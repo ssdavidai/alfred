@@ -50,8 +50,11 @@
 #      Response: {bootstrapAccepted:true}.
 #   8. POST /api/companies/ {"name":"Alfred", description:"..."} → company id.
 #   9. POST /api/companies/<id>/agents {name:"hermes", role:"ceo", ...} →
-#      agent id. adapterType=openclaw_gateway because Alfred's Hermes is
-#      the agent's runtime.
+#      agent id. adapterType=hermes_local because Alfred's Hermes is
+#      the agent's runtime — the alfred-black paperclip image ships a
+#      patched hermes-paperclip-adapter whose execute() POSTs every
+#      heartbeat to hermes:18789/v1/responses (see
+#      packages/paperclip/DESIGN.md).
 #  10. POST /api/agents/<id>/keys {name:"hermes-runtime"} → token: pcp_… .
 #      This is the long-lived token Hermes' paperclip MCP server uses.
 #  11. Persist the password + token tuple. Two artifacts:
@@ -562,17 +565,24 @@ if not company_id:
 log(f"  company id: {company_id}")
 
 # --------------------------------------------------------------------------
-# Step 9 - create the CEO agent. adapterType=openclaw_gateway because
-# Alfred's Hermes is the runtime: Paperclip's HTTP adapter will send
-# heartbeats to ${TENANT}/api/v1/channels/paperclip/heartbeat, which
-# ctrl-api translates into a Hermes /v1/responses call.
+# Step 9 - create the CEO agent. adapterType=hermes_local because the
+# alfred-black paperclip image ships a patched hermes-paperclip-adapter
+# whose execute() calls hermes:18789/v1/responses over HTTP — every
+# heartbeat round-trips through the tenant's own Hermes Agent
+# container, no CLI binary required. See packages/paperclip/DESIGN.md
+# for the mapping.
+#
+# Why not adapterType="openclaw_gateway"? That was the previous default;
+# it pointed at a WebSocket gateway protocol Paperclip ships out-of-the-
+# box but which alfred-black doesn't run. Live observation: agents
+# created with openclaw_gateway never actually executed a heartbeat.
 # --------------------------------------------------------------------------
 log(f"step 9: creating agent '{os.environ['PAPERCLIP_SEED_AGENT_NAME']}' (CEO)")
 agent_body = {
     "name": os.environ["PAPERCLIP_SEED_AGENT_NAME"],
     "role": "ceo",
     "title": os.environ["PAPERCLIP_SEED_AGENT_TITLE"],
-    "adapterType": "openclaw_gateway",
+    "adapterType": "hermes_local",
     "capabilities": os.environ["PAPERCLIP_SEED_AGENT_CAPABILITIES"],
 }
 code, body, _ = request("POST", f"/api/companies/{company_id}/agents", agent_body)

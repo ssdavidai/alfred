@@ -1275,7 +1275,13 @@ services:
   # 2026-05-26). If a future Paperclip release ships /api/health, switch
   # to `curl -fsS http://127.0.0.1:3100/api/health` for a tighter signal.
   paperclip:
-    image: ghcr.io/paperclipai/paperclip@sha256:711d29717855abbd84d0e576a0a07daff8e9007a229fb8220d8203d492e886e4
+    # alfred-black-paperclip: upstream ghcr.io/paperclipai/paperclip image
+    # overlaid with our patched hermes-paperclip-adapter (HTTP-mode execute()
+    # against the tenant's local hermes container at :18789). See
+    # packages/paperclip/DESIGN.md for the rationale; the Dockerfile pins
+    # the upstream base by digest with a tripwire that fails the build on
+    # upstream version drift.
+    image: ssdavidai00/alfred-black-paperclip:latest
     restart: unless-stopped
     env_file:
       - .env
@@ -1286,8 +1292,23 @@ services:
       - PAPERCLIP_PUBLIC_URL=https://paperclip.${DOMAIN}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      # ── HTTP-mode hermes_local adapter ─────────────────────────────────
+      # Where our patched adapter sends the per-heartbeat /v1/responses call.
+      # The compose-network DNS name `hermes` resolves to the main gateway
+      # at :18789 (see the hermes service above). Override per-tenant if
+      # you point paperclip at a non-default gateway.
+      - HERMES_GATEWAY_URL=http://hermes:18789
+      # The adapter reads Hermes' API_SERVER_KEY out of
+      # /hermes-state/profiles/main/.env at call time. Override the base
+      # dir here if you mount hermes_data somewhere else.
+      - HERMES_CONFIG_DIR=/hermes-state/profiles
     volumes:
       - paperclip_data:/paperclip
+      # Read-only mount so the patched adapter can resolve Hermes'
+      # API_SERVER_KEY from the rendered profile .env. Without this the
+      # adapter falls back to no Authorization header and Hermes returns
+      # 401. Mirrors the ctrl-api mount (server.ts:readHermesMainApiKey).
+      - hermes_data:/hermes-state:ro
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3100/sign-in >/dev/null 2>&1 || exit 1"]
       interval: 15s
