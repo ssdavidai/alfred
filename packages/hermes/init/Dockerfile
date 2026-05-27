@@ -69,6 +69,11 @@ COPY packages/hermes/init/render_sms_gateway.py ./render_sms_gateway.py
 # this image's default entrypoint.sh — keeps the main init container
 # focused on filesystem scaffolding (no docker.sock there).
 COPY packages/hermes/init/bootstrap-paperclip.sh ./bootstrap-paperclip.sh
+# paperclip_board_key.py — board API key minting + per-profile .env writer.
+# Imported by bootstrap-paperclip.sh's Python redeem block (step 12) and
+# usable as a standalone CLI (PAPERCLIP_BOARD_API_TOKEN env → writes to
+# HERMES_STATE_DIR/profiles/*/.env). Lib AND script.
+COPY packages/hermes/init/paperclip_board_key.py ./paperclip_board_key.py
 COPY packages/hermes/init/sure-bootstrap.rb    ./sure-bootstrap.rb
 COPY packages/hermes/init/sure-mutate-base.rb  ./sure-mutate-base.rb
 COPY packages/hermes/init/sure-account-mutate.rb    ./sure-account-mutate.rb

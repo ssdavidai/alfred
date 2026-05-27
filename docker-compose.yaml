@@ -1356,6 +1356,12 @@ services:
       - PAPERCLIP_SEED_EMAIL=${PAPERCLIP_SEED_EMAIL:-}
       - PAPERCLIP_SEED_NAME=${PAPERCLIP_SEED_NAME:-}
       - PAPERCLIP_SEED_COMPANY=${PAPERCLIP_SEED_COMPANY:-}
+      # HERMES_STATE_DIR points the board-key writer (step 12) at the
+      # hermes_data volume mount declared below. The MCP server reads
+      # PAPERCLIP_API_KEY from process env on stdio startup — writing
+      # it into each profile's .env here is the seam that survives
+      # `docker compose pull`.
+      - HERMES_STATE_DIR=/hermes-state
     volumes:
       - alfred_data:/alfred-data
       # RO socket — the script only invokes `docker exec` / `docker inspect`.
@@ -1367,6 +1373,17 @@ services:
       # full seed cannot complete; only the legacy invite-file fallback
       # would land.
       - ${COMPOSE_DIR_HOST:-/opt/alfred}:/srv/alfred-black
+      # hermes_data RW so step 12 can write PAPERCLIP_API_KEY into each
+      # profile's .env. The MCP server inside Hermes reads
+      # ``PAPERCLIP_API_KEY`` from process env at stdio startup; writing
+      # the board API key here is the only seam that survives
+      # `docker compose pull` (PAPERCLIP_ is in render_hermes.py's
+      # _RUNTIME_KEY_PREFIXES so future init re-renders preserve it).
+      # 2026-05-27: PR #87's smoke test caught the missing wiring — every
+      # MCP tool call from Hermes 401-ed because the agent token
+      # (PAPERCLIP_AGENT_TOKEN, scope=agent) gives 403 "Board access
+      # required" on the company-scoped routes the MCP tools call.
+      - hermes_data:/hermes-state
     entrypoint: ["./bootstrap-paperclip.sh"]
     mem_limit: 256m
     pids_limit: 256

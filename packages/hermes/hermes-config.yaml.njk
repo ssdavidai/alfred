@@ -387,7 +387,23 @@ mcp_servers:
     args: ["/opt/paperclip-mcp/node_modules/@paperclipai/mcp-server/dist/stdio.js"]
     env:
       PAPERCLIP_API_URL: "http://paperclip:3100/api"
+      # PAPERCLIP_API_KEY is the BOARD API KEY (pcp_board_…), minted by
+      # bootstrap-paperclip.sh step 12 / migrate-paperclip-board-key.sh
+      # and persisted into this profile's .env. NOT the agent token from
+      # /opt/alfred/.env — that's the 2026-05-27 root-cause:
+      # company-scoped MCP tools 403 with "Board access required" if
+      # they're handed an agent token instead of a board key.
       PAPERCLIP_API_KEY: "${PAPERCLIP_API_KEY}"
+      # PAPERCLIP_COMPANY_ID + PAPERCLIP_AGENT_ID let the MCP server
+      # default the most common args (companyId, agentId) so the tools
+      # work without the LLM having to know the UUIDs. Source:
+      # /opt/alfred/.env (written by bootstrap-paperclip.sh step 11b);
+      # bridged through this profile's .env via the same paperclip-init
+      # path that wrote PAPERCLIP_API_KEY. If unset, the MCP tools
+      # surface a clear "companyId is required because
+      # PAPERCLIP_COMPANY_ID is not set" error.
+      PAPERCLIP_COMPANY_ID: "${PAPERCLIP_COMPANY_ID}"
+      PAPERCLIP_AGENT_ID: "${PAPERCLIP_AGENT_ID}"
     timeout: 120
     connect_timeout: 60
 

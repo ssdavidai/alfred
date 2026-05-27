@@ -718,7 +718,116 @@ except PermissionError:
 os.replace(tmp_path, env_path)
 log(f"step 11b: persisted {len(keys)} keys -> {env_path}")
 
-log("steps 6-11 complete - Paperclip is fully seeded")
+# --------------------------------------------------------------------------
+# Step 12 — mint a Paperclip BOARD API key + write PAPERCLIP_API_KEY into
+# each Hermes profile .env. This is the auth Hermes' baked-in
+# `@paperclipai/mcp-server` needs to call Paperclip's company-scoped routes
+# (the 39-of-40 tools that 403 with "Board access required" on an agent
+# token).
+#
+# The agent token persisted in step 11b is enough for Paperclip → Hermes
+# (heartbeats, /agents/me — see PR #87) but the MCP server needs board
+# scope. We use Paperclip's cli-auth challenge flow which trades our
+# active session cookie (from step 6 sign-up) for a long-lived
+# `pcp_board_...` token via:
+#
+#   POST /api/cli-auth/challenges      → pending `boardApiToken`
+#   POST /api/cli-auth/challenges/<id>/approve  → activate it
+#
+# On success we write `PAPERCLIP_API_KEY=<token>` into every Hermes
+# profile's .env under HERMES_STATE_DIR (the hermes_data volume,
+# bind-mounted into this container — see docker-compose.yaml
+# paperclip-init.volumes). render_hermes.py already lists PAPERCLIP_ in
+# _RUNTIME_KEY_PREFIXES so the key survives future init re-renders.
+#
+# Failure here is NON-FATAL — step 11 already gave us a working agent
+# (heartbeats work, paperclipMe MCP tool works). The MCP tools that
+# need board scope just keep 401-ing until the operator re-runs the
+# bootstrap OR runs migrate-paperclip-board-key.sh by hand. The
+# bootstrap script is invoked in a one-shot compose service that
+# normally only runs at first install; making it fatal would leave
+# tenants stuck on a transient cli-auth issue (e.g. paperclip restart
+# mid-flow) with no obvious recovery path.
+# --------------------------------------------------------------------------
+hermes_state_dir = os.environ.get("HERMES_STATE_DIR", "/hermes-state").strip()
+if not hermes_state_dir:
+    log("step 12: skipping board-key mint — HERMES_STATE_DIR is unset")
+else:
+    # Import paperclip_board_key from the same directory as this script.
+    # Bash invokes us via `python3 - <<PYEOF` so __file__ is unset; the
+    # expected sibling location is /setup/ in the init image
+    # (Dockerfile WORKDIR /setup + COPY paperclip_board_key.py). Fall
+    # back to PWD for a manual invocation outside the image.
+    candidates = ["/setup", os.environ.get("PWD", "")]
+    pbk = None
+    last_err = None
+    for cand in candidates:
+        if not cand:
+            continue
+        if cand not in sys.path:
+            sys.path.insert(0, cand)
+        try:
+            import paperclip_board_key as _pbk
+            pbk = _pbk
+            break
+        except ImportError as exc:
+            last_err = exc
+            continue
+    if pbk is None:
+        log(
+            f"step 12: WARN: paperclip_board_key.py not importable "
+            f"({last_err!r}); skipping board-key mint. Run "
+            f"migrate-paperclip-board-key.sh to wire it up later."
+        )
+    else:
+        try:
+            log("step 12: minting board API key via cli-auth challenge flow")
+            # The cookie jar from steps 6-11 carries an active session;
+            # the cli-auth flow's /approve endpoint uses it to authorise
+            # the new board key.
+            board_token = pbk.mint_board_key_via_api(
+                internal_url=internal_url,
+                public_url=public_url,
+                cookies=cookies,
+                client_name="alfred-paperclip-init",
+            )
+            log(
+                f"  board token captured "
+                f"({len(board_token)} chars; prefix {board_token[:11]}...)"
+            )
+            written = pbk.write_paperclip_api_key_to_profiles(
+                hermes_state_dir=hermes_state_dir,
+                token=board_token,
+                # Make the MCP server's resolveCompanyId/resolveAgentId
+                # work out-of-the-box by seeding both IDs into the
+                # per-profile .env. Without these, every company-scoped
+                # tool call surfaces "companyId is required because
+                # PAPERCLIP_COMPANY_ID is not set" until the LLM
+                # remembers to thread the UUID through.
+                company_id=company_id,
+                agent_id=agent_id,
+            )
+            for path in written:
+                log(f"  wrote PAPERCLIP_API_KEY -> {path}")
+            if not written:
+                log(
+                    f"  WARN: no Hermes profile dirs under "
+                    f"{hermes_state_dir}/profiles — nothing written. "
+                    f"Is the hermes_data volume mounted on this service?"
+                )
+            else:
+                log(
+                    f"step 12: PAPERCLIP_API_KEY persisted to "
+                    f"{len(written)} profile(s); restart hermes to pick it up"
+                )
+        except Exception as exc:
+            log(
+                f"step 12: WARN: board-key mint failed ({exc}); MCP tools "
+                f"requiring board scope will keep 401-ing until "
+                f"migrate-paperclip-board-key.sh is run"
+            )
+
+log("steps 6-12 complete - Paperclip is fully seeded")
 PYEOF
 }
 
