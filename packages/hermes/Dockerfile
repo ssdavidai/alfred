@@ -116,6 +116,25 @@ RUN python3 /tmp/patch_upstream_hermes.py \
  && rm /tmp/patch_upstream_hermes.py
 
 # =============================================================================
+# Patch: handle response.output=None in the openai SDK's streaming parser.
+# 2026-05-27 OpenAI changed Codex's streaming shape — response snapshots
+# during response.output_item.added now carry output=None instead of [].
+# The SDK's parse_response() crashes with 'NoneType' object is not
+# iterable at openai/lib/_parsing/_responses.py:61, taking down every
+# Hermes-main turn using openai-codex. One-line fix: `for output in
+# (response.output or []):`. See patch_openai_sdk.py for the full
+# rationale; the script is idempotent and tripwire'd so a future openai
+# SDK bump that moves or fixes this line fails the build loudly.
+#
+# Sir 2026-05-27 — local-only durable fix for an upstream openai SDK
+# bug exposed by an OpenAI backend contract change.
+COPY packages/hermes/patch_openai_sdk.py /tmp/patch_openai_sdk.py
+RUN python3 /tmp/patch_openai_sdk.py \
+ && grep -q 'for output in (response.output or \[\]):' \
+        /usr/local/lib/python3.12/site-packages/openai/lib/_parsing/_responses.py \
+ && rm /tmp/patch_openai_sdk.py
+
+# =============================================================================
 # Bake the hermes-lcm plugin (lossless cross-session context engine).
 # =============================================================================
 # The `stephenschoettler/hermes-lcm` plugin enables Hermes' LCM context engine
