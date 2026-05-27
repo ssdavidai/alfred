@@ -14,6 +14,7 @@ import {
 } from "wasp/client/operations";
 import { Frame } from "../client/components/ab/Frame";
 import { RitualNav } from "../client/components/ab/RitualNav";
+import { verifyViewState } from "./verifyPageCore";
 
 type FactStatus = "pending" | "confirmed" | "edited" | "discarded";
 type Fact = {
@@ -38,6 +39,17 @@ export default function VerifyPage() {
       display: string;
     }>;
   }, [progress]);
+
+  // View-state branch: distinguish "the backend hasn't finished extracting"
+  // (waiting) from "the backend finished and produced nothing" (empty).
+  // Logic lives in verifyPageCore so the wedge behaviour is unit-tested at
+  // the contract instead of buried in render flags.
+  const stage = progress?.stage as string | undefined;
+  const view = verifyViewState({
+    stage,
+    factsCount: sourceFacts.length,
+  });
+  const factsSettled = view === "empty";
 
   const [facts, setFacts] = useState<Fact[]>([]);
   const [seeded, setSeeded] = useState(false);
@@ -119,13 +131,64 @@ export default function VerifyPage() {
           Confirm what Alfred has learned.
         </h1>
 
-        {!seeded && (
+        {!seeded && !factsSettled && (
           <p
             className="font-body italic text-[16px]"
             style={{ color: "var(--marginalia)" }}
           >
             A moment — Alfred is sorting his observations.
           </p>
+        )}
+
+        {/*
+          Empty-state finale. The backend reached the verification gate
+          (or beyond) but produced no key identity facts — most often
+          because extract_facts_opus degraded against the LLM (a 402
+          credit dip, a chunk timeout, an empty inbox). Without this
+          branch the principal saw the "sorting" line forever, even
+          though there was nothing more to sort. Alfred speaks in his
+          own voice here and offers a single, honest way forward; the
+          continue handler submits empty corrections, which the
+          /onboarding/corrections endpoint accepts and uses to advance
+          the workflow into the brief stage exactly as a normal
+          confirmation would.
+        */}
+        {!seeded && factsSettled && (
+          <div className="space-y-6">
+            <p
+              className="font-body italic text-[18px]"
+              style={{ color: "var(--ink)" }}
+            >
+              I haven&rsquo;t yet found enough about you to confirm, sir.
+              The first sweep was a quiet one — we&rsquo;ll get acquainted
+              as we go.
+            </p>
+            <p
+              className="font-body text-[14px]"
+              style={{ color: "var(--marginalia)" }}
+            >
+              You may tell me anything you&rsquo;d like me to remember
+              before we continue. A sentence will do.
+            </p>
+            <div>
+              <input
+                value={extra}
+                onChange={(e) => setExtra(e.target.value)}
+                placeholder="Anything you&rsquo;d like me to know."
+                className="w-full bg-transparent outline-none border-b font-display italic text-[22px] pb-2"
+                style={{ borderColor: "var(--brass)" }}
+              />
+            </div>
+            <div className="border-t border-rule pt-8 flex items-baseline justify-end">
+              <button
+                disabled={submitting}
+                onClick={handleContinue}
+                className="btn-brass"
+              >
+                {submitting ? "A moment…" : "Continue →"}
+              </button>
+            </div>
+          </div>
         )}
 
         {seeded && pendingCount > 0 && (
@@ -259,15 +322,24 @@ export default function VerifyPage() {
           </div>
         )}
 
-        <div className="mt-14 border-t border-rule pt-8 flex items-baseline justify-end">
-          <button
-            disabled={!allTouched || submitting}
-            onClick={handleContinue}
-            className="btn-brass"
-          >
-            {submitting ? "A moment…" : "Continue →"}
-          </button>
-        </div>
+        {/*
+          The standard Continue rail. Hidden in the empty-state finale
+          (which renders its own Continue) so the principal does not see
+          two side-by-side Continue buttons. Visible whenever the user
+          has facts to confirm — gated by `seeded` to avoid flashing on
+          the pre-hydration paint.
+        */}
+        {seeded && (
+          <div className="mt-14 border-t border-rule pt-8 flex items-baseline justify-end">
+            <button
+              disabled={!allTouched || submitting}
+              onClick={handleContinue}
+              className="btn-brass"
+            >
+              {submitting ? "A moment…" : "Continue →"}
+            </button>
+          </div>
+        )}
       </section>
     </Frame>
   );
