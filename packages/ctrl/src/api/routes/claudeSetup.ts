@@ -249,7 +249,27 @@ export function registerClaudeSetupRoutes(): void {
     // Gated on the Vaultwarden password being provisioned. On the merged
     // single-VM stack the password is VAULTWARDEN_BW_PASSWORD and the web UI
     // is served at vault.${DOMAIN} (no per-tenant subdomain prefix). (F62)
-    const bwUser = process.env.BW_USER || process.env.OWNER_EMAIL || null;
+    //
+    // The Vaultwarden account is registered by the bootstrap-signup container
+    // with BW_USER=${ACME_EMAIL} (see docker-compose.yaml, init/init-signup
+    // services). ACME_EMAIL is the operator's email (the Let's Encrypt
+    // contact), and it is the ONLY email that ever gets a row in
+    // Vaultwarden's users table on this stack — OWNER_EMAIL is the
+    // principal's identity (rendered in the Brief, used for outbound
+    // attribution) and is NOT a Vaultwarden user. Surfacing OWNER_EMAIL on
+    // /settings#agent told principals to log into Vaultwarden as themselves,
+    // which fails with "invalid credentials" because that account doesn't
+    // exist — the password shown is correct, but for the operator's email.
+    // Prefer the real VW account email (BW_USER if a future stack sets it,
+    // otherwise ACME_EMAIL — the actual signup identity on the merged stack)
+    // and keep OWNER_EMAIL as a last-resort fallback for any pre-merge tenant
+    // that did mirror OWNER_EMAIL into the signup payload. (Vaultwarden login
+    // email mismatch, 2026-05-27.)
+    const bwUser =
+      process.env.BW_USER ||
+      process.env.ACME_EMAIL ||
+      process.env.OWNER_EMAIL ||
+      null;
     const bwPassword = process.env.VAULTWARDEN_BW_PASSWORD || process.env.BW_PASSWORD || null;
     // Surface the Vaultwarden master password to the dashboard. The
     // earlier F63/C16-style "reveal-once" treatment was wrong for this
