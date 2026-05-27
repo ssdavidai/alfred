@@ -702,7 +702,7 @@ services:
         condition: service_healthy
     environment:
       - BW_SERVER_URL=http://vaultwarden:80
-      - BW_USER=${ACME_EMAIL}
+      - BW_USER=${OWNER_EMAIL:-${ACME_EMAIL}}
       - BW_PASSWORD=${VAULTWARDEN_BW_PASSWORD}
       - VAULTWARDEN_NAME=${OWNER_NAME}
       - VAULTWARDEN_ADMIN_TOKEN=${VAULTWARDEN_ADMIN_TOKEN}
@@ -738,7 +738,7 @@ services:
       - .env
     environment:
       - BW_SERVER_URL=http://vaultwarden:80
-      - BW_USER=${ACME_EMAIL}
+      - BW_USER=${OWNER_EMAIL:-${ACME_EMAIL}}
       - BW_PASSWORD=${VAULTWARDEN_BW_PASSWORD}
     depends_on:
       vaultwarden:
