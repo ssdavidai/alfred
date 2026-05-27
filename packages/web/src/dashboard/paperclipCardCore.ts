@@ -265,9 +265,9 @@ export function derivePaperclipCardState(
       pillTone: "available",
       heading: "Claim your Paperclip admin account",
       description:
-        "Your Paperclip instance is up but needs an admin. One-time setup — " +
-        "click the button to claim it, sign up in Paperclip, then come " +
-        "back here.",
+        "Your Paperclip instance is ready — one-time admin claim. Click " +
+        "the invite link to sign up, or paste an existing API key below " +
+        "if you've already claimed your account.",
       heartbeatUrl,
       paperclipOrigin: s.paperclip_origin || paperclipOrigin,
       canTest: false,

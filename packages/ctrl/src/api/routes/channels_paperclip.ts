@@ -731,29 +731,34 @@ async function probeSetupState(): Promise<SetupProbeResult> {
     });
   }
   if (!apiKey) {
-    // Confirm Paperclip is at least reachable. The /sign-in body is the
-    // canonical way to distinguish "instance-setup wall" from "fully
-    // onboarded but our key is missing" — Paperclip prints a verbatim
-    // "Instance setup required" page on the former (live-confirmed on
-    // home pre-bootstrap 2026-05-27). We match on the literal phrase so
-    // a copy-tweak by Paperclip downstream doesn't silently flip
-    // tenants back to "needs_api_key" without an invite link.
+    // Confirm Paperclip is at least reachable.
     const ping = await probe("/sign-in", false);
     if (ping.status === 0) {
       return { state: "unreachable", admin_invite_url: null };
     }
-    if (
-      ping.body.includes("Instance setup required") ||
-      ping.body.includes("instance setup required")
-    ) {
-      // Surface the invite URL we captured at init-time. When the file
-      // isn't yet present (paperclip-init still running / disabled),
-      // null tells the UI to fall through to a degraded message.
-      return {
-        state: "needs_admin_signup",
-        admin_invite_url: readPaperclipInviteUrl(),
-      };
+    // Heuristic: when `paperclip-init` has captured an invite URL into
+    // /alfred-data/paperclip-ceo-invite.txt, the principal is presumed to
+    // be in admin-signup. Note that we cannot reliably probe Paperclip's
+    // live "has an admin signed up yet?" state — Paperclip's /sign-in is
+    // a React SPA whose 'Instance setup required' string is rendered
+    // client-side and never lands in the SSR HTML we can see from here
+    // (live-confirmed on joe + home 2026-05-27). The invite file is the
+    // best proxy: it exists iff paperclip-init has run.
+    //
+    // The card's UI accommodates the ambiguity by offering BOTH
+    // affordances on needs_admin_signup — the click-through invite link
+    // (for tenants that genuinely haven't signed up yet) AND a secondary
+    // "I've already signed up — paste my API key" path. The principal
+    // can drive the card to `configured` from either branch.
+    const inviteUrl = readPaperclipInviteUrl();
+    if (inviteUrl) {
+      return { state: "needs_admin_signup", admin_invite_url: inviteUrl };
     }
+    // No invite captured — legacy fallback. Either paperclip-init hasn't
+    // run yet (rare; service runs once at compose-up), the bootstrap
+    // failed (caller can re-run), or this is an old deploy that never
+    // had paperclip-init. The existing PR #73 paste-API-key panel handles
+    // this gracefully.
     return { state: "needs_api_key", admin_invite_url: null };
   }
   const probed = await probe("/api/companies", true);

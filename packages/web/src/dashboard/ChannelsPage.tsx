@@ -2801,18 +2801,22 @@ function PaperclipCard() {
         </div>
       )}
 
-      {/* needs_admin_signup — paperclip-init has captured the CEO invite
-          URL but no admin has signed up yet. The principal clicks the
-          big "Set up your Paperclip account →" button (opens new tab),
-          completes Paperclip's first-run signup, comes back; the next
-          /status poll flips to "needs_api_key" and the panel below
-          takes over. Replaces the 6-step manual SSH ritual (2026-05-27). */}
+      {/* needs_admin_signup — paperclip-init captured a CEO invite URL.
+          Panel offers BOTH affordances:
+            * primary: click-through invite button (for tenants not yet
+              admin-claimed);
+            * secondary: paste API key (for tenants already claimed via a
+              prior session, or for the principal completing the flow on
+              a return visit). Pasting a working key flips /status to
+              "configured". Replaces the 6-step manual SSH ritual
+              (2026-05-27). */}
       {card.status === "needs_admin_signup" && (
         <PaperclipAdminSignupPanel
           adminInviteUrl={card.adminInviteUrl}
           paperclipOrigin={card.paperclipOrigin}
           description={card.description}
           onRefetch={refetch}
+          onSaved={refetch}
         />
       )}
 
@@ -3109,13 +3113,48 @@ function PaperclipAdminSignupPanel({
   paperclipOrigin,
   description,
   onRefetch,
+  onSaved,
 }: {
   adminInviteUrl: string;
   paperclipOrigin: string;
   description: string;
   onRefetch: () => unknown;
+  onSaved: () => Promise<unknown>;
 }) {
   const ready = Boolean(adminInviteUrl);
+  // The API-key paste form is offered as a secondary affordance for two
+  // cases the invite click-through can't cleanly handle:
+  //   1. The principal already signed up (via a prior visit, or because the
+  //      tenant was already admin-claimed before paperclip-init wrote the
+  //      invite file). The invite link would land them on a "you're
+  //      already in" page; pasting the key is the fast path.
+  //   2. Sir's manual home-recovery on 2026-05-27 — the invite was issued
+  //      but Sir hasn't claimed it yet on this device.
+  // ctrl-api treats the second affordance as the authoritative state
+  // transition: once a valid key is pasted, /status flips to configured.
+  const [apiKey, setApiKey] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  async function saveKey() {
+    const trimmed = apiKey.trim();
+    if (!trimmed) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const r: any = await setPaperclipApiKey({ api_key: trimmed });
+      if (r?.ok) {
+        setApiKey("");
+        await onSaved();
+      } else {
+        setError("Paperclip didn't accept that key. Try generating a fresh one.");
+      }
+    } catch (e: any) {
+      setError(e?.message ?? "Couldn't save the key. Check the ctrl-api logs.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div className="mt-5 space-y-5">
       <p
@@ -3126,16 +3165,25 @@ function PaperclipAdminSignupPanel({
       </p>
 
       {ready ? (
-        <a
-          href={adminInviteUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-          // Mirror PaperclipApiKeyPanel's button class so the visual
-          // language is identical — same fonts, same hover, same height.
-          className="btn-ghost inline-block"
-        >
-          Set up your Paperclip account →
-        </a>
+        <div className="space-y-2">
+          <a
+            href={adminInviteUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            // Mirror PaperclipApiKeyPanel's button class so the visual
+            // language is identical — same fonts, same hover, same height.
+            className="btn-ghost inline-block"
+          >
+            Set up your Paperclip account →
+          </a>
+          <p
+            className="font-body italic text-[11px]"
+            style={{ color: "var(--marginalia)" }}
+          >
+            One-time setup. After you sign up, generate an API key
+            (Paperclip → Settings → API keys) and paste it below.
+          </p>
+        </div>
       ) : (
         <div className="space-y-2">
           <p
@@ -3155,13 +3203,48 @@ function PaperclipAdminSignupPanel({
         </div>
       )}
 
-      <p
-        className="font-body italic text-[11px]"
-        style={{ color: "var(--marginalia)" }}
-      >
-        After you sign up, come back here and the card will move you to the
-        next step (paste an API key from Paperclip → Settings → API keys).
-      </p>
+      {/* Already signed up? Paste API key. This is also the natural next
+          step after the principal completes signup via the click-through
+          above — no need to re-render with a different panel. */}
+      <div className="space-y-2 pt-4 border-t border-rule">
+        <div
+          className="font-mono text-[10px] uppercase tracking-[0.22em]"
+          style={{ color: "var(--marginalia)" }}
+        >
+          Already signed up? Paste your Paperclip API key
+        </div>
+        <textarea
+          value={apiKey}
+          onChange={(e) => setApiKey(e.target.value)}
+          placeholder="pck_… (from Paperclip Settings → API keys)"
+          rows={2}
+          className="w-full bg-transparent border border-rule px-2 py-1 font-mono text-[11px]"
+        />
+        <div className="flex items-baseline justify-between gap-2">
+          <p
+            className="font-body italic text-[11px]"
+            style={{ color: "var(--marginalia)" }}
+          >
+            Alfred validates the key against Paperclip and only persists it
+            if it works.
+          </p>
+          <button
+            onClick={saveKey}
+            disabled={busy || !apiKey.trim()}
+            className="btn-ghost shrink-0"
+          >
+            {busy ? "Validating…" : "Save & connect"}
+          </button>
+        </div>
+        {error && (
+          <p
+            className="font-body italic text-[12px]"
+            style={{ color: "var(--brass)" }}
+          >
+            {error}
+          </p>
+        )}
+      </div>
 
       {/* Secondary deep-link, kept available in case the invite link
           expires and the principal needs to start over via Paperclip's

@@ -401,19 +401,19 @@ describe("/api/v1/channels/paperclip/* — Lane I", () => {
       assert.equal(r.payload.has_signing_secret, true);
     });
 
-    it("setup_state=needs_admin_signup + admin_invite_url when Paperclip shows the instance-setup wall and the invite file is present", async () => {
-      // Paperclip's /sign-in body on a fresh sidecar:
+    it("setup_state=needs_admin_signup + admin_invite_url when paperclip is reachable AND the invite file exists", async () => {
+      // Paperclip's /sign-in is a React SPA — the body is just the bundle
+      // HTML, never the 'Instance setup required' string (which is rendered
+      // client-side). The invite file is the authoritative signal: when
+      // paperclip-init has captured an invite, the principal needs to
+      // either click through it OR paste their API key. Both affordances
+      // live on the same panel.
       paperclipHttpStub.signIn = {
         status: 200,
-        body:
-          "<!DOCTYPE html><html><body>" +
-          "<h1>Instance setup required</h1>" +
-          "<p>Run pnpm paperclipai auth bootstrap-ceo to claim this instance.</p>" +
-          "</body></html>",
+        body: "<!DOCTYPE html><html><body><div id='root'></div></body></html>",
       };
-      // paperclip-init writes the captured invite URL here.
       const invite =
-        "https://paperclip.test.alfred.black/admin/setup?token=abc123";
+        "https://paperclip.test.alfred.black/invite/pcp_bootstrap_abc123";
       fs.writeFileSync(paperclipInviteFile, invite + "\n");
 
       const r = await invokeRoute("GET", "/api/v1/channels/paperclip/status");
@@ -422,37 +422,14 @@ describe("/api/v1/channels/paperclip/* — Lane I", () => {
       assert.equal(r.payload.admin_invite_url, invite);
     });
 
-    it("needs_admin_signup with no invite file → setup_state surfaces but admin_invite_url is absent", async () => {
-      // paperclip-init might not have completed yet (or compose hasn't been
-      // restarted). The card should still show the right state so the UI
-      // can show a degraded "still preparing your invite…" message.
+    it("setup_state=needs_api_key (legacy fallback) when paperclip is reachable but the invite file is missing", async () => {
+      // paperclip-init hasn't run yet (or this is an old deploy that
+      // never had it). The PR #73 paste-API-key flow still works.
       paperclipHttpStub.signIn = {
         status: 200,
-        body: "<h1>Instance setup required</h1>",
+        body: "<!DOCTYPE html><html><body><div id='root'></div></body></html>",
       };
       // No invite file written.
-      const r = await invokeRoute("GET", "/api/v1/channels/paperclip/status");
-      assert.equal(r.status, 200);
-      assert.equal(r.payload.setup_state, "needs_admin_signup");
-      assert.equal(r.payload.admin_invite_url, undefined);
-    });
-
-    it("setup_state=needs_api_key when /sign-in is up and NOT showing the instance-setup wall", async () => {
-      // Past the admin-signup wall, but PAPERCLIP_API_KEY is still unset.
-      paperclipHttpStub.signIn = {
-        status: 200,
-        body:
-          "<!DOCTYPE html><html><body>" +
-          "<form><input name='email'/><input name='password' type='password'/>" +
-          "<button>Sign in</button></form></body></html>",
-      };
-      // Even if the invite file is present, we must NOT surface it on
-      // needs_api_key — the principal has already signed up; the URL is stale.
-      fs.writeFileSync(
-        paperclipInviteFile,
-        "https://paperclip.test.alfred.black/admin/setup?token=stale\n",
-      );
-
       const r = await invokeRoute("GET", "/api/v1/channels/paperclip/status");
       assert.equal(r.status, 200);
       assert.equal(r.payload.setup_state, "needs_api_key");
@@ -468,6 +445,21 @@ describe("/api/v1/channels/paperclip/* — Lane I", () => {
       assert.equal(r.payload.admin_invite_url, undefined);
     });
 
+    it("configured state hides admin_invite_url even when the invite file still exists (stale URL)", async () => {
+      // Once a working API key is in place, the principal has already
+      // claimed the instance — surfacing the (now stale) invite link
+      // would be confusing. Verify the URL is intentionally withheld.
+      process.env.PAPERCLIP_API_KEY = "pck_real_key";
+      paperclipHttpStub.apiCompanies = { status: 200, body: "[]" };
+      fs.writeFileSync(
+        paperclipInviteFile,
+        "https://paperclip.test.alfred.black/invite/pcp_stale\n",
+      );
+      const r = await invokeRoute("GET", "/api/v1/channels/paperclip/status");
+      assert.equal(r.payload.setup_state, "configured");
+      assert.equal(r.payload.admin_invite_url, undefined);
+    });
+
     it("setup_state=auth_failed when /api/companies rejects the key", async () => {
       process.env.PAPERCLIP_API_KEY = "pck_revoked";
       paperclipHttpStub.apiCompanies = { status: 401, body: "" };
@@ -476,16 +468,18 @@ describe("/api/v1/channels/paperclip/* — Lane I", () => {
       assert.equal(r.payload.setup_state, "auth_failed");
     });
 
-    it("admin_invite_url is hidden when the invite file holds garbage", async () => {
+    it("falls back to needs_api_key when the invite file holds garbage", async () => {
       paperclipHttpStub.signIn = {
         status: 200,
-        body: "Instance setup required",
+        body: "<!DOCTYPE html><html><body></body></html>",
       };
-      // Non-URL content (e.g. a stray banner line snuck through the parser).
+      // Non-URL content → readPaperclipInviteUrl returns null → no invite
+      // captured → legacy needs_api_key fallback (rather than surfacing a
+      // garbage URL to the UI).
       fs.writeFileSync(paperclipInviteFile, "not-actually-a-url\n");
 
       const r = await invokeRoute("GET", "/api/v1/channels/paperclip/status");
-      assert.equal(r.payload.setup_state, "needs_admin_signup");
+      assert.equal(r.payload.setup_state, "needs_api_key");
       assert.equal(r.payload.admin_invite_url, undefined);
     });
   });

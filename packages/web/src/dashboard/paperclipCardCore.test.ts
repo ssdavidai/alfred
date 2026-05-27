@@ -154,15 +154,16 @@ test("derive: connected — allRuns clamps at 10 even if API returns more", () =
 });
 
 test("derive: needs_admin_signup — paperclip-init wrote the invite, principal hasn't claimed yet", () => {
-  // Card state when ctrl-api's probeSetupState saw the "Instance setup
-  // required" wall on /sign-in AND paperclip-init wrote the invite URL.
+  // Card state when ctrl-api saw a captured invite file (the invite-file's
+  // existence is the authoritative signal; Paperclip's React SPA never
+  // serves a server-side "Instance setup required" marker).
   const card = derivePaperclipCardState(
     {
       ...BASE,
       has_signing_secret: true,
       setup_state: "needs_admin_signup",
       admin_invite_url:
-        "https://paperclip.home.alfred.black/admin/setup?token=abc123",
+        "https://paperclip.home.alfred.black/invite/pcp_bootstrap_abc123",
     },
     FROZEN_NOW,
   );
@@ -172,10 +173,13 @@ test("derive: needs_admin_signup — paperclip-init wrote the invite, principal 
   assert.equal(card.canTest, false);
   assert.equal(
     card.adminInviteUrl,
-    "https://paperclip.home.alfred.black/admin/setup?token=abc123",
+    "https://paperclip.home.alfred.black/invite/pcp_bootstrap_abc123",
   );
-  // Copy explicitly mentions the one-click setup.
+  // Copy explicitly mentions the one-time admin claim.
   assert.match(card.heading, /admin/i);
+  // Description offers both the click-through invite link AND a "paste
+  // an existing API key" path for principals who've already signed up.
+  assert.match(card.description, /invite link|API key/i);
 });
 
 test("derive: needs_admin_signup with no invite URL → state surfaces, adminInviteUrl empty", () => {
