@@ -26,6 +26,9 @@
 //   response.function_call_arguments.done       — tool-call dispatch point
 //   input_audio_buffer.speech_started           — user started talking (server
 //                                                 auto-cancels assistant per VAD config)
+//   input_audio_buffer.speech_stopped           — user stopped talking
+//   response.cancelled                          — server confirms it killed the in-flight
+//                                                 response after VAD-detected barge-in
 //   conversation.item.input_audio_transcription.completed — user-utterance transcript
 //   error                                       — log + continue
 //
@@ -86,6 +89,12 @@ export class OpenAIRealtimeClient {
   // request responses, otherwise the model runs on default config (generic
   // assistant, server_vad / no interrupt, default voice).
   private sessionReady = false;
+  // Active response_id, tracked off `response.created`/`response.done`/
+  // `response.cancelled`. Used to suppress an explicit `response.create` after
+  // a function_call_output when the server is already auto-creating a
+  // response — sending both produces the `conversation_already_has_active_
+  // response` error we hit on Sir's 2026-05-27 home call.
+  private activeResponseId: string | null = null;
 
   constructor(callId: string) {
     this.callId = callId;
@@ -168,12 +177,36 @@ export class OpenAIRealtimeClient {
               audio: {
                 input: {
                   format: { type: "audio/pcmu" },
+                  // Twilio carrier audio is 8 kHz narrow-band μ-law with carrier
+                  // noise — outside the wideband training distribution that
+                  // `semantic_vad` was optimised for. Sir's 2026-05-27 home call
+                  // (sid CAc28fd7...bbc6) emitted zero `input_audio_buffer.
+                  // speech_started` events with `semantic_vad`, so barge-in never
+                  // fired. Twilio's official OpenAI Realtime tutorial uses
+                  // `server_vad` for this exact reason; ConnorCallison's
+                  // openclaw-voice-gpt-realtime reference also defaults to it for
+                  // telephony. The threshold/silence_duration_ms below are tuned
+                  // for narrow-band carrier audio:
+                  //   threshold:0.5         — lower than the GA default (0.5–0.7
+                  //                           varies by region) to compensate for
+                  //                           the energy loss in 300-3400 Hz
+                  //                           filtered telephony bandwidth
+                  //   prefix_padding_ms:300 — capture the leading consonant of a
+                  //                           barge-in word ("stop", "wait")
+                  //   silence_duration_ms:500 — short enough that quick "stop"
+                  //                           commits the turn cleanly, long
+                  //                           enough that natural pauses don't
+                  //                           prematurely end the user turn
+                  // With `interrupt_response: true` the server auto-cancels the
+                  // in-flight response on `speech_started` — the bridge does NOT
+                  // need to send `response.cancel` itself, but it DOES need to
+                  // send a Twilio `clear` event to drain the playback queue (see
+                  // voice-call.ts).
                   turn_detection: {
-                    type: "semantic_vad",
-                    eagerness: "medium",
-                    // With `interrupt_response: true` the server auto-cancels the
-                    // in-flight response when the user starts talking — the
-                    // bridge does NOT need to send `response.cancel` itself.
+                    type: "server_vad",
+                    threshold: 0.5,
+                    prefix_padding_ms: 300,
+                    silence_duration_ms: 500,
                     create_response: true,
                     interrupt_response: true,
                   },
@@ -201,6 +234,20 @@ export class OpenAIRealtimeClient {
               ),
             );
           }, tmo);
+        }
+
+        // Track active response lifecycle so submitToolResult can avoid sending
+        // a colliding response.create when the server is already auto-running
+        // a response for the function_call_output we just submitted.
+        if (event.type === "response.created") {
+          const rid = event.response?.id;
+          if (typeof rid === "string") this.activeResponseId = rid;
+        }
+        if (
+          event.type === "response.done" ||
+          event.type === "response.cancelled"
+        ) {
+          this.activeResponseId = null;
         }
 
         if (event.type === "session.updated" && !this.sessionReady) {
@@ -302,7 +349,15 @@ export class OpenAIRealtimeClient {
   // Submit a function-call result back to the model + ask it to continue.
   // Sequence per OpenAI Realtime docs:
   //   1. conversation.item.create  (function_call_output)
-  //   2. response.create           (resume the turn)
+  //   2. response.create           (resume the turn) — UNLESS a response is
+  //      already active. In server_vad mode the server auto-creates a response
+  //      after each conversation item (`create_response: true` on
+  //      turn_detection), and an explicit response.create on top collides as
+  //      `conversation_already_has_active_response`. We log on Sir's 2026-05-27
+  //      home call showed two of those errors back-to-back from this exact path:
+  //      "Conversation already has an active response in progress:
+  //       resp_DkTdYdF3xrJ4Ul526DhFG". So if we already know about an in-flight
+  //      response, we skip step 2 and let the server's auto-response do the work.
   submitToolResult(callId: string, output: string): void {
     this.send({
       type: "conversation.item.create",
@@ -312,6 +367,14 @@ export class OpenAIRealtimeClient {
         output,
       },
     });
+    if (this.activeResponseId) {
+      if (DEBUG) {
+        console.log(
+          `[realtime ${this.callId}] submitToolResult: response ${this.activeResponseId} already active — suppressing response.create`,
+        );
+      }
+      return;
+    }
     this.send({ type: "response.create" });
   }
 

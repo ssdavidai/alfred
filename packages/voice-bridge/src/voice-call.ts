@@ -16,6 +16,7 @@
 import type { WebSocket as WsSocket } from "ws";
 import {
   parseTwilioMessage,
+  sendTwilioClear,
   sendTwilioMark,
   sendTwilioMedia,
 } from "./twilio-stream.js";
@@ -264,6 +265,34 @@ export class VoiceCall {
             text: this.currentAssistantText.trim(),
             ts: new Date().toISOString(),
           });
+        }
+        this.currentAssistantText = "";
+        break;
+      case "input_audio_buffer.speech_started":
+        // Server-side VAD detected the user starting to talk. With
+        // `interrupt_response: true` on turn_detection the server will also emit
+        // `response.cancelled` and tear down the in-flight TTS. But Twilio has
+        // already buffered everything we forwarded up to this point — without a
+        // `clear` event Twilio keeps playing the cached audio for another
+        // 500-2000 ms, which is the "Alfred keeps talking after I interrupt"
+        // symptom Sir reported on the 2026-05-27 home call. The `clear` drops
+        // every pending media frame in Twilio's queue, so playback stops the
+        // moment the cancel completes server-side.
+        if (VOICE_DEBUG) {
+          console.log(`[call ${this.callId}] VAD: speech_started — clearing Twilio playback buffer`);
+        }
+        sendTwilioClear(this.twilioWs, this.streamSid);
+        this.currentAssistantText = "";
+        break;
+      case "input_audio_buffer.speech_stopped":
+        if (VOICE_DEBUG) {
+          console.log(`[call ${this.callId}] VAD: speech_stopped`);
+        }
+        break;
+      case "response.cancelled":
+        // Server confirmed it killed the in-flight response on VAD barge-in.
+        if (VOICE_DEBUG) {
+          console.log(`[call ${this.callId}] response.cancelled (barge-in)`);
         }
         this.currentAssistantText = "";
         break;

@@ -104,13 +104,29 @@ test("connect() resolves only after session.updated, not session.created", async
     assert.ok(sessionUpdateSeen, "server never received session.update from client");
     // GA-schema sanity: payload still has the expected nested shape.
     assert.equal(sessionUpdateSeen.session.type, "realtime");
+    // 2026-05-28: switched semantic_vad → server_vad after the home-call VAD
+    // failure (CAc28fd7...bbc6). semantic_vad's classifier did not detect Sir's
+    // mid-reply interrupt on Twilio's 8 kHz μ-law carrier audio; server_vad
+    // with tuned narrow-band thresholds is the Twilio-reference recipe.
     assert.equal(
       sessionUpdateSeen.session.audio.input.turn_detection.type,
-      "semantic_vad",
+      "server_vad",
     );
     assert.equal(
       sessionUpdateSeen.session.audio.input.turn_detection.interrupt_response,
       true,
+    );
+    assert.equal(
+      sessionUpdateSeen.session.audio.input.turn_detection.threshold,
+      0.5,
+    );
+    assert.equal(
+      sessionUpdateSeen.session.audio.input.turn_detection.silence_duration_ms,
+      500,
+    );
+    assert.equal(
+      sessionUpdateSeen.session.audio.input.turn_detection.prefix_padding_ms,
+      300,
     );
 
     client.close();
@@ -159,6 +175,87 @@ test("appendAudio is dropped while sessionReady is false", async () => {
     // triggerGreeting must also no-op pre-ack.
     client.triggerGreeting();
     await new Promise((r) => setTimeout(r, 50));
+
+    client.close();
+  } finally {
+    await server.close();
+  }
+});
+
+test("submitToolResult suppresses response.create while a response is active", async () => {
+  // Reproduces the 2026-05-27 home-call collision: in server_vad mode the server
+  // auto-creates a response after each `function_call_output`, so a follow-up
+  // `response.create` from the client collides as `conversation_already_has_
+  // active_response`. The fix: track the active response_id off `response.
+  // created`/`response.done` and skip the explicit create while one is in flight.
+  const messagesSeen: any[] = [];
+  const server = await startMockOpenAI((ws) => {
+    ws.send(JSON.stringify({ type: "session.created", session: { id: "s_tool" } }));
+    ws.on("message", (raw: Buffer) => {
+      const ev = JSON.parse(raw.toString());
+      messagesSeen.push(ev);
+      if (ev.type === "session.update") {
+        ws.send(JSON.stringify({ type: "session.updated", session: ev.session }));
+        // Simulate the server auto-creating a response right after the session
+        // is updated (mirrors what happens after function_call_output in
+        // server_vad mode with create_response: true).
+        ws.send(
+          JSON.stringify({
+            type: "response.created",
+            response: { id: "resp_active_1" },
+          }),
+        );
+      }
+    });
+  });
+
+  try {
+    process.env.OPENAI_REALTIME_BASE_URL = `ws://127.0.0.1:${server.port}/`;
+    const { OpenAIRealtimeClient } = await import("./openai-realtime.js");
+    const client = new OpenAIRealtimeClient("test-tool-collision");
+
+    await client.connect({ instructions: "t" });
+    // Give the mock a tick to push response.created.
+    await new Promise((r) => setTimeout(r, 50));
+
+    client.submitToolResult("call_abc", JSON.stringify({ ok: true }));
+    await new Promise((r) => setTimeout(r, 50));
+
+    // We expect the conversation.item.create but NOT a response.create
+    // because resp_active_1 is still in flight.
+    const itemCreate = messagesSeen.find(
+      (m) =>
+        m.type === "conversation.item.create" &&
+        m.item?.type === "function_call_output",
+    );
+    const responseCreate = messagesSeen.find((m) => m.type === "response.create");
+    assert.ok(itemCreate, "function_call_output was not sent");
+    assert.equal(
+      responseCreate,
+      undefined,
+      "response.create leaked while a response was active — would collide as conversation_already_has_active_response",
+    );
+
+    // After response.done lands, a subsequent submitToolResult must send
+    // response.create again (no in-flight response to ride on).
+    server.wss.clients.forEach((c) =>
+      c.send(
+        JSON.stringify({
+          type: "response.done",
+          response: { id: "resp_active_1" },
+        }),
+      ),
+    );
+    await new Promise((r) => setTimeout(r, 50));
+
+    const before = messagesSeen.length;
+    client.submitToolResult("call_def", JSON.stringify({ ok: true }));
+    await new Promise((r) => setTimeout(r, 50));
+    const newMsgs = messagesSeen.slice(before);
+    assert.ok(
+      newMsgs.some((m) => m.type === "response.create"),
+      "response.create was not sent after response.done cleared the active-response gate",
+    );
 
     client.close();
   } finally {
