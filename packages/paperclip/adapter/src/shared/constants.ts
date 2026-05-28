@@ -12,11 +12,42 @@ export const ADAPTER_LABEL = "Hermes Agent (HTTP)";
 /** Default Hermes gateway URL — the main profile (compose-network DNS). */
 export const DEFAULT_HERMES_GATEWAY_URL = "http://hermes:18789";
 
+/**
+ * Compose-internal URL for the sealed `codex-builder` Hermes profile
+ * (docs/codex-builder-runtime.md). Fleet-wide port :18793 — name-based
+ * routing (see CODEX_BUILDER_AGENT_NAMES) works identically on every
+ * tenant. Never published to the host; reachable only inside the compose
+ * network from the paperclip container.
+ */
+export const HERMES_CODEX_BUILDER_GATEWAY_URL = "http://hermes:18793";
+
+/**
+ * Agent names that route to the sealed codex-builder profile.
+ *
+ * Sir's decision #3 (docs/codex-builder-runtime.md §11.6): match on
+ * agent.name for v1, accept the small risk that a UI-side rename
+ * silently re-routes traffic back to main. The list lives here so
+ * adding a second sealed-runtime agent in v2 is one constant edit.
+ *
+ * Comparison is case-insensitive — the helper lowercases the
+ * incoming name before lookup, so a UI capitalisation tweak
+ * ("Codex-Feature-Builder") doesn't bypass the route.
+ */
+export const CODEX_BUILDER_AGENT_NAMES: ReadonlySet<string> = new Set([
+  "codex-feature-builder",
+]);
+
 /** Default per-call timeout. Mirrors upstream's DEFAULT_TIMEOUT_SEC. */
 export const DEFAULT_TIMEOUT_SEC = 300;
 
 /** Where to read Hermes' API_SERVER_KEY from on disk. */
 export const DEFAULT_HERMES_CONFIG_DIR = "/hermes-state/profiles";
+
+/**
+ * Profile names whose .env we know how to read for API_SERVER_KEY.
+ * Used by readHermesProfileApiKey() to validate the argument.
+ */
+export type HermesProfileName = "main" | "codex-builder";
 
 /** Session-key prefix used to derive a stable Hermes session per Paperclip agent. */
 export const SESSION_KEY_PREFIX = "paperclip-";
