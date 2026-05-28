@@ -454,6 +454,123 @@ const briefDecisionTools: ToolDef[] = [
     }),
   },
   {
+    name: "act_on_decision",
+    description:
+      // Sir's voice — clear, no fluff. The model on the other end of the
+      // connector picks an action and sometimes types a prompt; that prompt
+      // (instructions / when / context) lands here as `note`.
+      "Act on ONE decision card sitting on Sir's desk — the exact same five buttons Sir clicks on /desk (Delegate · Defer · Done · Do · Noise) wrapped into one tool. Always `list_pending_decisions` first so you know which `id` you're acting on and which action fits.\n" +
+      "\n" +
+      "Action menu (mirrors the dashboard exactly):\n" +
+      "  • `delegate` — hand it to Alfred to do. ctrl-api re-arms the source signal and the router fires the matched instinct's agent. REQUIRES `note` = the instructions Sir would type into the 'Instructions for me' box (e.g. 'Settle it, then file the receipt under May expenses.'). 2xx with `nothing_to_delegate: true` means the card had no real signal behind it (advisory card) and stays on the Desk — surface that to Sir verbatim.\n" +
+      "  • `defer` — bury the card until a named time. REQUIRES `note` = the natural-language when ('Tomorrow morning', 'After the Carter meeting'). DecisionRouterWorkflow parses it and stamps `resurface_at`; the card drops off /desk and returns then.\n" +
+      "  • `done` — mark the card resolved. `note` is OPTIONAL context ('Already replied', 'Paid on call', 'Resolved on the thread'). The note also seeds an observation for the learning pipeline, so a one-line context is worth more than empty.\n" +
+      "  • `do` — Sir's taking this on himself. A to_do/<ts>.md spawns within ~60s and surfaces in his Backstage. `note` OPTIONAL — anything Sir wants in the to_do body.\n" +
+      "  • `noise` — this kind of card should never have surfaced. The card drops off /desk and the learning layer materialises a `signal_noise_pattern` so the next one like it is filtered upstream. `note` is OPTIONAL (the gesture itself is the explanation; leave it empty unless Sir says why).\n" +
+      "\n" +
+      "Defaults: `source` defaults to `needs_attention` (the common case — the card came from Sir's Desk). Override only when the card came from `approval`, `judgment`, `to_do`, `pattern_proposal`, or a `desk_originated` decision you just wrote. `id` is the needs_attention stem from `list_pending_decisions` (e.g. `2026-05-28-04-15-xyz`), NOT the wrapped `needs_attention/<id>.md` path — the tool wraps it for you.\n" +
+      "\n" +
+      "Returns the created decision record `{id, path, frontmatter, side_effects}`. `side_effects.dispatch_ok: false` on a delegate means the agent fired but no real backend work happened (advisory card / nothing to delegate); the card stays on the Desk in that case. Backing: POST /api/v1/decisions — the exact endpoint the dashboard buttons hit. NOT idempotent: each call writes a decision record; the synchronous source-record flip prevents double-handling of the same card, but a retry against an already-handled card returns the new decision with the source already in its target state.",
+    inputSchema: z
+      .object({
+        id: z.string().min(1).describe(
+          "Source-record id — for a Desk card, the `id` field from `list_pending_decisions` (the needs_attention stem). For other sources, the bare record id; the tool wraps the path for `needs_attention` only.",
+        ),
+        action: z.enum(["delegate", "defer", "done", "do", "noise"]).describe(
+          "Which Desk button to press. delegate=hand to Alfred · defer=resurface later · done=mark resolved · do=Sir takes it (spawns a to_do) · noise=mark as low-signal so the pattern is filtered upstream.",
+        ),
+        note: z.string().optional().describe(
+          "The prompt the dashboard collects per action. REQUIRED for `delegate` (instructions for Alfred) and `defer` (natural-language when, e.g. 'tomorrow morning'). OPTIONAL for `done` (resolution context — seeds the learning observation) and `do` (to_do body). Pass empty / omit for `noise`.",
+        ),
+        source: z
+          .enum([
+            "needs_attention",
+            "approval",
+            "judgment",
+            "to_do",
+            "desk_originated",
+            "pattern_proposal",
+            "instinct_fire",
+          ])
+          .optional()
+          .describe(
+            "Where the card came from. Defaults to `needs_attention` (the Desk queue). Override only when acting on an approval, judgment, to_do, pattern_proposal, or desk-originated decision.",
+          ),
+        matter_ref: z.string().optional().describe(
+          "Optional matter wikilink/path to attach (e.g. `matter/acme.md`). ctrl-api backfills this from the needs_attention record's target_path when omitted, so you rarely need to set it.",
+        ),
+        task_ref: z.string().optional().describe(
+          "Optional task wikilink/path to attach (e.g. `task/follow-up-sam.md`). Same backfill rule as `matter_ref`.",
+        ),
+        source_headline: z.string().optional().describe(
+          "Optional headline copied onto the decision record for ledger readability. Defaults to empty; the dashboard passes the card's `display_headline` when it has one.",
+        ),
+      })
+      .superRefine((v, ctx) => {
+        // Action-level required-note validation: mirrors the dashboard,
+        // where Delegate and Defer reveal a text input the user MUST fill.
+        // Done / Do / Noise have an optional input.
+        const needsNote = v.action === "delegate" || v.action === "defer";
+        if (needsNote && (!v.note || !v.note.trim())) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["note"],
+            message:
+              v.action === "delegate"
+                ? "`note` is required for `delegate` — pass the instructions Sir would give Alfred (e.g. 'Settle it, then file the receipt')."
+                : "`note` is required for `defer` — pass the natural-language when (e.g. 'Tomorrow morning', 'After the Carter meeting').",
+          });
+        }
+      }),
+    buildRequest: ({ id, action, note, source, matter_ref, task_ref, source_headline }) => {
+      const src = source ?? "needs_attention";
+      // The dashboard wraps the needs_attention id as `needs_attention/<id>.md`
+      // before POSTing; for other sources the recordId is passed verbatim.
+      // Mirror that exactly so ctrl-api's synchronous source-flip finds the
+      // right file.
+      const sourceRecord =
+        src === "needs_attention" ? `needs_attention/${id}.md` : id;
+      // Map the user-facing action onto the ctrl-api intent enum. `delete`
+      // is a dashboard-side label only — we use Sir's plainer word `done`
+      // for both the action and the intent, and translate `do` → `take_mine`
+      // here so callers stay in dashboard vocabulary.
+      const intent =
+        action === "do" ? "take_mine" : (action as "delegate" | "defer" | "done" | "noise");
+      return {
+        method: "POST",
+        path: "/api/v1/decisions",
+        body: {
+          source: src,
+          source_record: sourceRecord,
+          intent,
+          note: note ?? "",
+          matter_ref: matter_ref ?? "",
+          task_ref: task_ref ?? "",
+          source_headline: source_headline ?? "",
+          time_to_decision_ms: null,
+        },
+      };
+    },
+  },
+  {
+    name: "reverse_decision",
+    description:
+      "Undo a decision Sir (or Alfred autonomously) just made — flips state→reversed and the DecisionRouterWorkflow runs inverse side-effects on its next 60s tick (source-record status flips back onto the Desk, any spawned to_do gets cancelled). Use when Sir says 'undo that', 'I changed my mind on the Carter card', or after `act_on_decision` returned something that's clearly wrong.\n" +
+      "\n" +
+      "Caveat: reverse is best-effort. For `intent=delegate`, the source-record flip is reversible but an agent that already fired CANNOT be unsent — Sir gets the Desk card back, but the dispatched work in the world isn't rewound. ctrl-api marks `delegate` as not-reversible in its frontmatter (`is_reversible: false`) — calling reverse on one returns 400 with that reason. The other four intents (defer/done/take_mine/noise) reverse cleanly.\n" +
+      "\n" +
+      "Returns `{ok: true, id, path, frontmatter}` (or `{ok: true, id, already_reversed: true}` on a no-op). Idempotent. Backing: POST /api/v1/decisions/:id/reverse.",
+    inputSchema: z.object({
+      id: z.string().min(1).describe(
+        "Decision id — e.g. `2026-05-28T04-15-22Z-a1b2c3d4`. Get it from `list_decisions` or from the `id` field in a prior `act_on_decision` response.",
+      ),
+    }),
+    buildRequest: ({ id }) => ({
+      method: "POST",
+      path: `/api/v1/decisions/${encodeURIComponent(id)}/reverse`,
+    }),
+  },
+  {
     name: "list_state_changes",
     description:
       "List entries from the state-change audit ledger — the canonical record of every mutation to matter / task state-fields written through state_mutator v2 (per docs/STATE-MUTATION.md). Each entry: `{when, source, target_kind, target_path, fields_changed, reason, audit_record_path}`. Filters: `target` (full vault-relative target_path like `matter/acme.md`), `source` (writer name, e.g. `briefing.morning`, `steward`, `nightly_narrative`, `manual.<userid>`), `since` / `until` ISO timestamps, `limit` (default 50, cap 200), `offset`. Use to answer 'who changed this matter?', 'show me everything Steward did last hour', 'what mutated under the briefing source today'. Backing: indexed vault walk via /api/v1/state-changes.",

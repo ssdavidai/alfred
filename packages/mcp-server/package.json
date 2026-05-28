@@ -9,7 +9,8 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node --experimental-sqlite dist/index.js",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test src/**/*.test.ts"
   },
   "engines": {
     "node": ">=22.0.0"

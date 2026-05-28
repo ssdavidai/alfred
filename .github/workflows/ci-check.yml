@@ -39,6 +39,26 @@ jobs:
         working-directory: packages/ctrl
         run: node build.mjs
 
+  test-mcp-server:
+    # tsc typecheck + node --test for the per-app tool catalogues
+    # (alfred / sure / plane / vaultwarden / execute / hermes). The tests are
+    # pure schema + buildRequest assertions; no network or env required.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install deps
+        working-directory: packages/mcp-server
+        run: npm ci
+      - name: typecheck
+        working-directory: packages/mcp-server
+        run: npm run typecheck
+      - name: node --test
+        working-directory: packages/mcp-server
+        run: npm test
+
   test-voice-bridge:
     # tsc compile + node --test for the OpenAI Realtime session-update race fix.
     # Mock WS server is in-process; no network or OpenAI key needed (a dummy

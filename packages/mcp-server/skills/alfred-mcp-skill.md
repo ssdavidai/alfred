@@ -6,7 +6,7 @@ license: alfred-platform internal — see the parent monorepo's LICENSE
 
 # Alfred MCP — claude.ai Custom Connector
 
-This connector exposes Sir's tenant ctrl-api content surface to claude.ai. The 16 tools below are the ONLY way you reach his box from a claude.ai conversation — there is no shell, no `bash`, no direct HTTP. Everything goes through this MCP server's bearer token, which is bound to one tenant for one hour.
+This connector exposes Sir's tenant ctrl-api content surface to claude.ai. The 18 tools below are the ONLY way you reach his box from a claude.ai conversation — there is no shell, no `bash`, no direct HTTP. Everything goes through this MCP server's bearer token, which is bound to one tenant for one hour.
 
 The catalogue is intentionally narrow. Container restarts, credential rotation, device revocation, env mutation, log streaming, and similar high-blast-radius operations are NOT exposed here — they live behind in-tenant agents (Alfred main, chores) where trust is scoped. If Sir asks for one of those over claude.ai, route him back to his Alfred channel rather than improvising.
 
@@ -40,6 +40,20 @@ The catalogue is intentionally narrow. Container restarts, credential rotation, 
 - `get_openclaw_health` — gateway healthz envelope
 - `list_openclaw_agents` — live agent state from the gateway (model bindings, provider auth)
 - `list_openclaw_allowed_tools` — `gateway.tools.allow` + MCP-server tool inventory
+
+### Desk (briefings, decisions, state-changes) — read + act
+
+- `list_briefings` / `get_briefing` — the daily letterpress brief snapshots
+- `list_decisions` / `get_decision` — every Desk click and every autonomous fire, with state + intent + outcome
+- `list_pending_decisions` — what's on Sir's `/desk` right now (raw `needs_attention` records)
+- `list_state_changes` — the matter/task mutation ledger
+- `list_in_flight_agents` — ephemeral exec-* subagents currently working
+- `act_on_decision` — press one of the five Desk buttons (delegate / defer / done / do / noise) for a card. `delegate` and `defer` REQUIRE a `note` (instructions / when); `done` / `do` take optional context; `noise` takes nothing
+- `reverse_decision` — undo a decision (best-effort: `delegate` is marked not-reversible upstream)
+
+### Channels (1)
+
+- `notify_principal` — send Sir a message on his preferred channel (Telegram, Slack, …)
 
 ### DM pairing (1)
 
@@ -83,6 +97,18 @@ The common task queue on the learn package is `alfred-learn`. If Sir doesn't kno
 ### "Is Alfred healthy?"
 
 `get_openclaw_health` — gateway-side health (provider auth, queue depth). Pair with `list_openclaw_agents` to see which model each agent is wired to right now and whether any provider is missing credentials. If health is bad, surface what's broken to Sir; do NOT try to restart anything from this connector — that's deliberately not exposed.
+
+### "What's on my desk?" / "Handle / delegate / defer this one"
+
+1. `list_pending_decisions` — pull the open cards. Each entry has `id`, `display_headline`, `display_body`, `reasoning`, `decay_band`, plus the matter/task/source-signal provenance.
+2. Read the queue back to Sir in prose — `decay_band: fresh|aging|stale` plus the headline. Don't dump JSON.
+3. When Sir picks one (or asks you to triage), call `act_on_decision({id, action, note})`. Action menu:
+   - `delegate` — hand to Alfred. `note` REQUIRED — write what Sir would say in the Instructions box ("Settle it, then file the receipt under May expenses.").
+   - `defer` — bury until later. `note` REQUIRED — the natural-language when ("Tomorrow morning", "After the Carter meeting").
+   - `done` — mark resolved. `note` OPTIONAL but it improves the learning signal — what closed it ("Already replied on the thread").
+   - `do` — Sir's taking it himself; a `to_do` spawns within ~60s.
+   - `noise` — this kind of card should never have surfaced. No note; the gesture is the explanation.
+4. If Sir says "actually undo that", call `reverse_decision({id})` on the decision id you got back. Works cleanly for defer/done/do/noise; for delegate it reopens the Desk card but cannot un-fire what already dispatched.
 
 ### "Approve my Telegram / Slack pairing"
 
