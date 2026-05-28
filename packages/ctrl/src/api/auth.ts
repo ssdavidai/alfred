@@ -7,28 +7,45 @@
 //
 //   2. Optional VOICE_BRIDGE_INTERNAL_TOKEN — a scoped, path-allowlisted
 //      Bearer for the voice-bridge sibling container. It is permitted
-//      ONLY on the routes voice-bridge actually needs:
+//      ONLY on the routes voice-bridge actually needs (see the two
+//      allowlists below). Everything else 401s as if no token were sent.
 //
-//        GET  /api/v1/phone/voice-context   (read primer for the realtime agent)
-//        POST /api/v1/phone/transcript      (post call transcript at hangup)
-//        POST /api/v1/integrations/execute  (dispatch composio_execute tool
-//                                            calls during the realtime session
-//                                            — added 2026-05-28; without this
-//                                            the realtime agent could not call
-//                                            Composio actions on home.alfred.
-//                                            black, surfacing as a 6ms
-//                                            `composio_execute ok=false
-//                                            status=err` on every voice call.)
+//      The allowlist comes in two shapes:
 //
-//      Any other route requested with this token rejects with 401, as if
-//      no token were presented. This is principle-of-least-privilege for an
-//      internal monorepo service that lives on the same docker network as
-//      ctrl-api but is large attack surface (Twilio mulaw, OpenAI Realtime
-//      WebSocket). If voice-bridge is ever compromised, the blast radius is
-//      bounded to these routes — the master key never leaves ctrl-api.
+//      (a) VOICE_BRIDGE_ALLOWLIST — exact `METHOD:/exact/path` matches.
+//          Used for routes that have no path parameters (`/voice-context`,
+//          `/transcript`, `/integrations/execute`, `/briefings`, etc.).
+//          No prefix inheritance — a future `/voice-context/raw` would not
+//          accidentally inherit privilege from `/voice-context`.
 //
-// Both validations are constant-time (`crypto.timingSafeEqual`) so a
-// network attacker can't time the comparison to recover bytes.
+//      (b) VOICE_BRIDGE_PATTERN_ALLOWLIST — anchored regexes, one per
+//          parameterized route (`/briefings/:slugDate`, `/decisions/:id`,
+//          `/vault/list/:type`, `/vault/records/*`, etc.). Each pattern is
+//          `^...$` anchored and uses a tight `[^/]+` (or path-tail) match,
+//          so adjacent routes can't inherit privilege either. The shape
+//          mirrors what the `self` realtime tool surface needs (vault
+//          read, briefings, decisions, schedules, workflows, matters,
+//          chores, signals, observations) — added 2026-05-28 when sir's
+//          home call sid CAb414732e8fce45b65d1d9f236d91b984 surfaced
+//          `tool self ok=false status=401 4ms argsLen=89` (the residual
+//          PR #95 called out: the voice-bridge `self` tool was routing
+//          correctly to single-VM ctrl-api but the scoped bearer had no
+//          path beyond the original two).
+//
+//      Writes intentionally omitted: the realtime agent has MCP coverage
+//      for the write paths it needs (alfred__act_on_decision /
+//      alfred__reverse_decision were added in PR #97, alfred__notify_*,
+//      alfred__create_vault_record, etc.). `self` stays read-only — if
+//      voice-bridge is ever compromised the blast radius is bounded to
+//      observable state, never mutation.
+//
+//      This is principle-of-least-privilege for an internal monorepo
+//      service that lives on the same docker network as ctrl-api but is
+//      large attack surface (Twilio mulaw, OpenAI Realtime WebSocket). The
+//      master key never leaves ctrl-api.
+//
+// Both token validations are constant-time (`crypto.timingSafeEqual`) so
+// a network attacker can't time the comparison to recover bytes.
 
 import crypto from "node:crypto";
 import type { IncomingMessage } from "node:http";
@@ -42,17 +59,114 @@ let voiceBridgeKeyBuf: Buffer | null = null;
  * allowed to call. The match is EXACT (no prefix matching, no wildcards) so
  * a future route accidentally named close to one of these (e.g.
  * /api/v1/phone/voice-context/raw) does NOT inherit the privilege.
+ *
+ * Routes with path parameters (e.g. `/decisions/:id`) live in
+ * VOICE_BRIDGE_PATTERN_ALLOWLIST below — anchored-regex per route, never a
+ * blanket prefix.
  */
 const VOICE_BRIDGE_ALLOWLIST: ReadonlySet<string> = new Set([
+  // Voice primer + transcript hand-off — the original two routes from
+  // Phase 4.1 (commit 85be684e).
   "GET:/api/v1/phone/voice-context",
   "POST:/api/v1/phone/transcript",
-  // composio_execute dispatch path — added 2026-05-28. The realtime agent's
-  // built-in `composio_execute` tool routes through here. Auth body is
-  // tenant-bound (one Composio user-id per ctrl-api), so this token cannot
-  // hop tenants. Action arguments are model-supplied — we accept the same
-  // surface Hermes uses through MCP, scoped to this single endpoint.
+  // composio_execute dispatch path — added 2026-05-28 in PR #95. The
+  // realtime agent's built-in `composio_execute` tool routes through here.
+  // Auth body is tenant-bound (one Composio user-id per ctrl-api), so this
+  // token cannot hop tenants.
   "POST:/api/v1/integrations/execute",
+  // ── `self` realtime tool, read-only surface — added 2026-05-28. ──────
+  // Sir said the call sid CAb414732e8fce45b65d1d9f236d91b984 logged
+  // `tool self ok=false status=401 4ms argsLen=89`. PR #95 fixed the
+  // dispatcher; this widens the allowlist to the read-only catalogue the
+  // persona file documents (vault, briefings, decisions, schedules,
+  // workflows, matters, chores, signals, observations, learning).
+  //
+  // Briefings — Sir asks "what's my brief?" / list briefings.
+  "GET:/api/v1/briefings",
+  // Vault context primer + parameterless reads.
+  "GET:/api/v1/vault/context",
+  "GET:/api/v1/vault/search",
+  "GET:/api/v1/vault/index",
+  "GET:/api/v1/vault/schema",
+  "GET:/api/v1/vault/inbox",
+  "GET:/api/v1/vault/graph",
+  "GET:/api/v1/vault/nebula-data",
+  // Decision queue — Sir asks "what's on my desk?"
+  "GET:/api/v1/decisions",
+  "GET:/api/v1/decisions/in-flight",
+  // Matters / chores / workflows / schedules — listing the top-level set.
+  "GET:/api/v1/matters",
+  "GET:/api/v1/chores",
+  "GET:/api/v1/chore-actions",
+  "GET:/api/v1/workflows",
+  "GET:/api/v1/schedules",
+  // Signals + observations top-of-list (state.db read surface).
+  "GET:/api/v1/state/signals",
+  "GET:/api/v1/state/observations",
+  // Desk queue (needs_attention) — the Desk audit ledger.
+  "GET:/api/v1/admin/needs-attention",
+  // Learning surfaces — Sir asks "what's Alfred figured out lately?"
+  "GET:/api/v1/learning/status",
+  "GET:/api/v1/learning/observations",
+  "GET:/api/v1/learning/instincts",
+  "GET:/api/v1/learning/reflections",
+  "GET:/api/v1/learning/sessions",
 ]);
+
+/**
+ * Parameterised routes the voice-bridge scoped token can read. Each entry is
+ * an anchored regex matched against the request pathname — no prefix
+ * inheritance, no wildcard between segments. Generated once at module load.
+ *
+ * The shape is deliberately tight: a `[^/]+` for `:id`-style placeholders,
+ * and a `.+` only for the documented `/vault/records/*` tail (the vault
+ * surface natively uses slash-separated record paths). Anything outside
+ * this catalogue 401s through the same code path as a wrong token would.
+ */
+const VOICE_BRIDGE_PATTERN_ALLOWLIST: ReadonlyArray<{
+  method: string;
+  regex: RegExp;
+}> = [
+  // GET /api/v1/briefings/:slugDate — read one brief by date.
+  { method: "GET", regex: /^\/api\/v1\/briefings\/[^/]+$/ },
+  // GET /api/v1/decisions/:id — read one decision (the Desk row).
+  { method: "GET", regex: /^\/api\/v1\/decisions\/[^/]+$/ },
+  // GET /api/v1/vault/list/:type — list vault records by type.
+  { method: "GET", regex: /^\/api\/v1\/vault\/list\/[^/]+$/ },
+  // GET /api/v1/vault/records/<path>  — read one vault record (path can
+  // contain slashes; the route uses an explicit /* tail). Read-only.
+  { method: "GET", regex: /^\/api\/v1\/vault\/records\/.+$/ },
+  // GET /api/v1/matters/:id — read one matter.
+  { method: "GET", regex: /^\/api\/v1\/matters\/[^/]+$/ },
+  // GET /api/v1/chores/:slug — read one chore.
+  { method: "GET", regex: /^\/api\/v1\/chores\/[^/]+$/ },
+  // GET /api/v1/chores/:slug/runs — recent runs of a chore.
+  { method: "GET", regex: /^\/api\/v1\/chores\/[^/]+\/runs$/ },
+  // GET /api/v1/chores/:slug/source — the YAML source of a chore.
+  { method: "GET", regex: /^\/api\/v1\/chores\/[^/]+\/source$/ },
+  // GET /api/v1/workflows/:wfId — read one workflow's status.
+  { method: "GET", regex: /^\/api\/v1\/workflows\/[^/]+$/ },
+  // GET /api/v1/workflows/:wfId/history — workflow history (read-only).
+  { method: "GET", regex: /^\/api\/v1\/workflows\/[^/]+\/history$/ },
+  // GET /api/v1/schedules/:schId — read one schedule's status.
+  { method: "GET", regex: /^\/api\/v1\/schedules\/[^/]+$/ },
+  // GET /api/v1/state/signals/:id — read one signal.
+  { method: "GET", regex: /^\/api\/v1\/state\/signals\/[^/]+$/ },
+  // GET /api/v1/state/observations/:id — read one observation.
+  { method: "GET", regex: /^\/api\/v1\/state\/observations\/[^/]+$/ },
+  // GET /api/v1/learning/observations/:id — one learn observation.
+  { method: "GET", regex: /^\/api\/v1\/learning\/observations\/[^/]+$/ },
+  // GET /api/v1/learning/instincts/:id — one instinct.
+  { method: "GET", regex: /^\/api\/v1\/learning\/instincts\/[^/]+$/ },
+];
+
+function voiceBridgeRouteAllowed(method: string, pathname: string): boolean {
+  if (VOICE_BRIDGE_ALLOWLIST.has(`${method}:${pathname}`)) return true;
+  for (const entry of VOICE_BRIDGE_PATTERN_ALLOWLIST) {
+    if (entry.method === method && entry.regex.test(pathname)) return true;
+  }
+  return false;
+}
 
 export function setApiKey(key: string): void {
   apiKeyBuf = Buffer.from(key);
@@ -100,10 +214,7 @@ export function authenticate(
     tokenBuf.length === voiceBridgeKeyBuf.length &&
     crypto.timingSafeEqual(tokenBuf, voiceBridgeKeyBuf)
   ) {
-    if (
-      route &&
-      VOICE_BRIDGE_ALLOWLIST.has(`${route.method}:${route.pathname}`)
-    ) {
+    if (route && voiceBridgeRouteAllowed(route.method, route.pathname)) {
       return;
     }
     // Token recognised but route not in allowlist — explicit 401 with a
