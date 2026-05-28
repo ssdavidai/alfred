@@ -43,8 +43,18 @@
 	# its webhooks (per their docs), so the handler validates a
 	# shared-secret `?token=` query param against AGENTMAIL_WEBHOOK_TOKEN
 	# baked into the URL configured in the AgentMail console.
+	#
+	# /api/v1/composio/webhook is included so Composio can POST connection
+	# lifecycle events (connection_added / _deleted / _failed, scope revoke,
+	# etc.) straight to ctrl-api. Composio composes its callback URL from
+	# our SaaS-registered base, which on alfred-black is the apex. PR #72
+	# added the in-process 1-min reconciler; PR #74 added the route + the
+	# unsigned-fallback policy (the handler WARN-logs when
+	# COMPOSIO_WEBHOOK_SECRET is unset). Discovery #293 found the Caddy
+	# matcher was never updated and every Composio webhook was 405-ing
+	# at the SPA's nginx.
 	@public_webhooks {
-		path /api/v1/streams/omi/* /api/v1/plane/webhook /api/v1/webhooks/plane/steward /api/v1/webhooks/vexa /api/v1/webhooks/in/* /api/v1/channels/email/inbound /api/v1/channels/paperclip/*
+		path /api/v1/streams/omi/* /api/v1/plane/webhook /api/v1/webhooks/plane/steward /api/v1/webhooks/vexa /api/v1/webhooks/in/* /api/v1/channels/email/inbound /api/v1/channels/paperclip/* /api/v1/composio/webhook
 	}
 	handle @public_webhooks {
 		reverse_proxy ctrl-api:3100

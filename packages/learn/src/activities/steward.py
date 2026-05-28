@@ -1095,11 +1095,27 @@ def _gmail_query_matches(query: str, fields: dict[str, str]) -> bool:
 # ---------------------------------------------------------------------------
 
 # Stream files are written by streams.ts as ``<safe_id>.jsonl`` under
-# ALFRED_DATA_DIR/streams. Composio-gmail streams have ids of the form
-# ``composio-gmail-*`` (the underscore-equivalent on disk after the
-# safe-filename pass). We glob for both the canonical pattern AND any
-# stream named exactly ``gmail`` since some tenants run the legacy
-# direct-pull stream under that id.
+# ALFRED_DATA_DIR/streams, and their configs live alongside under
+# ``streams/configs/<safe_id>.json`` (see ctrl-api streams.ts —
+# ``getStreamConfigPath`` / ``getStreamEventsPath``).
+#
+# Historically we matched gmail streams by *filename* (``composio-gmail*``,
+# ``gmail.jsonl``, ``gmail-*``). That works only when auto-config wrote
+# the canonical id ``composio-gmail-gmail-fetch-emails``. UI-created or
+# UUID-id streams (e.g. ``f7446eaf-…``) write to a sibling JSONL that
+# none of those globs touch, so steward read a 4-day-stale legacy file
+# and reported "stale gmail stream" while the real Composio pull was
+# alive and well in a UUID-named JSONL. Discovery #293, fix landed via
+# Composio recurring-break PR.
+#
+# The correct selector is ``composio_action == "GMAIL_FETCH_EMAILS"``
+# on the stream config — that's tenant-agnostic and survives the legacy
+# auto-config ↔ UI naming split. We walk ``streams/configs/`` for any
+# config carrying that action and resolve the matching ``<id>.jsonl``.
+# The legacy filename globs remain a fallback for tenants whose configs
+# dir is empty (early pre-auto-config tenants, dev fixtures, etc.).
+_GMAIL_COMPOSIO_ACTION = "GMAIL_FETCH_EMAILS"
+
 _GMAIL_STREAM_GLOBS = (
     "composio-gmail*.jsonl",
     "gmail.jsonl",
@@ -1108,11 +1124,58 @@ _GMAIL_STREAM_GLOBS = (
 
 
 def _list_gmail_stream_files(streams_dir: str) -> list[str]:
-    """Return absolute paths of every gmail-shaped JSONL stream file."""
+    """Return absolute paths of every gmail-shaped JSONL stream file.
+
+    Primary selector: any stream config under ``<streams_dir>/configs/``
+    whose ``composio_action`` is ``GMAIL_FETCH_EMAILS``. The config's
+    ``id`` (after the same safe-filename pass as ctrl-api streams.ts)
+    resolves to ``<streams_dir>/<safe_id>.jsonl``.
+
+    Fallback: legacy filename glob (``composio-gmail*.jsonl`` etc.) —
+    kept so a tenant whose configs dir is missing (pre-auto-config or
+    fixture-only) still picks up canonical-id JSONLs.
+
+    Files that don't exist on disk yet (stream config exists, JSONL not
+    written) are silently dropped — the freshness check downstream
+    handles the "no data yet" state.
+    """
     out: list[str] = []
+
+    # Primary: walk stream configs, select by composio_action.
+    configs_dir = os.path.join(streams_dir, "configs")
+    try:
+        config_names = os.listdir(configs_dir)
+    except OSError:
+        config_names = []
+    for name in config_names:
+        if not name.endswith(".json"):
+            continue
+        cfg_path = os.path.join(configs_dir, name)
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(cfg, dict):
+            continue
+        if cfg.get("composio_action") != _GMAIL_COMPOSIO_ACTION:
+            continue
+        stream_id = cfg.get("id") or os.path.splitext(name)[0]
+        if not isinstance(stream_id, str) or not stream_id:
+            continue
+        # Mirror ctrl-api streams.ts getStreamEventsPath sanitisation
+        # (``[^a-zA-Z0-9_-]`` → ``_``) so we land on the same file.
+        safe_id = re.sub(r"[^a-zA-Z0-9_-]", "_", stream_id)
+        jsonl_path = os.path.join(streams_dir, f"{safe_id}.jsonl")
+        if os.path.exists(jsonl_path):
+            out.append(jsonl_path)
+
+    # Fallback: legacy filename glob — covers tenants without a configs
+    # dir and the canonical auto-config id case.
     for pattern in _GMAIL_STREAM_GLOBS:
         out.extend(glob.glob(os.path.join(streams_dir, pattern)))
-    # Dedup while preserving order.
+
+    # Dedup while preserving order (config-driven hits take precedence).
     seen: set[str] = set()
     uniq: list[str] = []
     for p in out:
