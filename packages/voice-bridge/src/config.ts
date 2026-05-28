@@ -45,6 +45,14 @@ export const config = {
   openaiApiKey: required("OPENAI_API_KEY"),
   openaiModel: optional("OPENAI_REALTIME_MODEL", "gpt-realtime-2"),
   openaiVoice: optional("OPENAI_REALTIME_VOICE", "cedar"),
+  // Optional override for the OpenAI Realtime WS base URL. Production leaves
+  // this empty and points at wss://api.openai.com/v1/realtime. Tests set it
+  // to ws://localhost:<port> with a mock server emulating session.created /
+  // session.updated to validate the connect-handshake race fix.
+  openaiRealtimeBaseUrl: optional(
+    "OPENAI_REALTIME_BASE_URL",
+    "wss://api.openai.com/v1/realtime",
+  ),
 
   // Twilio account auth token — used to verify X-Twilio-Signature on the
   // inbound TwiML webhook. When empty we still serve TwiML but log a

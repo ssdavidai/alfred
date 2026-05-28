@@ -39,6 +39,26 @@ jobs:
         working-directory: packages/ctrl
         run: node build.mjs
 
+  test-voice-bridge:
+    # tsc compile + node --test for the OpenAI Realtime session-update race fix.
+    # Mock WS server is in-process; no network or OpenAI key needed (a dummy
+    # key satisfies config.ts's required-env check).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install deps
+        working-directory: packages/voice-bridge
+        run: npm ci || npm install
+      - name: tsc + node --test
+        working-directory: packages/voice-bridge
+        env:
+          OPENAI_API_KEY: sk-ci-dummy
+          VOICE_BRIDGE_INTERNAL_TOKEN: ci-dummy-token
+        run: npm test
+
   pytest-learn:
     runs-on: ubuntu-latest
     steps:

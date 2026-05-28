@@ -8,7 +8,8 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/server.js",
-    "dev": "tsc --watch"
+    "dev": "tsc --watch",
+    "test": "tsc && node --test dist/*.test.js"
   },
   "engines": {
     "node": ">=22"

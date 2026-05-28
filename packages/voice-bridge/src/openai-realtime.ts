@@ -28,9 +28,44 @@
 //                                                 auto-cancels assistant per VAD config)
 //   conversation.item.input_audio_transcription.completed — user-utterance transcript
 //   error                                       — log + continue
+//
+// Connection handshake (race-safe — fixed 2026-05-28):
+//
+//   1. ws.open
+//   2. server → session.created          (default config in effect)
+//   3. client → session.update           (persona + VAD + tools)
+//   4. server → session.updated          (config now applied)  ← connect() resolves HERE
+//
+// The previous implementation resolved on step 2, which meant the model could
+// receive `response.create` (greeting trigger) or `input_audio_buffer.append`
+// (Twilio media) before step 4 applied. Symptoms were:
+//   * agent freelancing on the default persona instead of the RP butler
+//   * default turn-detection (no semantic VAD interrupt) → not interruptible
+//   * voice defaulted to generic American
+// The race window is small (~100–500ms on OpenAI's side) but Twilio media
+// streams start the moment Twilio gets a "start" event, so it hit every call.
 
 import { WebSocket as WsSocket } from "ws";
 import { config } from "./config.js";
+
+// Timeout for the session.update ACK. If `session.updated` doesn't land within
+// this window after we send `session.update`, we error the call hard rather
+// than silently running on default OpenAI Realtime config.
+//
+// Production default is 5s. Tests override via VOICE_BRIDGE_ACK_TIMEOUT_MS_FOR_TEST
+// so they don't have to sit on the prod timeout for every negative case. The
+// override is read at call-time, not at module-load time, because Node's test
+// runner sets env per-test.
+function ackTimeoutMs(): number {
+  const override = process.env.VOICE_BRIDGE_ACK_TIMEOUT_MS_FOR_TEST;
+  if (override) {
+    const n = Number(override);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return 5_000;
+}
+
+const DEBUG = process.env.VOICE_BRIDGE_DEBUG === "1";
 
 export interface RealtimeSessionConfig {
   instructions: string;
@@ -46,6 +81,11 @@ export class OpenAIRealtimeClient {
   private listeners = new Set<RealtimeListener>();
   private closed = false;
   private callId: string;
+  // True once OpenAI has echoed back `session.updated` confirming our persona
+  // + VAD + tools are applied. Until this flips, we MUST NOT send audio or
+  // request responses, otherwise the model runs on default config (generic
+  // assistant, server_vad / no interrupt, default voice).
+  private sessionReady = false;
 
   constructor(callId: string) {
     this.callId = callId;
@@ -55,13 +95,24 @@ export class OpenAIRealtimeClient {
     return !this.closed && this.ws?.readyState === this.ws?.OPEN;
   }
 
+  /** True once the model is configured with our persona/VAD/tools. */
+  get isReady(): boolean {
+    return this.isOpen && this.sessionReady;
+  }
+
   on(listener: RealtimeListener): void {
     this.listeners.add(listener);
   }
 
-  // Open the WS and wait for session.created. Resolves once configured.
+  // Open the WS, send session.update, and wait for the server's `session.updated`
+  // echo before resolving. Hard 5s timeout — we'd rather hang up than serve a
+  // call on the default OpenAI persona.
   async connect(sessionConfig: RealtimeSessionConfig): Promise<void> {
-    const url = `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(config.openaiModel)}`;
+    // Read the base URL fresh at connect-time so tests can swap it between
+    // cases without having to reload the SUT module each time.
+    const baseUrl =
+      process.env.OPENAI_REALTIME_BASE_URL ?? config.openaiRealtimeBaseUrl;
+    const url = `${baseUrl}${baseUrl.includes("?") ? "&" : "?"}model=${encodeURIComponent(config.openaiModel)}`;
     return new Promise((resolve, reject) => {
       // GA endpoint does NOT want the `OpenAI-Beta: realtime=v1` header — it
       // silently flips the session into a compat mode that rejects GA-shape
@@ -72,6 +123,19 @@ export class OpenAIRealtimeClient {
         },
       });
       this.ws = ws;
+
+      let settled = false;
+      let ackTimer: NodeJS.Timeout | null = null;
+      const settle = (err?: Error) => {
+        if (settled) return;
+        settled = true;
+        if (ackTimer) {
+          clearTimeout(ackTimer);
+          ackTimer = null;
+        }
+        if (err) reject(err);
+        else resolve();
+      };
 
       ws.on("open", () => {
         // Session config arrives *after* server emits session.created. Defer the
@@ -127,7 +191,34 @@ export class OpenAIRealtimeClient {
                 : {}),
             },
           });
-          resolve();
+          // Arm the ACK timeout — if `session.updated` doesn't arrive within
+          // this window we hang up rather than run on defaults.
+          const tmo = ackTimeoutMs();
+          ackTimer = setTimeout(() => {
+            settle(
+              new Error(
+                `session.update ACK timeout after ${tmo}ms — refusing to serve call on default config`,
+              ),
+            );
+          }, tmo);
+        }
+
+        if (event.type === "session.updated" && !this.sessionReady) {
+          this.sessionReady = true;
+          if (DEBUG) {
+            // One-line debug breadcrumb so future regressions can be diagnosed
+            // without a hot-patch. Set VOICE_BRIDGE_DEBUG=1 to enable.
+            const td = event.session?.audio?.input?.turn_detection;
+            const voice = event.session?.audio?.output?.voice;
+            const instrLen =
+              typeof event.session?.instructions === "string"
+                ? event.session.instructions.length
+                : -1;
+            console.log(
+              `[realtime ${this.callId}] session.updated turn_detection=${td?.type} voice=${voice} instrLen=${instrLen}`,
+            );
+          }
+          settle();
         }
 
         for (const l of this.listeners) {
@@ -149,12 +240,21 @@ export class OpenAIRealtimeClient {
             `[realtime ${this.callId}] WS closed code=${code} reason=${reason.toString()}`,
           );
         }
+        // If the WS closes before we got `session.updated`, surface that as a
+        // connect failure so the caller disposes the call cleanly.
+        if (!settled) {
+          settle(
+            new Error(
+              `WS closed before session.updated (code=${code} reason=${reason.toString()})`,
+            ),
+          );
+        }
       });
 
       ws.on("error", (err) => {
         console.error(`[realtime ${this.callId}] WS error`, err);
         if (this.ws?.readyState === this.ws?.CONNECTING) {
-          reject(err);
+          settle(err as Error);
         }
       });
     });
@@ -167,7 +267,15 @@ export class OpenAIRealtimeClient {
 
   // Append a base64 μ-law chunk to the model's input buffer. Twilio's payload
   // passes through unchanged — both sides speak g711_ulaw natively.
+  //
+  // Hard guard: if the session is not yet ready (session.updated unseen) we
+  // drop the chunk on the floor. Happy-path callers wait for `connect()` to
+  // resolve before sending audio, so this is defence-in-depth against a race
+  // regression and against early Twilio media frames slipping past
+  // VoiceCall.initialise() (which won't happen today — `this.realtime` is
+  // null until connect resolves — but we belt-and-braces it).
   appendAudio(payloadBase64: string): void {
+    if (!this.sessionReady) return;
     this.send({ type: "input_audio_buffer.append", audio: payloadBase64 });
   }
 
@@ -178,8 +286,16 @@ export class OpenAIRealtimeClient {
   }
 
   // Greet immediately on call connect — semantic VAD waits for user speech
-  // otherwise, which would mean dead air after pickup.
+  // otherwise, which would mean dead air after pickup. We only trigger the
+  // greeting AFTER `session.updated` has applied; until then `response.create`
+  // would run on the default persona (generic American assistant, no RP).
   triggerGreeting(): void {
+    if (!this.sessionReady) {
+      console.warn(
+        `[realtime ${this.callId}] triggerGreeting() called before session.updated — refusing`,
+      );
+      return;
+    }
     this.send({ type: "response.create" });
   }
 
