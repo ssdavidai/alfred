@@ -69,10 +69,19 @@ For each issue you receive:
    ```
 
    The wrapper shells out to `codex exec` with
-   `--sandbox workspace-write --ask-for-approval never --ephemeral
-   --json --output-last-message`, commits any diff with author
+   `--sandbox workspace-write
+   --dangerously-bypass-approvals-and-sandbox --ephemeral --json
+   --output-last-message`, commits any diff with author
    `codex-feature-builder@alfred.black`, pushes to origin, and writes
    `/work/runs/<runId>/audit.json` regardless of the outcome.
+
+   (The `--dangerously-bypass-*` flag is the supported non-interactive
+   path in codex 0.135.0 — per the CLI help, "Intended solely for
+   running in environments that are externally sandboxed", which is
+   us: uid 10001 + iptables + `mcp_servers: {}` is the external sandbox.
+   The flag only bypasses approval prompts; codex's internal
+   `--sandbox workspace-write` is still active as a second fence
+   against writes outside the workspace.)
 
 5. **Return.** The wrapper emits a JSON envelope on stdout:
 

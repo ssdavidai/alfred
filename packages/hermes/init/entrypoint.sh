@@ -665,14 +665,33 @@ EOF
         # known_hosts for github.com so the first push doesn't trip on a
         # prompt (we have StrictHostKeyChecking=accept-new in the .env
         # but a pre-seeded entry is more deterministic).
+        #
+        # If ssh-keyscan failed at first boot (DNS / network blip), the
+        # file gets created but EMPTY and the next init pass skips it
+        # entirely, leaving the codex-builder uid unable to write its
+        # OWN host key on accept-new (the file was root-owned 0644).
+        # Fix: delete-and-retry whenever empty.
+        if [[ -f "$SSH_DIR/known_hosts" ]] && [[ ! -s "$SSH_DIR/known_hosts" ]]; then
+            rm -f "$SSH_DIR/known_hosts"
+        fi
         if [[ ! -f "$SSH_DIR/known_hosts" ]]; then
             ssh-keyscan -t ed25519,ecdsa github.com 2>/dev/null > "$SSH_DIR/known_hosts" || true
             if [[ -s "$SSH_DIR/known_hosts" ]]; then
-                chmod 0600 "$SSH_DIR/known_hosts"
-                chown 10001:10001 "$SSH_DIR/known_hosts"
                 echo "[init] [codex-builder] seeded $SSH_DIR/known_hosts with github.com keys"
+            else
+                # Couldn't fetch — leave an empty file so the codex-builder
+                # uid can write its own entry on the first connection's
+                # accept-new prompt. Empty + writeable beats absent (the
+                # uid otherwise can't create it depending on umask).
+                : > "$SSH_DIR/known_hosts"
+                echo "[init] [codex-builder] WARNING: ssh-keyscan github.com returned no keys — leaving empty known_hosts for accept-new"
             fi
         fi
+        # ALWAYS chown + chmod regardless of whether ssh-keyscan succeeded —
+        # the previous code only chowned on -s success, leaving an empty
+        # root-owned file the codex-builder uid couldn't write to.
+        chmod 0600 "$SSH_DIR/known_hosts" 2>/dev/null || true
+        chown 10001:10001 "$SSH_DIR/known_hosts" 2>/dev/null || true
     else
         echo "[init] [codex-builder] CODEX_BUILDER_DEPLOY_KEY_B64 unset — git push will fail clean (no key)"
     fi
