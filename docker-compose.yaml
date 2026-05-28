@@ -360,6 +360,16 @@ services:
       # 3 profiles new privileges (they run as uid 10000 and their egress
       # paths are unrestricted today). See docs/codex-builder-runtime.md §6.
       - NET_ADMIN
+      # SETUID + SETGID — needed by PR 4's `setpriv --reuid=10001
+      # --regid=10001 ...` wrap on the codex-builder gateway's start_proc.
+      # Without these the supervisor (running as root) gets
+      # `setpriv: setresuid failed: Operation not permitted` and the
+      # codex-builder gateway crashes in a tight restart loop. cap_drop:
+      # ALL + this targeted cap_add is still a much tighter posture than
+      # the default (which doesn't drop ALL). Live-observed crash loop
+      # on home 2026-05-28 right after PR #104 landed.
+      - SETUID
+      - SETGID
     # Sized for two Python gateway processes + MCP stdio children. The
     # workers side carries the heavier task-registry boot path.
     mem_limit: 6g
