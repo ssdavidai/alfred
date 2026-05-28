@@ -39,9 +39,11 @@ import {
 } from "./tools.js";
 import {
   dispatchMcp,
-  getMcpToolDefs,
+  getVoiceMcpToolDefs,
   isMcpToolName,
 } from "./mcp-clients.js";
+
+const VOICE_DEBUG = process.env.VOICE_BRIDGE_DEBUG === "1";
 
 export interface VoiceCallOpts {
   tenantId: string;
@@ -120,6 +122,15 @@ export class VoiceCall {
     // Open OpenAI Realtime and wire its events.
     this.realtime = new OpenAIRealtimeClient(this.callId);
     this.realtime.on((event) => this.onRealtimeEvent(event));
+    const voiceMcpTools = getVoiceMcpToolDefs();
+    const totalTools = ALL_TOOLS.length + voiceMcpTools.length;
+    if (VOICE_DEBUG) {
+      console.log(
+        `[call ${this.callId}] curated tool catalog: ${totalTools} tools ` +
+          `(${ALL_TOOLS.length} static + ${voiceMcpTools.length} MCP; ` +
+          `ceiling is 16384 tokens for instructions+tools per OpenAI Realtime)`,
+      );
+    }
     try {
       await this.realtime.connect({
         instructions: buildInstructions({
@@ -134,7 +145,11 @@ export class VoiceCall {
         // by the time a call lands the catalog is populated. Empty list is
         // a soft failure (every MCP server was unreachable at boot); voice
         // still works on self + composio.
-        tools: [...ALL_TOOLS, ...getMcpToolDefs()],
+        //
+        // We deliberately ship a CURATED voice subset (getVoiceMcpToolDefs)
+        // rather than the full 157-tool union — see mcp-clients.ts allowlist
+        // header for the 16,384-token Realtime ceiling rationale.
+        tools: [...ALL_TOOLS, ...voiceMcpTools],
       });
     } catch (err) {
       console.error(`[call ${this.callId}] OpenAI Realtime connect failed`, err);
@@ -302,6 +317,14 @@ export class VoiceCall {
       return;
     }
 
+    // Per-dispatch breadcrumb (DEBUG-gated). The pre-curation debug build
+    // logged nothing on the dispatch path, so post-mortems had to cross-
+    // reference ctrl-api access logs to reconstruct which tools the model
+    // tried. With this in place a single `docker logs voice-bridge` over the
+    // call window shows the full tool-call timeline. Args length only, never
+    // the args themselves — they can carry secrets (`composio_execute` action
+    // arguments, `self` request bodies).
+    const dispatchStart = Date.now();
     let result;
     if (name === "self") {
       result = await dispatchSelf(this.tenantCtx, args);
@@ -313,6 +336,19 @@ export class VoiceCall {
       result = await dispatchMcp(name, args);
     } else {
       result = { ok: false, error: `Unknown tool: ${name}` };
+    }
+    if (VOICE_DEBUG) {
+      const ms = Date.now() - dispatchStart;
+      const status =
+        typeof (result as any)?.status === "number"
+          ? (result as any).status
+          : (result as any)?.ok
+            ? "ok"
+            : "err";
+      const argsLen = argsRaw ? String(argsRaw).length : 0;
+      console.log(
+        `[call ${this.callId}] tool ${name} ok=${(result as any)?.ok} status=${status} ${ms}ms argsLen=${argsLen}`,
+      );
     }
     this.realtime.submitToolResult(callId, serializeToolResult(result));
   }

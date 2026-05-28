@@ -227,3 +227,81 @@ export function isMcpToolName(name: string): boolean {
   if (!name.includes(PREFIX_SEP)) return false;
   return toolCatalog.some((t) => t.prefixedName === name);
 }
+
+// ── Voice-essential allowlist ────────────────────────────────────────────────
+//
+// OpenAI Realtime (`gpt-realtime` / `gpt-realtime-2`) has a documented
+// `session.instructions + tools` ceiling of ~16,384 tokens — voice-specific,
+// does NOT scale with the 128K context window. The pre-curation catalog was
+// 157 MCP tools across 6 servers ≈ 35,990 tokens, plus a 17 KB persona =
+// ~40,585 tokens of session prefix — about 2.5× the ceiling, almost certainly
+// silently truncated by OpenAI. The model then "saw" a partial tool surface
+// at inference time and fell back to "service unavailable" deflection without
+// invoking the tool (postmortem of CA2795e1ddda6bd26fa2420bef84b6fa30 confirms:
+// of 44 dispatches, only ~10 distinct tools used; 4 of 6 servers — sure / plane
+// / vaultwarden / execute — never touched).
+//
+// This curated set targets ~5K tokens of tools so the whole session prefix
+// stays comfortably under 16,384. Keep it lean. Anything that has no plausible
+// reason to be invoked on a phone call belongs OUT of this list. The model
+// retains the `self` and `composio_execute` catch-alls (set in tools.ts) for
+// long-tail surfaces — and `self` can hit any ctrl-api endpoint, so dropping
+// e.g. `alfred__list_state_changes` from this list does NOT make that
+// functionality unreachable.
+//
+// Discovery memory: "voice-bridge h2+h4 compound fix" — see commit message.
+const VOICE_ALLOWED_MCP_TOOLS = new Set<string>([
+  // alfred — the principal's own surface; most voice use lives here
+  "alfred__list_vault_by_type",
+  "alfred__search_vault",
+  "alfred__get_vault_record",
+  "alfred__create_vault_record",
+  "alfred__update_vault_record",
+  "alfred__list_briefings",
+  "alfred__get_briefing",
+  "alfred__list_decisions",
+  "alfred__list_pending_decisions",
+  "alfred__notify_principal",
+  "alfred__spawn_alfred_task",
+  "alfred__list_in_flight_agents",
+  "alfred__list_workflows",
+  "alfred__start_workflow",
+  "alfred__signal_workflow",
+  // hermes — schedule + delegate from a call
+  "hermes__run",
+  "hermes__schedule_prompt",
+  "hermes__list_scheduled",
+  "hermes__cancel_scheduled",
+  // execute — list connections (read-only diagnostic); composio_execute
+  // itself is shipped as a static top-level tool (tools.ts COMPOSIO_EXECUTE_TOOL)
+  // so it's not duplicated here.
+  "execute__list_connections",
+]);
+
+/**
+ * Voice-essential MCP tool defs for the OpenAI Realtime `session.update`
+ * tools payload. Filters the live `toolCatalog` against the
+ * `VOICE_ALLOWED_MCP_TOOLS` allowlist. Returned in the same `function`-tool
+ * shape `getMcpToolDefs()` uses; same dispatch path (`dispatchMcp` via
+ * `isMcpToolName`).
+ *
+ * External servers wired via `MCP_EXTERNAL_SERVERS` (e.g. joe.alfred.black's
+ * `cdsk` Contractor's Desk) are passed through unfiltered — voice surfaces a
+ * tenant-specific external server in full, because the tenant chose to wire
+ * it specifically for voice use cases. Built-in servers (the 6 standard apps)
+ * are subject to the allowlist.
+ */
+export function getVoiceMcpToolDefs(): Array<Record<string, unknown>> {
+  const builtInApps = new Set<string>(APPS as readonly string[]);
+  return toolCatalog
+    .filter((t) => {
+      if (!builtInApps.has(t.serverName)) return true; // external — passthrough
+      return VOICE_ALLOWED_MCP_TOOLS.has(t.prefixedName);
+    })
+    .map((t) => ({
+      type: "function",
+      name: t.prefixedName,
+      description: t.description,
+      parameters: t.inputSchema,
+    }));
+}

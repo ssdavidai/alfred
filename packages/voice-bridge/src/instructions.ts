@@ -1,11 +1,25 @@
 // Build the OpenAI Realtime `session.update` instructions string.
 //
-// Layered:
-//   1. baseline persona (greetings, speech rules, latency masking, tool surface)
-//   2. alfred-voice SKILL.md body (replaces baseline if available — same content
-//      but the skill is the canonical source)
-//   3. cross-channel context primer (MEMORY.md + open matters + open tasks +
-//      recent sessions) — fetched per-call, falls back gracefully if missing
+// Ordering (the OpenAI cookbook ordering — Role → Personality → Context →
+// Tools → Instructions → Safety LAST so the last thing the model sees before
+// the conversation begins is the guardrail that prevents hallucinated tool
+// results / fabricated "unavailable" claims):
+//
+//   1. PERSONA — identity, accent, speech rules, greetings (the SKILL.md
+//      body, or BASELINE_PERSONA fallback). Includes everything except the
+//      guardrails block.
+//   2. CALLER LINE — Sir's E.164 number for SMS callbacks.
+//   3. CONTEXT PRIMER — MEMORY.md + open matters + open tasks + recent
+//      sessions + per-MCP-server skill cheatsheets.
+//   4. VOICE GUARDRAILS — the recency-weighted rule block. "Before claiming
+//      a tool/service is unavailable you MUST have invoked the tool" + the
+//      negative "never invent tool-result content." OpenAI's prompting guide
+//      explicitly recommends safety/escalation rules go LAST so they
+//      override what came before (recency-weighted attention). Pre-fix this
+//      block lived at position ~4 of 11 inside SKILL.md, BEFORE 7.7 KB of
+//      primer — the primer dominated and the model deflected with
+//      "unavailable" without first calling the tool. See H4 discovery
+//      memo for the full reasoning.
 
 import type { VoiceContextBundle } from "./tenant.js";
 
@@ -107,6 +121,36 @@ function formatContextPrimer(bundle: VoiceContextBundle): string {
   return `\n\n# Cross-channel context\n\n${sections.join("\n\n")}`;
 }
 
+/**
+ * Voice guardrails block — appended LAST so recency-weighted attention
+ * favours these rules over earlier persona/primer content. The negative
+ * "never invent" rule paired with the positive "tool-must-precede-claim"
+ * enforcement that converts a known-weak pattern (negation) into a
+ * known-stronger one (must-do).
+ *
+ * Keep this block tight (a few hundred tokens at most) — it is the last
+ * thing the model reads before the user's first turn lands. Every line
+ * here is one the model is expected to honour.
+ */
+const VOICE_GUARDRAILS = [
+  "",
+  "## Voice guardrails — read these last",
+  "",
+  "These rules override everything earlier in the prompt if they conflict.",
+  "",
+  "1. **Tool must precede claim.** If you say something is done — scheduled, sent, updated, found, looked up — you MUST have called the tool that does it and seen a successful return FIRST. Don't claim \"scheduled\" / \"sent\" / \"updated\" / \"on your calendar\" until the tool actually returned ok.",
+  "",
+  "2. **Never invent unavailability.** Before claiming a service / tool is unavailable, you MUST have called the tool and received an error (4xx, 5xx, network failure, or empty result with an error envelope). If you haven't invoked the tool, you don't know whether it's available. The default response when you're not sure is \"One moment, sir.\" followed by the tool call — NEVER \"the X service is unavailable\" without trying.",
+  "",
+  "3. **Speak only what the tool returned.** Names in the primer (MEMORY.md, open matters, recent sessions) are background context, NOT tool output. Don't weave them into a tool-grounded answer unless the tool result actually mentions them.",
+  "",
+  "4. **Tool-call failure narration.** If a tool call fails, tell Sir what failed in plain words — \"the schedule rejected the request because it needs a prompt field\" — not a vague \"the service is unavailable.\" Only say \"unavailable\" if the failure was a real connection / 5xx outage.",
+  "",
+  "5. **Empty result is not failure.** If the tool returns an empty array / no items, say so honestly: \"There's nothing on your calendar for that window, sir.\" Do NOT fabricate items to fill the silence.",
+  "",
+  "6. **Truncated result.** If you see `\"...[truncated NNNb]...\"` in a tool result, say \"I have the first few — shall I pull the rest, sir?\" — do NOT invent the missing items from primer context.",
+].join("\n");
+
 export function buildInstructions(ctx: InstructionContext): string {
   const persona =
     ctx.initiator === "alfred"
@@ -123,5 +167,7 @@ export function buildInstructions(ctx: InstructionContext): string {
     ? `\n\nCaller: ${ctx.callerNumber} (use this number for any SMS the caller asks you to send).`
     : "";
 
-  return `${persona}${callerLine}${primer}`;
+  // Order matters — guardrails LAST so recency-weighted attention favours
+  // them over the (also-load-bearing-but-not-as-load-bearing) primer.
+  return `${persona}${callerLine}${primer}\n${VOICE_GUARDRAILS}`;
 }
