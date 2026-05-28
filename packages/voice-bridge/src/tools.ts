@@ -10,7 +10,7 @@
 // (NOT over any agent-runtime WebSocket — see README.md, issue #30), using the
 // per-call AAS_API_KEY fetched at call setup.
 
-import type { TenantContext } from "./tenant.js";
+import { ctrlApiAuthToken, ctrlApiUrl, type TenantContext } from "./tenant.js";
 
 // ── Function-tool schemas (sent to OpenAI Realtime via session.update) ───────
 
@@ -92,13 +92,21 @@ export interface ToolResult {
   error?: string;
 }
 
+// URL + auth construction is delegated to tenant.ts so the dispatcher
+// here picks up single-VM mode the same way fetchVoiceContext /
+// postCallTranscript do. The hardcoded `https://${tailscaleHost}:3100`
+// shape this file used pre-2026-05-28 failed instantly on home.alfred.black
+// because single-VM TenantContext carries `tailscaleHost: "local"` and an
+// empty aasApiKey — so every composio_execute dispatched by the realtime
+// agent died at DNS resolution in ~6ms.
+
 function buildCtrlUrl(
   tenant: TenantContext,
   endpoint: string,
   method: string,
   query?: Record<string, string>,
 ): string {
-  let url = `https://${tenant.tailscaleHost}:3100${endpoint}`;
+  let url = ctrlApiUrl(tenant, endpoint);
   if (query && method === "GET") {
     const qs = new URLSearchParams(query).toString();
     if (qs) url += (url.includes("?") ? "&" : "?") + qs;
@@ -119,7 +127,7 @@ async function ctrlFetch(
   const fetchOpts: any = {
     method: opts.method,
     headers: {
-      Authorization: `Bearer ${tenant.aasApiKey}`,
+      Authorization: `Bearer ${ctrlApiAuthToken(tenant)}`,
       "Content-Type": "application/json",
     },
     signal: AbortSignal.timeout(TOOL_TIMEOUT_MS),

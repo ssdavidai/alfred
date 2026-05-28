@@ -7,17 +7,25 @@
 //
 //   2. Optional VOICE_BRIDGE_INTERNAL_TOKEN — a scoped, path-allowlisted
 //      Bearer for the voice-bridge sibling container. It is permitted
-//      ONLY on the two routes voice-bridge actually needs:
+//      ONLY on the routes voice-bridge actually needs:
 //
 //        GET  /api/v1/phone/voice-context   (read primer for the realtime agent)
 //        POST /api/v1/phone/transcript      (post call transcript at hangup)
+//        POST /api/v1/integrations/execute  (dispatch composio_execute tool
+//                                            calls during the realtime session
+//                                            — added 2026-05-28; without this
+//                                            the realtime agent could not call
+//                                            Composio actions on home.alfred.
+//                                            black, surfacing as a 6ms
+//                                            `composio_execute ok=false
+//                                            status=err` on every voice call.)
 //
 //      Any other route requested with this token rejects with 401, as if
 //      no token were presented. This is principle-of-least-privilege for an
 //      internal monorepo service that lives on the same docker network as
 //      ctrl-api but is large attack surface (Twilio mulaw, OpenAI Realtime
 //      WebSocket). If voice-bridge is ever compromised, the blast radius is
-//      bounded to the 2 routes — the master key never leaves ctrl-api.
+//      bounded to these routes — the master key never leaves ctrl-api.
 //
 // Both validations are constant-time (`crypto.timingSafeEqual`) so a
 // network attacker can't time the comparison to recover bytes.
@@ -38,6 +46,12 @@ let voiceBridgeKeyBuf: Buffer | null = null;
 const VOICE_BRIDGE_ALLOWLIST: ReadonlySet<string> = new Set([
   "GET:/api/v1/phone/voice-context",
   "POST:/api/v1/phone/transcript",
+  // composio_execute dispatch path — added 2026-05-28. The realtime agent's
+  // built-in `composio_execute` tool routes through here. Auth body is
+  // tenant-bound (one Composio user-id per ctrl-api), so this token cannot
+  // hop tenants. Action arguments are model-supplied — we accept the same
+  // surface Hermes uses through MCP, scoped to this single endpoint.
+  "POST:/api/v1/integrations/execute",
 ]);
 
 export function setApiKey(key: string): void {

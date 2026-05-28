@@ -24,8 +24,15 @@ function singleVmMode(): boolean {
   return config.singleVmMode;
 }
 
-/** Build the ctrl-api URL for the current deploy mode. */
-function ctrlApiUrl(tenant: TenantContext, path: string): string {
+/** Build the ctrl-api URL for the current deploy mode.
+ *
+ *  Exported so the tool dispatchers in tools.ts share the same single-VM /
+ *  legacy-SaaS routing. Prior to 2026-05-28 tools.ts hardcoded the legacy
+ *  `https://${tailscaleHost}:3100` shape, which on single-VM (tailscaleHost
+ *  is the sentinel string "local") triggered an instant DNS failure (~6ms),
+ *  surfacing as `composio_execute ok=false status=err 6ms` during voice
+ *  calls. The fetch never even left the container. */
+export function ctrlApiUrl(tenant: TenantContext, path: string): string {
   if (singleVmMode()) {
     return `${config.saasInternalUrl}${path}`;
   }
@@ -35,10 +42,13 @@ function ctrlApiUrl(tenant: TenantContext, path: string): string {
 /**
  * Bearer token for the ctrl-api call. Single-VM mode presents this bridge's
  * own internalToken — ctrl-api's auth.ts accepts it as a SCOPED bearer for
- * the two allowlisted voice-bridge routes (and only those). Legacy SaaS
+ * the voice-bridge allowlist (see VOICE_BRIDGE_ALLOWLIST). Legacy SaaS
  * mode forwards the per-tenant aasApiKey returned by the SaaS handshake.
+ *
+ * Exported for the same reason as ctrlApiUrl above — tools.ts needs the
+ * exact same single-VM routing.
  */
-function ctrlApiAuthToken(tenant: TenantContext): string {
+export function ctrlApiAuthToken(tenant: TenantContext): string {
   return singleVmMode() ? config.internalToken : tenant.aasApiKey;
 }
 
