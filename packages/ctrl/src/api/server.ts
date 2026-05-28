@@ -57,6 +57,7 @@ import { registerSmsRoutes } from "./routes/sms.js";
 import { registerVoiceRoutes } from "./routes/voice.js";
 import { registerOmiChannelRoutes } from "./routes/channels_omi.js";
 import { registerPaperclipChannelRoutes } from "./routes/channels_paperclip.js";
+import { registerPaperclipEvidenceRoutes } from "./routes/paperclipEvidence.js";
 import { registerComposioWebhookRoutes } from "./routes/composioWebhook.js";
 import { registerAlfredJournalRoutes } from "./routes/alfredJournal.js";
 import { registerAlfredDeliverRoutes } from "./routes/alfredDeliver.js";
@@ -174,6 +175,7 @@ export function createApiServer(): http.Server {
   registerVoiceRoutes();
   registerOmiChannelRoutes();
   registerPaperclipChannelRoutes();
+  registerPaperclipEvidenceRoutes();
   registerComposioWebhookRoutes();
   // The one-Alfred continuity layer — alfred_journal + principal mapping
   // (the persistence + lookup surface) plus alfred-deliver (the unified
