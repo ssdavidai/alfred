@@ -451,6 +451,7 @@ if (( ENABLE_CODEX_BUILDER == 1 )); then
     #      PATH=/usr/local/bin:/usr/bin:/bin
     #      HOME=$PROFILES_DIR/codex-builder
     #      TERM=$TERM (preserve if set; else dumb)
+    #      HERMES_HOME=$HERMES_HOME (Hermes' profile resolution root)
     #      cd $HOME
     #      source $HOME/.env  (positive-allowlist)
     #      exec hermes -p codex-builder gateway run --replace
@@ -459,6 +460,13 @@ if (( ENABLE_CODEX_BUILDER == 1 )); then
     # group set (default gid 10000 would be inherited from the container
     # default user); `--reset-env` wipes the inherited env, which is the
     # crucial bit for keeping OPENROUTER_API_KEY etc. out of the gateway.
+    #
+    # HERMES_HOME passthrough is REQUIRED — without it Hermes' CLI
+    # falls back to ~/.hermes which doesn't contain our profile dir,
+    # giving "Error: Profile 'codex-builder' does not exist". Live-
+    # observed 2026-05-28 right after the SETUID cap fix. We pass the
+    # current supervisor's HERMES_HOME through verbatim; it points at
+    # the hermes_data volume both views share.
     CODEX_HOME_DIR="${PROFILES_DIR}/codex-builder"
     start_proc "hermes-codex-builder" \
         "exec setpriv --reuid=10001 --regid=10001 --clear-groups --reset-env \
@@ -466,6 +474,7 @@ if (( ENABLE_CODEX_BUILDER == 1 )); then
               PATH=/usr/local/bin:/usr/bin:/bin \
               HOME=\"${CODEX_HOME_DIR}\" \
               TERM=\"\${TERM:-dumb}\" \
+              HERMES_HOME=\"${HERMES_HOME}\" \
               bash -c 'cd \"${CODEX_HOME_DIR}\" \
                        && set -a && . \"${CODEX_HOME_DIR}/.env\" && set +a \
                        && TERMINAL_CWD=\"${CODEX_HOME_DIR}/workspace\" \
