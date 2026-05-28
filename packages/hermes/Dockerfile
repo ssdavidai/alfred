@@ -75,6 +75,41 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && node --version && npm --version
 
 # =============================================================================
+# OpenAI Codex CLI — installed for use ONLY by the codex-builder profile.
+# =============================================================================
+# Available on PATH inside the container, but the codex-builder profile (PR 2)
+# is the only one with credentials (CODEX_HOME) and an isolated workspace to
+# act on. main/workers/heavy can `which codex` but a `codex exec` would 401
+# (no auth file in their CODEX_HOME) and would have no workspace to mutate
+# (their terminal.cwd is the profile dir, not /work).
+#
+# Source: npm @openai/codex. Pin a version arg so a future bump is explicit
+# and reviewable. See docs/codex-builder-runtime.md §3 for the install
+# rationale (image-size impact, separation of concerns, security model).
+#
+# PR 1 of 5 — Sir 2026-05-28. The CLI is INERT until PR 2 lands the profile
+# config + supervisor entry. No existing profile's behaviour changes here.
+ARG CODEX_CLI_REF=0.135.0
+RUN npm install -g --no-audit --no-fund "@openai/codex@${CODEX_CLI_REF}" \
+ && codex --version
+
+# --- /etc/passwd entry for the codex-builder uid (10001) ----------------------
+# Pre-create the uid that PR 2's supervisor.sh will drop the codex-builder
+# gateway process onto via `setpriv --reuid 10001`. Without an entry,
+# tools that stat the running uid's home dir (codex, ssh, git, npm) emit
+# noisy "No passwd entry for user 10001" warnings even though they otherwise
+# work — and a future Hermes hook that relies on `pwd.getpwuid(os.geteuid())`
+# would crash on KeyError. Doing it in PR 1 keeps PR 2 focused on the profile
+# rendering and supervisor wiring; the uid is unused until then.
+#
+# Home points at the profile state dir (laid down by PR 2's init container).
+# Shell is /usr/sbin/nologin — the operator-facing surface for this uid is
+# `docker exec -u 10001 ... bash`, NOT an interactive login.
+RUN echo 'codex-builder:x:10001:10001::/hermes-state/profiles/codex-builder:/usr/sbin/nologin' \
+    >> /etc/passwd \
+ && echo 'codex-builder:x:10001:' >> /etc/group
+
+# =============================================================================
 # Install Hermes Agent from a PINNED upstream ref.
 # =============================================================================
 # Pinned to the v0.14.0 release tag (v2026.5.16). Hermes exact-pins every
