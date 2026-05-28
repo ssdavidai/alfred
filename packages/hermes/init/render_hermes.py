@@ -24,7 +24,7 @@ Environment (read for template variables):
     HERMES_API_CORS_ORIGINS  (optional CORS allowlist)
 
 Positional:
-    <profile>       "main" | "workers" | "heavy"
+    <profile>       "main" | "workers" | "heavy" | "codex-builder"
     <profile_dir>   absolute path where this process WRITES config.yaml +
                     .env (the init container's view of the volume,
                     e.g. /hermes-data/profiles/main)
@@ -33,8 +33,8 @@ Positional:
                     API_SERVER_KEY in the profile .env
 
 The Hermes API server binds the canonical ports 18789 (main) / 18790
-(workers) / 18791 (heavy) directly — the hermes-shim that used to front it
-was retired in issue #40.
+(workers) / 18791 (heavy) / 18793 (codex-builder) directly — the
+hermes-shim that used to front it was retired in issue #40.
 
 Path-baking: the absolute paths baked INTO the rendered config.yaml
 (mcp-stdio dir, ctrl-server.mjs, NODE_PATH) must be valid in the HERMES
@@ -63,7 +63,23 @@ from jinja2 import Environment, FileSystemLoader, StrictUndefined
 # The hermes-shim was retired (issue #40); the Hermes API server now binds
 # these ports directly. Must match docker/supervisor.sh and the EXPOSE in
 # the Dockerfile.
-_API_SERVER_PORT = {"main": 18789, "workers": 18790, "heavy": 18791}
+#
+# codex-builder (:18793) is the sealed-runtime builder profile (PR 2 of the
+# codex-builder build, docs/codex-builder-runtime.md). It is rendered on
+# every tenant for fleet-uniform port layout, but the supervisor only
+# LAUNCHES it when ENABLE_CODEX_BUILDER=true in the per-tenant compose env.
+# So home gets the running gateway; rj/joe/zsolt/miguel get an idle profile
+# dir but no listening process on :18793.
+_API_SERVER_PORT = {
+    "main": 18789,
+    "workers": 18790,
+    "heavy": 18791,
+    "codex-builder": 18793,
+}
+
+# Profiles this script knows how to render. Adding a profile is two changes:
+# this set + a port mapping above. Everything else flows from the templates.
+_KNOWN_PROFILES = frozenset(_API_SERVER_PORT.keys())
 
 # The template renders the `model:` block with `provider: openrouter`. Hermes
 # owns provider/model selection natively (`hermes model`, with a live model
@@ -230,11 +246,23 @@ def _parse_env_keys(text: str) -> dict[str, str]:
     return out
 
 
-def _merge_preserve_runtime_keys(rendered: str, env_path: Path) -> str:
+def _merge_preserve_runtime_keys(
+    rendered: str, env_path: Path, profile: str
+) -> str:
     """Append runtime-managed keys (TELEGRAM_*, SLACK_*, …) from the
     existing .env to the freshly-rendered output, if they aren't already
     present in the render.
+
+    codex-builder is the explicit exception: its .env is a STRICT
+    positive allowlist (no provider keys, no MCP keys, no channel keys),
+    and any preservation step would be a leak vector — a stray
+    TELEGRAM_BOT_TOKEN written by ctrl-api into the wrong profile would
+    survive across re-renders here without preservation being skipped.
+    The sealed runtime exists exactly to keep secret surfaces small;
+    treat the per-profile .env as the surface authority.
     """
+    if profile == "codex-builder":
+        return rendered
     if not env_path.exists():
         return rendered
     try:
@@ -287,9 +315,10 @@ def main() -> int:
     template_dir = Path(sys.argv[3])
     gateway_token = sys.argv[4].strip()
 
-    if profile not in ("main", "workers", "heavy"):
+    if profile not in _KNOWN_PROFILES:
+        valid = "|".join(sorted(_KNOWN_PROFILES))
         print(
-            f"error: profile must be main|workers|heavy, got {profile!r}",
+            f"error: profile must be {valid}, got {profile!r}",
             file=sys.stderr,
         )
         return 2
@@ -353,6 +382,13 @@ def main() -> int:
         main_model=os.environ.get("HERMES_MAIN_MODEL", "x-ai/grok-4.3"),
         workers_model=os.environ.get("HERMES_WORKERS_MODEL", "openai/gpt-4.1-nano"),
         heavy_model=os.environ.get("HERMES_HEAVY_MODEL", "anthropic/claude-opus-4-6"),
+        # codex-builder runs Hermes' supervising agent on the same openai-
+        # codex model the CLI it shells out to uses. Overridable so a
+        # future Codex model bump is a one-line .env change, not a
+        # template+rebuild. See docs/codex-builder-runtime.md §2.
+        codex_builder_model=os.environ.get(
+            "HERMES_CODEX_BUILDER_MODEL", "gpt-5-codex"
+        ),
     )
     config_path = profile_dir / "config.yaml"
     # config.yaml is operator-owned: once it exists, `hermes config` / the
@@ -400,7 +436,7 @@ def main() -> int:
     # everything not in the template" rule) so an operator who hand-edits the
     # file with a stale provider key doesn't accidentally pin that stale
     # value across re-renders.
-    env_out = _merge_preserve_runtime_keys(env_out, env_path)
+    env_out = _merge_preserve_runtime_keys(env_out, env_path, profile)
     env_path.write_text(env_out, encoding="utf-8")
     # .env carries the API key + provider keys. We want it permissive
     # enough that sibling containers in the SAME compose stack — paperclip

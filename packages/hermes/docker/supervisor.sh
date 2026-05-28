@@ -7,10 +7,15 @@
 #   1. hermes -p main    gateway run   — user-facing chat (Hermes API :18789)
 #   2. hermes -p workers gateway run   — background agents (Hermes API :18790)
 #   3. hermes -p heavy   gateway run   — heavy reasoning (Hermes API :18791)
+#   4. hermes -p codex-builder gateway run — sealed builder (Hermes API
+#      :18793) — ONLY when ENABLE_CODEX_BUILDER=true. The profile dir
+#      is always rendered by the init container; this script just decides
+#      whether to launch a gateway against it. Drops to uid 10001 via
+#      `setpriv --reuid 10001`. See docs/codex-builder-runtime.md §2.
 #
 # The hermes-shim was retired in issue #40: the Hermes API server binds the
-# canonical ports (:18789 / :18790 / :18791) directly, so callers speak the
-# Hermes /v1 API natively — there is no compat layer to supervise.
+# canonical ports (:18789 / :18790 / :18791 / :18793) directly, so callers
+# speak the Hermes /v1 API natively — there is no compat layer to supervise.
 #
 # SessionStore housekeeping is no longer a supervised process: Hermes
 # v2026.5.16 natively prunes its SQLite session store and VACUUMs, driven
@@ -22,14 +27,26 @@
 #
 # Profile state (config.yaml, .env, SOUL.md, sessions, skills, the MCP
 # bundle) is rendered/deployed by the init container into
-# ${HERMES_HOME}/profiles/{main,workers,heavy}/ BEFORE this container starts —
-# `init` is a compose `service_completed_successfully` gate. This script
-# only waits for that state to appear, then launches.
+# ${HERMES_HOME}/profiles/{main,workers,heavy,codex-builder}/ BEFORE this
+# container starts — `init` is a compose `service_completed_successfully`
+# gate. This script only waits for that state to appear, then launches.
 # =============================================================================
 set -uo pipefail
 
 HERMES_HOME="${HERMES_HOME:-/opt/data}"
 PROFILES_DIR="${HERMES_HOME}/profiles"
+
+# Sir's decision #2: codex-builder is rendered on every tenant but ONLY
+# launched where the flag is true. Reads the runtime container env (set
+# from docker-compose's `environment:` block + the tenant /opt/alfred/.env).
+# Treat the empty string, "0", "false", "no", "off" as false; anything else
+# is true. Defaults to false — every tenant that doesn't explicitly opt in
+# gets the rendered profile dir + a silent no-launch.
+ENABLE_CODEX_BUILDER_RAW="${ENABLE_CODEX_BUILDER:-false}"
+case "${ENABLE_CODEX_BUILDER_RAW,,}" in
+    true|1|yes|on)  ENABLE_CODEX_BUILDER=1 ;;
+    *)              ENABLE_CODEX_BUILDER=0 ;;
+esac
 
 # Per-process restart backoff — a crash-looping process must not hammer the
 # provider or spin the CPU. Three rapid restarts then a longer cooldown.
@@ -92,7 +109,11 @@ trap shutdown TERM INT
 # launch before that exists, Hermes boots with no API key / no MCP config.
 wait_for_profiles() {
     local waited=0
-    for profile in main workers heavy; do
+    local profiles_to_wait=(main workers heavy)
+    if (( ENABLE_CODEX_BUILDER == 1 )); then
+        profiles_to_wait+=(codex-builder)
+    fi
+    for profile in "${profiles_to_wait[@]}"; do
         local cfg="${PROFILES_DIR}/${profile}/config.yaml"
         local env="${PROFILES_DIR}/${profile}/.env"
         while [[ ! -f "$cfg" || ! -f "$env" ]]; do
@@ -108,7 +129,7 @@ wait_for_profiles() {
             fi
         done
     done
-    log "all Hermes profiles provisioned under ${PROFILES_DIR}"
+    log "all Hermes profiles provisioned under ${PROFILES_DIR} (codex-builder enabled=${ENABLE_CODEX_BUILDER})"
 }
 
 # =============================================================================
@@ -137,6 +158,19 @@ hermes profile use main 2>/dev/null || true
 # either is missing OR is smaller (heuristic: empty or env-pointer-only).
 # Idempotent — re-running this on every boot is a no-op once the per-profile
 # files are sized at-least the main one.
+#
+# Sir's decision #1 (docs/codex-builder-runtime.md §11.1, overruling the
+# design-doc recommendation): codex-builder uses the SHARED openai-codex
+# auth, NOT a separate `codex login --device-auth` ritual per tenant. So
+# when ENABLE_CODEX_BUILDER=1 AND the profile dir exists, we mirror the
+# same main/auth.json into:
+#   - profiles/codex-builder/auth.json (Hermes' LLM provider auth — what
+#     the supervising agent uses for its own /v1/responses calls)
+#   - profiles/codex-builder/.codex/auth.json (the codex CLI's auth file —
+#     the CLI reads $CODEX_HOME/auth.json, which the .env points at
+#     /hermes-state/profiles/codex-builder/.codex).
+# Same OAuth token, two file locations, one shared ChatGPT identity.
+# Survives `docker compose pull` because hermes_data is a named volume.
 HERMES_ROOT="${HERMES_HOME:-/hermes-state}"
 MAIN_AUTH="$HERMES_ROOT/profiles/main/auth.json"
 if [[ -f "$MAIN_AUTH" && -s "$MAIN_AUTH" ]]; then
@@ -150,6 +184,28 @@ if [[ -f "$MAIN_AUTH" && -s "$MAIN_AUTH" ]]; then
             log "propagated main/auth.json -> $p/auth.json (${MAIN_SIZE} bytes)"
         fi
     done
+
+    # codex-builder mirror — gated on the flag + the rendered profile.
+    if (( ENABLE_CODEX_BUILDER == 1 )) \
+       && [[ -d "$HERMES_ROOT/profiles/codex-builder" ]]; then
+        CB_AUTH="$HERMES_ROOT/profiles/codex-builder/auth.json"
+        CB_SIZE=0
+        [[ -f "$CB_AUTH" ]] && CB_SIZE=$(stat -c%s "$CB_AUTH" 2>/dev/null || echo 0)
+        if [[ "$CB_SIZE" -lt "$MAIN_SIZE" ]]; then
+            cp "$MAIN_AUTH" "$CB_AUTH"
+            log "propagated main/auth.json -> codex-builder/auth.json (${MAIN_SIZE} bytes, Hermes-LLM auth)"
+        fi
+        # Codex CLI's own auth — reads $CODEX_HOME/auth.json. .env sets
+        # CODEX_HOME=/hermes-state/profiles/codex-builder/.codex.
+        mkdir -p "$HERMES_ROOT/profiles/codex-builder/.codex"
+        CLI_AUTH="$HERMES_ROOT/profiles/codex-builder/.codex/auth.json"
+        CLI_SIZE=0
+        [[ -f "$CLI_AUTH" ]] && CLI_SIZE=$(stat -c%s "$CLI_AUTH" 2>/dev/null || echo 0)
+        if [[ "$CLI_SIZE" -lt "$MAIN_SIZE" ]]; then
+            cp "$MAIN_AUTH" "$CLI_AUTH"
+            log "propagated main/auth.json -> codex-builder/.codex/auth.json (${MAIN_SIZE} bytes, codex-CLI auth)"
+        fi
+    fi
 fi
 
 # Consolidate the Alfred-personalised SOUL.md to the file Hermes actually
@@ -328,6 +384,33 @@ fi
 start_proc "hermes-main"     "cd \"${PROFILES_DIR}/main\"    && set -a && . \"${PROFILES_DIR}/main/.env\"    && set +a && TERMINAL_CWD=${PROFILES_DIR}/main    exec hermes -p main gateway run --replace"
 start_proc "hermes-workers"  "cd \"${PROFILES_DIR}/workers\" && set -a && . \"${PROFILES_DIR}/workers/.env\" && set +a && TERMINAL_CWD=${PROFILES_DIR}/workers exec hermes -p workers gateway run --replace"
 start_proc "hermes-heavy"    "cd \"${PROFILES_DIR}/heavy\"   && set -a && . \"${PROFILES_DIR}/heavy/.env\"   && set +a && TERMINAL_CWD=${PROFILES_DIR}/heavy   exec hermes -p heavy gateway run --replace"
+
+# --- codex-builder gateway (Sir's decision #2 — flag-gated, home only) -------
+# The 4th profile, only launched when ENABLE_CODEX_BUILDER=1. Renders fleet-
+# wide via the init container, but a non-home tenant never starts the process.
+#
+# PR 2 of 5: this launches under the container's default uid (10000, same as
+# the other 3 gateways). PR 4 will swap the body for `setpriv --reuid 10001
+# --regid 10001 --clear-groups --reset-env hermes -p codex-builder gateway
+# run --replace` once the FS-isolation init step has chowned the profile dir
+# + /work to uid 10001. Verifying PR 2 means: the gateway boots on :18793
+# and answers /health. PR 4 verifies: uid-10001 cannot read /vault.
+#
+# `cd ${PROFILES_DIR}/codex-builder` lines up AGENTS.md auto-discovery and
+# matches the established pattern. `set -a; . .env; set +a` source-and-
+# exports the codex-builder positive-allowlist (the 2026-05-28 hardening
+# from PR #92) — the .env's CODEX_HOME / CODEX_WORKSPACE_ROOT / GIT_SSH_
+# COMMAND flow through to the gateway process here.
+if (( ENABLE_CODEX_BUILDER == 1 )); then
+    start_proc "hermes-codex-builder" \
+        "cd \"${PROFILES_DIR}/codex-builder\" \
+         && set -a && . \"${PROFILES_DIR}/codex-builder/.env\" && set +a \
+         && TERMINAL_CWD=${PROFILES_DIR}/codex-builder/workspace \
+         exec hermes -p codex-builder gateway run --replace"
+    log "codex-builder gateway enabled (ENABLE_CODEX_BUILDER=1) — launching on :18793"
+else
+    log "codex-builder gateway disabled (ENABLE_CODEX_BUILDER!=1) — profile dir is rendered but no process launched"
+fi
 
 # =============================================================================
 # Supervise — restart any worker that exits while we are not shutting down.

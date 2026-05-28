@@ -35,7 +35,25 @@ echo "=== alfred-black init container ==="
 HERMES_DATA_DIR="${HERMES_DATA_DIR:-/hermes-data}"
 # Where the HERMES RUNTIME container sees the same volume (its HERMES_HOME).
 HERMES_RUNTIME_HOME="${HERMES_RUNTIME_HOME:-/opt/data}"
+
+# Profiles whose state we render on every tenant. The codex-builder profile
+# (PR 2 of docs/codex-builder-runtime.md) is rendered fleet-wide so the port
+# layout stays uniform, but the SUPERVISOR only LAUNCHES its gateway when
+# ENABLE_CODEX_BUILDER=true in the runtime container env. Home flips that
+# flag true; rj/joe/zsolt/miguel leave it unset.
+#
+# PROFILES holds the "regular" profiles that get the full deploy treatment:
+# skills/, MCP bundle, AGENTS.md, SOUL.md. codex-builder is rendered (config
+# + .env + dir scaffold) but does NOT receive any of those — it is a sealed
+# runtime with no MCP catalogue and no skill library. See PROFILES_RENDERED
+# below for the broader set the renderer iterates over.
 PROFILES=(main workers heavy)
+# Every profile we render config + .env for. Each one gets profile_dir +
+# workspace/ + mcp/ created; codex-builder additionally gets its own
+# .codex/ + .ssh/ + workspace/runs/ tree but skips the skills + MCP-bundle
+# deploys further down. The supervisor reads ENABLE_CODEX_BUILDER to decide
+# whether to launch a gateway against the codex-builder dir.
+PROFILES_RENDERED=(main workers heavy codex-builder)
 
 # Resolve bundled paths via the installed alfred Python package.
 SCAFFOLD_DIR=$(python3 -c "from alfred._data import get_scaffold_dir; print(get_scaffold_dir())")
@@ -93,10 +111,20 @@ echo "[init] memories dir ready at $MEMORIES_DIR (chmod 0777 for cross-container
 # gets its own copy of: skills/, mcp-stdio/ (the 5-app bundle), mcp/
 # (ctrl-server.mjs), AGENTS.md, and a workspace/ scratch dir.
 # =============================================================================
-for profile in "${PROFILES[@]}"; do
+for profile in "${PROFILES_RENDERED[@]}"; do
     PROFILE_DIR="$HERMES_DATA_DIR/profiles/$profile"
-    mkdir -p "$PROFILE_DIR/skills" "$PROFILE_DIR/workspace" "$PROFILE_DIR/mcp"
-    echo "[init] Profile dir ready: $PROFILE_DIR"
+    if [[ "$profile" == "codex-builder" ]]; then
+        # Sealed runtime — no skills/, no mcp/ (mcp_servers: {} in
+        # config.yaml means the gateway never spawns an MCP child). Lay
+        # down workspace/ (terminal cwd) + .codex/ (CODEX_HOME) + .ssh/
+        # (PR 4 deploy key dst); the chown/chmod hardening to uid 10001
+        # happens in PR 4.
+        mkdir -p "$PROFILE_DIR/workspace" "$PROFILE_DIR/.codex" "$PROFILE_DIR/.ssh"
+        echo "[init] Profile dir ready (sealed): $PROFILE_DIR"
+    else
+        mkdir -p "$PROFILE_DIR/skills" "$PROFILE_DIR/workspace" "$PROFILE_DIR/mcp"
+        echo "[init] Profile dir ready: $PROFILE_DIR"
+    fi
 done
 
 # --- 2.0. One-time skill consolidation ---------------------------------------
@@ -449,7 +477,7 @@ fi
 # API_SERVER_KEY in each .env.
 # =============================================================================
 echo "[init] Rendering Hermes profile configs..."
-for profile in "${PROFILES[@]}"; do
+for profile in "${PROFILES_RENDERED[@]}"; do
     INIT_PROFILE_DIR="$HERMES_DATA_DIR/profiles/$profile"
     RUNTIME_PROFILE_DIR="$HERMES_RUNTIME_HOME/profiles/$profile"
     mkdir -p "$INIT_PROFILE_DIR"

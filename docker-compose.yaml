@@ -260,6 +260,13 @@ services:
       - hermes_data:/hermes-state
       - vault_data:/vault
       - alfred_data:/alfred-data
+      # Sealed builder runtime workspace — mounted in the hermes container
+      # only. Owned uid 10001 mode 0700 by the init container (PR 4); the
+      # codex-builder gateway process drops to uid 10001 (PR 4) and is the
+      # only consumer. Not mounted in paperclip / ctrl-api / web / any other
+      # service: the run data is not even visible to the rest of the stack.
+      # See docs/codex-builder-runtime.md §5.
+      - hermes_codex_work:/work
     tmpfs:
       - /tmp:size=256m
     environment:
@@ -272,6 +279,17 @@ services:
       # container renders profile config from this (via its env_file: .env);
       # pinned here too so the value is unambiguous at the hermes boundary.
       - HERMES_HEAVY_MODEL=${HERMES_HEAVY_MODEL:-anthropic/claude-opus-4-6}
+      # codex-builder profile (:18793) — Sir's decision #2 in
+      # docs/codex-builder-runtime.md §11.2. Default false: the profile is
+      # rendered everywhere by the init container, but the supervisor's
+      # 4th `start_proc` only fires when this is true. Home flips this to
+      # true in /opt/alfred/.env; rj/joe/zsolt/miguel leave it unset and
+      # get an idle profile dir with no listening process on :18793.
+      - ENABLE_CODEX_BUILDER=${ENABLE_CODEX_BUILDER:-false}
+      # Model used by the codex-builder profile's supervising Hermes agent
+      # (the codex CLI invocation it shells out to uses the same model).
+      # Default tracks the latest OpenAI Codex model; overridable.
+      - HERMES_CODEX_BUILDER_MODEL=${HERMES_CODEX_BUILDER_MODEL:-gpt-5-codex}
       - NODE_OPTIONS=--max-old-space-size=3072
       - CTRL_API_URL=http://ctrl-api:3100
       # Per-job timeout (seconds) Hermes applies to every `cron` job. This is
@@ -312,6 +330,14 @@ services:
       - ALL
     cap_add:
       - DAC_OVERRIDE
+      # NET_ADMIN — needed by PR 4's iptables egress allowlist scoped to
+      # uid 10001 (codex-builder), which installs OUTPUT rules at supervisor
+      # boot to allow OpenAI / GitHub / npm / PyPI / crates.io egress and
+      # REJECT everything else for uid 10001. The cap is dormant until PR 4
+      # adds the iptables setup script; it does NOT grant any of the other
+      # 3 profiles new privileges (they run as uid 10000 and their egress
+      # paths are unrestricted today). See docs/codex-builder-runtime.md §6.
+      - NET_ADMIN
     # Sized for two Python gateway processes + MCP stdio children. The
     # workers side carries the heavier task-registry boot path.
     mem_limit: 6g
@@ -1639,6 +1665,10 @@ services:
 volumes:
   vault_data:
   hermes_data:
+  # Sealed builder runtime workspace — used by the codex-builder Hermes
+  # profile only. Owned uid 10001 mode 0700 by the init container (PR 4).
+  # See docs/codex-builder-runtime.md §5.
+  hermes_codex_work:
   alfred_data:
   temporal_data:
   ollama_data:
