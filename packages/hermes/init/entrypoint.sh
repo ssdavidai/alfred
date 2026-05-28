@@ -656,6 +656,65 @@ EOF
         echo "[init] [codex-builder] CODEX_BUILDER_DEPLOY_KEY_B64 unset — git push will fail clean (no key)"
     fi
 
+    # --- Apply ACL deny for uid 10001 across the surrounding FS ----------
+    # The Posix-perm story alone doesn't tighten enough: /vault, /alfred-
+    # data, and the other profile .env files end up 0644 world-readable
+    # because every other consumer (ctrl-api, alfred-learn, vault-cli) is
+    # either root (DAC_OVERRIDE) or uid 1000 (must keep reading /vault).
+    # We cannot safely chmod those to 0640 without breaking those siblings.
+    #
+    # `setfacl -m u:10001:---` adds a per-uid deny ACL that is independent
+    # of owner/group/world bits — uid 10001 is denied read regardless of
+    # the underlying mode. Other uids keep their existing access verbatim.
+    #
+    # Idempotent: re-running adds the same ACL entries, which setfacl
+    # treats as a no-op.
+    #
+    # Coverage:
+    #   * /vault  — the principal's surface
+    #   * /alfred-data/.gateway-token (file, not the whole dir — alfred-
+    #     learn still needs to read other files there)
+    #   * other-profile dirs (main / workers / heavy)
+    #
+    # The codex-builder's OWN profile dir is OWNED by uid 10001 (the
+    # chowns above), so an ACL deny would lock the gateway out of its
+    # own state. We explicitly do NOT setfacl that dir.
+    if command -v setfacl >/dev/null 2>&1; then
+        setfacl -R -m u:10001:--- /vault 2>/dev/null \
+            && echo "[init] [codex-builder] denied uid 10001 read on /vault (ACL)" \
+            || echo "[init] [codex-builder] WARNING: setfacl /vault failed (filesystem may not support ACLs?)"
+        if [[ -f /alfred-data/.gateway-token ]]; then
+            setfacl -m u:10001:--- /alfred-data/.gateway-token 2>/dev/null \
+                && echo "[init] [codex-builder] denied uid 10001 read on /alfred-data/.gateway-token (ACL)"
+        fi
+        for p in main workers heavy; do
+            P_ENV="$HERMES_DATA_DIR/profiles/$p/.env"
+            if [[ -f "$P_ENV" ]]; then
+                setfacl -m u:10001:--- "$P_ENV" 2>/dev/null \
+                    && echo "[init] [codex-builder] denied uid 10001 read on profiles/$p/.env (ACL)"
+            fi
+            # auth.json + config.yaml are also sensitive — main/auth.json
+            # is the OAuth credential we mirror, but the codex-builder
+            # ALREADY HAS its own copy (PR 2 mirror). Deny uid 10001 from
+            # reading the SOURCE so a compromised codex-builder cannot
+            # walk back to main and read its sibling's auth.
+            for sensitive in auth.json config.yaml; do
+                P_FILE="$HERMES_DATA_DIR/profiles/$p/$sensitive"
+                if [[ -f "$P_FILE" ]]; then
+                    setfacl -m u:10001:--- "$P_FILE" 2>/dev/null || true
+                fi
+            done
+        done
+        # The codex-builder's parent dir (profiles/) needs uid 10001 to
+        # be able to CHDIR through it to reach codex-builder/. Posix
+        # behaviour: cd through a dir needs x (execute) only, not r.
+        # Mode 0755 on profiles/ is fine; our ACL denies on individual
+        # files don't change directory traversal.
+    else
+        echo "[init] [codex-builder] WARNING: setfacl missing — falling back to perm-only isolation"
+        echo "[init] [codex-builder]   Install acl package in the init image (apt-get install acl)."
+    fi
+
     # --- Negative-asserts: the codex-builder uid 10001 must NOT be able to
     #     read these paths. We test by `setpriv --reuid 10001 cat <file>`
     #     and fail the init if any of them succeed. Defense-in-depth — the

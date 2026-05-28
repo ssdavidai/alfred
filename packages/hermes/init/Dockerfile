@@ -29,7 +29,17 @@ FROM python:3.12-slim-bookworm
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     rsync gettext-base git ca-certificates curl gnupg \
+    acl \
+    util-linux \
     && rm -rf /var/lib/apt/lists/*
+# acl + util-linux: setfacl (codex-builder uid-10001 negative ACL on
+# /vault, /alfred-data, other-profile dirs) + setpriv (the negative-
+# assert spot-checks in step 7b). PR 4b — without these the existing
+# "world readable" perms on /vault (0644) etc. defeat the uid-only
+# negative-asserts because uid 10001 reads as "other". ACL deny rules
+# preserve every other consumer's read access (alfred-learn uid 1000,
+# vault-cli root, hermes main uid 10000) while specifically blocking
+# uid 10001. ~2 MB added.
 
 # docker-ce-cli only — bootstrap-paperclip.sh shells out to `docker exec`
 # / `docker inspect` against the paperclip sidecar (via the docker socket
