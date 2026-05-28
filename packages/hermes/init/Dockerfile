@@ -128,6 +128,11 @@ COPY packages/mcp-server/instructions/alfred-custom-instructions.md ./AGENTS.md
 # persona at /vault/SOUL.md takes precedence when present (see entrypoint).
 COPY packages/hermes/init/SOUL.md ./SOUL.md
 
+# SOUL.codex-builder.md — the codex-builder profile's distinct persona (a
+# sealed engineering executor, NOT Alfred). Deployed into the codex-builder
+# profile dir by entrypoint.sh step 7b. Not used by main/workers/heavy.
+COPY packages/hermes/SOUL.codex-builder.md ./SOUL.codex-builder.md
+
 RUN chmod +x entrypoint.sh bootstrap-paperclip.sh
 
 ENTRYPOINT ["./entrypoint.sh"]

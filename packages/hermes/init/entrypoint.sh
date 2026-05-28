@@ -560,6 +560,27 @@ chown -R 10000:10000 /vault 2>/dev/null || true
 CODEX_PROFILE_DIR="$HERMES_DATA_DIR/profiles/codex-builder"
 if [[ -d "$CODEX_PROFILE_DIR" ]]; then
     echo "[init] [codex-builder] hardening profile dir + /work for uid 10001"
+
+    # --- Deploy codex-builder SOUL.md (the agent persona) -------------------
+    # The other 3 profiles read /opt/data/SOUL.md (the global persona Hermes
+    # serves at gateway boot — `consolidate SOUL.md` step in supervisor.sh).
+    # codex-builder is per-profile-distinct; its identity is the sealed
+    # engineering executor, NOT Alfred. We render it to the profile dir.
+    # Idempotent — only writes if absent or different.
+    CB_SOUL_SRC="/setup/SOUL.codex-builder.md"
+    if [[ -f "$CB_SOUL_SRC" ]]; then
+        CB_SOUL_DST="$CODEX_PROFILE_DIR/SOUL.md"
+        CB_SOUL_HASH_FILE="$CODEX_PROFILE_DIR/.soul-md.content-hash"
+        CB_SOUL_HASH=$(md5sum "$CB_SOUL_SRC" | cut -d' ' -f1)
+        if [[ -f "$CB_SOUL_HASH_FILE" ]] && [[ "$(cat "$CB_SOUL_HASH_FILE")" == "$CB_SOUL_HASH" ]]; then
+            echo "[init] [codex-builder] SOUL.md unchanged, skipping"
+        else
+            cp "$CB_SOUL_SRC" "$CB_SOUL_DST"
+            echo "$CB_SOUL_HASH" > "$CB_SOUL_HASH_FILE"
+            echo "[init] [codex-builder] deployed SOUL.md"
+        fi
+    fi
+
     # The whole profile dir is owned by 10001 mode 0700 — uid 10000 (other
     # gateways) and root will use DAC_OVERRIDE if they need to write, but
     # the codex-builder gateway can never escape its own home.

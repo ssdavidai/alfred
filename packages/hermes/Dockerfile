@@ -295,10 +295,22 @@ RUN printf '#!/bin/sh\nexec hermes -p main "$@"\n' > /usr/local/bin/alfred && \
 #
 # Both are baked into /usr/local/bin so they're on the codex-builder
 # gateway's PATH and the existing 3 profiles can ignore them.
+#
+# PR 5 adds codex-builder-run.sh — the wrapper the codex-builder agent
+# invokes per-run. Takes (runId, issueId, promptFile), shells out to
+# `codex exec`, commits + pushes, writes /work/runs/<runId>/audit.json,
+# emits a JSON envelope on stdout.
 COPY packages/hermes/docker/setup-egress-jail.sh /usr/local/bin/codex-builder-setup-egress.sh
 COPY packages/hermes/docker/codex-builder-prep-run.sh /usr/local/bin/codex-builder-prep-run.sh
+COPY packages/hermes/docker/codex-builder-run.sh /usr/local/bin/codex-builder-run.sh
 RUN chmod +x /usr/local/bin/codex-builder-setup-egress.sh \
-             /usr/local/bin/codex-builder-prep-run.sh
+             /usr/local/bin/codex-builder-prep-run.sh \
+             /usr/local/bin/codex-builder-run.sh
+
+# codex-builder profile persona — `SOUL.md` Hermes loads per-profile.
+# This is the agent identity Sir's Paperclip persona references. The
+# init container copies it into the profile dir (PR 5).
+COPY packages/hermes/SOUL.codex-builder.md /opt/hermes-assets/SOUL.codex-builder.md
 
 # =============================================================================
 # Supervisor entrypoint.
