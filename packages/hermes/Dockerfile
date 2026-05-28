@@ -55,6 +55,12 @@ ENV PYTHONUNBUFFERED=1 \
 # - curl, ca-certificates : NodeSource setup + healthcheck.
 # - procps         : the supervisor uses `pgrep`/process checks.
 # - openssh-client : agents may `git`/`ssh` from the terminal tool.
+# - iptables       : PR 4 of docs/codex-builder-runtime.md — the codex-builder
+#                    profile's egress allowlist (scoped --uid-owner 10001) is
+#                    installed at supervisor boot when ENABLE_CODEX_BUILDER=1.
+#                    Dormant on every other tenant. Adds ~10 MB to the image.
+# - dnsutils       : `dig` resolves OpenAI/GitHub/npm CIDR sets at boot for
+#                    the iptables setup. Tiny (~5 MB).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         tini \
         git \
@@ -64,6 +70,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl ca-certificates \
         procps \
         openssh-client \
+        iptables \
+        dnsutils \
     && rm -rf /var/lib/apt/lists/*
 
 # --- Node.js 22 (NodeSource) --------------------------------------------------
@@ -269,6 +277,28 @@ RUN printf '#!/bin/sh\nexec hermes -p main "$@"\n' > /usr/local/bin/alfred && \
     printf '#!/bin/sh\nexec hermes -p workers "$@"\n' > /usr/local/bin/workers-cli && \
     printf '#!/bin/sh\nexec hermes -p heavy "$@"\n' > /usr/local/bin/heavy-cli && \
     chmod +x /usr/local/bin/alfred /usr/local/bin/workers-cli /usr/local/bin/heavy-cli
+
+# =============================================================================
+# codex-builder profile helpers (PR 4 of docs/codex-builder-runtime.md).
+# =============================================================================
+# Two scripts the codex-builder profile needs at runtime:
+#
+#   setup-egress-jail.sh — iptables OUTPUT chain scoped --uid-owner 10001,
+#     allowlists OpenAI/GitHub/npm/PyPI/crates.io, REJECTs everything else.
+#     Called by the supervisor at boot when ENABLE_CODEX_BUILDER=1.
+#
+#   codex-builder-prep-run.sh — invoked by the codex-builder agent at run
+#     start. Creates /work/runs/<runId>/repo as a fresh `git clone` and
+#     checks out a feature branch. Returns the workspace path on stdout.
+#     Defensive on runId/issueId — refuses path traversal, refuses to
+#     overwrite an existing run dir (collisions = bug).
+#
+# Both are baked into /usr/local/bin so they're on the codex-builder
+# gateway's PATH and the existing 3 profiles can ignore them.
+COPY packages/hermes/docker/setup-egress-jail.sh /usr/local/bin/codex-builder-setup-egress.sh
+COPY packages/hermes/docker/codex-builder-prep-run.sh /usr/local/bin/codex-builder-prep-run.sh
+RUN chmod +x /usr/local/bin/codex-builder-setup-egress.sh \
+             /usr/local/bin/codex-builder-prep-run.sh
 
 # =============================================================================
 # Supervisor entrypoint.

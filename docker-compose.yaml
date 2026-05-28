@@ -147,6 +147,13 @@ services:
       - vault_data:/vault
       - hermes_data:/hermes-state
       - alfred_data:/alfred-data
+      # codex-builder workspace mount — init chowns it to 10001:10001 mode
+      # 0700 (PR 4 of docs/codex-builder-runtime.md §6) so the codex-builder
+      # gateway can mkdir /work/runs/<runId>/. NOT mounted in any other
+      # compose service (paperclip / ctrl-api / web / alfred) — the run
+      # data is invisible to the rest of the stack. See the hermes service
+      # volumes for the matching mount on the consumer side.
+      - hermes_codex_work:/work
     env_file:
       - .env
     environment:
@@ -159,6 +166,21 @@ services:
       # files from OWNER_EMAIL. env_file already injects it, but pin it
       # explicitly so the canonical name is unambiguous at this boundary (C9).
       - OWNER_EMAIL=${OWNER_EMAIL:-}
+      # codex-builder hardening (PR 4 of docs/codex-builder-runtime.md §6).
+      # When the flag is on, init step 7b chowns the codex-builder profile
+      # dir + /work to 10001:10001 mode 0700, writes the deploy key, and
+      # runs the negative-assert spot-checks (uid 10001 cannot read /vault,
+      # /alfred-data, other-profile .env files). When off, the chowns
+      # still happen but the asserts are skipped — flipping the flag on
+      # later does not require a chown sweep.
+      - ENABLE_CODEX_BUILDER=${ENABLE_CODEX_BUILDER:-false}
+      # Base64-encoded private SSH key for the GitHub deploy key on
+      # ssdavidai/alfred (repo-scoped, write-enabled). When set, init
+      # writes it to /hermes-state/profiles/codex-builder/.ssh/codex_id_ed25519
+      # owned 10001:10001 mode 0600. When empty (default everywhere except
+      # home), no key is written and PR 5's wrapper emits a clean
+      # "deploy key missing" run audit if git push is attempted.
+      - CODEX_BUILDER_DEPLOY_KEY_B64=${CODEX_BUILDER_DEPLOY_KEY_B64:-}
 
   # ── temporal — workflow engine for alfred-learn ─────────────────────
   temporal:

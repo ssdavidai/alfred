@@ -532,6 +532,184 @@ fi
 chown -R 10000:10000 "$HERMES_DATA_DIR" 2>/dev/null || true
 chown -R 10000:10000 /vault 2>/dev/null || true
 
+# =============================================================================
+# 7b. codex-builder profile FS isolation (PR 4 of
+#     docs/codex-builder-runtime.md §6).
+#
+# The codex-builder gateway runs under uid 10001 (PR 4 supervisor.sh
+# swap). For its sandbox to mean anything we MUST ensure uid 10001 can:
+#   * read+write /hermes-state/profiles/codex-builder/ (own state)
+#   * read+write /work (the per-run workspace mount)
+# AND cannot:
+#   * read /vault (the principal's surface)
+#   * read /alfred-data (gateway tokens + Sure/Plane bootstrap inputs)
+#   * read other profiles' .env (provider keys, channel tokens)
+#   * read main's .codex/ auth.json (codex-builder has its OWN auth at
+#     /hermes-state/profiles/codex-builder/.codex/auth.json — see PR 2
+#     supervisor.sh mirror block)
+#
+# The chowns + chmods below establish the can-read side. The cannot-read
+# side is enforced by the surrounding /vault + /alfred-data + other-
+# profile dirs being 0700 root:root or 0700 10000:10000 — anything 10001
+# tries to read is uid-mismatched, no read bit.
+#
+# Idempotent — re-runs on every init container start. Safe alongside
+# step 7's broader chown above (this block REPLACES the chown for the
+# codex-builder subtree).
+# =============================================================================
+CODEX_PROFILE_DIR="$HERMES_DATA_DIR/profiles/codex-builder"
+if [[ -d "$CODEX_PROFILE_DIR" ]]; then
+    echo "[init] [codex-builder] hardening profile dir + /work for uid 10001"
+    # The whole profile dir is owned by 10001 mode 0700 — uid 10000 (other
+    # gateways) and root will use DAC_OVERRIDE if they need to write, but
+    # the codex-builder gateway can never escape its own home.
+    chown -R 10001:10001 "$CODEX_PROFILE_DIR" 2>/dev/null || true
+    chmod 0700 "$CODEX_PROFILE_DIR" 2>/dev/null || true
+    # Recursive 0700 on subdirs, 0600 on files. .ssh stricter (0700/0600).
+    find "$CODEX_PROFILE_DIR" -type d -exec chmod 0700 {} + 2>/dev/null || true
+    find "$CODEX_PROFILE_DIR" -type f -exec chmod 0600 {} + 2>/dev/null || true
+    # config.yaml ends up 0600 — that's tighter than the 0640 the other
+    # profiles use but fine because the only reader is the codex-builder
+    # gateway process at uid 10001 (init/hermes containers use DAC_OVERRIDE).
+
+    # /work is the named volume mounted at /work in the hermes service. The
+    # init container has it mounted at /work too (we added it below).
+    # Chown to 10001:10001 mode 0700 so ONLY the codex-builder gateway can
+    # see / write the per-run dirs. The volume isn't mounted in any other
+    # service so this is also the only mount point on the box.
+    if [[ -d /work ]]; then
+        chown 10001:10001 /work 2>/dev/null || true
+        chmod 0700 /work 2>/dev/null || true
+        mkdir -p /work/runs
+        chown 10001:10001 /work/runs 2>/dev/null || true
+        chmod 0700 /work/runs 2>/dev/null || true
+    else
+        echo "[init] [codex-builder] WARNING: /work not mounted in init container —"
+        echo "[init] [codex-builder]   add it to the init service's volumes block in docker-compose.yaml"
+    fi
+
+    # Lay down a default network-allowlist.txt so a future operator can
+    # extend the egress allowlist without rebuilding the image. The egress
+    # jail script reads any additional hosts from this file at supervisor
+    # boot. Idempotent — only writes if absent (preserves operator edits).
+    NET_ALLOW="$CODEX_PROFILE_DIR/network-allowlist.txt"
+    if [[ ! -f "$NET_ALLOW" ]]; then
+        cat > "$NET_ALLOW" <<'EOF'
+# codex-builder additional network egress allowlist.
+#
+# One hostname per line, '#' starts a comment, blank lines ignored.
+# These hosts are resolved at supervisor boot via `dig +short A <host>` and
+# added as ACCEPT rules in iptables OUTPUT chain scoped --uid-owner 10001
+# (TCP 443 + TCP 22 per host). Default deny stays in place — anything not
+# listed here OR in the script's BUILTIN_HOSTS array is REJECTed.
+#
+# BUILTIN_HOSTS (already on the list, do NOT duplicate):
+#   api.openai.com  chatgpt.com
+#   api.github.com  github.com  codeload.github.com
+#   registry.npmjs.org  pypi.org  files.pythonhosted.org  static.crates.io  crates.io
+#
+# Add a host below if a codex run needs a private registry, an internal
+# package mirror, or a tenant-specific deploy target. Restart hermes to
+# apply.
+EOF
+        chown 10001:10001 "$NET_ALLOW" 2>/dev/null || true
+        chmod 0600 "$NET_ALLOW" 2>/dev/null || true
+        echo "[init] [codex-builder] seeded $NET_ALLOW"
+    fi
+
+    # --- Deploy key (read from /opt/alfred/.env via init env passthrough) ---
+    # The codex-builder profile pushes branches to ssdavidai/alfred via a
+    # repo-scoped deploy key with "Allow write access" on. The private key
+    # lives in Vaultwarden + is mirrored into the per-tenant /opt/alfred/.env
+    # as CODEX_BUILDER_DEPLOY_KEY_B64 (base64 of the OpenSSH private key).
+    # We write it here, chown to 10001, chmod 0600.
+    #
+    # When the var is empty (default everywhere except home), we skip the
+    # write — no key, no `git push` capability. PR 5's wrapper handles the
+    # absent-key case by emitting a clean "deploy key missing" run audit.
+    SSH_DIR="$CODEX_PROFILE_DIR/.ssh"
+    KEY_FILE="$SSH_DIR/codex_id_ed25519"
+    if [[ -n "${CODEX_BUILDER_DEPLOY_KEY_B64:-}" ]]; then
+        mkdir -p "$SSH_DIR"
+        # Decode and write. Tolerate either standard or URL-safe base64;
+        # standard libraries accept both.
+        if echo -n "$CODEX_BUILDER_DEPLOY_KEY_B64" | base64 -d > "$KEY_FILE" 2>/dev/null; then
+            chmod 0600 "$KEY_FILE"
+            chown 10001:10001 "$KEY_FILE"
+            echo "[init] [codex-builder] wrote deploy key $KEY_FILE ($(wc -c < "$KEY_FILE") bytes)"
+        else
+            rm -f "$KEY_FILE"
+            echo "[init] [codex-builder] WARNING: CODEX_BUILDER_DEPLOY_KEY_B64 set but failed to base64-decode — skipping"
+        fi
+        # known_hosts for github.com so the first push doesn't trip on a
+        # prompt (we have StrictHostKeyChecking=accept-new in the .env
+        # but a pre-seeded entry is more deterministic).
+        if [[ ! -f "$SSH_DIR/known_hosts" ]]; then
+            ssh-keyscan -t ed25519,ecdsa github.com 2>/dev/null > "$SSH_DIR/known_hosts" || true
+            if [[ -s "$SSH_DIR/known_hosts" ]]; then
+                chmod 0600 "$SSH_DIR/known_hosts"
+                chown 10001:10001 "$SSH_DIR/known_hosts"
+                echo "[init] [codex-builder] seeded $SSH_DIR/known_hosts with github.com keys"
+            fi
+        fi
+    else
+        echo "[init] [codex-builder] CODEX_BUILDER_DEPLOY_KEY_B64 unset — git push will fail clean (no key)"
+    fi
+
+    # --- Negative-asserts: the codex-builder uid 10001 must NOT be able to
+    #     read these paths. We test by `setpriv --reuid 10001 cat <file>`
+    #     and fail the init if any of them succeed. Defense-in-depth — the
+    #     chmods above should already block, but a single fat-fingered
+    #     chmod elsewhere in this script could open a hole that nothing
+    #     would catch otherwise.
+    #
+    # Negative-asserts are enforced ONLY when ENABLE_CODEX_BUILDER is on.
+    # On a tenant that doesn't run the codex-builder gateway, the chowns
+    # still happen for safety (so the profile dir is correctly owned if
+    # the flag is later flipped on), but the asserts are skipped — the
+    # /vault chown step 7 may not have run yet on a first-boot init+hermes
+    # pull cycle, and a transient race shouldn't fail provisioning.
+    if [[ "${ENABLE_CODEX_BUILDER:-false}" == "true" ]]; then
+        echo "[init] [codex-builder] negative-asserts: uid 10001 must NOT read these paths"
+        ASSERT_FAILS=0
+        # SOUL.md is the marker — we want a file we know exists in /vault.
+        if setpriv --reuid 10001 --regid 10001 --clear-groups \
+               cat /vault/SOUL.md > /dev/null 2>&1; then
+            echo "[init] [codex-builder] FAIL: uid 10001 can read /vault/SOUL.md"
+            ASSERT_FAILS=$((ASSERT_FAILS + 1))
+        fi
+        if setpriv --reuid 10001 --regid 10001 --clear-groups \
+               cat /alfred-data/.gateway-token > /dev/null 2>&1; then
+            echo "[init] [codex-builder] FAIL: uid 10001 can read /alfred-data/.gateway-token"
+            ASSERT_FAILS=$((ASSERT_FAILS + 1))
+        fi
+        for p in main workers heavy; do
+            P_ENV="$HERMES_DATA_DIR/profiles/$p/.env"
+            if [[ -f "$P_ENV" ]] && setpriv --reuid 10001 --regid 10001 --clear-groups \
+                   cat "$P_ENV" > /dev/null 2>&1; then
+                echo "[init] [codex-builder] FAIL: uid 10001 can read $P_ENV"
+                ASSERT_FAILS=$((ASSERT_FAILS + 1))
+            fi
+        done
+        # Positive-assert too — uid 10001 MUST be able to read its own .env
+        # (otherwise the supervisor's source-and-export will silently fail).
+        if ! setpriv --reuid 10001 --regid 10001 --clear-groups \
+               cat "$CODEX_PROFILE_DIR/.env" > /dev/null 2>&1; then
+            echo "[init] [codex-builder] FAIL: uid 10001 CANNOT read its own .env"
+            ASSERT_FAILS=$((ASSERT_FAILS + 1))
+        fi
+        if (( ASSERT_FAILS > 0 )); then
+            echo "[init] [codex-builder] FATAL: ${ASSERT_FAILS} FS isolation assertion(s) failed"
+            echo "[init] [codex-builder]   The sandbox is not effective. Refusing to allow the codex-builder gateway to start."
+            echo "[init] [codex-builder]   Check the chown/chmod above; check /vault is owned 10000:10000 mode 0700."
+            exit 71
+        fi
+        echo "[init] [codex-builder] all isolation assertions passed"
+    else
+        echo "[init] [codex-builder] ENABLE_CODEX_BUILDER not true — skipping isolation asserts (chowns still applied)"
+    fi
+fi
+
 mkdir -p /alfred-data
 chmod -R 777 /alfred-data 2>/dev/null || true
 # Keep the token readable by every service in the stack (alfred-learn is

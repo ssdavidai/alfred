@@ -195,9 +195,20 @@ if [[ -f "$MAIN_AUTH" && -s "$MAIN_AUTH" ]]; then
             cp "$MAIN_AUTH" "$CB_AUTH"
             log "propagated main/auth.json -> codex-builder/auth.json (${MAIN_SIZE} bytes, Hermes-LLM auth)"
         fi
+        # PR 4: the codex-builder gateway runs under uid 10001 and cannot
+        # read root-owned files. Re-chown after every copy so a fresh-on-
+        # this-boot mirror is immediately readable by the gateway. The
+        # init container also chowns the whole profile dir, but supervisor
+        # boots AFTER init so a copy here racing against init's chown
+        # would leave the file root-owned if we don't repeat.
+        chown 10001:10001 "$CB_AUTH" 2>/dev/null || true
+        chmod 0600 "$CB_AUTH" 2>/dev/null || true
+
         # Codex CLI's own auth — reads $CODEX_HOME/auth.json. .env sets
         # CODEX_HOME=/hermes-state/profiles/codex-builder/.codex.
         mkdir -p "$HERMES_ROOT/profiles/codex-builder/.codex"
+        chown 10001:10001 "$HERMES_ROOT/profiles/codex-builder/.codex" 2>/dev/null || true
+        chmod 0700 "$HERMES_ROOT/profiles/codex-builder/.codex" 2>/dev/null || true
         CLI_AUTH="$HERMES_ROOT/profiles/codex-builder/.codex/auth.json"
         CLI_SIZE=0
         [[ -f "$CLI_AUTH" ]] && CLI_SIZE=$(stat -c%s "$CLI_AUTH" 2>/dev/null || echo 0)
@@ -205,6 +216,8 @@ if [[ -f "$MAIN_AUTH" && -s "$MAIN_AUTH" ]]; then
             cp "$MAIN_AUTH" "$CLI_AUTH"
             log "propagated main/auth.json -> codex-builder/.codex/auth.json (${MAIN_SIZE} bytes, codex-CLI auth)"
         fi
+        chown 10001:10001 "$CLI_AUTH" 2>/dev/null || true
+        chmod 0600 "$CLI_AUTH" 2>/dev/null || true
     fi
 fi
 
@@ -389,12 +402,20 @@ start_proc "hermes-heavy"    "cd \"${PROFILES_DIR}/heavy\"   && set -a && . \"${
 # The 4th profile, only launched when ENABLE_CODEX_BUILDER=1. Renders fleet-
 # wide via the init container, but a non-home tenant never starts the process.
 #
-# PR 2 of 5: this launches under the container's default uid (10000, same as
-# the other 3 gateways). PR 4 will swap the body for `setpriv --reuid 10001
-# --regid 10001 --clear-groups --reset-env hermes -p codex-builder gateway
-# run --replace` once the FS-isolation init step has chowned the profile dir
-# + /work to uid 10001. Verifying PR 2 means: the gateway boots on :18793
-# and answers /health. PR 4 verifies: uid-10001 cannot read /vault.
+# PR 4 hardening:
+#   1. Egress allowlist — iptables OUTPUT rules scoped --uid-owner 10001
+#      that allow OpenAI / GitHub / npm / PyPI / crates.io and REJECT
+#      everything else. Installed BEFORE the gateway starts so the first
+#      `codex exec` already runs under the constraint. Requires the
+#      NET_ADMIN cap (added in PR 2 docker-compose.yaml).
+#   2. setpriv uid drop — `setpriv --reuid 10001 --regid 10001
+#      --clear-groups --reset-env` swaps the gateway to uid 10001 and
+#      clears the inherited environment so OPENROUTER_API_KEY,
+#      AAS_API_KEY, COMPOSIO_*, etc. (which the docker-compose service
+#      surfaces into the container's initial env) CANNOT leak into the
+#      sealed gateway's process env. We re-establish the minimum
+#      (PATH, HOME, TERM) and source the profile's positive-allowlist
+#      .env on top.
 #
 # `cd ${PROFILES_DIR}/codex-builder` lines up AGENTS.md auto-discovery and
 # matches the established pattern. `set -a; . .env; set +a` source-and-
@@ -402,12 +423,54 @@ start_proc "hermes-heavy"    "cd \"${PROFILES_DIR}/heavy\"   && set -a && . \"${
 # from PR #92) — the .env's CODEX_HOME / CODEX_WORKSPACE_ROOT / GIT_SSH_
 # COMMAND flow through to the gateway process here.
 if (( ENABLE_CODEX_BUILDER == 1 )); then
+    # 1. Install the egress allowlist BEFORE launching the gateway.
+    # `codex-builder-setup-egress.sh` is baked into /usr/local/bin in the
+    # Dockerfile (PR 4); it expects NET_ADMIN. Failure here SHOULD fail
+    # the whole supervisor — a builder gateway running without the egress
+    # filter could exfiltrate to any host (the persona prompt is the only
+    # remaining fence, and that's a soft one). Run as root (the supervisor
+    # itself runs as root inside the container) so iptables can mutate the
+    # OUTPUT chain.
+    if /usr/local/bin/codex-builder-setup-egress.sh; then
+        log "codex-builder egress jail installed (--uid-owner 10001, default REJECT)"
+    else
+        log "FATAL: codex-builder egress jail setup failed (exit $?) — refusing to launch gateway"
+        log "       check 'cap_add: NET_ADMIN' on the hermes service in docker-compose.yaml,"
+        log "       and that /usr/local/bin/codex-builder-setup-egress.sh is executable."
+        # Don't `exit` the supervisor — main/workers/heavy are already up
+        # and we don't want to take them down on a codex-builder-specific
+        # failure. Just skip the codex-builder gateway and log loudly.
+        ENABLE_CODEX_BUILDER=0
+    fi
+fi
+
+if (( ENABLE_CODEX_BUILDER == 1 )); then
+    # 2. setpriv uid drop. The chain:
+    #    setpriv --reuid 10001 --regid 10001 --clear-groups --reset-env
+    #      env -i (already done by --reset-env)
+    #      PATH=/usr/local/bin:/usr/bin:/bin
+    #      HOME=$PROFILES_DIR/codex-builder
+    #      TERM=$TERM (preserve if set; else dumb)
+    #      cd $HOME
+    #      source $HOME/.env  (positive-allowlist)
+    #      exec hermes -p codex-builder gateway run --replace
+    # `bash -c` is what start_proc invokes — we put the whole chain in
+    # one quoted command string. `--clear-groups` drops the supplementary
+    # group set (default gid 10000 would be inherited from the container
+    # default user); `--reset-env` wipes the inherited env, which is the
+    # crucial bit for keeping OPENROUTER_API_KEY etc. out of the gateway.
+    CODEX_HOME_DIR="${PROFILES_DIR}/codex-builder"
     start_proc "hermes-codex-builder" \
-        "cd \"${PROFILES_DIR}/codex-builder\" \
-         && set -a && . \"${PROFILES_DIR}/codex-builder/.env\" && set +a \
-         && TERMINAL_CWD=${PROFILES_DIR}/codex-builder/workspace \
-         exec hermes -p codex-builder gateway run --replace"
-    log "codex-builder gateway enabled (ENABLE_CODEX_BUILDER=1) — launching on :18793"
+        "exec setpriv --reuid=10001 --regid=10001 --clear-groups --reset-env \
+            env \
+              PATH=/usr/local/bin:/usr/bin:/bin \
+              HOME=\"${CODEX_HOME_DIR}\" \
+              TERM=\"\${TERM:-dumb}\" \
+              bash -c 'cd \"${CODEX_HOME_DIR}\" \
+                       && set -a && . \"${CODEX_HOME_DIR}/.env\" && set +a \
+                       && TERMINAL_CWD=\"${CODEX_HOME_DIR}/workspace\" \
+                          exec hermes -p codex-builder gateway run --replace'"
+    log "codex-builder gateway enabled (ENABLE_CODEX_BUILDER=1) — launching on :18793 as uid 10001"
 else
     log "codex-builder gateway disabled (ENABLE_CODEX_BUILDER!=1) — profile dir is rendered but no process launched"
 fi
