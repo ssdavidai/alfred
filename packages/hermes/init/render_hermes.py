@@ -402,8 +402,40 @@ def main() -> int:
     # value across re-renders.
     env_out = _merge_preserve_runtime_keys(env_out, env_path)
     env_path.write_text(env_out, encoding="utf-8")
-    # .env carries the API key + provider keys — restrict it.
-    env_path.chmod(0o600)
+    # .env carries the API key + provider keys. We want it permissive
+    # enough that sibling containers in the SAME compose stack — paperclip
+    # (uid 1000), ctrl-api (root), vault-cli (root), the init container
+    # itself (root, writes it) — can all read it without each having to
+    # docker-engine-side `group_add` or share a numeric GID.
+    #
+    # 0o644 is deliberate, not lazy:
+    #   * The file lives in a NAMED docker volume (`hermes_data`), not a
+    #     host bind-mount. It is reachable only by containers in this
+    #     compose stack that EXPLICITLY mount the volume — we control that
+    #     list (hermes, ctrl-api, paperclip, vault-cli, sure-bootstrap).
+    #     World-readable INSIDE the container ≠ world-readable on the
+    #     host; the host's volume backing dir is root:root and unreadable
+    #     to non-root host users.
+    #   * Group-only (0o640) would require every consumer container to be
+    #     added to gid 10000 via `group_add`. That fights gosu and any
+    #     entrypoint that does its own setuid — supplementary groups are
+    #     not preserved across uid transitions inside the container
+    #     unless the consumer image adds the gid to /etc/group AND the
+    #     entrypoint calls `initgroups()` (or uses `setpriv
+    #     --init-groups`). The paperclip upstream entrypoint uses `gosu
+    #     node "$@"`, gosu inherits the caller's supplementary groups
+    #     fine, but the `node` user has no gid 10000 in /etc/group so the
+    #     supplementary group dies at the uid transition. Fixing that
+    #     properly requires customising the upstream entrypoint.
+    #   * The 0o600 default this replaces was the original cause of an
+    #     hour-long misdiagnosed paperclip-MCP HERMES_AUTH=401 storm on
+    #     home (Sir, 2026-05-28): the paperclip node server runs as UID
+    #     1000 and hit EACCES on this file, the adapter swallowed the
+    #     error and sent every heartbeat with no Authorization header,
+    #     Hermes rejected with 401, and the symptom (`invalid_api_key` on
+    #     a key that worked in a `cat`-as-root docker-exec spot-check)
+    #     sent the on-call chasing a phantom env-var bug.
+    env_path.chmod(0o644)
     print(f"[render] wrote {env_path} ({len(env_out)} bytes)")
 
     return 0

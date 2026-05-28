@@ -1309,6 +1309,9 @@ services:
       # API_SERVER_KEY from the rendered profile .env. Without this the
       # adapter falls back to no Authorization header and Hermes returns
       # 401. Mirrors the ctrl-api mount (server.ts:readHermesMainApiKey).
+      # The .env is rendered 0o644 by the init container
+      # (packages/hermes/init/render_hermes.py) so the paperclip node
+      # server (uid 1000) can read it without supplementary-group plumbing.
       - hermes_data:/hermes-state:ro
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3100/sign-in >/dev/null 2>&1 || exit 1"]

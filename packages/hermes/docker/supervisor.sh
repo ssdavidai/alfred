@@ -299,9 +299,35 @@ fi
 # `cd "${PROFILES_DIR}/<p>" && exec hermes …` aligns the gateway's cwd
 # with its profile dir. `exec` hands the PID directly to hermes so the
 # supervisor's `kill -0 $pid` bookkeeping still tracks the real process.
-start_proc "hermes-main"     "cd \"${PROFILES_DIR}/main\"    && TERMINAL_CWD=${PROFILES_DIR}/main    exec hermes -p main gateway run --replace"
-start_proc "hermes-workers"  "cd \"${PROFILES_DIR}/workers\" && TERMINAL_CWD=${PROFILES_DIR}/workers exec hermes -p workers gateway run --replace"
-start_proc "hermes-heavy"    "cd \"${PROFILES_DIR}/heavy\"   && TERMINAL_CWD=${PROFILES_DIR}/heavy   exec hermes -p heavy gateway run --replace"
+#
+# .env source-and-export contract (the 2026-05-28 hardening):
+#   `set -a; . "${PROFILES_DIR}/<p>/.env"; set +a` reads the per-profile
+#   .env rendered by the init container and exports every KEY=VALUE pair
+#   into the gateway's process environment BEFORE `exec hermes`. Without
+#   this the running gateway depends entirely on Hermes' internal
+#   `load_hermes_dotenv()` (gateway/run.py imports `hermes_cli.env_loader`),
+#   which is fragile in two ways:
+#     (a) the profile override (hermes_cli/main.py:_apply_profile_override)
+#         must fire so HERMES_HOME points at the profile dir, otherwise
+#         the wrong .env loads — a future CLI refactor could regress this
+#         silently.
+#     (b) `/proc/<pid>/environ` shows the gateway's initial env, not
+#         os.environ after Python loads it; operators (and ctrl-api's
+#         channels code, see channels_paperclip.ts:readHermesMainApiKey)
+#         that diagnose 401s by inspecting /proc see EMPTY API_SERVER_KEY
+#         and conclude the gateway boots unauthenticated. Sourcing the
+#         file here makes the auth key explicit, visible, and unambiguous.
+#   Sir 2026-05-28 — this hardening was prompted by a live paperclip-MCP
+#   heartbeat 401 storm on home where the running gateway accepted the
+#   profile key but /proc/<hermes-pid>/environ looked empty, sending
+#   operators chasing a phantom config-load bug for an hour.
+#
+# Idempotent + crash-loop-safe: `start_proc` re-eval's the full command
+# string on each restart, so a profile .env edited after first boot is
+# picked up the next time the supervisor respawns that gateway.
+start_proc "hermes-main"     "cd \"${PROFILES_DIR}/main\"    && set -a && . \"${PROFILES_DIR}/main/.env\"    && set +a && TERMINAL_CWD=${PROFILES_DIR}/main    exec hermes -p main gateway run --replace"
+start_proc "hermes-workers"  "cd \"${PROFILES_DIR}/workers\" && set -a && . \"${PROFILES_DIR}/workers/.env\" && set +a && TERMINAL_CWD=${PROFILES_DIR}/workers exec hermes -p workers gateway run --replace"
+start_proc "hermes-heavy"    "cd \"${PROFILES_DIR}/heavy\"   && set -a && . \"${PROFILES_DIR}/heavy/.env\"   && set +a && TERMINAL_CWD=${PROFILES_DIR}/heavy   exec hermes -p heavy gateway run --replace"
 
 # =============================================================================
 # Supervise — restart any worker that exits while we are not shutting down.
