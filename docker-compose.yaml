@@ -583,8 +583,9 @@ services:
       # scripts/bootstrap.sh if absent.
       VOICE_BRIDGE_INTERNAL_TOKEN: ${VOICE_BRIDGE_INTERNAL_TOKEN}
       OPENAI_API_KEY: ${OPENAI_API_KEY}
-      OPENAI_REALTIME_MODEL: ${OPENAI_REALTIME_MODEL:-gpt-realtime-1.5}
+      OPENAI_REALTIME_MODEL: ${OPENAI_REALTIME_MODEL:-gpt-realtime-2}
       OPENAI_REALTIME_VOICE: ${OPENAI_REALTIME_VOICE:-cedar}
+      VOICE_BRIDGE_DEBUG: "${VOICE_BRIDGE_DEBUG:-}"
       # ctrl-api is the "SaaS internal" surface on this single-VM build —
       # the bridge calls back for tenant lookup, tool dispatch, and (in
       # Phase 3) alfred_journal writes on transcript ingest.
