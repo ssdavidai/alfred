@@ -1,0 +1,5 @@
+# Per-domain Caddy snippets written by POST /api/v1/channels/tailscale/cert.
+# Generated at runtime — never commit.
+*.caddy
+!.gitkeep
+!.gitignore

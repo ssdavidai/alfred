@@ -19,6 +19,23 @@
 	email {$ACME_EMAIL}
 }
 
+# Tailscale Serve / cert overlays (issue #109 PR 4).
+#
+# When the principal clicks "Issue cert" on the /channels Tailscale card,
+# ctrl-api's POST /api/v1/channels/tailscale/cert route runs
+# `tailscale cert <domain>` inside the sidecar, copies the resulting `.crt`
+# + `.key` into the shared `tailscale-certs` bind mount, and writes a
+# per-domain snippet here. The `import` glob silently expands to zero
+# files on a stock tenant (no Tailscale sidecar, no certs) — Caddy treats
+# a missing-file `import` of a glob pattern as a no-op, so this line is
+# safe even before PR 4 surfaces are exercised.
+#
+# Snippets are full site blocks (e.g. `home-alfred-black.tail-acme.ts.net
+# { tls /tailscale-certs/...crt /tailscale-certs/...key; reverse_proxy
+# web-client:80 }`). Caddy hot-reloads on `caddy reload`, which ctrl-api
+# triggers via `docker exec caddy caddy reload --config /etc/caddy/Caddyfile`.
+import /tailscale-snippets/*.caddy
+
 # Apex — the Wasp React SPA (static, served by the web-client nginx).
 # `wasp build` splits the app in two: the SPA is served here; its API
 # server lives on api.<domain> below. Distinct hosts — no path-prefix

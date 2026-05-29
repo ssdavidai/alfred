@@ -43,6 +43,18 @@ services:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
+      # Tailscale-issued certs (issue #109 PR 4). The /channels Tailscale
+      # card's "Issue cert" button calls POST /api/v1/channels/tailscale/cert
+      # which runs `tailscale cert <domain>` inside the sidecar and copies
+      # the resulting `.crt` + `.key` into this directory. Caddy imports
+      # snippets from /tailscale-snippets/*.caddy at load time (see the
+      # `import` directive at the top of Caddyfile) — the cert route writes
+      # one snippet per domain and then triggers `caddy reload` via
+      # `docker exec`. The directory must exist on the host before compose
+      # up (bootstrap.sh creates it); on a stock tenant the import is a
+      # no-op because the glob matches zero files.
+      - ./caddy/tailscale-certs:/tailscale-certs
+      - ./caddy/tailscale-snippets:/tailscale-snippets
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/ >/dev/null 2>&1 || exit 0"]
       interval: 30s

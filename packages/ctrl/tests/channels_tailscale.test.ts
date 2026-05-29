@@ -19,8 +19,8 @@
 //   7. POST /disconnect runs logout + down + compose stop and flips state to
 //      `disabled`. Returns 200 even when docker exec warns (best-effort).
 //   8. POST /disconnect flips TAILSCALE_ENABLED back to false.
-//   9. GET /cert returns 501 with deferred:"PR4".
-//  10. POST /serve returns 501 with deferred:"PR4".
+//   9. (was: GET /cert + POST /serve stubs — now in
+//      channels_tailscale_pr4.test.ts as real impls).
 //  11. GET /peers returns empty list (no error) when sidecar absent.
 //  12. GET /peers extracts peers from the probe JSON when sidecar is live.
 //  13. Every write emits an audit row (action_type tailscale_*).
@@ -450,22 +450,8 @@ describe("POST /api/v1/channels/tailscale/disconnect — #109 PR 2", () => {
   });
 });
 
-describe("PR 4 stubs — /cert + /serve return 501", () => {
-  beforeEach(clearAll);
-
-  it("GET /cert returns 501 deferred:PR4", async () => {
-    const r = await invoke("GET", "/api/v1/channels/tailscale/cert");
-    assert.equal(r.status, 501);
-    assert.equal(r.payload.deferred, "PR4");
-    assert.equal(r.payload.error.code, "NOT_IMPLEMENTED");
-  });
-
-  it("POST /serve returns 501 deferred:PR4", async () => {
-    const r = await invoke("POST", "/api/v1/channels/tailscale/serve", {});
-    assert.equal(r.status, 501);
-    assert.equal(r.payload.deferred, "PR4");
-  });
-});
+// (PR 4 stubs replaced by real impls. Coverage moved to
+// channels_tailscale_pr4.test.ts.)
 
 describe("GET /api/v1/channels/tailscale/peers — #109 PR 2", () => {
   beforeEach(clearAll);

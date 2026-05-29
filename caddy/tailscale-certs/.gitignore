@@ -1,0 +1,6 @@
+# Tailscale-issued LE certs land here at runtime (issue #109 PR 4).
+# Never commit a `.crt` or `.key` — the principal's auth material.
+*.crt
+*.key
+!.gitkeep
+!.gitignore

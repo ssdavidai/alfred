@@ -10,8 +10,9 @@
 //   GET    /api/v1/channels/tailscale/status      — live lifecycle (fail-soft).
 //   POST   /api/v1/channels/tailscale/connect     — bring the sidecar up.
 //   POST   /api/v1/channels/tailscale/disconnect  — logout + stop.
-//   GET    /api/v1/channels/tailscale/cert        — PR 4 stub (501).
-//   POST   /api/v1/channels/tailscale/serve       — PR 4 stub (501).
+//   POST   /api/v1/channels/tailscale/cert        — PR 4 LE-via-Tailscale cert issue.
+//   POST   /api/v1/channels/tailscale/serve       — PR 4 Tailscale Serve (tailnet-only).
+//   POST   /api/v1/channels/tailscale/funnel      — PR 4 Tailscale Funnel (public).
 //   GET    /api/v1/channels/tailscale/peers       — peer list (fail-soft).
 //
 // Architecture
@@ -49,6 +50,7 @@ import {
   dockerExec,
 } from "../helpers.js";
 import fs from "node:fs";
+import path from "node:path";
 
 // ── Constants ─────────────────────────────────────────────────────────────
 
@@ -82,6 +84,40 @@ const ENV_PATH = `${COMPOSE_DIR}/.env`;
 
 /** Spec §5.1: cache the status probe for ~2s to absorb the dashboard poller. */
 const STATUS_CACHE_MS = 2_000;
+
+// ── PR 4: cert + serve + funnel ──────────────────────────────────────────
+//
+// `tailscale cert` writes a `<domain>.crt` + `<domain>.key` pair into the
+// sidecar's working directory; we shuffle them across to Caddy's bind
+// mount so the active web server can pick them up. Caddy already imports
+// `tailscale-snippets/*.caddy` (see Caddyfile + docker-compose.yaml), so
+// the cert route also drops a per-domain snippet there and triggers
+// `caddy reload`.
+//
+// The compose-side paths and the in-Caddy paths are deliberately split:
+//   - host side: `${COMPOSE_DIR}/caddy/tailscale-{certs,snippets}/`
+//   - caddy view: `/tailscale-certs/` and `/tailscale-snippets/`
+// ctrl-api lives next to the docker socket; it writes via the host
+// path because that's what's bind-mounted by docker compose.
+//
+// The directories are seeded by bootstrap.sh (.gitkeep'd in the repo)
+// so the first `caddy reload` after PR 4 lands doesn't fail on a
+// missing glob target.
+
+/** Host path to the Caddy-shared bind mount where `.crt`+`.key` land. */
+const CERT_HOST_DIR = `${COMPOSE_DIR}/caddy/tailscale-certs`;
+
+/** Host path to the Caddy snippet directory imported by Caddyfile. */
+const SNIPPET_HOST_DIR = `${COMPOSE_DIR}/caddy/tailscale-snippets`;
+
+/** Path Caddy sees in the certs bind mount (used inside snippet files). */
+const CERT_CADDY_DIR = "/tailscale-certs";
+
+/** Compose service name for Caddy — used for the reload `docker exec` call. */
+const CADDY_SERVICE = "caddy";
+
+/** Compose service name for Tailscale — alias of TAILSCALE_SERVICE for symmetry. */
+// (kept inline below — same value as TAILSCALE_SERVICE)
 
 // ── Lifecycle row helpers ────────────────────────────────────────────────
 
@@ -439,6 +475,101 @@ interface ConnectBody {
   authkey?: string;
 }
 
+// ── PR 4 body parsers ────────────────────────────────────────────────────
+
+/**
+ * Restrictive hostname check. We're going to feed this straight to
+ * `tailscale cert` AND use it as a filename. Allow only a-z, 0-9, dot, hyphen.
+ * The MagicDNS namespace is `<host>.<tailnet>.ts.net` so the longest live
+ * domain we'd see is ~63 chars × 3 labels = ~250.
+ */
+function parseDomainBody(raw: unknown): string {
+  if (raw === null || raw === undefined || typeof raw !== "object") {
+    throw new ValidationError("body must be a JSON object with `domain`");
+  }
+  const b = raw as Record<string, unknown>;
+  const domain = b.domain;
+  if (typeof domain !== "string" || domain.trim().length === 0) {
+    throw new ValidationError("`domain` must be a non-empty string");
+  }
+  const d = domain.trim();
+  if (d.length > 253) {
+    throw new ValidationError("`domain` is too long");
+  }
+  if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i.test(d)) {
+    throw new ValidationError(
+      "`domain` must be a valid hostname (lowercase letters, digits, hyphen, dot)",
+    );
+  }
+  // Additional guard — path traversal in filenames.
+  if (d.includes("/") || d.includes("..") || d.startsWith(".")) {
+    throw new ValidationError("`domain` must not contain path separators");
+  }
+  return d;
+}
+
+interface ServeBody {
+  port: number;
+  path?: string;
+}
+function parseServeBody(raw: unknown): ServeBody {
+  if (raw === null || raw === undefined || typeof raw !== "object") {
+    throw new ValidationError("body must be a JSON object");
+  }
+  const b = raw as Record<string, unknown>;
+  if (typeof b.port !== "number" || !Number.isInteger(b.port)) {
+    throw new ValidationError("`port` must be an integer");
+  }
+  if (b.port < 1 || b.port > 65535) {
+    throw new ValidationError("`port` must be in 1..65535");
+  }
+  let p: string | undefined;
+  if (b.path !== undefined && b.path !== null) {
+    if (typeof b.path !== "string") {
+      throw new ValidationError("`path` must be a string when present");
+    }
+    p = b.path.startsWith("/") ? b.path : `/${b.path}`;
+  }
+  return { port: b.port, path: p };
+}
+
+interface FunnelBody {
+  port: number;
+}
+function parseFunnelBody(raw: unknown): FunnelBody {
+  if (raw === null || raw === undefined || typeof raw !== "object") {
+    throw new ValidationError("body must be a JSON object");
+  }
+  const b = raw as Record<string, unknown>;
+  if (typeof b.port !== "number" || !Number.isInteger(b.port)) {
+    throw new ValidationError("`port` must be an integer");
+  }
+  if (b.port < 1 || b.port > 65535) {
+    throw new ValidationError("`port` must be in 1..65535");
+  }
+  return { port: b.port };
+}
+
+/**
+ * Throws 503 SIDECAR_DOWN when the sidecar isn't reachable. Used by the
+ * three PR 4 routes (cert / serve / funnel) which can't do anything useful
+ * without the tailscale CLI alive on the other end of the socket.
+ *
+ * Implementation: a probe of `tailscale status --json` — if that's fine the
+ * sidecar's listener is up. The probe is mocked by tests via
+ * `_setTailscaleProbeForTests`, so this stays exercise-able without docker.
+ */
+async function ensureSidecarRunning(): Promise<void> {
+  const probe = await probeTailscaleStatus();
+  if (!probe.ok) {
+    throw new ApiError(
+      503,
+      "SIDECAR_DOWN",
+      `Tailscale sidecar is not reachable: ${probe.reason}`,
+    );
+  }
+}
+
 function parseConnectBody(raw: unknown): ConnectBody {
   if (raw === null || raw === undefined) return {};
   if (typeof raw !== "object") {
@@ -644,35 +775,300 @@ export function registerChannelsTailscaleRoutes(): void {
   });
 
   // ──────────────────────────────────────────────────────────────────────
-  // GET /api/v1/channels/tailscale/cert
+  // POST /api/v1/channels/tailscale/cert  — issue #109 PR 4
   //
-  // PR 4 (Caddy + Funnel ingress) lands the LE cert passthrough. PR 2
-  // returns 501 so callers wiring against the catalogue see the explicit
-  // shape rather than a 404.
+  // Body: { domain: string }
+  //
+  // Issues a Let's Encrypt cert *via Tailscale* (the tailnet's MagicDNS
+  // names get LE certs for free through Tailscale's HTTPS feature).
+  // Flow:
+  //   1. Sidecar must be running — 503 SIDECAR_DOWN otherwise.
+  //   2. `docker exec tailscale tailscale cert <domain>` writes a
+  //      <domain>.crt + <domain>.key pair into the sidecar's CWD.
+  //   3. We `cat` them out and write them to ${COMPOSE_DIR}/caddy/
+  //      tailscale-certs/<domain>.{crt,key} — the same path Caddy sees
+  //      as /tailscale-certs/<domain>.{crt,key} via the bind mount.
+  //   4. Drop a per-domain snippet at ${COMPOSE_DIR}/caddy/
+  //      tailscale-snippets/<domain>.caddy that defines the site block
+  //      with `tls /tailscale-certs/<d>.crt /tailscale-certs/<d>.key`.
+  //   5. `docker exec caddy caddy reload --config /etc/caddy/Caddyfile`
+  //      to pick up the new snippet.
+  //
+  // Returns: { ok, domain, cert_path, key_path, expires_at }.
+  // expires_at is read off the cert's `Not After` field via openssl
+  // when available; falls back to null when the tool is absent.
+  //
+  // First-issue can take 5-30s (LE HTTP-01 round-trip via Tailscale's
+  // edge); we don't add a custom timeout here because dockerExec's
+  // default 30s is the floor we need anyway and the test mocks dockerExec
+  // wholesale.
   // ──────────────────────────────────────────────────────────────────────
-  addRoute("GET", "/api/v1/channels/tailscale/cert", async ({ res }) => {
-    sendJson(res, 501, {
-      error: {
-        code: "NOT_IMPLEMENTED",
-        message: "Tailscale cert passthrough lands in #109 PR 4.",
-      },
-      deferred: "PR4",
+  addRoute("POST", "/api/v1/channels/tailscale/cert", async ({ res, body }) => {
+    const domain = parseDomainBody(body);
+    await ensureSidecarRunning();
+
+    let certPem = "";
+    let keyPem = "";
+    try {
+      // `tailscale cert --cert-file=... --key-file=...` writes to disk inside
+      // the sidecar; we'd then need a second exec to read it. Easier: pipe
+      // both to stdout via `-` markers, which the CLI doesn't support, so we
+      // use the on-disk form + `cat` round-trip.
+      await dockerExec(TAILSCALE_SERVICE, [
+        "tailscale",
+        "cert",
+        "--cert-file",
+        `/tmp/${domain}.crt`,
+        "--key-file",
+        `/tmp/${domain}.key`,
+        domain,
+      ]);
+      certPem = (await dockerExec(TAILSCALE_SERVICE, ["cat", `/tmp/${domain}.crt`])).trim();
+      keyPem = (await dockerExec(TAILSCALE_SERVICE, ["cat", `/tmp/${domain}.key`])).trim();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      auditWrite("tailscale_cert_failed", `Failed to issue cert for ${domain}: ${msg}`, {
+        domain,
+      });
+      // Tailscale itself rejects domains it doesn't own (`HTTPS not enabled`
+      // on the tailnet, or domain doesn't match MagicDNS). Map to 502 so the
+      // UI surfaces "issue failed" without a generic 500.
+      throw new ApiError(
+        502,
+        "TAILSCALE_CERT_FAILED",
+        `tailscale cert ${domain} failed: ${msg}`,
+      );
+    }
+
+    if (!certPem || !keyPem) {
+      throw new ApiError(
+        502,
+        "TAILSCALE_CERT_EMPTY",
+        `tailscale cert returned an empty body for ${domain}`,
+      );
+    }
+
+    // Write to the Caddy-shared bind mount on the host.
+    try {
+      fs.mkdirSync(CERT_HOST_DIR, { recursive: true });
+      fs.mkdirSync(SNIPPET_HOST_DIR, { recursive: true });
+    } catch {
+      /* ignore — the bootstrap likely already created these */
+    }
+    const certHostPath = path.join(CERT_HOST_DIR, `${domain}.crt`);
+    const keyHostPath = path.join(CERT_HOST_DIR, `${domain}.key`);
+    fs.writeFileSync(certHostPath, `${certPem}\n`, { mode: 0o644 });
+    fs.writeFileSync(keyHostPath, `${keyPem}\n`, { mode: 0o600 });
+
+    // Caddy snippet: a full site block that uses the bind-mounted cert.
+    // ctrl-api is the only writer; Caddy is the only reader. We use the
+    // tenant's web-client as the default upstream — same target as the
+    // apex site in Caddyfile. The principal can swap it on POST /serve
+    // (which targets an arbitrary localhost port) but the default
+    // tls-only block is the common case: the dashboard, behind the LE
+    // cert, reachable on the tailnet hostname.
+    const snippetHostPath = path.join(SNIPPET_HOST_DIR, `${domain}.caddy`);
+    const snippet =
+      `# Issued by ctrl-api on behalf of POST /api/v1/channels/tailscale/cert.\n` +
+      `# Domain: ${domain}\n` +
+      `# Cert  : ${CERT_CADDY_DIR}/${domain}.crt\n` +
+      `# Key   : ${CERT_CADDY_DIR}/${domain}.key\n` +
+      `${domain} {\n` +
+      `\tencode zstd gzip\n` +
+      `\ttls ${CERT_CADDY_DIR}/${domain}.crt ${CERT_CADDY_DIR}/${domain}.key\n` +
+      `\treverse_proxy web-client:80\n` +
+      `}\n`;
+    fs.writeFileSync(snippetHostPath, snippet, { mode: 0o644 });
+
+    // Hot-reload Caddy so the new snippet picks up without restart.
+    let reloadOk = true;
+    try {
+      await dockerExec(CADDY_SERVICE, [
+        "caddy",
+        "reload",
+        "--config",
+        "/etc/caddy/Caddyfile",
+      ]);
+    } catch (err) {
+      reloadOk = false;
+      console.warn(
+        "[channels_tailscale] caddy reload failed (cert written, will pick up on next restart):",
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+
+    // Best-effort `Not After` extraction. We don't depend on openssl being
+    // present — the cert's PEM is shaped so the Node TLS lib can decode it,
+    // but pulling in `crypto.X509Certificate` keeps the import surface
+    // small.
+    let expiresAt: string | null = null;
+    try {
+      // X509Certificate accepts PEM. Available since Node 15.6 — well below
+      // the v22 floor.
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { X509Certificate } = await import("node:crypto");
+      const cert = new X509Certificate(certPem);
+      expiresAt = cert.validTo; // e.g. "Aug 13 12:00:00 2026 GMT"
+    } catch {
+      /* leave null */
+    }
+
+    auditWrite(
+      "tailscale_cert_issued",
+      `Issued Tailscale LE cert for ${domain}`,
+      { domain, reload_ok: reloadOk },
+    );
+
+    sendJson(res, 200, {
+      ok: true,
+      domain,
+      cert_path: `${CERT_CADDY_DIR}/${domain}.crt`,
+      key_path: `${CERT_CADDY_DIR}/${domain}.key`,
+      expires_at: expiresAt,
+      caddy_reload_ok: reloadOk,
     });
   });
 
   // ──────────────────────────────────────────────────────────────────────
-  // POST /api/v1/channels/tailscale/serve
+  // POST /api/v1/channels/tailscale/serve  — issue #109 PR 4
   //
-  // Tailscale Serve config (the per-tenant `https://home-alfred-black.<tailnet>.ts.net`
-  // ingress) lands in PR 4 with the Caddy story.
+  // Body: { port: number, path?: string }
+  //
+  // Calls `tailscale serve --bg https / http://127.0.0.1:<port>` so the
+  // tenant exposes a localhost service over Tailscale's tailnet-only
+  // HTTPS (no LE round-trip, Tailscale terminates internally).
+  //
+  // Idempotent: tailscale's own `serve` config is keyed on (mountpoint,
+  // upstream) — re-running with the same args is a no-op as far as the
+  // tailnet is concerned, and we treat it as success. A `port=N, path=/X`
+  // pair replaces whatever was previously serving on /X.
+  //
+  // Returns: { ok, url } where url is `https://<hostname>.ts.net<path>`.
   // ──────────────────────────────────────────────────────────────────────
-  addRoute("POST", "/api/v1/channels/tailscale/serve", async ({ res }) => {
-    sendJson(res, 501, {
-      error: {
-        code: "NOT_IMPLEMENTED",
-        message: "Tailscale Serve configuration lands in #109 PR 4.",
-      },
-      deferred: "PR4",
+  addRoute("POST", "/api/v1/channels/tailscale/serve", async ({ res, body }) => {
+    const parsed = parseServeBody(body);
+    await ensureSidecarRunning();
+
+    const mountPath = parsed.path ?? "/";
+    const upstream = `http://127.0.0.1:${parsed.port}`;
+    try {
+      await dockerExec(TAILSCALE_SERVICE, [
+        "tailscale",
+        "serve",
+        "--bg",
+        "--https",
+        "443",
+        "--set-path",
+        mountPath,
+        upstream,
+      ]);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      auditWrite(
+        "tailscale_serve_failed",
+        `tailscale serve port=${parsed.port} path=${mountPath} failed: ${msg}`,
+        { port: parsed.port, path: mountPath },
+      );
+      throw new ApiError(
+        502,
+        "TAILSCALE_SERVE_FAILED",
+        `tailscale serve failed: ${msg}`,
+      );
+    }
+
+    // Hostname comes from the lifecycle row (populated by /status probe).
+    // When the row is fresh and a probe hasn't run yet, fall back to a
+    // generic placeholder rather than 500-ing — the UI can re-fetch.
+    const row = getTailscaleRow();
+    const hostname = row.tailnet_hostname ?? "this-node.ts.net";
+    const url = `https://${hostname}${mountPath}`;
+
+    auditWrite(
+      "tailscale_serve_set",
+      `Tailscale Serve mapped ${mountPath} → :${parsed.port}`,
+      { port: parsed.port, path: mountPath, url },
+    );
+
+    sendJson(res, 200, {
+      ok: true,
+      url,
+      port: parsed.port,
+      path: mountPath,
+    });
+  });
+
+  // ──────────────────────────────────────────────────────────────────────
+  // POST /api/v1/channels/tailscale/funnel  — issue #109 PR 4
+  //
+  // Body: { port: number }
+  //
+  // Calls `tailscale funnel --bg <port>` to expose a localhost port to the
+  // public internet via Tailscale Funnel (LE-passthrough, no Caddy needed).
+  //
+  // Funnel is gated at the tailnet-policy level — when the org's
+  // `tailnet-funnel` ACL doesn't include this node's tag, the CLI fails
+  // with "funnel is not enabled". We map that to 403 FUNNEL_NOT_ENABLED
+  // so the UI can prompt the principal to open
+  // https://login.tailscale.com/admin/dns and toggle the feature.
+  //
+  // Returns: { ok, public_url }.
+  // ──────────────────────────────────────────────────────────────────────
+  addRoute("POST", "/api/v1/channels/tailscale/funnel", async ({ res, body }) => {
+    const parsed = parseFunnelBody(body);
+    await ensureSidecarRunning();
+
+    try {
+      await dockerExec(TAILSCALE_SERVICE, [
+        "tailscale",
+        "funnel",
+        "--bg",
+        String(parsed.port),
+      ]);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // The CLI surfaces "funnel is not available" / "HTTPS not enabled" /
+      // "not allowed on this tailnet" when the org policy denies funnel.
+      // Catch every variant so the UI can prompt to enable it.
+      if (
+        /funnel.*(not enabled|not available|not allowed|disabled)/i.test(msg) ||
+        /HTTPS not enabled/i.test(msg)
+      ) {
+        auditWrite("tailscale_funnel_denied", `Funnel denied by tailnet policy`, {
+          port: parsed.port,
+          message: msg,
+        });
+        throw new ApiError(
+          403,
+          "FUNNEL_NOT_ENABLED",
+          "Tailscale Funnel is not enabled for this tailnet. Open the admin console and toggle Funnel on for this node.",
+        );
+      }
+      auditWrite(
+        "tailscale_funnel_failed",
+        `tailscale funnel port=${parsed.port} failed: ${msg}`,
+        { port: parsed.port },
+      );
+      throw new ApiError(
+        502,
+        "TAILSCALE_FUNNEL_FAILED",
+        `tailscale funnel failed: ${msg}`,
+      );
+    }
+
+    const row = getTailscaleRow();
+    const hostname = row.tailnet_hostname ?? "this-node.ts.net";
+    const publicUrl = `https://${hostname}`;
+
+    auditWrite(
+      "tailscale_funnel_set",
+      `Tailscale Funnel exposing :${parsed.port} publicly at ${publicUrl}`,
+      { port: parsed.port, public_url: publicUrl },
+    );
+
+    sendJson(res, 200, {
+      ok: true,
+      public_url: publicUrl,
+      port: parsed.port,
     });
   });
 
