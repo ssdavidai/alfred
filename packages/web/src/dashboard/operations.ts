@@ -2689,24 +2689,59 @@ export const deleteFile = async (
 // 404 handling when the listener isn't enabled yet.
 // ============================================================
 
-/** Read the channel_tokens rows for `channel=ha-conversation`. Shape
- *  comes from ctrl-api's GET /api/v1/channel-tokens (PR #111 PR1):
- *  `{ tokens: ChannelTokenMeta[] }` where each meta omits the
- *  token_hash and includes a public-safe `scope`. The web layer
- *  passes through the rows verbatim; haConversationCardCore.ts
- *  groups/sorts/filters into the install-table shape. */
+/** Public-safe row shape returned by /api/v1/channels/tokens/* (#111
+ *  PR4). The ctrl-api wire format names the JSON-typed scope field
+ *  `scope_json` (mirroring the column name); the card's core helpers
+ *  read `scope`. We normalise at the boundary so the existing card
+ *  doesn't need to change. */
+interface ChannelTokenWireRow {
+  id: string;
+  channel: string;
+  label: string | null;
+  scope_json: Record<string, unknown> | null;
+  created_at: number;
+  last_used_at: number | null;
+  last_used_ip: string | null;
+  rotated_from: string | null;
+  revoked_at: number | null;
+}
+
+function wireRowToCardRow(r: ChannelTokenWireRow) {
+  return {
+    id: r.id,
+    channel: r.channel,
+    label: r.label,
+    scope: r.scope_json,
+    created_at: r.created_at,
+    last_used_at: r.last_used_at,
+    last_used_ip: r.last_used_ip,
+    rotated_from: r.rotated_from,
+    revoked_at: r.revoked_at,
+  };
+}
+
+/** Read the channel_tokens rows for `channel=ha-conversation`. Backed
+ *  by ctrl-api's canonical REST surface
+ *    GET /api/v1/channels/tokens?channel=ha-conversation
+ *  shipped in #111 PR4. Returns `{ tokens: ChannelTokenRow[] }` — the
+ *  card's haConversationCardCore.ts reads `t.scope.haInstanceId`, so
+ *  we normalise the wire's `scope_json` → `scope` here. */
 export const getHaInstalledTokens = async (_args: unknown, context: any) => {
   const instance = await getUserInstance(context);
   try {
-    return await proxyToTenant(instance, {
-      path: "/api/v1/channel-tokens",
+    const raw = (await proxyToTenant(instance, {
+      path: "/api/v1/channels/tokens",
       query: { channel: "ha-conversation" },
-    });
+    })) as { tokens?: ChannelTokenWireRow[] };
+    const tokens = Array.isArray(raw?.tokens)
+      ? raw.tokens.map(wireRowToCardRow)
+      : [];
+    return { tokens };
   } catch (e: any) {
-    // The shared channel-tokens surface lands in #111 PR1; the route
-    // is already on this branch, but tenants that haven't pulled the
-    // image yet will 404. Surface a graceful empty list so the card
-    // shows the "no installs yet" empty-state instead of an error.
+    // ctrl-api images predating PR4 will 404 the new path. Surface a
+    // graceful empty list so the card paints "no installs yet" instead
+    // of an error toast. The card has its own `unavailable` rendering
+    // for this signal.
     if (e instanceof HttpError && e.statusCode === 404) {
       return { tokens: [], unavailable: true };
     }
@@ -2717,7 +2752,12 @@ export const getHaInstalledTokens = async (_args: unknown, context: any) => {
 /** Mint a new ha-conversation channel token. The principal supplies
  *  a free-form label (typically `ha:<installId>`) and the install id
  *  (a uuid v4 or a slug) which we stash on `scope.haInstanceId` so
- *  ctrl-api's validator can pin auth back to a specific HA install. */
+ *  ctrl-api's validator can pin auth back to a specific HA install.
+ *
+ *  Backed by POST /api/v1/channels/tokens (#111 PR4). The card reads
+ *  `r.token` (legacy field name from the PR1 surface); we re-shape
+ *  the canonical `raw_token` response field to `token` at this layer
+ *  so the merged card (#137) keeps compiling unchanged. */
 export const mintHaChannelToken = async (
   args: { label?: string; installId?: string },
   context: any,
@@ -2735,23 +2775,40 @@ export const mintHaChannelToken = async (
   }
   const instance = await getUserInstance(context);
   try {
-    return await proxyToTenant(instance, {
+    const raw = (await proxyToTenant(instance, {
       method: "POST",
-      path: "/api/v1/channel-tokens/mint",
+      path: "/api/v1/channels/tokens",
       body: {
         channel: "ha-conversation",
         label: label ?? `ha:${installId}`,
         scope: { haInstanceId: installId },
       },
-    });
+    })) as {
+      id: string;
+      raw_token: string;
+      label: string | null;
+      created_at: number;
+      scope_json: Record<string, unknown> | null;
+    };
+    // Two-name response: `raw_token` matches the PR4 ctrl-api spec;
+    // `token` is the field the merged HaConversationSetupCard already
+    // reads. Both point at the same one-time string. `meta.id` mirrors
+    // the legacy mint shape so any other caller that grabs the id off
+    // `meta` (e.g. a CLI consumer) keeps working.
+    return {
+      id: raw.id,
+      label: raw.label,
+      created_at: raw.created_at,
+      raw_token: raw.raw_token,
+      token: raw.raw_token,
+      scope: raw.scope_json,
+      meta: { id: raw.id, label: raw.label, created_at: raw.created_at },
+    };
   } catch (e: any) {
-    // PR #111 PR4 will surface a user-facing mint flow; until then,
-    // bubble a recognisable error so the card can show "Coming in
-    // PR4" without breaking the page.
     if (e instanceof HttpError && e.statusCode === 404) {
       throw new HttpError(
         501,
-        "Mint surface not deployed yet (PR #111 PR4 lands the runtime mint).",
+        "Mint surface not deployed yet — ctrl-api image predates #111 PR4.",
       );
     }
     throw e;
@@ -2760,7 +2817,10 @@ export const mintHaChannelToken = async (
 
 /** Revoke (soft-delete) a channel token by id. The HA card uses this
  *  to retire an install — the per-install bearer stops authenticating
- *  on the next request. Idempotent on ctrl-api side. */
+ *  on the next request via channelTokenBearer. Idempotent at the
+ *  ctrl-api layer (revoking a revoked row is a no-op that still
+ *  returns 200). Backed by DELETE /api/v1/channels/tokens/:id (#111
+ *  PR4). */
 export const revokeChannelToken = async (
   args: { id?: string },
   context: any,
@@ -2771,14 +2831,14 @@ export const revokeChannelToken = async (
   const instance = await getUserInstance(context);
   try {
     return await proxyToTenant(instance, {
-      method: "POST",
-      path: `/api/v1/channel-tokens/${encodeURIComponent(args.id.trim())}/revoke`,
+      method: "DELETE",
+      path: `/api/v1/channels/tokens/${encodeURIComponent(args.id.trim())}`,
     });
   } catch (e: any) {
     if (e instanceof HttpError && e.statusCode === 404) {
       throw new HttpError(
         501,
-        "Revoke surface not deployed yet (PR #111 PR4 lands the runtime mint).",
+        "Revoke surface not deployed yet — ctrl-api image predates #111 PR4.",
       );
     }
     throw e;

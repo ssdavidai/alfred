@@ -63,6 +63,7 @@ import {
 } from "./routes/channels_recall.js";
 import { registerHaChannelRoutes } from "./routes/channels_ha.js";
 import { registerChannelTokenRoutes } from "./routes/channel_tokens.js";
+import { registerChannelsTokensRoutes } from "./routes/channels_tokens.js";
 import { registerComposioWebhookRoutes } from "./routes/composioWebhook.js";
 import { registerAlfredJournalRoutes } from "./routes/alfredJournal.js";
 import { registerAlfredDeliverRoutes } from "./routes/alfredDeliver.js";
@@ -196,6 +197,14 @@ export function createApiServer(): http.Server {
   // (#111 PR1, Sir's decision Q2). HA-conversation tokens land here; HA
   // Voice (#112) joins next; Paperclip migrates onto it later.
   registerChannelTokenRoutes();
+  // /api/v1/channels/tokens/* — canonical REST surface for the same
+  // shared bearer-token table (#111 PR4). REST-uniform: resource at the
+  // path root, methods pick the operation
+  // (POST mint, GET list, GET :id, DELETE revoke, POST :id/rotate).
+  // The legacy /api/v1/channel-tokens/* surface stays registered above
+  // so existing fleet bearers + the first cut of the HA card keep
+  // working; new web-layer callers (PR4 web operations) use this surface.
+  registerChannelsTokensRoutes();
   registerComposioWebhookRoutes();
   // The one-Alfred continuity layer — alfred_journal + principal mapping
   // (the persistence + lookup surface) plus alfred-deliver (the unified
