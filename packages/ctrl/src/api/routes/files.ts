@@ -54,6 +54,8 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import zlib from "node:zlib";
+import { pipeline } from "node:stream/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError, NotFoundError, ApiError } from "../errors.js";
@@ -65,6 +67,28 @@ import { getStateDb } from "../../db/state.js";
  *  docker-compose mount lands `files_data` here `:rw`. Override via
  *  FILES_ROOT for tests. */
 const FILES_ROOT = process.env.FILES_ROOT ?? "/files";
+
+/** Root of the cold-archive volume inside the ctrl-api container.
+ *  The docker-compose mount lands `files_cold_data` here `:rw`. The
+ *  daily FilesColdArchiveWorkflow promotes unread (>=90d) files from
+ *  FILES_ROOT to FILES_COLD_ROOT, zstd-compressed at level 19.
+ *  Override via FILES_COLD_ROOT for tests. Issue #114 PR 5. */
+const FILES_COLD_ROOT = process.env.FILES_COLD_ROOT ?? "/cold-files";
+
+/** Cold-storage path prefix used in `files.path` + `file_blobs.path`
+ *  to mark a blob as living on the cold volume. The blob GET route
+ *  strips the prefix, resolves the remainder under FILES_COLD_ROOT,
+ *  appends `.zst`, and streams a transparent decompression on the way
+ *  out. */
+const COLD_PATH_PREFIX = "cold:";
+
+/** Age threshold for cold-archive promotion. Files whose
+ *  `last_accessed_at` (or `uploaded_at` if never accessed) is older
+ *  than this become eligible for the daily sweep. Override via
+ *  FILES_COLD_AFTER_MS for tests. Default: 90 days. */
+export const COLD_AFTER_MS = Number(
+  process.env.FILES_COLD_AFTER_MS ?? String(90 * 24 * 60 * 60 * 1000),
+);
 
 const MB = 1024 * 1024;
 const GB = 1024 * MB;
@@ -165,6 +189,34 @@ function resolveBlobPath(relPath: string): string {
   return abs;
 }
 
+/** Resolve a `cold:<ULID>` path to its absolute on-disk location under
+ *  FILES_COLD_ROOT. The on-disk filename is `<ULID>.zst`. Throws
+ *  ValidationError if the resolution would escape FILES_COLD_ROOT
+ *  (defence in depth — the cold blob name is principal-untrusted in
+ *  the rare case a malformed row sneaks through). Issue #114 PR 5. */
+function resolveColdBlobPath(coldPath: string): string {
+  if (!coldPath.startsWith(COLD_PATH_PREFIX)) {
+    throw new ValidationError(`not a cold path: ${coldPath}`);
+  }
+  const tail = coldPath.slice(COLD_PATH_PREFIX.length);
+  // The cold filename is just the ULID — no path separators allowed.
+  if (tail.includes("/") || tail.includes("\\") || tail.includes("..")) {
+    throw new ValidationError(`cold path tail must be a bare ULID: ${tail}`);
+  }
+  const root = path.resolve(FILES_COLD_ROOT);
+  const abs = path.resolve(root, `${tail}.zst`);
+  if (!abs.startsWith(root + path.sep)) {
+    throw new ValidationError("cold path escapes the cold files root");
+  }
+  return abs;
+}
+
+/** True iff the given `files.path` / `file_blobs.path` value lives on
+ *  the cold-archive volume (vs the live volume). */
+export function isColdPath(p: string): boolean {
+  return p.startsWith(COLD_PATH_PREFIX);
+}
+
 // ── DB helpers ─────────────────────────────────────────────────────────────
 
 interface FileRow {
@@ -179,6 +231,8 @@ interface FileRow {
   uploaded_at: number;
   last_accessed_at: number | null;
   deleted_at: number | null;
+  cold_promoted_at: number | null;
+  ref_count: number;
 }
 
 function rowFromDb(raw: Record<string, unknown>): FileRow {
@@ -197,17 +251,64 @@ function rowFromDb(raw: Record<string, unknown>): FileRow {
     last_accessed_at:
       raw.last_accessed_at == null ? null : Number(raw.last_accessed_at),
     deleted_at: raw.deleted_at == null ? null : Number(raw.deleted_at),
+    cold_promoted_at:
+      raw.cold_promoted_at == null ? null : Number(raw.cold_promoted_at),
+    ref_count: raw.ref_count == null ? 1 : Number(raw.ref_count),
   };
 }
 
-function liveUsage(): { used_bytes: number; count: number } {
-  const row = getStateDb()
+/**
+ * Per-tenant storage usage, computed from the deduped `file_blobs`
+ * table so two `files` rows with the same sha256 count their bytes
+ * ONCE. Live (= un-promoted) and cold (= promoted) storage are
+ * reported separately so the /usage UI can break down "what's on the
+ * hot volume" vs "what's been frozen to the cold volume". Issue #114
+ * PR 5.
+ *
+ * The `count` is the number of distinct sha256s in each bucket, NOT
+ * the number of `files.id` rows — the row count is the principal's
+ * count of distinct uploads, exposed separately as `file_count` on
+ * the /usage response.
+ */
+function tenantUsage(): {
+  live_bytes: number;
+  cold_bytes: number;
+  blob_count_live: number;
+  blob_count_cold: number;
+  file_count: number;
+} {
+  const db = getStateDb();
+  // Only `file_blobs` rows with at least one live (non-tombstoned)
+  // `files` row referencing them contribute to usage. Tombstoned rows
+  // already had their ref_count decremented at delete time; a
+  // ref_count of zero means the bytes have been (or will be) reaped
+  // by the deletion path and don't count.
+  const live = db
     .prepare(
       `SELECT COALESCE(SUM(size_bytes), 0) AS used, COUNT(*) AS count
-       FROM files WHERE deleted_at IS NULL`,
+         FROM file_blobs
+        WHERE cold_promoted_at IS NULL AND ref_count > 0`,
     )
     .get() as { used: number; count: number };
-  return { used_bytes: Number(row.used), count: Number(row.count) };
+  const cold = db
+    .prepare(
+      `SELECT COALESCE(SUM(size_bytes), 0) AS used, COUNT(*) AS count
+         FROM file_blobs
+        WHERE cold_promoted_at IS NOT NULL AND ref_count > 0`,
+    )
+    .get() as { used: number; count: number };
+  const fileCount = (
+    db
+      .prepare(`SELECT COUNT(*) AS c FROM files WHERE deleted_at IS NULL`)
+      .get() as { c: number }
+  ).c;
+  return {
+    live_bytes: Number(live.used),
+    cold_bytes: Number(cold.used),
+    blob_count_live: Number(live.count),
+    blob_count_cold: Number(cold.count),
+    file_count: Number(fileCount),
+  };
 }
 
 // ── multipart parser ───────────────────────────────────────────────────────
@@ -523,6 +624,7 @@ function rowToJson(row: FileRow): Record<string, unknown> {
     uploaded_at: row.uploaded_at,
     last_accessed_at: row.last_accessed_at,
     deleted_at: row.deleted_at,
+    cold_promoted_at: row.cold_promoted_at,
   };
 }
 
@@ -537,6 +639,13 @@ function ensureFilesRoot(): void {
     // is an mkdtemp dir.
     console.warn(
       `[files] could not ensure ${FILES_ROOT}: ${(err as Error).message}`,
+    );
+  }
+  try {
+    fs.mkdirSync(FILES_COLD_ROOT, { recursive: true });
+  } catch (err) {
+    console.warn(
+      `[files] could not ensure ${FILES_COLD_ROOT}: ${(err as Error).message}`,
     );
   }
 }
@@ -554,6 +663,27 @@ export function registerFilesRoutes(): void {
   // The `uploaded_by` actor defaults to `principal`; callers may
   // override via the `uploaded_by` field but PR 1 doesn't yet validate
   // it against a registry (PR 2 wires that to the MCP tool actor).
+  //
+  // Issue #114 PR 5 — content-addressed dedupe.
+  // ----------------------------------------------------------------
+  // Before inserting the `files` row we look up the sha256 in the
+  // `file_blobs` table. If a row exists we DO NOT write the bytes a
+  // second time: the new `files.id` points at the existing
+  // `file_blobs.path` (which may be a live `<ULID>/<safe-name>` or a
+  // promoted `cold:<ULID>`) and the canonical row's `ref_count` ticks
+  // up by one. Quota counts only unique sha256s (see `tenantUsage`),
+  // so the second upload of the same content costs zero principal
+  // bytes. The response shape is unchanged plus a `deduped` flag for
+  // observability.
+  //
+  // Race note. Two concurrent uploads of the same content can both
+  // pass the pre-flight `file_blobs` SELECT and both write the bytes
+  // to disk. We resolve that race AFTER both writes complete: the
+  // INSERT-or-IGNORE on `file_blobs` is the serialization point — the
+  // loser sees `changes()==0`, deletes its just-written ULID dir, and
+  // resolves its `files.path` to the winner's canonical path. Net
+  // outcome: exactly one set of bytes on disk, two `files` rows
+  // sharing it, ref_count=2.
   addRoute("POST", "/api/v1/files/upload", async ({ req, res }) => {
     const ct = String(req.headers["content-type"] ?? "");
     if (!ct.toLowerCase().startsWith("multipart/form-data")) {
@@ -568,8 +698,10 @@ export function registerFilesRoutes(): void {
 
     // Per-tenant hard quota pre-flight: bail before opening the write
     // stream so we don't even allocate the ULID dir on a doomed upload.
-    const before = liveUsage();
-    if (before.used_bytes >= QUOTA_HARD_BYTES) {
+    // PR 5 — only the unique-sha256 bytes count (live + cold).
+    const before = tenantUsage();
+    const usedBeforeBytes = before.live_bytes + before.cold_bytes;
+    if (usedBeforeBytes >= QUOTA_HARD_BYTES) {
       throw new ApiError(
         507,
         "QUOTA_EXCEEDED",
@@ -606,10 +738,29 @@ export function registerFilesRoutes(): void {
       throw err;
     }
 
-    // Post-write quota check: if the upload's tail pushes us past the
-    // hard cap, refuse + clean up. (We allow temporarily exceeding the
-    // soft cap; the principal sees that in `/usage`.)
-    if (before.used_bytes + parsed.size > QUOTA_HARD_BYTES) {
+    // ── dedupe check ────────────────────────────────────────────────
+    // After the body's been drained + sha256'd, look up the hash in
+    // `file_blobs`. We re-check the quota using the deduped size: a
+    // duplicate adds zero bytes to live storage so it should never be
+    // 507'd, even if the principal is right at the cap.
+    const db = getStateDb();
+    const existingBlob = db
+      .prepare(
+        `SELECT sha256, path, size_bytes, cold_promoted_at
+           FROM file_blobs WHERE sha256 = ?`,
+      )
+      .get(parsed.sha256) as
+      | {
+          sha256: string;
+          path: string;
+          size_bytes: number;
+          cold_promoted_at: number | null;
+        }
+      | undefined;
+
+    // Pure-new (no `file_blobs` row) quota gate: would this push us
+    // over the hard cap? Duplicates skip this check.
+    if (!existingBlob && usedBeforeBytes + parsed.size > QUOTA_HARD_BYTES) {
       try {
         fs.rmSync(ulidDir, { recursive: true, force: true });
       } catch {
@@ -630,10 +781,6 @@ export function registerFilesRoutes(): void {
       parsed.text.filename ||
       "file";
     const safeName = sanitizeFilename(declared);
-    const finalPath = path.join(ulidDir, safeName);
-    fs.renameSync(scratchPath, finalPath);
-
-    const relPath = path.posix.join(id, safeName);
     const contentType =
       parsed.contentType ||
       parsed.text.content_type ||
@@ -641,33 +788,84 @@ export function registerFilesRoutes(): void {
     const principalLabel = parsed.text.principal_label || null;
     const uploadedBy = parsed.text.uploaded_by || "principal";
     const now = Date.now();
-
-    // The principal-facing `original_filename` is `declared` — the
-    // explicit text-field override beats the multipart part's own
-    // filename header, mirroring the precedence we used for the
-    // on-disk safe-name above. Otherwise an uploader who passes both
-    // would see the row carry the part header (which they treat as
-    // a transport detail) instead of the value they intended.
     const originalFilename = declared;
 
-    getStateDb()
-      .prepare(
-        `INSERT INTO files
-          (id, path, size_bytes, sha256, content_type, original_filename,
-           principal_label, uploaded_by, uploaded_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        id,
-        relPath,
-        parsed.size,
-        parsed.sha256,
-        contentType,
-        originalFilename,
-        principalLabel,
-        uploadedBy,
-        now,
-      );
+    let relPath: string;
+    let deduped: boolean;
+
+    if (existingBlob) {
+      // ── dedupe path: the bytes already live on disk (or in the
+      // cold archive). Throw away our scratch copy, bump the
+      // canonical row's ref_count, and point the new `files.id`
+      // row at the existing path. The principal sees the SAME path
+      // they would have gotten if they uploaded for the first time —
+      // the dedupe is transparent on the read side.
+      try {
+        fs.rmSync(ulidDir, { recursive: true, force: true });
+      } catch {
+        /* best-effort */
+      }
+      db.prepare(
+        `UPDATE file_blobs SET ref_count = ref_count + 1 WHERE sha256 = ?`,
+      ).run(parsed.sha256);
+      relPath = existingBlob.path;
+      deduped = true;
+    } else {
+      // ── novel path: finalize the on-disk filename, then INSERT
+      // OR IGNORE into `file_blobs`. The IGNORE catches the race
+      // where two concurrent uploads of the same content both pass
+      // the dedupe-check above; whoever loses the INSERT race wins
+      // the cleanup duty (delete their just-written ULID dir, point
+      // at the canonical path, bump ref_count).
+      const finalPath = path.join(ulidDir, safeName);
+      fs.renameSync(scratchPath, finalPath);
+      const novelRelPath = path.posix.join(id, safeName);
+      const insert = db
+        .prepare(
+          `INSERT OR IGNORE INTO file_blobs
+            (sha256, path, size_bytes, ref_count, created_at)
+           VALUES (?, ?, ?, 1, ?)`,
+        )
+        .run(parsed.sha256, novelRelPath, parsed.size, now);
+      if (insert.changes === 0) {
+        // Concurrent-write race lost. Adopt the canonical row.
+        const canonical = db
+          .prepare(
+            `SELECT path FROM file_blobs WHERE sha256 = ?`,
+          )
+          .get(parsed.sha256) as { path: string } | undefined;
+        try {
+          fs.rmSync(ulidDir, { recursive: true, force: true });
+        } catch {
+          /* best-effort */
+        }
+        db.prepare(
+          `UPDATE file_blobs SET ref_count = ref_count + 1 WHERE sha256 = ?`,
+        ).run(parsed.sha256);
+        relPath = canonical?.path ?? novelRelPath;
+        deduped = true;
+      } else {
+        relPath = novelRelPath;
+        deduped = false;
+      }
+    }
+
+    db.prepare(
+      `INSERT INTO files
+        (id, path, size_bytes, sha256, content_type, original_filename,
+         principal_label, uploaded_by, uploaded_at, ref_count)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+    ).run(
+      id,
+      relPath,
+      parsed.size,
+      parsed.sha256,
+      contentType,
+      originalFilename,
+      principalLabel,
+      uploadedBy,
+      now,
+    );
 
     sendJson(res, 201, {
       id,
@@ -679,6 +877,7 @@ export function registerFilesRoutes(): void {
       principal_label: principalLabel,
       uploaded_by: uploadedBy,
       uploaded_at: now,
+      deduped,
     });
   });
 
@@ -754,13 +953,29 @@ export function registerFilesRoutes(): void {
 
   // GET /api/v1/files/usage
   //
-  // Always-on observability. Reports the live total + count + both
-  // caps so the dashboard can decide when to show a warning band.
+  // Always-on observability. PR 5 changed two things:
+  //   * usage is computed from `file_blobs` (one row per unique
+  //     sha256) so two duplicate uploads count their bytes ONCE.
+  //   * the live/cold split is exposed so the /files dashboard can
+  //     show "X GB live + Y GB cold" — useful both for the storage
+  //     mental model and for sizing future cold-restore decisions.
+  //
+  // `used_bytes` + `count` are preserved as the PR 1 fields so
+  // existing callers (the /files page, MCP `files__usage`) keep
+  // working without a contract bump. `used_bytes` is the SUM of
+  // `live_bytes` + `cold_bytes`; `count` is `file_count`.
   addRoute("GET", "/api/v1/files/usage", async ({ res }) => {
-    const u = liveUsage();
+    const u = tenantUsage();
     sendJson(res, 200, {
-      used_bytes: u.used_bytes,
-      count: u.count,
+      // PR 1 compatibility surface (now the live+cold sum).
+      used_bytes: u.live_bytes + u.cold_bytes,
+      count: u.file_count,
+      // PR 5 surface — live vs cold breakdown.
+      live_bytes: u.live_bytes,
+      cold_bytes: u.cold_bytes,
+      blob_count_live: u.blob_count_live,
+      blob_count_cold: u.blob_count_cold,
+      file_count: u.file_count,
       soft_cap_bytes: QUOTA_SOFT_BYTES,
       hard_cap_bytes: QUOTA_HARD_BYTES,
       upload_soft_bytes: UPLOAD_SOFT_BYTES,
@@ -788,7 +1003,23 @@ export function registerFilesRoutes(): void {
   // GET /api/v1/files/blob/* — stream the raw bytes.
   //
   // Bumps `last_accessed_at` on every read so the principal can sort
-  // by recency in PR 3.
+  // by recency on the /files page AND so the cold-archive sweep can
+  // skip recently-touched files.
+  //
+  // Cold-aware (PR 5). If `files.path` starts with `cold:` the blob
+  // lives on the `files_cold_data` volume as `<ULID>.zst`. The
+  // decompression streams through `zlib.createZstdDecompress` so we
+  // never load a multi-MB file into memory — the inflated bytes go
+  // straight from the cold volume to the response socket. We can't
+  // pre-compute `Content-Length` (decompressed size != on-disk size)
+  // so we drop that header on cold reads and let the client read to
+  // EOF; the live path keeps its Content-Length for byte-range and
+  // download-progress goodness.
+  //
+  // A cold read does NOT auto-restore the blob to the live volume —
+  // the principal opts in via the explicit `POST /cold-restore/:file_id`
+  // route. Keeps the read path predictable: a cold read is a cold
+  // read until the operator says otherwise.
   addRoute("GET", "/api/v1/files/blob/*", async ({ res, params }) => {
     const relPath = params.path ?? "";
     if (!relPath) throw new ValidationError("path is required");
@@ -800,7 +1031,9 @@ export function registerFilesRoutes(): void {
       .get(relPath) as Record<string, unknown> | undefined;
     if (!raw) throw new NotFoundError(`file not found: ${relPath}`);
     const row = rowFromDb(raw);
-    const abs = resolveBlobPath(row.path);
+
+    const cold = isColdPath(row.path);
+    const abs = cold ? resolveColdBlobPath(row.path) : resolveBlobPath(row.path);
     if (!fs.existsSync(abs)) {
       // Row points at a missing blob — a real "this should never
       // happen", but if it does the principal deserves a clear 410.
@@ -810,11 +1043,22 @@ export function registerFilesRoutes(): void {
         `the row exists but the blob at ${row.path} is gone`,
       );
     }
-    const stat = fs.statSync(abs);
+
     const headers: Record<string, string | number> = {
       "Content-Type": row.content_type || "application/octet-stream",
-      "Content-Length": stat.size,
     };
+    if (!cold) {
+      // Hot path: we know the decompressed size; live blobs are
+      // stored verbatim so the on-disk size is the wire size.
+      const stat = fs.statSync(abs);
+      headers["Content-Length"] = stat.size;
+    } else {
+      // Cold path: the inflated stream is generated on the fly. We
+      // could pre-inflate to a temp file to learn the size, but that
+      // breaks the "never load into memory" invariant and costs an
+      // extra disk round trip. Drop the header instead.
+      headers["X-Cold-Blob"] = "1";
+    }
     if (row.original_filename) {
       // RFC 5987 / 6266 — use a UTF-8 encoded `filename*` so non-ASCII
       // characters survive the round trip without breaking older
@@ -828,7 +1072,11 @@ export function registerFilesRoutes(): void {
     db.prepare(
       `UPDATE files SET last_accessed_at = ? WHERE id = ?`,
     ).run(Date.now(), row.id);
-    streamBlobTo(res, abs);
+    if (cold) {
+      streamColdBlobTo(res, abs);
+    } else {
+      streamBlobTo(res, abs);
+    }
   });
 
   // PATCH /api/v1/files/* — update principal-owned metadata.
@@ -891,10 +1139,14 @@ export function registerFilesRoutes(): void {
 
   // DELETE /api/v1/files/* — soft delete.
   //
-  // Sets the tombstone column and unlinks the on-disk blob (the row
-  // and the ULID dir stay for the audit trail). PR 2 will tighten the
-  // ACL to "only the principal actor"; PR 1 accepts any authenticated
-  // caller.
+  // Sets the tombstone column. With dedupe (PR 5) the on-disk bytes
+  // are SHARED via `file_blobs`, so the unlink only happens when the
+  // canonical row's `ref_count` drops to zero — otherwise the other
+  // live `files.id` rows would suddenly point at a missing blob. The
+  // `files` row stays for the audit trail either way.
+  //
+  // Cold blobs are unlinked from FILES_COLD_ROOT instead of
+  // FILES_ROOT when their ref_count hits zero.
   addRoute("DELETE", "/api/v1/files/*", async ({ res, params }) => {
     const relPath = params.path ?? "";
     if (!relPath) throw new ValidationError("path is required");
@@ -906,17 +1158,410 @@ export function registerFilesRoutes(): void {
       .get(relPath) as Record<string, unknown> | undefined;
     if (!raw) throw new NotFoundError(`file not found: ${relPath}`);
     const row = rowFromDb(raw);
-    const abs = resolveBlobPath(row.path);
     const now = Date.now();
+    // Soft-delete the principal-facing row.
     db.prepare(`UPDATE files SET deleted_at = ? WHERE id = ?`).run(now, row.id);
-    try {
-      if (fs.existsSync(abs)) fs.unlinkSync(abs);
-    } catch (err) {
-      console.warn(
-        `[files] could not unlink ${abs}: ${(err as Error).message}`,
-      );
+    // Decrement the canonical blob's ref_count, then physically unlink
+    // only if it just hit zero. INSERT-or-IGNORE on upload guarantees
+    // exactly one `file_blobs` row per sha256, so this UPDATE +
+    // SELECT is race-free under SQLite's per-statement atomicity.
+    db.prepare(
+      `UPDATE file_blobs SET ref_count = ref_count - 1 WHERE sha256 = ?`,
+    ).run(row.sha256);
+    const blob = db
+      .prepare(
+        `SELECT path, ref_count, cold_promoted_at
+           FROM file_blobs WHERE sha256 = ?`,
+      )
+      .get(row.sha256) as
+      | { path: string; ref_count: number; cold_promoted_at: number | null }
+      | undefined;
+    if (blob && blob.ref_count <= 0) {
+      // Last reference dropped — reap the on-disk bytes + the
+      // canonical row. The ULID dir (live) or `<ULID>.zst` file
+      // (cold) is unlinked best-effort; the SQL state is the source
+      // of truth.
+      try {
+        if (isColdPath(blob.path)) {
+          const abs = resolveColdBlobPath(blob.path);
+          if (fs.existsSync(abs)) fs.unlinkSync(abs);
+        } else {
+          const abs = resolveBlobPath(blob.path);
+          if (fs.existsSync(abs)) fs.unlinkSync(abs);
+          // The ULID parent dir was the upload-namespace wrapper;
+          // remove it too if it's empty. Best-effort: a concurrent
+          // mkdir would race here harmlessly.
+          const parentDir = path.dirname(abs);
+          try {
+            fs.rmdirSync(parentDir);
+          } catch {
+            /* dir not empty / not ours / etc — fine. */
+          }
+        }
+      } catch (err) {
+        console.warn(
+          `[files] could not unlink ${blob.path}: ${(err as Error).message}`,
+        );
+      }
+      db.prepare(`DELETE FROM file_blobs WHERE sha256 = ?`).run(row.sha256);
     }
     sendJson(res, 200, { id: row.id, path: row.path, deleted_at: now });
+  });
+
+  // GET /api/v1/files/cold-candidates?older_than_ms=…
+  //
+  // Operator-facing list of files eligible for cold promotion (issue
+  // #114 PR 5). A row is a candidate when:
+  //
+  //   * `deleted_at IS NULL`              (not tombstoned)
+  //   * `cold_promoted_at IS NULL`        (not already promoted)
+  //   * `COALESCE(last_accessed_at, uploaded_at) < now - older_than_ms`
+  //
+  // The `older_than_ms` query arg defaults to COLD_AFTER_MS (90d). The
+  // daily FilesColdArchiveWorkflow consumes this surface, then loops
+  // POST /cold-promote/:file_id for each row.
+  //
+  // We deliberately project the per-file row (not the canonical
+  // `file_blobs` row) — multiple `files.id` rows can share a sha256
+  // via dedupe, and the workflow needs the per-row id to address the
+  // promote endpoint. The activity de-dupes on the workflow side.
+  addRoute("GET", "/api/v1/files/cold-candidates", async ({ res, query }) => {
+    const olderRaw = Number(
+      query.get("older_than_ms") ?? String(COLD_AFTER_MS),
+    );
+    const olderThanMs =
+      Number.isFinite(olderRaw) && olderRaw >= 0 ? olderRaw : COLD_AFTER_MS;
+    const limitRaw = Number(query.get("limit") ?? "500");
+    const limit =
+      Number.isFinite(limitRaw) && limitRaw > 0
+        ? Math.min(5000, Math.floor(limitRaw))
+        : 500;
+    const cutoff = Date.now() - olderThanMs;
+    const rows = getStateDb()
+      .prepare(
+        `SELECT * FROM files
+          WHERE deleted_at IS NULL
+            AND cold_promoted_at IS NULL
+            AND COALESCE(last_accessed_at, uploaded_at) < ?
+          ORDER BY COALESCE(last_accessed_at, uploaded_at) ASC
+          LIMIT ?`,
+      )
+      .all(cutoff, limit) as Record<string, unknown>[];
+    sendJson(res, 200, {
+      cutoff_ms: cutoff,
+      older_than_ms: olderThanMs,
+      items: rows.map((r) => rowToJson(rowFromDb(r))),
+      total: rows.length,
+    });
+  });
+
+  // POST /api/v1/files/cold-promote/:file_id
+  //
+  // Move ONE file from the live volume to the cold volume. Steps:
+  //
+  //   1. Look up the row + canonical `file_blobs` row by file_id.
+  //   2. Refuse if the blob is already cold, or if the row is
+  //      tombstoned, or if the live file is missing on disk.
+  //   3. Stream the live bytes through `zlib.createZstdCompress` at
+  //      level 19 into a temp file under FILES_COLD_ROOT. (We use a
+  //      temp + rename so a crash mid-promote never leaves a
+  //      half-written cold blob.)
+  //   4. Atomically swap: update `file_blobs.path` to `cold:<ULID>`
+  //      + `cold_promoted_at`, then update every live `files` row
+  //      that shares the sha256 to the cold path + `cold_promoted_at`
+  //      stamp, then unlink the live bytes.
+  //
+  // If step 4's DB write fails the temp file is cleaned up. If the
+  // unlink fails after the DB update the next sweep will skip the
+  // row (`cold_promoted_at IS NOT NULL`) and the orphan can be reaped
+  // by ops. Better that than rolling back the DB and re-promoting on
+  // every sweep tick.
+  addRoute("POST", "/api/v1/files/cold-promote/:file_id", async ({ res, params }) => {
+    const fileId = params.file_id ?? "";
+    if (!fileId) throw new ValidationError("file_id is required");
+    const db = getStateDb();
+    const raw = db
+      .prepare(`SELECT * FROM files WHERE id = ? LIMIT 1`)
+      .get(fileId) as Record<string, unknown> | undefined;
+    if (!raw) throw new NotFoundError(`file not found: ${fileId}`);
+    const row = rowFromDb(raw);
+    if (row.deleted_at != null) {
+      throw new ApiError(
+        409,
+        "TOMBSTONED",
+        `cannot promote a tombstoned file: ${fileId}`,
+      );
+    }
+    const blob = db
+      .prepare(`SELECT * FROM file_blobs WHERE sha256 = ?`)
+      .get(row.sha256) as
+      | {
+          sha256: string;
+          path: string;
+          size_bytes: number;
+          ref_count: number;
+          created_at: number;
+          cold_promoted_at: number | null;
+        }
+      | undefined;
+    if (!blob) {
+      throw new ApiError(
+        410,
+        "BLOB_INDEX_MISSING",
+        `file_blobs row missing for sha256 ${row.sha256}`,
+      );
+    }
+    if (blob.cold_promoted_at != null || isColdPath(blob.path)) {
+      // Already cold — idempotent no-op. Update the per-file row's
+      // cold_promoted_at + path in case it's drifted (the canonical
+      // blob is the source of truth).
+      db.prepare(
+        `UPDATE files SET path = ?, cold_promoted_at = ? WHERE sha256 = ? AND deleted_at IS NULL`,
+      ).run(blob.path, blob.cold_promoted_at ?? Date.now(), row.sha256);
+      sendJson(res, 200, {
+        id: row.id,
+        sha256: row.sha256,
+        path: blob.path,
+        cold_promoted_at: blob.cold_promoted_at,
+        already_cold: true,
+      });
+      return;
+    }
+    const liveAbs = resolveBlobPath(blob.path);
+    if (!fs.existsSync(liveAbs)) {
+      throw new ApiError(
+        410,
+        "BLOB_MISSING",
+        `the blob at ${blob.path} is gone (cannot promote)`,
+      );
+    }
+    // Derive the cold-volume ULID from the live path's first segment.
+    // The live path layout is `<ULID>/<safe-name>`; reuse the same
+    // ULID as the cold filename so the relationship is auditable.
+    const liveUlid = blob.path.split("/")[0];
+    if (!/^[0-9A-HJKMNP-TV-Z]{26}$/.test(liveUlid)) {
+      throw new ApiError(
+        500,
+        "INVALID_LIVE_PATH",
+        `live path does not start with a ULID: ${blob.path}`,
+      );
+    }
+    const coldRelPath = `${COLD_PATH_PREFIX}${liveUlid}`;
+    const coldFinalAbs = path.join(FILES_COLD_ROOT, `${liveUlid}.zst`);
+    const coldTempAbs = `${coldFinalAbs}.in-progress`;
+
+    // Stream zstd-compress live → temp file. createZstdCompress is
+    // a Transform stream, so `pipeline(read, compress, write)` keeps
+    // the data flowing chunk-by-chunk; nothing ever lives fully in
+    // memory.
+    const readStream = fs.createReadStream(liveAbs);
+    const compressor = (zlib as unknown as {
+      createZstdCompress: (opts?: unknown) => NodeJS.ReadWriteStream;
+      constants: Record<string, number>;
+    }).createZstdCompress({
+      params: {
+        // Level 19 is the strong-ratio knob; cold writes are
+        // one-shot so CPU spend is fine.
+        [(zlib as unknown as { constants: Record<string, number> }).constants
+          .ZSTD_c_compressionLevel ?? 0]: 19,
+      },
+    });
+    const writeStream = fs.createWriteStream(coldTempAbs);
+    try {
+      await pipeline(readStream, compressor, writeStream);
+    } catch (err) {
+      try {
+        if (fs.existsSync(coldTempAbs)) fs.unlinkSync(coldTempAbs);
+      } catch {
+        /* best-effort */
+      }
+      throw new ApiError(
+        500,
+        "COMPRESS_FAILED",
+        `zstd compression failed: ${(err as Error).message}`,
+      );
+    }
+    fs.renameSync(coldTempAbs, coldFinalAbs);
+
+    const promotedAt = Date.now();
+    const compressedSize = fs.statSync(coldFinalAbs).size;
+    // Atomic DB swap.
+    db.exec("BEGIN");
+    try {
+      db.prepare(
+        `UPDATE file_blobs
+            SET path = ?, cold_promoted_at = ?
+          WHERE sha256 = ?`,
+      ).run(coldRelPath, promotedAt, row.sha256);
+      db.prepare(
+        `UPDATE files
+            SET path = ?, cold_promoted_at = ?
+          WHERE sha256 = ? AND deleted_at IS NULL`,
+      ).run(coldRelPath, promotedAt, row.sha256);
+      db.exec("COMMIT");
+    } catch (err) {
+      db.exec("ROLLBACK");
+      try {
+        if (fs.existsSync(coldFinalAbs)) fs.unlinkSync(coldFinalAbs);
+      } catch {
+        /* best-effort */
+      }
+      throw err;
+    }
+    // Unlink the live bytes + the now-empty ULID dir. Best-effort
+    // after the DB has been flipped — if these fail the cold side is
+    // already authoritative.
+    try {
+      fs.unlinkSync(liveAbs);
+      const parentDir = path.dirname(liveAbs);
+      try {
+        fs.rmdirSync(parentDir);
+      } catch {
+        /* dir not empty / not ours / etc — fine. */
+      }
+    } catch (err) {
+      console.warn(
+        `[files] cold-promote: could not unlink live ${liveAbs}: ${(err as Error).message}`,
+      );
+    }
+    sendJson(res, 200, {
+      id: row.id,
+      sha256: row.sha256,
+      path: coldRelPath,
+      cold_promoted_at: promotedAt,
+      live_bytes: blob.size_bytes,
+      cold_bytes: compressedSize,
+      compression_ratio: blob.size_bytes
+        ? Number((blob.size_bytes / compressedSize).toFixed(3))
+        : null,
+    });
+  });
+
+  // POST /api/v1/files/cold-restore/:file_id
+  //
+  // Manually pull a file BACK to the live volume — the inverse of
+  // cold-promote. Steps mirror the promotion path: decompress the
+  // cold blob into a live temp file, then atomically flip the SQL
+  // path back to the live ULID layout and unlink the cold copy.
+  //
+  // This is operator-only; the read path (GET /blob/*) intentionally
+  // does NOT auto-restore on access so cold-promoted files stay cold
+  // until the operator explicitly opts in.
+  addRoute("POST", "/api/v1/files/cold-restore/:file_id", async ({ res, params }) => {
+    const fileId = params.file_id ?? "";
+    if (!fileId) throw new ValidationError("file_id is required");
+    const db = getStateDb();
+    const raw = db
+      .prepare(`SELECT * FROM files WHERE id = ? LIMIT 1`)
+      .get(fileId) as Record<string, unknown> | undefined;
+    if (!raw) throw new NotFoundError(`file not found: ${fileId}`);
+    const row = rowFromDb(raw);
+    if (row.deleted_at != null) {
+      throw new ApiError(
+        409,
+        "TOMBSTONED",
+        `cannot restore a tombstoned file: ${fileId}`,
+      );
+    }
+    const blob = db
+      .prepare(`SELECT * FROM file_blobs WHERE sha256 = ?`)
+      .get(row.sha256) as
+      | { sha256: string; path: string; size_bytes: number; cold_promoted_at: number | null }
+      | undefined;
+    if (!blob) {
+      throw new ApiError(
+        410,
+        "BLOB_INDEX_MISSING",
+        `file_blobs row missing for sha256 ${row.sha256}`,
+      );
+    }
+    if (!isColdPath(blob.path)) {
+      // Already live — idempotent no-op.
+      sendJson(res, 200, {
+        id: row.id,
+        sha256: row.sha256,
+        path: blob.path,
+        cold_promoted_at: null,
+        already_live: true,
+      });
+      return;
+    }
+    const coldAbs = resolveColdBlobPath(blob.path);
+    if (!fs.existsSync(coldAbs)) {
+      throw new ApiError(
+        410,
+        "BLOB_MISSING",
+        `the cold blob at ${blob.path} is gone (cannot restore)`,
+      );
+    }
+    const coldUlid = blob.path.slice(COLD_PATH_PREFIX.length);
+    // Reconstruct the live path by reusing the file's original name
+    // from the principal-facing row. If `original_filename` is null
+    // (a rare debug case), fall back to "file" — sanitize either way.
+    const safeName = sanitizeFilename(row.original_filename ?? "file");
+    const liveRelPath = path.posix.join(coldUlid, safeName);
+    const liveUlidDir = resolveBlobPath(coldUlid);
+    fs.mkdirSync(liveUlidDir, { recursive: true });
+    const liveFinalAbs = path.join(liveUlidDir, safeName);
+    const liveTempAbs = `${liveFinalAbs}.in-progress`;
+
+    const readStream = fs.createReadStream(coldAbs);
+    const decompressor = (zlib as unknown as {
+      createZstdDecompress: (opts?: unknown) => NodeJS.ReadWriteStream;
+    }).createZstdDecompress();
+    const writeStream = fs.createWriteStream(liveTempAbs);
+    try {
+      await pipeline(readStream, decompressor, writeStream);
+    } catch (err) {
+      try {
+        if (fs.existsSync(liveTempAbs)) fs.unlinkSync(liveTempAbs);
+      } catch {
+        /* best-effort */
+      }
+      throw new ApiError(
+        500,
+        "DECOMPRESS_FAILED",
+        `zstd decompression failed: ${(err as Error).message}`,
+      );
+    }
+    fs.renameSync(liveTempAbs, liveFinalAbs);
+
+    db.exec("BEGIN");
+    try {
+      db.prepare(
+        `UPDATE file_blobs
+            SET path = ?, cold_promoted_at = NULL
+          WHERE sha256 = ?`,
+      ).run(liveRelPath, row.sha256);
+      db.prepare(
+        `UPDATE files
+            SET path = ?, cold_promoted_at = NULL
+          WHERE sha256 = ? AND deleted_at IS NULL`,
+      ).run(liveRelPath, row.sha256);
+      db.exec("COMMIT");
+    } catch (err) {
+      db.exec("ROLLBACK");
+      try {
+        if (fs.existsSync(liveFinalAbs)) fs.unlinkSync(liveFinalAbs);
+      } catch {
+        /* best-effort */
+      }
+      throw err;
+    }
+    try {
+      fs.unlinkSync(coldAbs);
+    } catch (err) {
+      console.warn(
+        `[files] cold-restore: could not unlink cold ${coldAbs}: ${(err as Error).message}`,
+      );
+    }
+    sendJson(res, 200, {
+      id: row.id,
+      sha256: row.sha256,
+      path: liveRelPath,
+      cold_promoted_at: null,
+      restored_bytes: blob.size_bytes,
+    });
   });
 }
 
@@ -936,4 +1581,35 @@ function streamBlobTo(res: ServerResponse, abs: string): void {
     }
   });
   rs.pipe(res);
+}
+
+/** Stream the contents of a cold-archived `<ULID>.zst` blob to the
+ *  response, decompressing on the fly. The read + decompress + write
+ *  pipeline keeps everything chunked — the inflated bytes never sit
+ *  in a Node buffer at full size, so 100 MB cold reads stay within
+ *  the same memory budget as a 100 KB one. Issue #114 PR 5. */
+function streamColdBlobTo(res: ServerResponse, abs: string): void {
+  const rs = fs.createReadStream(abs);
+  const decompressor = (zlib as unknown as {
+    createZstdDecompress: (opts?: unknown) => NodeJS.ReadWriteStream;
+  }).createZstdDecompress();
+  rs.on("error", (err) => {
+    console.error(`[files] cold blob read error: ${(err as Error).message}`);
+    try {
+      res.end();
+    } catch {
+      /* noop */
+    }
+  });
+  decompressor.on("error", (err) => {
+    console.error(
+      `[files] cold blob decompress error: ${(err as Error).message}`,
+    );
+    try {
+      res.end();
+    } catch {
+      /* noop */
+    }
+  });
+  rs.pipe(decompressor).pipe(res);
 }

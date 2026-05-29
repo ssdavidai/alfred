@@ -461,6 +461,20 @@ services:
       # volume `:ro` and write only through POST /api/v1/files/upload.
       # Issue #114 PR 1; see docs/specs/issue-114-local-file-storage.md §5.1.
       - files_data:/files
+      # Store 5 cold archive (#114 PR 5) — companion volume for ZSTD-19
+      # compressed copies of any blob untouched for 90+ days. The daily
+      # FilesColdArchiveWorkflow (alfred-learn) drives the promotion via
+      # ctrl-api's POST /api/v1/files/cold-promote endpoint, which:
+      #   1. reads the live blob from /files
+      #   2. streams it through node:zlib.createZstdCompress at level 19
+      #   3. lands the compressed bytes at /cold-files/<ULID>.zst
+      #   4. atomically flips file_blobs.path to `cold:<ULID>` and
+      #      unlinks the live copy.
+      # GET /api/v1/files/blob/* transparently decompresses cold reads
+      # via createZstdDecompress — the principal sees the same shape on
+      # the read side either way. Only ctrl-api needs RW on this volume;
+      # no other service mounts it.
+      - files_cold_data:/cold-files
       # ctrl-api restarts sibling containers (worker ops, chore runs).
       - /var/run/docker.sock:/var/run/docker.sock
       # The host compose dir, bind-mounted RW. ctrl-api modules
@@ -1538,6 +1552,11 @@ volumes:
   # write only through POST /api/v1/files/upload. Issue #114 PR 1.
   # docs/specs/issue-114-local-file-storage.md.
   files_data:
+  # Store 5 cold archive (#114 PR 5) — companion to files_data, holds
+  # ZSTD-19 compressed copies of any blob untouched for 90+ days. ctrl-api
+  # is the sole consumer; nothing else mounts this volume. The blob layout
+  # is `<ULID>.zst`, one file per unique sha256 (file_blobs row).
+  files_cold_data:
   hermes_data:
   # Sealed builder runtime workspace — used by the codex-builder Hermes
   # profile only. Owned uid 10001 mode 0700 by the init container (PR 4).

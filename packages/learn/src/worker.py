@@ -28,6 +28,9 @@ from src.workflows.plane_sync import PlaneSyncWorkflow
 from src.workflows.plane_reverse_sync import PlaneReverseSyncWorkflow
 from src.workflows.plane_reconciliation import PlaneReconciliationWorkflow
 from src.workflows.fleet_audit import FleetAuditWorkflow
+from src.workflows.files_cold_archive import (
+    FilesColdArchiveWorkflow,
+)
 from src.workflows.composio_reconnect_cleanup import (
     ComposioReconnectCleanupWorkflow,
 )
@@ -401,6 +404,15 @@ from src.activities.composio_reconnect import (
     verify_new_connection_active,
 )
 
+# Files cold-archive sweep (#114 PR 5) — daily promotion of unaccessed
+# blobs from `files_data` (live volume) to `files_cold_data` (ZSTD-19
+# compressed). ctrl-api owns the compression + atomic SQL flip; the
+# workflow is pure orchestration over these two activities.
+from src.activities.files_cold_archive import (
+    find_cold_candidates,
+    promote_to_cold,
+)
+
 # Phase 2 #23: the openclaw .bak-* session reaper activity
 # (sweep_openclaw_bak_sessions) was DELETED — Hermes' SQLite
 # SessionStore removes the O(N) readdir leak it existed to mop up.
@@ -711,6 +723,7 @@ _STATIC_WORKFLOWS = [
     PlaneReconciliationWorkflow,
     FleetAuditWorkflow,
     ComposioReconnectCleanupWorkflow,
+    FilesColdArchiveWorkflow,
     # OpenclawSessionSweepWorkflow removed — Phase 2 #23.
     # StewardWorkflow kept registered as a tombstone (#52): no longer
     # scheduled per-matter, but callable ad-hoc and harmless to register.
@@ -985,6 +998,9 @@ ALL_ACTIVITIES = [
     verify_new_connection_active,
     delete_old_connection,
     remove_ledger_entry,
+    # Files cold-archive sweep (#114 PR 5)
+    find_cold_candidates,
+    promote_to_cold,
     # sweep_openclaw_bak_sessions removed — Phase 2 #23.
     # Plane reverse sync (#536 B7)
     plane_reverse_sync_is_enabled,

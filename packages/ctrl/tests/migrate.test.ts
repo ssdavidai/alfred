@@ -36,13 +36,13 @@ describe("state.db migration runner", () => {
     const db = new DatabaseSync(":memory:");
     db.exec(schema);
     const v = runMigrations(db);
-    // Latest version moves as new migrations land. Today: 9
+    // Latest version moves as new migrations land. Today: 10
     // (0001_fix_pack + 0002_alfred_journal + 0003_tailscale_connection
     // + 0004_channel_tokens + 0005_ha_channel + 0006_files_table
     // + 0007_recall + 0008_ha_event_subscription
-    // + 0009_ha_registry_vanished).
-    assert.equal(v, 9, "migrated to latest version");
-    assert.equal(userVersion(db), 9);
+    // + 0009_ha_registry_vanished + 0010_files_cold_archive).
+    assert.equal(v, 10, "migrated to latest version");
+    assert.equal(userVersion(db), 10);
     assert.ok(cols(db, "observation").includes("processed_at"), "0001: processed_at present after migrate");
     // 0002: alfred_journal + alfred_principal tables present.
     const tables = (
@@ -137,6 +137,78 @@ describe("state.db migration runner", () => {
       "0009: ha_registry.vanished_at column added",
     );
 
+    // 0010: file_blobs table + files.cold_promoted_at / ref_count
+    // columns + idx_files_last_accessed (issue #114 PR 5).
+    assert.ok(
+      tables.includes("file_blobs"),
+      "0010: file_blobs table created",
+    );
+    const blobCols = cols(db, "file_blobs");
+    for (const required of [
+      "sha256",
+      "path",
+      "size_bytes",
+      "ref_count",
+      "created_at",
+      "cold_promoted_at",
+    ]) {
+      assert.ok(
+        blobCols.includes(required),
+        `0010: file_blobs.${required} present`,
+      );
+    }
+    const fileCols = cols(db, "files");
+    assert.ok(
+      fileCols.includes("cold_promoted_at"),
+      "0010: files.cold_promoted_at present",
+    );
+    assert.ok(
+      fileCols.includes("ref_count"),
+      "0010: files.ref_count present",
+    );
+    // The PR 1 UNIQUE constraint on files.path is gone (dedupe needs
+    // two files.id rows to point at the same path). Verify the
+    // constraint was dropped: inserting two rows with the same path
+    // must succeed.
+    const filesNow = Date.now();
+    db.prepare(
+      `INSERT INTO files
+        (id, path, size_bytes, sha256, content_type, original_filename,
+         principal_label, uploaded_by, uploaded_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      "01HFTEST0000000000000000A",
+      "01HFTEST/dup.bin",
+      4,
+      "abc",
+      null,
+      "dup.bin",
+      null,
+      "principal",
+      filesNow,
+    );
+    assert.doesNotThrow(() =>
+      db
+        .prepare(
+          `INSERT INTO files
+            (id, path, size_bytes, sha256, content_type, original_filename,
+             principal_label, uploaded_by, uploaded_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          "01HFTEST0000000000000000B",
+          "01HFTEST/dup.bin",
+          4,
+          "abc",
+          null,
+          "dup.bin",
+          null,
+          "principal",
+          filesNow,
+        ),
+      "0010: files.path UNIQUE constraint dropped — dedupe needs shared paths",
+    );
+
     db.close();
   });
 
@@ -145,7 +217,7 @@ describe("state.db migration runner", () => {
     db.exec(schema);
     runMigrations(db);
     const v2 = runMigrations(db);
-    assert.equal(v2, 9);
+    assert.equal(v2, 10);
     assert.equal(
       cols(db, "observation").filter((c) => c === "processed_at").length,
       1,

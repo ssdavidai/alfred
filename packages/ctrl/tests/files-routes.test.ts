@@ -248,10 +248,13 @@ describe("/api/v1/files/* — PR 1", () => {
   });
 
   beforeEach(() => {
-    // Clear the files table + the on-disk blobs between tests so each
-    // case sees a quiet starting state.
+    // Clear the files + file_blobs tables + the on-disk blobs between
+    // tests so each case sees a quiet starting state. (PR 5 added the
+    // file_blobs companion table that holds the actual size totals
+    // for /usage.)
     const db = getStateDb();
     db.exec("DELETE FROM files");
+    db.exec("DELETE FROM file_blobs");
     if (fs.existsSync(FILES_ROOT)) {
       for (const entry of fs.readdirSync(FILES_ROOT)) {
         try {
@@ -382,11 +385,14 @@ describe("/api/v1/files/* — PR 1", () => {
 
     it("507 QUOTA_EXCEEDED when the upload would blow the hard cap", async () => {
       // FILES_QUOTA_HARD_BYTES = 1 MiB; one 600 KiB upload fits, the
-      // next 600 KiB pushes us over.
-      const half = Buffer.alloc(600 * 1024, "a");
-      const r1 = await uploadBlob("first.bin", half, "application/octet-stream");
+      // next DISTINCT-CONTENT 600 KiB pushes us over. PR 5 dedupes by
+      // sha256 so the bytes have to be different — use Buffer.alloc
+      // with two different fill characters.
+      const first = Buffer.alloc(600 * 1024, "a");
+      const second = Buffer.alloc(600 * 1024, "b");
+      const r1 = await uploadBlob("first.bin", first, "application/octet-stream");
       assert.equal(r1.status, 201);
-      const r2 = await uploadBlob("second.bin", half, "application/octet-stream");
+      const r2 = await uploadBlob("second.bin", second, "application/octet-stream");
       assert.equal(r2.status, 507);
       assert.equal(r2.payload.error.code, "QUOTA_EXCEEDED");
       // Verify the failed upload's scratch dir was cleaned up.

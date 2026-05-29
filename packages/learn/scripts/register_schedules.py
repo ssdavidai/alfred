@@ -401,6 +401,23 @@ CALENDAR_SCHEDULES = [
             minute=[ScheduleRange(start=0)],
         ),
     },
+    {
+        # #114 PR 5 — daily cold-archive sweep for Store 5 (files).
+        # Walks the principal's files table for blobs untouched in
+        # >=90 days, hands each one to ctrl-api's
+        # POST /api/v1/files/cold-promote endpoint (zstd-19 compress
+        # → write to `files_cold_data` → unlink live → atomic SQL
+        # flip). Runs at 03:00 LOCAL — low-traffic window, sits
+        # comfortably between nightly_maintenance and the morning
+        # briefing. The sweep is per-entry-isolated so one bad file
+        # never wedges the rest of the run.
+        "id": "al-files-cold-archive",
+        "workflow": "FilesColdArchiveWorkflow",
+        "calendar": ScheduleCalendarSpec(
+            hour=[ScheduleRange(start=3)],
+            minute=[ScheduleRange(start=0)],
+        ),
+    },
 ]
 
 
