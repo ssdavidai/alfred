@@ -47,6 +47,10 @@ import {
   getTailscalePeers,
   connectTailscale,
   disconnectTailscale,
+  getHaStatus,
+  getHaRegistry,
+  connectHa,
+  disconnectHa,
   updateCredentials,
 } from "wasp/client/operations";
 import { Frame } from "../client/components/ab/Frame";
@@ -102,6 +106,7 @@ import {
 import RecallCard from "./RecallCard";
 import { HaConversationSetupCard } from "./HaConversationSetupCard";
 import { VoiceWakeWordsCard } from "./VoiceWakeWordsCard";
+import { HaCard } from "./HaCard";
 
 // F57/C14 — the email card reads the live ctrl-api status, not a phantom
 // Instance row. `inbox_address` is only present once `configured`.
@@ -366,6 +371,17 @@ export default function ChannelsPage() {
               so the substantial dial form stays out of this already
               large page. */}
           <RecallCard />
+
+          {/* Home Assistant — #110 PR3 (2026-05-29). Operator deep-
+              integrates HA: paste URL + LLAT, ctrl-api probes /api/ +
+              /api/config, persists state.db row + Vaultwarden item.
+              Five UI states (unconfigured / connecting / connected /
+              error / disconnected) come from haCardCore. The connected
+              view surfaces ha_url + ha_version + registry counts +
+              an expander for "Recent runs" (PR4 ships the route;
+              the card 404-handles gracefully). Alphabetically before
+              <OmiCard /> (H before O). */}
+          <HaCard />
 
           {/* Omi — Phase-6b live card (Lane III, 2026-05-25). Surfaces the
               4 OMI channel states (unconfigured / needs_groq_key /

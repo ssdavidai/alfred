@@ -1022,6 +1022,30 @@ query getEsphomeDevices {
   entities: []
 }
 
+// Lane I (Home Assistant, #110 PR3 — 2026-05-29) — operator deep-integrates
+// HA on /channels. Four ops backed by ctrl-api /api/v1/channels/ha/*
+// (PR1 #133 backfill landed the routes). State derivation lives in
+// haCardCore.ts. PR4 lands the /runs ledger; PR5 backfills the registry.
+query getHaStatus {
+  fn: import { getHaStatus } from "@src/dashboard/operations",
+  entities: []
+}
+
+query getHaRegistry {
+  fn: import { getHaRegistry } from "@src/dashboard/operations",
+  entities: []
+}
+
+action connectHa {
+  fn: import { connectHa } from "@src/dashboard/operations",
+  entities: []
+}
+
+action disconnectHa {
+  fn: import { disconnectHa } from "@src/dashboard/operations",
+  entities: []
+}
+
 query getAgentConfig {
   fn: import { getAgentConfig } from "@src/dashboard/operations",
   entities: []

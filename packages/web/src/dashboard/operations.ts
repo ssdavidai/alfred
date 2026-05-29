@@ -2805,3 +2805,98 @@ export const getEsphomeDevices = async (_args: unknown, context: any) => {
     throw e;
   }
 };
+
+// ============================================================
+// Home Assistant channel (#110 PR3) — operator deep-integrates HA.
+// Backed by ctrl-api /api/v1/channels/ha/* (PR1 #133 backfill landed
+// the routes). Four Wasp ops:
+//
+//   getHaStatus       → { connected, state, ha_url, ha_version, label,
+//                         last_test_ok, last_test_at, error }
+//                       The LLAT is NEVER in the payload — ctrl-api
+//                       only stores the vault_item_id in state.db.
+//   getHaRegistry     → { entities, areas, devices, automations,
+//                         scenes, helpers }
+//                       Empty until PR5's HaBootstrapWorkflow populates
+//                       ha_registry.
+//   connectHa         → POST { ha_url, llat, label? } → { ok, ha_url,
+//                                                          ha_version,
+//                                                          state }
+//                       The action accepts the LLAT in transit, passes
+//                       it once to ctrl-api, and NEVER echoes it back
+//                       to the client.
+//   disconnectHa      → DELETE → { ok }
+//                       Clears the Vaultwarden item + state.db row.
+//
+// SECURITY: the LLAT is a ~180-char JWT-shaped Home Assistant
+// long-lived access token. It must NEVER appear in any log line,
+// toast, or error message that surfaces above ctrl-api. The action
+// passes the trimmed value through; ctrl-api errors (e.g. 401
+// AUTH_FAILED) do not echo the token.
+// ============================================================
+
+export const getHaStatus = async (_args: unknown, context: any) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    path: "/api/v1/channels/ha/status",
+  });
+};
+
+export const getHaRegistry = async (_args: unknown, context: any) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    path: "/api/v1/channels/ha/registry",
+  });
+};
+
+/**
+ * Connect the tenant to a Home Assistant install.
+ *
+ * Body: { ha_url: string, llat: string, label?: string }
+ *
+ *   • ha_url — http(s) URL to the HA frontend (validated client-side by
+ *     parseHaUrl + server-side by assertValidHaUrl in channels_ha.ts).
+ *   • llat   — Home Assistant long-lived access token. Stored in
+ *     Vaultwarden by ctrl-api; the state.db row only carries the
+ *     vault_item_id.
+ *   • label  — optional human label ("Home", "Cabin") for the
+ *     Vaultwarden item. Defaults to "Home Assistant" server-side.
+ *
+ * SECURITY: the trimmed LLAT is passed once to ctrl-api and never
+ * logged or echoed. The 200 response from ctrl-api does NOT include
+ * the LLAT.
+ */
+export const connectHa = async (
+  args: { ha_url: string; llat: string; label?: string },
+  context: any,
+) => {
+  if (!args?.ha_url?.trim()) {
+    throw new HttpError(400, "ha_url is required");
+  }
+  if (!args?.llat?.trim()) {
+    throw new HttpError(400, "llat is required");
+  }
+  const instance = await getUserInstance(context);
+  // Trim only — ctrl-api is the real validator. The label is optional;
+  // we forward it verbatim when present.
+  const body: Record<string, string> = {
+    ha_url: args.ha_url.trim(),
+    llat: args.llat.trim(),
+  };
+  if (typeof args.label === "string" && args.label.trim().length > 0) {
+    body.label = args.label.trim();
+  }
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/channels/ha/connect",
+    body,
+  });
+};
+
+export const disconnectHa = async (_args: unknown, context: any) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "DELETE",
+    path: "/api/v1/channels/ha/disconnect",
+  });
+};

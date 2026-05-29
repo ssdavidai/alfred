@@ -1,0 +1,737 @@
+// HaCard — the Home Assistant /channels surface.
+//
+// #110 PR3 (2026-05-29). The React layer for the deep-integration card;
+// state derivation lives in haCardCore.ts (pure, import-free, unit-tested
+// under node:test). Backed by ctrl-api /api/v1/channels/ha/* (PR1 #133
+// landed connect/status/disconnect/registry; PR4 adds /runs; PR5 backfills
+// the registry).
+//
+// Five views map to the five ctrl-api `state` values:
+//
+//   • unconfigured/disconnected → connect form (HA URL + LLAT textarea +
+//                                 a HACS hint pointing at ssdavidai/alfred-ha)
+//   • connecting                → spinner + URL being probed, polls /status
+//                                 every 3s
+//   • connected                 → ha_url, ha_version, registry counts,
+//                                 expanders for "Registry" / "Recent runs" /
+//                                 "Voice surface" / "Disconnect"
+//   • error                     → last_error verbatim + retry + disconnect
+//
+// SECURITY: the LLAT is a ~180-char JWT-shaped Home Assistant long-lived
+// access token. It must NEVER appear in any UI element, log line, error
+// toast, commit, or PR body. This file:
+//
+//   * uses a <textarea> with autoComplete="off" + spellCheck={false}
+//     (LLATs don't fit a single-line input)
+//   * never re-displays the pasted token (no "show password" toggle, no
+//     echo in any toast, no serialisation into React state log)
+//   * clears the local React state holding the LLAT immediately on
+//     submit success, so the value stops living in the React tree
+//   * routes any in-toast surfacing through redactLlat() which only
+//     leaks the first 8 chars
+//
+// ctrl-api's /status route does NOT echo the LLAT; it only carries the
+// vault_item_id in state.db.
+
+import { useEffect, useState } from "react";
+import {
+  useQuery,
+  getHaStatus,
+  getHaRegistry,
+  connectHa,
+  disconnectHa,
+} from "wasp/client/operations";
+import {
+  deriveHaCardState,
+  isProbablyValidLlat,
+  parseHaUrl,
+  redactLlat,
+  summariseRegistry,
+  type HaRegistry,
+  type HaStatus,
+} from "./haCardCore";
+
+// Re-use the ChannelCard chrome from ChannelsPage. Pulling the JSX-only
+// wrapper through a prop-driven function keeps HaCard.tsx self-contained
+// without re-implementing the pill / heading / address layout.
+//
+// We mirror the inline cards (TelegramCard, OmiCard, PaperclipCard, …)
+// by re-rendering the same .border / .p-6 / .card-hover shell ourselves.
+// The styling stays in sync because both shells read the same CSS vars.
+
+type ChannelStatus = "active" | "available" | "soon" | "starting" | "error";
+
+function ChannelCard({
+  name,
+  address,
+  note,
+  status,
+  children,
+}: {
+  name: string;
+  address: string;
+  note: string;
+  status: ChannelStatus;
+  children?: React.ReactNode;
+}) {
+  const pillColor =
+    status === "active" || status === "error"
+      ? "var(--brass)"
+      : "var(--marginalia)";
+  const pillText =
+    status === "active"
+      ? "Connected"
+      : status === "soon"
+        ? "Coming soon"
+        : status === "starting"
+          ? "Starting"
+          : status === "error"
+            ? "Needs attention"
+            : "Not connected";
+  return (
+    <div className="border border-rule p-6 card-hover h-full">
+      <div className="flex items-baseline justify-between mb-3">
+        <span className="font-display text-3xl">{name}</span>
+        <span
+          className="font-mono text-[10px] uppercase tracking-[0.22em] font-extrabold"
+          style={{ color: pillColor }}
+        >
+          {pillText}
+        </span>
+      </div>
+      <div
+        className="font-mono text-[12px] mb-3"
+        style={{ color: "var(--ink)" }}
+      >
+        {address}
+      </div>
+      <div className="font-body italic" style={{ color: "var(--marginalia)" }}>
+        {note}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+// The voice-bridge `self` allowlist contract (#110 PR1 spec §7 Q13) — the
+// four read routes the voice surface can call against HA. Surfaced in the
+// "Voice surface" expander so the operator can see at a glance what
+// Alfred-the-voice can read from HA without their explicit per-turn
+// approval.
+const VOICE_SURFACE_TOOLS: Array<{ route: string; what: string }> = [
+  {
+    route: "GET /api/v1/channels/ha/status",
+    what: "Is HA connected? What's the version?",
+  },
+  {
+    route: "GET /api/v1/channels/ha/registry",
+    what: "Read the entity / device / area / automation registry.",
+  },
+  {
+    route: "GET /api/v1/channels/ha/automations",
+    what: "List automation entities and their last-fired times.",
+  },
+  {
+    route: "GET /api/v1/channels/ha/state/:entity_id",
+    what: "Read the current state of a single entity (no writes).",
+  },
+];
+
+const REGISTRY_PREVIEW_LIMIT = 20;
+const STATUS_POLL_MS = 3_000;
+
+export function HaCard() {
+  const { data: statusData, refetch: refetchStatus } = useQuery(
+    getHaStatus,
+    undefined,
+    { retry: false },
+  );
+  const status = (statusData as HaStatus | undefined) ?? null;
+  const card = deriveHaCardState({ status });
+
+  // The registry is only meaningful in the connected view, so we wire the
+  // useQuery to start enabled-once-connected. Wasp's useQuery does not
+  // expose `enabled`, but a 404 / empty response from ctrl-api is the
+  // bootstrap-not-run-yet signal — we render the empty-state copy in
+  // that branch instead of hiding the section.
+  const { data: registryData, refetch: refetchRegistry } = useQuery(
+    getHaRegistry,
+    undefined,
+    { retry: false },
+  );
+  const registry = (registryData as HaRegistry | undefined) ?? null;
+  const summary = summariseRegistry(registry);
+
+  // Connect-form state (kept local; never persisted).
+  const [haUrl, setHaUrl] = useState("");
+  const [haUrlError, setHaUrlError] = useState<string | null>(null);
+  const [llat, setLlat] = useState("");
+  const [label, setLabel] = useState("");
+  const [connectBusy, setConnectBusy] = useState(false);
+  const [connectErr, setConnectErr] = useState<string | null>(null);
+
+  // Disconnect state.
+  const [discBusy, setDiscBusy] = useState(false);
+
+  // Expanders.
+  const [registryOpen, setRegistryOpen] = useState(false);
+  const [runsOpen, setRunsOpen] = useState(false);
+  const [voiceOpen, setVoiceOpen] = useState(false);
+
+  // Poll /status every 3s while connecting.
+  useEffect(() => {
+    if (!card.shouldPoll) return;
+    const handle = setInterval(() => {
+      refetchStatus();
+    }, STATUS_POLL_MS);
+    return () => clearInterval(handle);
+  }, [card.shouldPoll, refetchStatus]);
+
+  // When we transition into connected, fetch the registry once so the
+  // counts populate without the operator having to expand the section.
+  useEffect(() => {
+    if (card.mode === "connected") {
+      refetchRegistry();
+    }
+  }, [card.mode, refetchRegistry]);
+
+  function onHaUrlBlur() {
+    if (haUrl.trim().length === 0) {
+      setHaUrlError(null);
+      return;
+    }
+    const parsed = parseHaUrl(haUrl);
+    setHaUrlError(parsed.ok ? null : parsed.error);
+  }
+
+  const llatTrimmed = llat.trim();
+  const llatLooksLikeJwt = isProbablyValidLlat(llatTrimmed);
+  const llatHint =
+    llatTrimmed.length > 0 && !llatLooksLikeJwt
+      ? "That doesn't look JWT-shaped — HA tokens start with eyJ and have two dots."
+      : null;
+
+  async function onConnect() {
+    setConnectErr(null);
+    const parsed = parseHaUrl(haUrl);
+    if (!parsed.ok || !parsed.url) {
+      setHaUrlError(parsed.error);
+      return;
+    }
+    if (llatTrimmed.length === 0) {
+      setConnectErr("LLAT is required.");
+      return;
+    }
+    setConnectBusy(true);
+    try {
+      await connectHa({
+        ha_url: parsed.url,
+        llat: llatTrimmed,
+        label: label.trim() || undefined,
+      });
+      // SECURITY: clear the token from React state IMMEDIATELY on
+      // success. The server response by contract does NOT echo the
+      // LLAT, but we still wipe the local copy so it stops living in
+      // the React tree.
+      setLlat("");
+      setHaUrl("");
+      setLabel("");
+      refetchStatus();
+      refetchRegistry();
+    } catch (e: any) {
+      // SECURITY: redactLlat is the ONLY formatter allowed to touch
+      // the in-memory token. Even on error we leak no more than the
+      // first 8 chars, and only when the operator pasted something.
+      const prefix = redactLlat(llatTrimmed);
+      const base =
+        e?.message ?? e?.data?.error ?? "Couldn't connect to Home Assistant.";
+      setConnectErr(prefix ? `${base} (token ${prefix})` : base);
+    } finally {
+      setConnectBusy(false);
+    }
+  }
+
+  async function onDisconnect() {
+    if (discBusy) return;
+    if (
+      typeof window !== "undefined" &&
+      !window.confirm(
+        "Disconnect Home Assistant? The LLAT is removed from Vaultwarden " +
+          "and the discovered registry is forgotten.",
+      )
+    ) {
+      return;
+    }
+    setDiscBusy(true);
+    try {
+      await disconnectHa({});
+      setRegistryOpen(false);
+      setRunsOpen(false);
+      setVoiceOpen(false);
+      refetchStatus();
+    } catch (e) {
+      // Disconnect errors are very rare (vault-cli down) — surface a
+      // calm message without the LLAT (the LLAT isn't even in the
+      // delete payload).
+      console.error("ha disconnect failed", e);
+    } finally {
+      setDiscBusy(false);
+    }
+  }
+
+  const address =
+    card.state === "connected"
+      ? status?.ha_url ||
+        (status?.ha_version ? `HA ${status.ha_version}` : "Connected")
+      : card.state === "connecting"
+        ? "Probing your HA install…"
+        : card.state === "error"
+          ? "Needs attention"
+          : "Not connected — paste a URL + LLAT below";
+
+  return (
+    <ChannelCard
+      name="Home Assistant"
+      address={address}
+      note="Operator deep-integrates HA — Alfred reads the registry, proposes baselines, never writes without approval."
+      status={card.pill}
+    >
+      {/* UNCONFIGURED / DISCONNECTED — connect form + HACS hint. */}
+      {card.mode === "unconfigured" && (
+        <div className="mt-5 space-y-4">
+          <p
+            className="font-body italic text-[13px]"
+            style={{ color: "var(--marginalia)" }}
+          >
+            {card.description}
+          </p>
+
+          {/* HACS hint card pointing at ssdavidai/alfred-ha. The custom
+              component is the substrate for the conversation-agent
+              (#111) and voice-bridge (#112) lanes; without it the LLAT
+              alone is not enough. */}
+          <div
+            className="border border-rule p-3 text-[12px] font-body"
+            style={{ color: "var(--marginalia)" }}
+          >
+            <div
+              className="font-mono text-[10px] uppercase tracking-[0.22em] mb-1"
+              style={{ color: "var(--brass)" }}
+            >
+              Step 0 — install the custom component
+            </div>
+            <p>
+              In Home Assistant, add{" "}
+              <a
+                href="https://github.com/ssdavidai/alfred-ha"
+                target="_blank"
+                rel="noreferrer"
+                className="underline"
+                style={{ color: "var(--ink)" }}
+              >
+                ssdavidai/alfred-ha
+              </a>{" "}
+              as a custom HACS repository, then download a long-lived
+              token from{" "}
+              <span className="font-mono">
+                User Profile → Security → Long-Lived Access Tokens
+              </span>
+              .
+            </p>
+          </div>
+
+          <div className="space-y-3">
+            <div className="space-y-1">
+              <div
+                className="font-mono text-[10px] uppercase tracking-[0.22em]"
+                style={{ color: "var(--marginalia)" }}
+              >
+                HA URL
+              </div>
+              <input
+                type="text"
+                value={haUrl}
+                onChange={(e) => {
+                  setHaUrl(e.target.value);
+                  if (haUrlError) setHaUrlError(null);
+                }}
+                onBlur={onHaUrlBlur}
+                placeholder="http://homeassistant.local:8123"
+                autoComplete="off"
+                spellCheck={false}
+                className="w-full bg-transparent border border-rule px-2 py-1 font-mono text-[12px]"
+              />
+              {haUrlError && (
+                <p
+                  className="font-body italic text-[12px]"
+                  style={{ color: "var(--brass)" }}
+                >
+                  {haUrlError}
+                </p>
+              )}
+            </div>
+
+            <div className="space-y-1">
+              <div
+                className="font-mono text-[10px] uppercase tracking-[0.22em]"
+                style={{ color: "var(--marginalia)" }}
+              >
+                Long-Lived Access Token
+              </div>
+              {/* SECURITY: a textarea (not single-line input) because the
+                  LLAT is ~180 chars; spellCheck/autoComplete off so the
+                  browser doesn't try to remember it. The value is wiped
+                  from React state immediately on submit success. We
+                  intentionally do NOT offer a "show" toggle — the only
+                  formatter allowed for the in-memory token is
+                  redactLlat() (first 8 chars). */}
+              <textarea
+                value={llat}
+                onChange={(e) => setLlat(e.target.value)}
+                placeholder="eyJ…"
+                autoComplete="off"
+                spellCheck={false}
+                rows={3}
+                className="w-full bg-transparent border border-rule px-2 py-1 font-mono text-[11px]"
+              />
+              {llatHint && (
+                <p
+                  className="font-body italic text-[12px]"
+                  style={{ color: "var(--marginalia)" }}
+                >
+                  {llatHint}
+                </p>
+              )}
+            </div>
+
+            <div className="space-y-1">
+              <div
+                className="font-mono text-[10px] uppercase tracking-[0.22em]"
+                style={{ color: "var(--marginalia)" }}
+              >
+                Label (optional)
+              </div>
+              <input
+                type="text"
+                value={label}
+                onChange={(e) => setLabel(e.target.value)}
+                placeholder="Home"
+                autoComplete="off"
+                spellCheck={false}
+                className="w-full bg-transparent border border-rule px-2 py-1 font-mono text-[12px]"
+              />
+            </div>
+
+            <div className="flex items-baseline gap-3">
+              <button
+                onClick={onConnect}
+                disabled={
+                  connectBusy ||
+                  haUrl.trim().length === 0 ||
+                  llatTrimmed.length === 0 ||
+                  !!haUrlError
+                }
+                className="btn-ghost"
+              >
+                {connectBusy ? "Connecting…" : "Connect"}
+              </button>
+            </div>
+
+            {connectErr && (
+              <p
+                className="font-body italic text-[13px]"
+                style={{ color: "var(--brass)" }}
+              >
+                {connectErr}
+              </p>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* CONNECTING — spinner copy + the URL being probed. Polls /status. */}
+      {card.mode === "connecting" && (
+        <div className="mt-5 space-y-3">
+          <p
+            className="font-body italic text-[13px]"
+            style={{ color: "var(--marginalia)" }}
+          >
+            {card.description}
+          </p>
+
+          <div className="flex items-baseline gap-3 pt-1">
+            <span
+              className="font-mono text-[11px]"
+              style={{ color: "var(--marginalia)" }}
+            >
+              Polling status every 3s…
+            </span>
+            {card.showDisconnect && (
+              <button
+                onClick={onDisconnect}
+                disabled={discBusy}
+                className="btn-link"
+              >
+                Cancel
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* CONNECTED — ha_url, ha_version, registry counts, expanders. */}
+      {card.mode === "connected" && (
+        <div className="mt-5 space-y-4">
+          <p
+            className="font-body italic text-[13px]"
+            style={{ color: "var(--marginalia)" }}
+          >
+            {card.description}
+          </p>
+
+          <div className="space-y-1 font-mono text-[12px]">
+            {status?.ha_url && (
+              <div className="flex gap-2">
+                <span style={{ color: "var(--marginalia)" }}>url</span>
+                <span style={{ color: "var(--ink)" }}>{status.ha_url}</span>
+              </div>
+            )}
+            {status?.ha_version && (
+              <div className="flex gap-2">
+                <span style={{ color: "var(--marginalia)" }}>version</span>
+                <span style={{ color: "var(--ink)" }}>
+                  HA {status.ha_version}
+                </span>
+              </div>
+            )}
+            {status?.label && (
+              <div className="flex gap-2">
+                <span style={{ color: "var(--marginalia)" }}>label</span>
+                <span style={{ color: "var(--ink)" }}>{status.label}</span>
+              </div>
+            )}
+          </div>
+
+          {/* At-a-glance counts. summariseRegistry handles empty/missing
+              buckets safely — the PR5 backfill is what brings these
+              above zero. */}
+          <div
+            className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-1 font-mono text-[12px] pt-1"
+            style={{ color: "var(--ink)" }}
+          >
+            <RegistryCount label="lights" n={summary.counts.lights} />
+            <RegistryCount label="switches" n={summary.counts.switches} />
+            <RegistryCount label="scenes" n={summary.counts.scenes} />
+            <RegistryCount label="sensors" n={summary.counts.sensors} />
+            <RegistryCount label="climate" n={summary.counts.climate} />
+            <RegistryCount label="cover" n={summary.counts.cover} />
+            <RegistryCount
+              label="media_player"
+              n={summary.counts.media_player}
+            />
+            <RegistryCount label="areas" n={summary.areaCount} />
+            <RegistryCount label="devices" n={summary.deviceCount} />
+            <RegistryCount
+              label="automations"
+              n={summary.automationCount}
+            />
+          </div>
+
+          {/* Expander row. */}
+          <div className="flex flex-wrap gap-3 items-baseline pt-1">
+            <button
+              onClick={() => setRegistryOpen((v) => !v)}
+              className="btn-link"
+            >
+              {registryOpen ? "Hide registry" : "Registry"}
+            </button>
+            <button
+              onClick={() => setRunsOpen((v) => !v)}
+              className="btn-link"
+            >
+              {runsOpen ? "Hide recent runs" : "Recent runs"}
+            </button>
+            <button
+              onClick={() => setVoiceOpen((v) => !v)}
+              className="btn-link"
+            >
+              {voiceOpen ? "Hide voice surface" : "Voice surface"}
+            </button>
+            <button
+              onClick={onDisconnect}
+              disabled={discBusy}
+              className="btn-ghost"
+            >
+              {discBusy ? "Disconnecting…" : "Disconnect"}
+            </button>
+          </div>
+
+          {/* Registry expander — top 20 entities with friendly_name +
+              entity_id. PR5 populates this; until then we show the
+              empty-state copy. */}
+          {registryOpen && (
+            <RegistrySection registry={registry} />
+          )}
+
+          {/* Recent-runs expander — PR4 ships /runs. Today we render a
+              calm placeholder so the connected-state view doesn't have
+              a broken expander. */}
+          {runsOpen && <RunsSection />}
+
+          {/* Voice-surface expander — the 4 read routes voice-bridge can
+              call against HA per the #110 PR1 spec. */}
+          {voiceOpen && <VoiceSurfaceSection />}
+        </div>
+      )}
+
+      {/* ERROR — verbatim last_error + retry CTA + disconnect. */}
+      {card.mode === "error" && (
+        <div className="mt-5 space-y-3">
+          <p
+            className="font-body italic text-[13px]"
+            style={{ color: "var(--brass)" }}
+          >
+            {card.description}
+          </p>
+          {card.errorMessage && card.errorMessage !== card.description && (
+            <p
+              className="font-mono text-[11px]"
+              style={{ color: "var(--marginalia)" }}
+            >
+              {card.errorMessage}
+            </p>
+          )}
+          <div className="flex flex-wrap gap-3 items-baseline">
+            {card.showRetry && (
+              <button
+                onClick={() => refetchStatus()}
+                className="btn-ghost"
+                disabled={connectBusy}
+              >
+                Try again
+              </button>
+            )}
+            {card.showDisconnect && (
+              <button
+                onClick={onDisconnect}
+                disabled={discBusy}
+                className="btn-link"
+              >
+                {discBusy ? "Disconnecting…" : "Disconnect"}
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+    </ChannelCard>
+  );
+}
+
+// ── Sub-components ────────────────────────────────────────────────────────
+
+function RegistryCount({ label, n }: { label: string; n: number }) {
+  return (
+    <div className="flex gap-2">
+      <span style={{ color: "var(--marginalia)" }}>{label}</span>
+      <span>{n}</span>
+    </div>
+  );
+}
+
+function RegistrySection({ registry }: { registry: HaRegistry | null }) {
+  // PR5 populates ha_registry; PR3 just displays. When empty we explain
+  // why so the operator doesn't think anything is broken.
+  const entities = Array.isArray(registry?.entities)
+    ? registry!.entities.slice(0, REGISTRY_PREVIEW_LIMIT)
+    : [];
+  const totalEntities = Array.isArray(registry?.entities)
+    ? registry!.entities.length
+    : 0;
+
+  if (totalEntities === 0) {
+    return (
+      <div className="border-t border-rule pt-3 space-y-1">
+        <p
+          className="font-body italic text-[12px]"
+          style={{ color: "var(--marginalia)" }}
+        >
+          The registry is empty. HaBootstrapWorkflow (PR5) populates entities
+          on connect — until that PR lands, this section will be quiet.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="border-t border-rule pt-3 space-y-1">
+      <div
+        className="font-mono text-[10px] uppercase tracking-[0.22em] pb-1"
+        style={{ color: "var(--marginalia)" }}
+      >
+        Entities (top {entities.length} of {totalEntities})
+      </div>
+      {entities.map((e, idx) => {
+        const id = e.entity_id || e.ha_id || "";
+        const name = e.friendly_name || id || "—";
+        return (
+          <div
+            key={id || idx}
+            className="flex items-baseline gap-3 font-mono text-[11px]"
+          >
+            <span style={{ color: "var(--ink)" }}>{name}</span>
+            {id && id !== name && (
+              <span style={{ color: "var(--marginalia)" }}>{id}</span>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function RunsSection() {
+  // The /runs route ships in #110 PR4. PR3's connected view must NOT
+  // crash on the 404; we show a friendly placeholder instead. When PR4
+  // lands, this component will switch to a useQuery(getHaRuns) call and
+  // render pickRecentRuns(rows).
+  return (
+    <div className="border-t border-rule pt-3 space-y-1">
+      <p
+        className="font-body italic text-[12px]"
+        style={{ color: "var(--marginalia)" }}
+      >
+        Recent-runs surface arrives in PR4 — the service-call / automation
+        / proposal-apply ledger. Until then, this section is intentionally
+        quiet.
+      </p>
+    </div>
+  );
+}
+
+function VoiceSurfaceSection() {
+  return (
+    <div className="border-t border-rule pt-3 space-y-2">
+      <div
+        className="font-mono text-[10px] uppercase tracking-[0.22em]"
+        style={{ color: "var(--marginalia)" }}
+      >
+        Voice-bridge `self` allowlist
+      </div>
+      <p
+        className="font-body italic text-[12px]"
+        style={{ color: "var(--marginalia)" }}
+      >
+        The four read routes Alfred-the-voice can call against HA without
+        per-turn approval. Writes (service calls, automation create /
+        update / delete) NEVER appear here — they require a Hermes MCP
+        call routed through the principal's approval surface.
+      </p>
+      {VOICE_SURFACE_TOOLS.map((t) => (
+        <div key={t.route} className="font-mono text-[11px]">
+          <div style={{ color: "var(--ink)" }}>{t.route}</div>
+          <div style={{ color: "var(--marginalia)" }}>{t.what}</div>
+        </div>
+      ))}
+    </div>
+  );
+}

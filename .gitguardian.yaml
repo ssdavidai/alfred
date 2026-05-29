@@ -20,3 +20,7 @@ secret:
     # `password:` assignment; this file is the Vault writer and is
     # audited by hand. No literal secret ever appears here.
     - "packages/ctrl/src/api/routes/channels_ha.ts"
+    # /channels HA card unit tests. Same `llat_TEST_…` placeholder
+    # convention as channels_ha_pr1.test.ts; the JWT-shaped fixtures are
+    # synthetic (TEST_aaa…/TEST_bbb…/TEST_ccc… segments). See #110 PR3.
+    - "packages/web/src/dashboard/haCardCore.test.ts"
