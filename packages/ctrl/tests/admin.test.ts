@@ -16,6 +16,11 @@ const execFileFn = mock.fn((...args: any[]) => {
 mock.module("node:child_process", {
   namedExports: {
     execFile: execFileFn,
+    // execFileSync is imported by src/api/routes/system.ts (ssh-keygen
+    // path). The mock loader rejects any named-export the module's source
+    // imports if it isn't listed here, so we must keep this stub even
+    // though these tests don't exercise the ssh-keygen surface.
+    execFileSync: mock.fn(() => ""),
     spawn: mock.fn(() => ({
       stderr: { on: mock.fn() },
       stdin: { write: mock.fn(), end: mock.fn() },

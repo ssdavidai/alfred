@@ -134,10 +134,19 @@ describe("delegate-dispatch mints re-routed signal as TERMINAL (#216)", () => {
     assert.equal(status, 200, `dispatch must 200, got ${status}: ${JSON.stringify(payload)}`);
     assert.equal(payload.status, "dispatched");
 
-    // Existing assertions (carry forward — F2 + Gap 4 contract).
+    // Existing assertions (carry forward — F2 contract).
     const rec = readNeedsAttention(NA_LEGACY);
     assert.equal(rec!.frontmatter.status, "dispatched", "NA must be flipped to dispatched");
-    assert.ok(payload.decision_record_path, "decision mirror must be minted");
+    // #218 round 2 (bb868daf): when /dispatch is called WITH decision_origin
+    // (the DecisionRouter caller path — exactly what this test simulates),
+    // the mirror mint is intentionally suppressed to avoid the 1/min minting
+    // loop. Gap 4 mirror minting still applies when /dispatch is called
+    // WITHOUT decision_origin — covered by the next assertion further down
+    // and by the second `it()` block.
+    assert.equal(
+      payload.decision_record_path, null,
+      "with decision_origin set, mirror mint MUST be suppressed (#218 round 2)",
+    );
 
     // NEW assertion (#216): the re-routed signal MUST be terminal —
     // status="routed_agent" — so SignalRouterWorkflow's `unrouted`

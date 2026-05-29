@@ -47,7 +47,8 @@ const fsMock: any = {
   promises: { mkdir: async () => undefined, writeFile: async () => undefined },
 };
 mock.module("node:fs", { defaultExport: fsMock, namedExports: { ...fsMock } });
-mock.module("node:child_process", { namedExports: { execFile: (...a: any[]) => { (a[a.length - 1] as Function)(null, "{}", ""); }, spawn: () => ({ stderr: { on() {} }, stdin: { write() {}, end() {} }, on() {} }) } });
+// execFileSync needed by src/api/routes/system.ts (ssh-keygen path, unused here).
+mock.module("node:child_process", { namedExports: { execFile: (...a: any[]) => { (a[a.length - 1] as Function)(null, "{}", ""); }, execFileSync: () => "", spawn: () => ({ stderr: { on() {} }, stdin: { write() {}, end() {} }, on() {} }) } });
 
 process.env.COMPOSIO_API_KEY = "test-composio-key";
 process.env.COMPOSIO_USER_ID = "alfred-test-user";
