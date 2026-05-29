@@ -9,3 +9,7 @@ secret:
     # /channels Tailscale card derivation tests — same FIXTUREONLY rule.
     # #109 PR3 (2026-05-29).
     - "packages/web/src/dashboard/tailscaleCardCore.test.ts"
+    # Home Assistant tests use a synthetic LLAT placeholder
+    # `llat_TEST_0000…000` that matches HA's long-lived access token
+    # shape but is never real. See #110 PR1 backfill.
+    - "packages/ctrl/tests/channels_ha_pr1.test.ts"
