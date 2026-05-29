@@ -36,8 +36,9 @@ describe("state.db migration runner", () => {
     const db = new DatabaseSync(":memory:");
     db.exec(schema);
     const v = runMigrations(db);
-    // The latest version moves as new migrations land. Today: 3
-    // (0001_fix_pack + 0002_alfred_journal + 0003_tailscale_connection).
+    // Latest version moves as new migrations land. Today: 4
+    // (0001_fix_pack + 0002_alfred_journal + 0003_tailscale_connection
+    // + 0004_channel_tokens).
     assert.equal(v, 6, "migrated to latest version");
     assert.equal(userVersion(db), 6);
     assert.ok(cols(db, "observation").includes("processed_at"), "0001: processed_at present after migrate");
@@ -91,6 +92,20 @@ describe("state.db migration runner", () => {
       /CHECK constraint failed/i,
       "0003: CHECK(id=1) blocks a second tailscale_connection row",
     );
+
+    // 0004: channel_tokens table present (issue #111 PR 1).
+    assert.ok(
+      tables.includes("channel_tokens"),
+      "0004: channel_tokens table created",
+    );
+    const ctCols = cols(db, "channel_tokens");
+    for (const required of ["id", "channel", "token_hash", "created_at"]) {
+      assert.ok(
+        ctCols.includes(required),
+        `0004: channel_tokens.${required} present`,
+      );
+    }
+
     db.close();
   });
 

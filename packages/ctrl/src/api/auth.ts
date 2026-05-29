@@ -50,6 +50,11 @@
 import crypto from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import { AuthError } from "./errors.js";
+import { getStateDb } from "../db/state.js";
+import {
+  validateChannelToken,
+  type ChannelTokenMeta,
+} from "../db/channelTokens.js";
 
 let apiKeyBuf: Buffer | null = null;
 let voiceBridgeKeyBuf: Buffer | null = null;
@@ -223,4 +228,80 @@ export function authenticate(
   }
 
   throw new AuthError("Invalid API key");
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Shared channel-token bearer path.
+//
+// Used by channel-keyed routes (HA-conversation /turn, future HA-voice
+// /audio, future Paperclip /heartbeat post-migration) to swap an inbound
+// bearer for the `channel_tokens` row that authorises it. The token shape
+// is `<prefix>_<48hex>` per channel; the validator (a) sha256-hashes the
+// raw bytes, (b) looks up by `(channel, token_hash)` with
+// `revoked_at IS NULL`, (c) bumps `last_used_at` + `last_used_ip` as a
+// side effect.
+//
+// IMPORTANT: this path is OUTSIDE the master-key authenticate() flow. A
+// channel-keyed route's place in server.ts must either:
+//   * list its path in `isPublic` so the global gate doesn't pre-empt it
+//     with a 401, OR
+//   * accept the master key in addition (the master AAS_API_KEY route also
+//     reaches the handler; the handler can opt into channelTokenBearer for
+//     the non-master case).
+//
+// The contract: when this returns a `ChannelTokenMeta`, the request is
+// authenticated as the principal that minted the row. When it throws
+// AuthError, the global error path returns 401.
+// ──────────────────────────────────────────────────────────────────────────
+
+/** Extract the bearer token bytes from `Authorization: Bearer <token>`.
+ *  Returns null if absent or malformed (so the caller decides whether to
+ *  401 or fall through to another auth path). */
+export function extractBearerToken(req: IncomingMessage): string | null {
+  const header = req.headers.authorization;
+  if (!header || typeof header !== "string") return null;
+  if (!header.startsWith("Bearer ")) return null;
+  const tok = header.slice(7).trim();
+  return tok.length > 0 ? tok : null;
+}
+
+/** Best-effort source ip for the `last_used_ip` column. Honours
+ *  X-Forwarded-For when behind Caddy (the apex passes traffic through to
+ *  ctrl-api with the original remote in the header). */
+function extractRemoteIp(req: IncomingMessage): string | null {
+  const xff = req.headers["x-forwarded-for"];
+  if (typeof xff === "string" && xff.length > 0) {
+    // first hop is the originating client
+    const first = xff.split(",")[0]?.trim();
+    if (first) return first;
+  }
+  const sock = (req as { socket?: { remoteAddress?: string } }).socket;
+  return sock?.remoteAddress ?? null;
+}
+
+/** Authenticate a channel-keyed bearer for one channel. Throws AuthError
+ *  on no/bad/revoked token. Returns the row metadata on success.
+ *
+ *  Side-effect: bumps `last_used_at` and `last_used_ip` on the matched
+ *  row.
+ *
+ *  This is the single function every channel route imports — there is no
+ *  parallel auth module. */
+export function channelTokenBearer(
+  req: IncomingMessage,
+  channel: string,
+): ChannelTokenMeta {
+  const raw = extractBearerToken(req);
+  if (!raw) {
+    throw new AuthError("Missing or malformed Authorization header");
+  }
+  const meta = validateChannelToken(getStateDb(), channel, raw, {
+    ip: extractRemoteIp(req),
+  });
+  if (!meta) {
+    // Don't leak whether the token was unknown vs revoked vs wrong-channel
+    // — every failure mode is the same 401 to the caller.
+    throw new AuthError("Invalid or revoked token");
+  }
+  return meta;
 }

@@ -57,6 +57,8 @@ import { registerSmsRoutes } from "./routes/sms.js";
 import { registerVoiceRoutes } from "./routes/voice.js";
 import { registerOmiChannelRoutes } from "./routes/channels_omi.js";
 import { registerPaperclipChannelRoutes } from "./routes/channels_paperclip.js";
+import { registerHaChannelRoutes } from "./routes/channels_ha.js";
+import { registerChannelTokenRoutes } from "./routes/channel_tokens.js";
 import { registerComposioWebhookRoutes } from "./routes/composioWebhook.js";
 import { registerAlfredJournalRoutes } from "./routes/alfredJournal.js";
 import { registerAlfredDeliverRoutes } from "./routes/alfredDeliver.js";
@@ -175,6 +177,14 @@ export function createApiServer(): http.Server {
   registerVoiceRoutes();
   registerOmiChannelRoutes();
   registerPaperclipChannelRoutes();
+  // /api/v1/channels/ha/* — Home Assistant conversation agent (#111). PR1
+  // ships the non-streaming /turn route; #110 PR1 extends with discovery
+  // routes; PR3+ extends with tool partitioning + streaming.
+  registerHaChannelRoutes();
+  // /api/v1/channel-tokens/* — shared per-channel bearer-token surface
+  // (#111 PR1, Sir's decision Q2). HA-conversation tokens land here; HA
+  // Voice (#112) joins next; Paperclip migrates onto it later.
+  registerChannelTokenRoutes();
   registerComposioWebhookRoutes();
   // The one-Alfred continuity layer — alfred_journal + principal mapping
   // (the persistence + lookup surface) plus alfred-deliver (the unified
@@ -232,6 +242,12 @@ export function createApiServer(): http.Server {
         // <ts>.<raw-body>), not bearer-authed. Lane V's Caddy
         // @public_webhooks matcher passes /api/v1/channels/paperclip/* through.
         pathname === "/api/v1/channels/paperclip/heartbeat" ||
+        // Home Assistant conversation /turn — bearer-authed via the shared
+        // channel_tokens table (channel='ha-conversation'). The route
+        // calls channelTokenBearer() itself; the global master-key gate
+        // would otherwise 401 every HA install whose bearer is NOT the
+        // master AAS_API_KEY. Issue #111 PR1.
+        pathname === "/api/v1/channels/ha/turn" ||
         // Composio webhook is HMAC-validated against COMPOSIO_WEBHOOK_SECRET
         // (Standard-Webhooks scheme on `webhook-signature` / older shape on
         // `x-composio-signature`). Composio cannot send a Bearer header so
