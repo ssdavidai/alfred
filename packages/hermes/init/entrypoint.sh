@@ -581,14 +581,33 @@ if [[ -d "$CODEX_PROFILE_DIR" ]]; then
         fi
     fi
 
-    # The whole profile dir is owned by 10001 mode 0700 — uid 10000 (other
+    # The whole profile dir is owned by 10001 mode 0711 — uid 10000 (other
     # gateways) and root will use DAC_OVERRIDE if they need to write, but
     # the codex-builder gateway can never escape its own home.
+    #
+    # Why 0711 (not 0700): the paperclip-hermes adapter runs in the paperclip
+    # container as uid 1000 (gosu node entrypoint, no DAC_OVERRIDE), and
+    # needs to read .env to pull the gateway's API_SERVER_KEY for the
+    # Authorization: Bearer header. 0700 made that EACCES so the adapter
+    # silently sent no auth header and every dispatch 401'd. The execute
+    # bit lets uid 1000 traverse to specific files (.env, see below); the
+    # missing read bit means it still can't `ls` the dir or stumble onto
+    # auth.json / .codex/ / workspace tree — and those individual files
+    # stay 0600 so even if uid 1000 knew the path it couldn't open them.
     chown -R 10001:10001 "$CODEX_PROFILE_DIR" 2>/dev/null || true
-    chmod 0700 "$CODEX_PROFILE_DIR" 2>/dev/null || true
-    # Recursive 0700 on subdirs, 0600 on files. .ssh stricter (0700/0600).
+    chmod 0711 "$CODEX_PROFILE_DIR" 2>/dev/null || true
+    # Recursive 0700 on subdirs (sealed), 0600 on files (owner-only by default).
     find "$CODEX_PROFILE_DIR" -type d -exec chmod 0700 {} + 2>/dev/null || true
     find "$CODEX_PROFILE_DIR" -type f -exec chmod 0600 {} + 2>/dev/null || true
+    # Then the two targeted opens: top-level dir back to 0711 (traverse), and
+    # .env world-readable (0644) so the paperclip adapter's uid 1000 can
+    # read API_SERVER_KEY. The .env never carries provider secrets for the
+    # codex-builder profile (codex CLI's auth lives in .codex/auth.json,
+    # which stays 0600 inside .codex/ at 0700 — uid 1000 can't reach it).
+    chmod 0711 "$CODEX_PROFILE_DIR" 2>/dev/null || true
+    if [[ -f "$CODEX_PROFILE_DIR/.env" ]]; then
+        chmod 0644 "$CODEX_PROFILE_DIR/.env" 2>/dev/null || true
+    fi
     # config.yaml ends up 0600 — that's tighter than the 0640 the other
     # profiles use but fine because the only reader is the codex-builder
     # gateway process at uid 10001 (init/hermes containers use DAC_OVERRIDE).
