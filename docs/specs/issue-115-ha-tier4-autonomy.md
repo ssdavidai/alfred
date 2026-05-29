@@ -44,7 +44,7 @@ configured" to "Alfred maintains the home." Concretely:
   Alfred is silent. Tier-4 Alfred provisions a HA user, mints an LLAT,
   configures a person-scoped allowlist, gives Sir the link.
 
-## What's not yet decided (Sir to confirm)
+## Defaults — LOCKED 2026-05-29 by Sir
 
 The blast radius of tier 4 is higher. Three knobs to set:
 
@@ -62,7 +62,7 @@ The blast radius of tier 4 is higher. Three knobs to set:
    silent; everything else recorded in a daybook so Sir has an audit
    trail.
 
-Defaults proposed; Sir says yes or amends.
+**All three locked YES, 2026-05-29.** Implementation proceeds against these defaults; future changes require an explicit decision.
 
 ## Architecture
 
