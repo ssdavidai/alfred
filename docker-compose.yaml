@@ -707,12 +707,18 @@ services:
       ESPHOME_TENANT_SEED: "${ESPHOME_TENANT_SEED:-}"
       ESPHOME_FRIENDLY_NAME: "${ESPHOME_FRIENDLY_NAME:-Alfred}"
     ports:
-      # ESPHome Native API on the tailnet. Plain TCP — not HTTP — so Caddy
-      # can't terminate it; HA's ESPHome integration expects no TLS on :6053
-      # (the noise-encrypted variant is out of scope for PR1, see spec §5.5).
-      # mDNS auto-discovery only works when this port is reachable from the
-      # network HA lives on; on a tailnet-only deploy, addressed by IP.
-      - "6053:6053"
+      # ESPHome Native API. Plain TCP — not HTTP — so Caddy can't terminate
+      # it; HA's ESPHome integration expects no TLS on :6053 (the
+      # noise-encrypted variant is out of scope for PR1, see spec §5.5).
+      #
+      # Bound to 127.0.0.1 ONLY — issue #112 PR 4 flipped this from a
+      # wide-open 0.0.0.0:6053:6053 bind. Recommended remote ingress for
+      # the principal's ESPHome devices is the Tailscale sidecar
+      # (`docker compose --profile tailscale up -d`), which advertises
+      # :6053 onto the tailnet; OR an mDNS-reachable subnet for satellite
+      # devices on the same LAN. End-to-end setup steps:
+      # packages/voice-bridge/docs/ha-pipeline-setup.md.
+      - "127.0.0.1:6053:6053"
     healthcheck:
       test: ["CMD-SHELL", "node -e \"require('http').get('http://127.0.0.1:9000/health', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))\""]
       interval: 30s
