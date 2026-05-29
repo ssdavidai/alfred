@@ -2318,3 +2318,111 @@ export const getVaultTitleIndex = async (
     return { titles: [] };
   }
 };
+
+// ============================================================
+// /files — principal-facing blob store (#114 PR3)
+// ============================================================
+//
+// PR1 shipped the routes (POST /upload, GET /list/usage/stat/blob, PATCH,
+// DELETE) on ctrl-api. Upload + blob ride through filesProxy.ts (raw
+// multipart/binary); the rest go through the standard Wasp queries +
+// actions below so the page can subscribe with `useQuery` and the
+// existing 60s `proxyToTenant` plumbing.
+//
+// Path encoding: file paths are `<ULID>/<safe-name>`. Both halves are
+// safe per the ctrl-api `sanitizeFilename`, so we splice into the path
+// directly. We DO percent-encode each segment defensively for the
+// :path-style endpoints (stat/patch/delete) since a future PR may
+// loosen `sanitizeFilename`.
+
+/** Safely encode each segment of a `<ULID>/<filename>` path. */
+function encodeFilesPath(p: string): string {
+  return p
+    .split("/")
+    .filter(Boolean)
+    .map((seg) => encodeURIComponent(seg))
+    .join("/");
+}
+
+/** GET /api/v1/files/usage — used by the quota strip + upload pre-flight. */
+export const getFilesUsage = async (_args: unknown, context: any) => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, { path: "/api/v1/files/usage" });
+};
+
+/** GET /api/v1/files/list?prefix=&q=&limit=&offset= */
+export const getFilesList = async (
+  args: {
+    prefix?: string;
+    q?: string;
+    limit?: number;
+    offset?: number;
+  } | undefined,
+  context: any,
+) => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const instance = await getUserInstance(context);
+  const query: Record<string, string> = {};
+  if (args?.prefix?.trim()) query.prefix = args.prefix.trim();
+  if (args?.q?.trim()) query.q = args.q.trim();
+  if (typeof args?.limit === "number" && args.limit > 0) {
+    query.limit = String(Math.floor(args.limit));
+  }
+  if (typeof args?.offset === "number" && args.offset >= 0) {
+    query.offset = String(Math.floor(args.offset));
+  }
+  return proxyToTenant(instance, {
+    path: "/api/v1/files/list",
+    query,
+  });
+};
+
+/** GET /api/v1/files/stat/:path — side-panel metadata for a selected row. */
+export const getFileStat = async (
+  args: { path: string },
+  context: any,
+) => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  if (typeof args?.path !== "string" || !args.path.trim()) {
+    throw new HttpError(400, "path required");
+  }
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    path: `/api/v1/files/stat/${encodeFilesPath(args.path)}`,
+  });
+};
+
+/** PATCH /api/v1/files/:path — inline pencil edit for principal_label.
+ *  PR2 of #114 added the route; PR3 surfaces it on the page. */
+export const updateFileLabel = async (
+  args: { path: string; principal_label: string | null },
+  context: any,
+) => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  if (typeof args?.path !== "string" || !args.path.trim()) {
+    throw new HttpError(400, "path required");
+  }
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "PATCH",
+    path: `/api/v1/files/${encodeFilesPath(args.path)}`,
+    body: { principal_label: args.principal_label },
+  });
+};
+
+/** DELETE /api/v1/files/:path — soft-delete (tombstone + blob unlink). */
+export const deleteFile = async (
+  args: { path: string },
+  context: any,
+) => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  if (typeof args?.path !== "string" || !args.path.trim()) {
+    throw new HttpError(400, "path required");
+  }
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "DELETE",
+    path: `/api/v1/files/${encodeFilesPath(args.path)}`,
+  });
+};

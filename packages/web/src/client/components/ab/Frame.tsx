@@ -24,6 +24,7 @@ const PRIMARY: NavItem[] = [
   { to: "/decisions", label: "Decisions", icon: "approval" },
   { to: "/matters", label: "Matters", icon: "matter" },
   { to: "/vault", label: "Vault", icon: "calling_card" },
+  { to: "/files", label: "Files", icon: "envelope" },
   { to: "/channels", label: "Channels", icon: "voice" },
   { to: "/chores", label: "Chores", icon: "pocket_watch" },
   { to: "/instincts", label: "Patterns", icon: "monocle" },

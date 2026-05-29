@@ -353,6 +353,17 @@ page VaultPage {
   component: import VaultPage from "@src/dashboard/VaultPage"
 }
 
+// /files — principal-facing blob store (#114 PR3). Distinct from /vault:
+// the vault is the principal's knowledge surface (markdown the principal
+// reads and edits); /files is raw blob storage (PDFs, images, audio,
+// archives) that Alfred can read but the principal owns. Backed by
+// `files_data` named volume + ctrl-api routes shipped in PR1.
+route FilesRoute { path: "/files", to: FilesPage }
+page FilesPage {
+  authRequired: true,
+  component: import FilesPage from "@src/dashboard/FilesPage"
+}
+
 // /matters + /matters/:id — long-running concerns (M4 #859).
 route MattersRoute { path: "/matters", to: MattersPage }
 page MattersPage {
@@ -537,6 +548,34 @@ query getVaultRecord {
 // cached on the tenant side).
 query getVaultTitleIndex {
   fn: import { getVaultTitleIndex } from "@src/dashboard/operations",
+  entities: []
+}
+
+// /files — principal-facing blob store (#114 PR3). Read endpoints flow
+// through standard Wasp queries; upload + blob (multipart / raw bytes)
+// ride through src/server/filesProxy.ts (registered in setup.ts).
+query getFilesUsage {
+  fn: import { getFilesUsage } from "@src/dashboard/operations",
+  entities: []
+}
+
+query getFilesList {
+  fn: import { getFilesList } from "@src/dashboard/operations",
+  entities: []
+}
+
+query getFileStat {
+  fn: import { getFileStat } from "@src/dashboard/operations",
+  entities: []
+}
+
+action updateFileLabel {
+  fn: import { updateFileLabel } from "@src/dashboard/operations",
+  entities: []
+}
+
+action deleteFile {
+  fn: import { deleteFile } from "@src/dashboard/operations",
   entities: []
 }
 
