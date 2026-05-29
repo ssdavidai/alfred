@@ -709,7 +709,7 @@ async function safeProxy(
 export const getRecallChannelStatus = async (
   _args: unknown,
   context: any,
-): Promise<RecallCompositeStatus> => {
+) => {
   const instance = await getUserInstance(context);
 
   // Three parallel reads — config + usage + active_bots.
