@@ -30,6 +30,7 @@ import { handleTwimlInbound, TWIML_INBOUND_PATH } from "./twiml.js";
 import { connectAllMcp } from "./mcp-clients.js";
 import { computeIdentity, startEsphomeServer } from "./esphome-server.js";
 import { announceEsphomeMdns } from "./esphome-mdns.js";
+import { EsphomeVoiceSession } from "./esphome-session.js";
 
 export function verifySig(tenantId: string, sig: string | null | undefined): boolean {
   if (!sig) return false;
@@ -176,6 +177,11 @@ if (config.esphomeApiEnabled) {
     bindHost: config.esphomeApiBind,
     identity,
     password: config.haVoiceApiToken || undefined,
+    // PR2 wires the ESPHome ↔ OpenAI Realtime bridge. The factory is passed
+    // explicitly (not statically imported by esphome-server.ts) so the test
+    // suite — which never touches OpenAI — doesn't need OPENAI_API_KEY in
+    // env. See esphome-server.ts's import block for the long form.
+    voiceSessionFactory: (opts) => new EsphomeVoiceSession(opts),
   });
   handle.ready
     .then(() =>

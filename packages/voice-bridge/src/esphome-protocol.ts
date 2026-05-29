@@ -52,6 +52,53 @@ export const MessageType = {
   // to satisfy the spec's "single voice_assistant component" minimum; the
   // media_player / button / sensor companions land in PR2.
   ListEntitiesVoiceAssistantResponse: 58,
+  // ── Voice-assistant message flow (PR2 — audio bridge to OpenAI Realtime) ──
+  // IDs taken verbatim from upstream esphome/components/api/api.proto. These
+  // are the only messages PR2 needs; timer/announce/wake-word-config land in
+  // later PRs (PR4 timers, PR5 announcements, PR6 wake words).
+  //
+  // Wire direction (per api.proto):
+  //   SubscribeVoiceAssistantRequest (89)  — HA → us. HA asks to subscribe.
+  //   VoiceAssistantRequest          (90)  — us → HA OR HA → us. The spec
+  //     annotates this as SOURCE_SERVER (i.e. emitted by the firmware/device),
+  //     but in our deployment HA's `voice_assistant` ESPHome integration uses
+  //     it as the start-of-pipeline signal both ways. We accept it as inbound
+  //     (HA → us) to trigger a Realtime turn — the satellite path. Sending
+  //     it ourselves is reserved for the wake-word-on-bridge path (PR4).
+  //   VoiceAssistantResponse         (91)  — us → HA. ACKs a start request
+  //     and tells HA we're ready to receive audio in-band (port=0 = API_AUDIO).
+  //   VoiceAssistantEventResponse    (92)  — us → HA. Pipeline progress events
+  //     (RUN_START, STT_END, INTENT_END, TTS_END, RUN_END) so HA's UI can
+  //     reflect "Alfred is thinking / speaking".
+  //   VoiceAssistantAudio            (106) — bidirectional. PCM-16 mono @ 16 kHz.
+  //
+  // Wire is identical regardless of direction; the SOURCE_SERVER vs
+  // SOURCE_CLIENT annotation is a serialization-side hint, not a wire-format
+  // distinction.
+  SubscribeVoiceAssistantRequest: 89,
+  VoiceAssistantRequest: 90,
+  VoiceAssistantResponse: 91,
+  VoiceAssistantEventResponse: 92,
+  VoiceAssistantAudio: 106,
+} as const;
+
+// Voice-assistant pipeline events. The set of event types HA's
+// voice_assistant integration recognises — emitting an unknown event_type is
+// silently ignored. We emit a minimal subset that's enough to drive HA's UI
+// state without misrepresenting the OpenAI Realtime pipeline (we don't have
+// distinct STT/intent/TTS stages — the realtime model collapses them — so we
+// fire RUN_START → STT_END (with the user transcript) → TTS_START →
+// TTS_END → RUN_END in one continuous block per turn).
+export const VoiceAssistantEvent = {
+  ERROR: 0,
+  RUN_START: 1,
+  RUN_END: 2,
+  STT_START: 3,
+  STT_END: 4,
+  INTENT_START: 5,
+  INTENT_END: 6,
+  TTS_START: 7,
+  TTS_END: 8,
 } as const;
 
 export type MessageTypeName = keyof typeof MessageType;
@@ -185,6 +232,25 @@ export function writeBytesField(fieldNumber: number, value: Buffer): Buffer {
     tag(fieldNumber, WIRE_LENGTH_DELIMITED),
     encodeVarint(value.length),
     value,
+  ]);
+}
+
+/** Embedded-message field writer. Per the protobuf spec a sub-message is
+ * length-delimited (same wire type as a string / bytes field), with the
+ * payload being the serialised sub-message. Used for VoiceAssistantEventData
+ * (repeated string-string pairs) inside VoiceAssistantEventResponse.
+ *
+ * Unlike writeBytesField we do NOT omit an empty submessage — a present-but-
+ * empty submessage is meaningful (it asserts the field is set to its default
+ * struct value). Callers that want "absent" should not call this. */
+export function writeSubmessageField(
+  fieldNumber: number,
+  payload: Buffer,
+): Buffer {
+  return Buffer.concat([
+    tag(fieldNumber, WIRE_LENGTH_DELIMITED),
+    encodeVarint(payload.length),
+    payload,
   ]);
 }
 

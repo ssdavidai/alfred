@@ -35,10 +35,20 @@ import {
   decodeFields,
   fieldAsString,
   fieldAsUint,
+  fieldAsBool,
   writeBoolField,
+  writeBytesField,
   writeStringField,
+  writeSubmessageField,
   writeUint32Field,
+  VoiceAssistantEvent,
 } from "./esphome-protocol.js";
+// NOTE: esphome-session.js is dynamic-imported inside the default factory at
+// call time, NOT statically imported here. Static import pulls in tenant.ts
+// → config.ts which reads required env vars at module-load time; the test
+// suite uses esphome-server.ts without ever spawning a production session,
+// so the static import would force every test to set OPENAI_API_KEY etc.
+// even when they pass in a mock voiceSessionFactory.
 
 // ── Identity ─────────────────────────────────────────────────────────────────
 // HA's ESPHome integration keys devices by MAC. For real ESP32s that's the
@@ -158,6 +168,76 @@ export function buildListEntitiesVoiceAssistantResponse(opts: {
 // ListEntitiesDoneResponse all encode as a frame with a zero-length payload.
 export const EMPTY_PAYLOAD = Buffer.alloc(0);
 
+// ── VoiceAssistant message builders (PR2 audio bridge) ──────────────────────
+// VoiceAssistantResponse — ACK for an incoming VoiceAssistantRequest. The
+// `port` field signals which audio transport HA should use:
+//   port = 0  → in-band audio over the API connection (VoiceAssistantAudio
+//               frames flow over the same TCP socket). This is the
+//               USE_API_AUDIO mode the linux-voice-assistant uses and the
+//               only mode PR2 implements.
+//   port > 0  → UDP audio on that port. NOT supported in PR2 — it'd require
+//               us to bind a separate UDP socket per session.
+// `error` flags a failed start; we set false on the happy path.
+export function buildVoiceAssistantResponse(opts: {
+  port: number;
+  error: boolean;
+}): Buffer {
+  return Buffer.concat([
+    writeUint32Field(1, opts.port),
+    writeBoolField(2, opts.error),
+  ]);
+}
+
+// VoiceAssistantEventResponse — pipeline progress event for HA's voice UI.
+// `data` is a repeated VoiceAssistantEventData (string name, string value).
+// We use it for the STT-end transcript and the TTS-stream-end marker.
+export function buildVoiceAssistantEventResponse(opts: {
+  eventType: number;
+  data?: Array<{ name: string; value: string }>;
+}): Buffer {
+  const parts: Buffer[] = [writeUint32Field(1, opts.eventType)];
+  // event_type=0 (ERROR) and =1 (RUN_START) would omit the field via the
+  // default-omit rule on writeUint32Field. ERROR is rare; RUN_START would
+  // disappear silently from the wire, which would break HA's pipeline UI
+  // mid-turn. Force the tag when needed.
+  if (opts.eventType === 0 || opts.eventType === 1) {
+    parts[0] = Buffer.concat([
+      Buffer.from([(1 << 3) | 0]), // tag for field 1, varint
+      Buffer.from([opts.eventType]),
+    ]);
+  }
+  if (opts.data) {
+    for (const kv of opts.data) {
+      const sub = Buffer.concat([
+        writeStringField(1, kv.name),
+        writeStringField(2, kv.value),
+      ]);
+      parts.push(writeSubmessageField(2, sub));
+    }
+  }
+  return Buffer.concat(parts);
+}
+
+// VoiceAssistantAudio — one audio frame. `data` is raw PCM-16 mono @ 16 kHz
+// LE bytes. `end` marks the last frame of a turn (HA drains its playback
+// buffer + transitions to idle on the next event).
+export function buildVoiceAssistantAudio(opts: {
+  data: Buffer;
+  end?: boolean;
+}): Buffer {
+  return Buffer.concat([
+    // We use the always-present writer because empty `data` with `end=true`
+    // is a valid wire shape (flush marker) and must not be omitted.
+    opts.data.length > 0
+      ? writeBytesField(1, opts.data)
+      : Buffer.concat([
+          Buffer.from([(1 << 3) | 2]), // tag for field 1, length-delimited
+          Buffer.from([0x00]), // zero-length payload
+        ]),
+    writeBoolField(2, !!opts.end),
+  ]);
+}
+
 // ── Per-connection session ───────────────────────────────────────────────────
 
 export interface EsphomeServerOptions {
@@ -166,13 +246,54 @@ export interface EsphomeServerOptions {
   password?: string;
   /** Logger override for tests. */
   log?: (msg: string, extra?: Record<string, unknown>) => void;
+  /** Factory for the voice-assistant session that the connection spawns on
+   * VoiceAssistantRequest(start=true). Production wires
+   * `createEsphomeVoiceSession` (from ./esphome-session); tests inject a
+   * mock so they can assert the bridge bytes without standing up the full
+   * OpenAI Realtime client. */
+  voiceSessionFactory?: VoiceSessionFactory;
 }
+
+/** Hooks the EsphomeConnection exposes to a voice-assistant session. */
+export interface VoiceSessionConnection {
+  /** Ship a framed message to HA on this TCP connection. */
+  send(messageType: number, payload: Buffer): void;
+  /** Per-connection logger. */
+  log: (msg: string, extra?: Record<string, unknown>) => void;
+  /** Stable tenant identity (so the session can pass it to the brain). */
+  identity: EsphomeServerIdentity;
+}
+
+/** A voice-assistant session — one turn end-to-end. The connection creates
+ * one on VoiceAssistantRequest(start=true) and forwards subsequent
+ * VoiceAssistantAudio + VoiceAssistantEventResponse frames to it until either
+ * side signals end. The session owns the OpenAI Realtime WS for that turn. */
+export interface VoiceSessionHandle {
+  /** Inbound audio frame from HA (mic audio). */
+  onInboundAudio(chunk: Buffer, end: boolean): void;
+  /** Inbound pipeline event from HA — RUN_END signals user stopped talking
+   * and HA is closing the turn from its side. */
+  onInboundEvent(eventType: number, data: Array<{ name: string; value: string }>): void;
+  /** Bridge cleanup — close the Realtime WS, free buffers. */
+  close(reason: string): void;
+}
+
+export type VoiceSessionFactory = (opts: {
+  conn: VoiceSessionConnection;
+  conversationId: string;
+  wakeWordPhrase: string;
+  flags: number;
+}) => VoiceSessionHandle;
 
 interface SessionState {
   helloSeen: boolean;
   connected: boolean;
   authorized: boolean;
   subscribedStates: boolean;
+  /** True when HA sent SubscribeVoiceAssistantRequest(subscribe=true). PR2
+   * uses this only as a diagnostic — we accept VoiceAssistantRequest even if
+   * subscribe never landed because aioesphomeapi's flow varies by HA version. */
+  voiceAssistantSubscribed: boolean;
 }
 
 function defaultLog(msg: string, extra?: Record<string, unknown>): void {
@@ -187,7 +308,12 @@ export class EsphomeConnection {
     connected: false,
     authorized: false,
     subscribedStates: false,
+    voiceAssistantSubscribed: false,
   };
+  /** Active voice session, if any. There is at most one session per
+   * connection in PR2 — concurrent turns from one HA satellite are not a
+   * thing the upstream pipeline emits. */
+  private voiceSession: VoiceSessionHandle | null = null;
 
   constructor(
     private readonly socket: net.Socket,
@@ -198,10 +324,22 @@ export class EsphomeConnection {
     log("connection accepted", { remote });
     socket.on("data", (chunk) => this.onData(chunk));
     socket.on("error", (err) => log("socket error", { remote, err: err.message }));
-    socket.on("close", () => log("connection closed", { remote }));
+    socket.on("close", () => {
+      log("connection closed", { remote });
+      if (this.voiceSession) {
+        try {
+          this.voiceSession.close("connection-closed");
+        } catch (err) {
+          log("voice session close error", {
+            err: err instanceof Error ? err.message : String(err),
+          });
+        }
+        this.voiceSession = null;
+      }
+    });
   }
 
-  private send(messageType: number, payload: Buffer): void {
+  send(messageType: number, payload: Buffer): void {
     if (this.socket.destroyed) return;
     const frame = encodeFrame(messageType, payload);
     this.socket.write(frame);
@@ -315,12 +453,168 @@ export class EsphomeConnection {
         this.state.subscribedStates = true;
         return;
       }
+      case MessageType.SubscribeVoiceAssistantRequest: {
+        // HA asks to receive voice events from this device. The `flags` field
+        // tells us whether HA wants UDP audio or API audio. We ignore the
+        // flag for now — PR2 only implements USE_API_AUDIO (in-band on the
+        // same TCP connection), so we have no UDP socket to allocate either
+        // way. PR4 will revisit if HA's UDP-audio path proves more reliable
+        // than in-band on real WAN-traversed satellites.
+        const fields = decodeFields(payload);
+        const subscribe = fieldAsBool(fields, 1);
+        const flags = fieldAsUint(fields, 2);
+        log("SubscribeVoiceAssistantRequest", { subscribe, flags });
+        this.state.voiceAssistantSubscribed = subscribe;
+        return;
+      }
+      case MessageType.VoiceAssistantRequest: {
+        // HA wants us to run a voice-assistant turn. `start=true` opens the
+        // turn (open Realtime, accept incoming audio, stream output back).
+        // `start=false` is HA's way of cancelling an in-flight turn — we
+        // dispose the session immediately.
+        const fields = decodeFields(payload);
+        const start = fieldAsBool(fields, 1);
+        const conversationId = fieldAsString(fields, 2);
+        const flags = fieldAsUint(fields, 3);
+        const wakeWordPhrase = fieldAsString(fields, 5);
+        log("VoiceAssistantRequest", {
+          start,
+          conversationId,
+          flags,
+          wakeWordPhrase,
+        });
+        if (!start) {
+          // Cancel — HA wants the turn dropped.
+          if (this.voiceSession) {
+            this.voiceSession.close("ha-cancelled");
+            this.voiceSession = null;
+          }
+          return;
+        }
+        if (this.voiceSession) {
+          // Already running. Per the spec we never have two concurrent turns
+          // on one connection; if HA sends an overlapping start the safest
+          // thing is to drop the old session and start fresh — same behaviour
+          // an ESPHome firmware would exhibit (the audio loop is single-
+          // threaded over the I2S DMA buffer).
+          log("overlapping VoiceAssistantRequest — disposing old session");
+          this.voiceSession.close("overlapping-start");
+          this.voiceSession = null;
+        }
+        // Tell HA we're ready and we'll use in-band API audio (port=0).
+        // Order matters: HA expects this response BEFORE we start emitting
+        // VoiceAssistantAudio frames, otherwise its pipeline state machine
+        // drops the audio.
+        this.send(
+          MessageType.VoiceAssistantResponse,
+          buildVoiceAssistantResponse({ port: 0, error: false }),
+        );
+        // Spawn the bridge. The factory is opts.voiceSessionFactory in tests
+        // and createEsphomeVoiceSession in production. We pass the connection
+        // hooks so the session can send audio + events back to HA.
+        const factory = this.opts.voiceSessionFactory ?? createDefaultVoiceSession;
+        try {
+          this.voiceSession = factory({
+            conn: {
+              send: (mt, p) => this.send(mt, p),
+              log,
+              identity: this.opts.identity,
+            },
+            conversationId,
+            wakeWordPhrase,
+            flags,
+          });
+        } catch (err) {
+          log("voice session factory threw", {
+            err: err instanceof Error ? err.message : String(err),
+          });
+          // Surface the failure to HA as a TTS_END + RUN_END pair so the
+          // pipeline UI returns to idle.
+          this.send(
+            MessageType.VoiceAssistantEventResponse,
+            buildVoiceAssistantEventResponse({
+              eventType: VoiceAssistantEvent.ERROR,
+              data: [{ name: "code", value: "session-init-failed" }],
+            }),
+          );
+          this.send(
+            MessageType.VoiceAssistantEventResponse,
+            buildVoiceAssistantEventResponse({
+              eventType: VoiceAssistantEvent.RUN_END,
+            }),
+          );
+          this.voiceSession = null;
+        }
+        return;
+      }
+      case MessageType.VoiceAssistantAudio: {
+        // Inbound mic audio from HA. The session resamples + forwards to
+        // OpenAI Realtime. No session = HA is sending audio for a turn we
+        // already disposed → drop on the floor.
+        if (!this.voiceSession) {
+          log("VoiceAssistantAudio with no active session — dropping");
+          return;
+        }
+        const fields = decodeFields(payload);
+        const dataField = fields[1];
+        const data = Buffer.isBuffer(dataField) ? dataField : Buffer.alloc(0);
+        const end = fieldAsBool(fields, 2);
+        this.voiceSession.onInboundAudio(data, end);
+        return;
+      }
+      case MessageType.VoiceAssistantEventResponse: {
+        // Inbound pipeline event from HA. PR2 only acts on RUN_END (HA is
+        // closing the turn from its side, e.g. user pressed cancel button on
+        // the satellite). We forward all events to the session for it to
+        // decide what to do.
+        if (!this.voiceSession) return;
+        const fields = decodeFields(payload);
+        const eventType = fieldAsUint(fields, 1);
+        // Repeated submessages decode as either a single Buffer or an array.
+        const raw = fields[2];
+        const subs = Array.isArray(raw)
+          ? raw.filter(Buffer.isBuffer)
+          : Buffer.isBuffer(raw)
+            ? [raw]
+            : [];
+        const data = (subs as Buffer[]).map((sub) => {
+          const inner = decodeFields(sub);
+          return {
+            name: fieldAsString(inner, 1),
+            value: fieldAsString(inner, 2),
+          };
+        });
+        this.voiceSession.onInboundEvent(eventType, data);
+        if (eventType === VoiceAssistantEvent.RUN_END) {
+          this.voiceSession = null;
+        }
+        return;
+      }
       default: {
         log("unhandled message (ignored)", { typeName, messageType });
         return;
       }
     }
   }
+}
+
+// Default factory — production wiring. We DO NOT import esphome-session at
+// module level (see import block at the top of the file for why); instead,
+// production wires its factory explicitly by calling startEsphomeServer({
+// voiceSessionFactory: createProductionVoiceSession }) where the production
+// function does the require. If the default fires it means the caller forgot
+// to wire the factory, which we surface loudly rather than silently spawning
+// a stub that drops audio.
+function createDefaultVoiceSession(_opts: {
+  conn: VoiceSessionConnection;
+  conversationId: string;
+  wakeWordPhrase: string;
+  flags: number;
+}): VoiceSessionHandle {
+  throw new Error(
+    "EsphomeConnection received VoiceAssistantRequest but no voiceSessionFactory was configured. " +
+      "server.ts must pass `voiceSessionFactory: (opts) => new EsphomeVoiceSession(opts)` to startEsphomeServer.",
+  );
 }
 
 // ── Server bootstrap ─────────────────────────────────────────────────────────
@@ -331,6 +625,9 @@ export interface StartEsphomeServerOptions {
   identity: EsphomeServerIdentity;
   password?: string;
   log?: (msg: string, extra?: Record<string, unknown>) => void;
+  /** Inject a different voice session factory — production omits and gets
+   * the default OpenAI Realtime bridge; tests inject a mock. */
+  voiceSessionFactory?: VoiceSessionFactory;
 }
 
 export interface EsphomeServerHandle {
@@ -350,6 +647,7 @@ export function startEsphomeServer(opts: StartEsphomeServerOptions): EsphomeServ
       identity: opts.identity,
       password: opts.password,
       log: opts.log,
+      voiceSessionFactory: opts.voiceSessionFactory,
     });
   });
   server.on("error", (err) => log("server error", { err: err.message }));
