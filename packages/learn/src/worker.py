@@ -56,6 +56,7 @@ from src.workflows.signal_router import (
 from src.workflows.stream_event_purge import StreamEventPurgeWorkflow
 from src.workflows.reversal_calibration import ReversalCalibrationWorkflow
 from src.workflows.briefing import BriefingWorkflow
+from src.workflows.recall_dispatcher import RecallDispatcherWorkflow
 
 # Chore template workflows (static + dynamic)
 from src.workflows.chores import ALL_CHORE_TEMPLATES
@@ -661,6 +662,15 @@ from src.activities.briefing import (
     list_active_matters_for_briefing,
 )
 
+# Recall.ai meeting-bot dispatcher (#113 PR4) — three activities the
+# RecallDispatcherWorkflow drives every 5 min. ``filter_dispatch_candidates``
+# is the pure helper; it's not an @activity.defn and is not registered here.
+from src.activities.recall_dispatcher import (
+    check_recall_dispatch_state,
+    dispatch_recall_bot,
+    fetch_upcoming_calendar_events,
+)
+
 # Validators used as activities
 from src.validators.frontmatter import validate_classification
 
@@ -711,6 +721,11 @@ _STATIC_WORKFLOWS = [
     StreamEventPurgeWorkflow,
     ReversalCalibrationWorkflow,
     BriefingWorkflow,
+    # Recall.ai meeting-bot dispatcher (#113 PR4) — every 5 min reads
+    # the calendar, applies the policy gate, dispatches a bot per
+    # surviving event. Scheduled as ``al-recall-dispatcher`` in
+    # register_schedules.py.
+    RecallDispatcherWorkflow,
     *ALL_CHORE_TEMPLATES,
 ]
 
@@ -1121,6 +1136,11 @@ ALL_ACTIVITIES = [
     get_prior_briefing,
     briefing_visit_matter,
     compose_and_write_briefing,
+    # Recall.ai meeting-bot dispatcher (#113 PR4) — see
+    # src.workflows.recall_dispatcher.RecallDispatcherWorkflow.
+    check_recall_dispatch_state,
+    dispatch_recall_bot,
+    fetch_upcoming_calendar_events,
 ]
 
 

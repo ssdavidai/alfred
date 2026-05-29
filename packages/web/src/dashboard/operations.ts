@@ -826,6 +826,37 @@ export const terminateRecallBot = async (
   });
 };
 
+/** Manually dispatch a Recall bot for a meeting URL (#113 PR4).
+ *
+ *  Card-side "Send bot now" CTA. The bot_name override is optional —
+ *  ctrl-api falls back to the configured default if omitted. The card
+ *  does NOT supply a calendar_event_id because this is the
+ *  ad-hoc, off-calendar path; the dispatcher workflow supplies one
+ *  for the automated path and ctrl-api uses it for dedupe. */
+export const dispatchRecallBot = async (
+  args: { meeting_url: string; bot_name?: string },
+  context: any,
+) => {
+  if (
+    typeof args?.meeting_url !== "string" ||
+    args.meeting_url.trim().length === 0
+  ) {
+    throw new HttpError(400, "meeting_url required");
+  }
+  const body: Record<string, string> = {
+    meeting_url: args.meeting_url.trim(),
+  };
+  if (typeof args.bot_name === "string" && args.bot_name.trim().length > 0) {
+    body.bot_name = args.bot_name.trim();
+  }
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/channels/recall/bots",
+    body,
+  });
+};
+
 // ============================================================
 // Dashboard Home
 // ============================================================

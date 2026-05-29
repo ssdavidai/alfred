@@ -1,4 +1,4 @@
-// /api/v1/channels/recall/* — Recall.ai channel routes (#113 PR2).
+// /api/v1/channels/recall/* — Recall.ai channel routes (#113 PR2 + PR4).
 //
 // Recall.ai replaces the retired Vexa stack (#113 PR1) as the per-meeting
 // bot transport. Everything Sir needs to configure — API key, region, bot
@@ -9,19 +9,21 @@
 //
 // This file ships the ctrl-api half of the card-driven contract per spec
 // §5.1.1, plus the inbound Svix-signed webhook target per spec §5.4.
-// The 7 outbound routes are bearer-authed via the global AAS_API_KEY
+// The 7+ outbound routes are bearer-authed via the global AAS_API_KEY
 // gate (same as every other /channels/* route except the webhook target).
 //
 // Surface:
 //
-//   POST /api/v1/channels/recall/validate-key       — paste+round-trip test
-//   GET  /api/v1/channels/recall/config             — current dials
-//   PATCH /api/v1/channels/recall/config            — update dials
-//   GET  /api/v1/channels/recall/usage              — month-to-date rollup
-//   GET  /api/v1/channels/recall/bots/active        — non-terminal bots
-//   DELETE /api/v1/channels/recall/bots/:bot_id     — mid-meeting terminate
-//   POST /api/v1/channels/recall/webhook-test       — synthetic delivery
-//   POST /api/v1/webhooks/recall                    — Svix-signed inbound
+//   POST /api/v1/channels/recall/validate-key            — paste+round-trip test
+//   GET  /api/v1/channels/recall/config                  — current dials
+//   PATCH /api/v1/channels/recall/config                 — update dials
+//   GET  /api/v1/channels/recall/usage                   — month-to-date rollup
+//   GET  /api/v1/channels/recall/bots/active             — non-terminal bots
+//   POST /api/v1/channels/recall/bots                    — dispatch a bot (PR4)
+//   DELETE /api/v1/channels/recall/bots/:bot_id          — mid-meeting terminate
+//   POST /api/v1/channels/recall/bots/:bot_id/leave      — graceful leave (PR4)
+//   POST /api/v1/channels/recall/webhook-test            — synthetic delivery
+//   POST /api/v1/webhooks/recall                         — Svix-signed inbound
 //
 // Persistence: state.db tables recall_config / recall_bot / recall_event
 // (migration 0007_recall.sql). The card-side surface (PR3a/PR3b) reads
@@ -57,6 +59,50 @@ const VALID_RESPOND_MODES = ["off", "on_mention", "always"] as const;
 
 function recallBaseUrl(region: string): string {
   return RECALL_REGION_HOSTS[region] ?? RECALL_REGION_HOSTS["us-east-1"];
+}
+
+// ── meeting URL validation ────────────────────────────────────────────────
+//
+// PR4 — POST /bots accepts a meeting URL the dispatcher (alfred-learn)
+// or the card pulled out of a calendar event. We confirm the URL is
+// shaped like one of the three platforms Recall actually supports
+// today: Zoom, Google Meet, Microsoft Teams. Anything else gets a 400
+// so a stray "join here" link in a description doesn't try to spin
+// up a bot Recall would refuse anyway.
+//
+// Patterns are deliberately loose — Recall does the canonical
+// resolution (e.g. zoom.us/j/... with a passcode encoded into the
+// link). We only confirm the host *family* matches one of the three.
+const MEETING_HOST_PATTERNS: Array<{ name: string; re: RegExp }> = [
+  { name: "zoom", re: /\b(?:[a-z0-9-]+\.)?zoom\.(?:us|com)\b/i },
+  { name: "meet", re: /\bmeet\.google\.com\b/i },
+  { name: "teams", re: /\bteams\.(?:microsoft|live)\.com\b/i },
+];
+
+interface MeetingUrlInfo {
+  platform: "zoom" | "meet" | "teams";
+  normalized: string;
+}
+
+export function classifyMeetingUrl(url: string): MeetingUrlInfo | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(url.trim());
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    return null;
+  }
+  for (const { name, re } of MEETING_HOST_PATTERNS) {
+    if (re.test(parsed.host)) {
+      return {
+        platform: name as MeetingUrlInfo["platform"],
+        normalized: parsed.toString(),
+      };
+    }
+  }
+  return null;
 }
 
 // ── recall_config row helpers ─────────────────────────────────────────────
@@ -633,6 +679,7 @@ export const _recallInternals = {
   getOrSeedConfig,
   statusFromEvent,
   parseConfigPatch,
+  classifyMeetingUrl,
 };
 
 // ── Routes ────────────────────────────────────────────────────────────────
@@ -780,6 +827,301 @@ export function registerChannelsRecallRoutes(): void {
         transcript_url: string | null;
       }>;
       sendJson(res, 200, { bots: rows });
+    },
+  );
+
+  // POST /api/v1/channels/recall/bots — dispatch a Recall bot (#113 PR4).
+  //
+  // Body: { meeting_url: string, bot_name?: string,
+  //         calendar_event_id?: string, scheduled_join_time?: string }
+  //
+  // Posts to Recall's POST /api/v2/bot create-bot endpoint with the
+  // configured bot_name, recording_config defaults, and an optional
+  // `join_at` if `scheduled_join_time` is in the future. The full
+  // Recall payload is persisted verbatim into recall_bot.json so we can
+  // re-derive any field later (transcript URL surfacing, etc.) without a
+  // migration.
+  //
+  // Two consumers:
+  //   1. The alfred-learn RecallDispatcherWorkflow (PR4) walks the
+  //      principal's calendar and POSTs here for each policy-passing
+  //      meeting.
+  //   2. The /channels Recall card's manual "Send bot now" button
+  //      (PR3a) POSTs here with just the meeting URL.
+  //
+  // Idempotence: if the request carries `calendar_event_id` and a
+  // recall_bot row already exists for it in a non-terminal state, we
+  // 200 the existing row instead of creating a second Recall bot. The
+  // dispatcher uses this as its dedupe surface; the card's manual path
+  // bypasses it (no calendar_event_id sent).
+  addRoute(
+    "POST",
+    "/api/v1/channels/recall/bots",
+    async ({ res, body }) => {
+      const b = (body ?? {}) as Record<string, unknown>;
+      if (typeof b.meeting_url !== "string" || b.meeting_url.trim().length === 0) {
+        throw new ValidationError("meeting_url (non-empty string) is required");
+      }
+      const meetingInfo = classifyMeetingUrl(b.meeting_url);
+      if (!meetingInfo) {
+        throw new ValidationError(
+          "meeting_url must point at zoom.us, meet.google.com, or teams.microsoft.com",
+        );
+      }
+      let calendarEventId: string | null = null;
+      if (b.calendar_event_id !== undefined && b.calendar_event_id !== null) {
+        if (
+          typeof b.calendar_event_id !== "string" ||
+          b.calendar_event_id.length > 256
+        ) {
+          throw new ValidationError(
+            "calendar_event_id must be a string ≤256 chars",
+          );
+        }
+        calendarEventId = b.calendar_event_id.trim() || null;
+      }
+      let scheduledJoinTime: string | null = null;
+      if (b.scheduled_join_time !== undefined && b.scheduled_join_time !== null) {
+        if (typeof b.scheduled_join_time !== "string") {
+          throw new ValidationError(
+            "scheduled_join_time must be an ISO 8601 string",
+          );
+        }
+        const ts = Date.parse(b.scheduled_join_time);
+        if (!Number.isFinite(ts)) {
+          throw new ValidationError(
+            "scheduled_join_time must be a valid ISO 8601 datetime",
+          );
+        }
+        scheduledJoinTime = new Date(ts).toISOString();
+      }
+      const apiKey = process.env.RECALL_API_KEY?.trim();
+      if (!apiKey) {
+        throw new ApiError(
+          503,
+          "NOT_CONFIGURED",
+          "RECALL_API_KEY is not set on this tenant",
+        );
+      }
+      const db = getStateDb();
+      const cfg = getOrSeedConfig(db);
+
+      // Idempotence on calendar_event_id — if the dispatcher already
+      // created a bot for this meeting, return the existing row.
+      if (calendarEventId) {
+        const existing = db
+          .prepare(
+            `SELECT id, status, json
+               FROM recall_bot
+              WHERE calendar_event_id = ?
+                AND status NOT IN ('done','fail')
+              ORDER BY created_at DESC
+              LIMIT 1`,
+          )
+          .get(calendarEventId) as
+          | { id: string; status: string; json: string }
+          | undefined;
+        if (existing) {
+          sendJson(res, 200, {
+            bot_id: existing.id,
+            status: existing.status,
+            recall_url: null,
+            note: "existing bot for this calendar_event_id",
+          });
+          return;
+        }
+      }
+
+      const botName =
+        typeof b.bot_name === "string" && b.bot_name.trim().length > 0
+          ? b.bot_name.trim().slice(0, 200)
+          : cfg.bot_name;
+
+      const recallBody: Record<string, unknown> = {
+        meeting_url: meetingInfo.normalized,
+        bot_name: botName,
+        recording_config: {
+          transcript: { provider: { meeting_captions: {} } },
+        },
+      };
+      if (scheduledJoinTime) {
+        recallBody.join_at = scheduledJoinTime;
+      }
+
+      const base = recallBaseUrl(cfg.region);
+      const url = `${base}/api/v2/bot`;
+      let resp: Response;
+      try {
+        resp = await fetch(url, {
+          method: "POST",
+          headers: {
+            Authorization: `Token ${apiKey}`,
+            "Content-Type": "application/json",
+            Accept: "application/json",
+          },
+          body: JSON.stringify(recallBody),
+          signal: AbortSignal.timeout(15_000),
+        });
+      } catch (err) {
+        // Never include the API key in the surfaced message — only the
+        // request error.
+        throw new ApiError(
+          502,
+          "RECALL_UNREACHABLE",
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+      if (!resp.ok) {
+        let detail = "";
+        try {
+          detail = (await resp.text()).slice(0, 200);
+        } catch {
+          /* swallow */
+        }
+        // Prefix-only key fingerprint for log correlation; the key
+        // itself never leaves the env.
+        const keyPrefix = apiKey.slice(0, 6);
+        console.warn(
+          `[recall] create-bot HTTP ${resp.status} (key ${keyPrefix}…): ${detail}`,
+        );
+        throw new ApiError(
+          resp.status === 401 || resp.status === 403 ? 503 : 502,
+          resp.status === 401 || resp.status === 403
+            ? "NOT_CONFIGURED"
+            : "RECALL_REJECTED",
+          `Recall returned HTTP ${resp.status}${detail ? ` — ${detail}` : ""}`,
+        );
+      }
+      let payload: Record<string, unknown> = {};
+      try {
+        payload = (await resp.json()) as Record<string, unknown>;
+      } catch {
+        // Recall returned 2xx with a non-JSON body. Treat as a soft
+        // failure — we have no bot_id to persist.
+        throw new ApiError(
+          502,
+          "RECALL_REJECTED",
+          "Recall returned a non-JSON success body",
+        );
+      }
+      const botId =
+        typeof payload.id === "string"
+          ? payload.id
+          : typeof payload.bot_id === "string"
+            ? payload.bot_id
+            : null;
+      if (!botId) {
+        throw new ApiError(
+          502,
+          "RECALL_REJECTED",
+          "Recall response did not include a bot id",
+        );
+      }
+      const recallUrl =
+        typeof payload.recording_url === "string"
+          ? payload.recording_url
+          : typeof payload.url === "string"
+            ? payload.url
+            : null;
+      const now = Date.now();
+      db.prepare(
+        `INSERT INTO recall_bot (id, calendar_event_id, meeting_url, status, created_at, json)
+           VALUES (?, ?, ?, 'requested', ?, ?)`,
+      ).run(
+        botId,
+        calendarEventId,
+        meetingInfo.normalized,
+        now,
+        JSON.stringify(payload),
+      );
+      sendJson(res, 200, {
+        bot_id: botId,
+        status: "requested",
+        recall_url: recallUrl,
+      });
+    },
+  );
+
+  // POST /api/v1/channels/recall/bots/:bot_id/leave — graceful leave (#113 PR4).
+  //
+  // Semantically identical to the DELETE route (Recall's API exposes
+  // exactly one "remove bot from call" verb) but matches the spec's
+  // POST-leave wording and gives the dispatcher / card a verb that
+  // reads naturally in their own code paths ("send bot home" vs
+  // "delete bot").
+  addRoute(
+    "POST",
+    "/api/v1/channels/recall/bots/:bot_id/leave",
+    async ({ res, params }) => {
+      const botId = params.bot_id;
+      if (!botId || botId.length > 200) {
+        throw new ValidationError("bot_id must be a non-empty string ≤200 chars");
+      }
+      const apiKey = process.env.RECALL_API_KEY?.trim();
+      if (!apiKey) {
+        throw new ApiError(
+          503,
+          "NOT_CONFIGURED",
+          "RECALL_API_KEY is not set on this tenant",
+        );
+      }
+      const db = getStateDb();
+      const cfg = getOrSeedConfig(db);
+      const base = recallBaseUrl(cfg.region);
+      const url = `${base}/api/v1/bot/${encodeURIComponent(botId)}/`;
+      let resp: Response;
+      try {
+        resp = await fetch(url, {
+          method: "DELETE",
+          headers: {
+            Authorization: `Token ${apiKey}`,
+            Accept: "application/json",
+          },
+          signal: AbortSignal.timeout(10_000),
+        });
+      } catch (err) {
+        throw new ApiError(
+          502,
+          "RECALL_UNREACHABLE",
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+      if (resp.status === 404) {
+        db.prepare(
+          `UPDATE recall_bot
+              SET status = 'done',
+                  left_at = COALESCE(left_at, ?)
+            WHERE id = ? AND status NOT IN ('done','fail')`,
+        ).run(Date.now(), botId);
+        sendJson(res, 200, {
+          ok: true,
+          bot_id: botId,
+          status: "done",
+          note: "Recall reported 404; local row marked done",
+        });
+        return;
+      }
+      if (!resp.ok) {
+        let detail = "";
+        try {
+          detail = (await resp.text()).slice(0, 200);
+        } catch {
+          /* swallow */
+        }
+        throw new ApiError(
+          502,
+          "RECALL_REJECTED",
+          `Recall returned HTTP ${resp.status}${detail ? ` — ${detail}` : ""}`,
+        );
+      }
+      const now = Date.now();
+      db.prepare(
+        `UPDATE recall_bot
+            SET status = CASE WHEN status IN ('done','fail') THEN status ELSE 'leaving' END,
+                left_at = COALESCE(left_at, ?)
+          WHERE id = ?`,
+      ).run(now, botId);
+      sendJson(res, 200, { ok: true, bot_id: botId, status: "leaving" });
     },
   );
 

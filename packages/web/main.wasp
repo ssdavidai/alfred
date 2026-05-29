@@ -992,6 +992,16 @@ action terminateRecallBot {
   entities: []
 }
 
+// Lane III (#113 PR4) — operator-facing "Send bot now" button on the
+// /channels Recall card. POSTs to ctrl-api's create-bot route with a
+// pasted meeting URL and (optionally) a friendly bot name override.
+// ctrl-api dedupes if calendar_event_id is supplied; the manual path
+// does not supply one (the card just hands over the URL).
+action dispatchRecallBot {
+  fn: import { dispatchRecallBot } from "@src/dashboard/operations",
+  entities: []
+}
+
 // Wave C — HA conversation setup card (#111 PR3). Reads the shared
 // `channel_tokens` table for rows with `channel='ha-conversation'`
 // (one row per HA install). Mint + revoke proxy to the same shared

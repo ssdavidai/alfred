@@ -284,6 +284,21 @@ INTERVAL_SCHEDULES = [
         "workflow": "DecayWatcherWorkflow",
         "interval": timedelta(hours=6),
     },
+    {
+        # Recall.ai dispatcher (#113 PR4) — every 5 min reads the
+        # principal's Google Calendar for the next 15 min, applies
+        # the operator-configured auto_join_policy (off /
+        # principal_attendee / all), dedupes against
+        # already-dispatched calendar_event_ids, refuses dispatches
+        # that would blow the monthly_hours_cap, and POSTs to
+        # ctrl-api's create-bot route for each surviving event. The
+        # workflow is a no-op when auto_join_policy=off, so leaving
+        # the schedule registered on tenants that haven't enabled
+        # Recall costs only one ctrl-api GET per tick.
+        "id": "al-recall-dispatcher",
+        "workflow": "RecallDispatcherWorkflow",
+        "interval": timedelta(minutes=5),
+    },
 ]
 
 CALENDAR_SCHEDULES = [
