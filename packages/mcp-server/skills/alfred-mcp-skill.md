@@ -76,6 +76,19 @@ The catalogue is intentionally narrow. Container restarts, credential rotation, 
 
 **HAOS caveat.** Every addon tool returns a 501 envelope on non-HAOS installs: `{error: "supervisor_not_available", installation_type, message}`. Read `installation_type` and explain to Sir; don't retry. Sir's home (home.alfred.black) is HAOS so this surface is live there.
 
+### Home Assistant — Tier 4 (#115 PR7, HA core lifecycle + backups)
+
+- `ha__core_version` — read `ha_version` + `installation_type`; no gate
+- `ha__core_check_config` — verify configuration.yaml parses (run before restart); no gate
+- `ha__core_reload_yaml` — reload every YAML domain without restarting; no gate
+- `ha__core_restart` — GATED: `decision_ref` REQUIRED; auto-snapshot recorded in `ha_backup_ref`; HA OFFLINE 30-120s
+- `ha__core_update` — GATED: `decision_ref` REQUIRED; auto-snapshot recorded; optional `version` pin; HA OFFLINE 3-10 min
+- `ha__list_backups` — every backup HA knows about; no gate
+- `ha__backup_info` — full details for one backup; no gate
+- `ha__create_backup` — generate a fresh backup; no gate (this IS a backup; `ha_backup_ref` row gets `triggered_by='user'`)
+- `ha__delete_backup` — GATED: `decision_ref` REQUIRED; daybook entry recorded; irreversible
+- `ha__restore_backup` — GATED: `decision_ref` REQUIRED; NO snapshot (restoring IS the recovery); HA OFFLINE several minutes
+
 ### DM pairing (1)
 
 - `approve_device` — approve a pending Hermes DM-pairing code by `platform` + `code` (the only pairing op exposed here)
@@ -188,6 +201,48 @@ Read the `installation_type` and explain to Sir — don't retry. Sir's home (hom
 2. Create a `decision/` record naming the version delta.
 3. `ha__addon_update({slug, decision_ref})` — snapshot taken before the upstream call.
 4. `ha__addon_logs({slug, tail: 100})` after Supervisor reports done — confirm no startup errors.
+
+### "Restart / update HA core" / "Back up before something risky" (Tier 4, #115 PR7)
+
+The PR7 surface gives Alfred HA's core lifecycle + backup CRUD: `ha__core_version`, `ha__core_check_config`, `ha__core_reload_yaml`, `ha__core_restart`, `ha__core_update`, `ha__list_backups`, `ha__backup_info`, `ha__create_backup`, `ha__delete_backup`, `ha__restore_backup`.
+
+**Gates + snapshots (locked YES on 2026-05-29).** `core/restart` + `core/update` + `delete_backup` + `restore_backup` all require a `decision_ref`. `core/restart` + `core/update` also auto-snapshot — ctrl-api triggers a real `backup/generate` BEFORE the destructive call and records the result in `ha_backup_ref`. The success envelope returns `backup_ref_id`, `ha_backup_id`, and `backup_name`. Mention "snapshot taken" to Sir. `restore_backup` is the only destructive verb that does NOT auto-snapshot — restoring IS the recovery action; backing up the broken state is backwards.
+
+**Recipe — restart HA core safely:**
+
+1. `ha__core_check_config({})` — never restart on a broken config; this catches yaml parse errors before HA goes down.
+2. If the config check returns warnings/errors, surface them to Sir and stop. Don't restart.
+3. Create a `decision/` record naming why ("restart to pick up new ESPHome device").
+4. `ha__core_restart({decision_ref: "decision/..."})` — snapshot taken; HA reboots; reply carries `backup_name`.
+5. Wait ~60s, then `ha__core_version({})` to confirm HA came back.
+
+**Recipe — update HA core to the latest stable:**
+
+1. `ha__core_version({})` — read the current version, surface it to Sir.
+2. Sir confirms the update. Create a `decision/` record naming the version delta if known.
+3. `ha__core_update({decision_ref: "decision/..."})` — omit `version` for the latest stable, or pass `version: "2025.7.0"` to pin. Snapshot taken before HA goes down.
+4. HA is OFFLINE for 3-10 min. Wait, then `ha__core_version({})` to confirm.
+5. If the update failed (Sir reports HA didn't come back): `ha__list_backups({})` → find the `alfred-pre-ha__core_update-*` snapshot → `ha__restore_backup({backup_id, decision_ref})`.
+
+**Recipe — explicit backup before a risky non-Alfred change:**
+
+Sir says "I'm about to flash my Z-Wave dongle, back HA up first" — Alfred can do this without a gated verb because creating a backup is always safe.
+
+1. `ha__create_backup({name: "alfred-pre-zwave-fw-2026-05-29"})` — name it contextually so Sir can find it later.
+2. ctrl-api records a `ha_backup_ref` row with `triggered_by='user'`; the response carries the new `ha_backup_id`.
+3. If something goes wrong later: `ha__restore_backup({backup_id, decision_ref})`.
+
+**Recipe — restore from a backup (irreversible, HA-stops-for-several-minutes):**
+
+1. `ha__list_backups({})` — find the right slug. Pick the most recent backup BEFORE the change Sir wants to undo.
+2. `ha__backup_info({backup_id})` — confirm the backup includes the components Sir needs (addons / database / homeassistant / folders).
+3. Create a `decision/` record explaining why the restore is happening.
+4. `ha__restore_backup({backup_id, decision_ref})` — HA stops, unpacks the backup, restarts. State + automations + addons revert to the backup's snapshot point.
+5. Wait several minutes, then `ha__core_version({})` to confirm HA is back. If the backup was encrypted, pass `password`.
+
+**Audit query — "what backed up my system the last 30 days":**
+
+ctrl-api exposes a ledger view at `GET /api/v1/channels/ha/backups/ledger?days=30` that reads `ha_backup_ref` directly — every Alfred-triggered snapshot, every Alfred-initiated user backup, plus future strategy-auto rows. The `triggered_by` column distinguishes `ha__core_restart` / `ha__core_update` (auto-snapshot before another verb), `user` (explicit user-initiated create), and `strategy:auto` (HA's scheduled backup strategy). Models don't need to call this directly — the dashboard / Desk surfaces it — but knowing it exists is useful when Sir asks "what's been backed up?".
 
 ---
 

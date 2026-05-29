@@ -36,6 +36,12 @@ import { dockerExec } from "../helpers.js";
 import { ulid } from "../../db/ulid.js";
 import fs from "node:fs";
 import { WebSocket } from "ws";
+import { getHaWsClient } from "../lib/ha_ws_client.js";
+import {
+  triggerBackupBeforeAction,
+  listBackupRefs,
+} from "../lib/ha_snapshot.js";
+import { recordHaWriteToDaybook } from "../lib/ha_daybook.js";
 
 const HERMES_MAIN_URL =
   process.env.HERMES_GATEWAY_URL ?? "http://hermes:18789";
@@ -1017,6 +1023,14 @@ export function registerHaChannelRoutes(): void {
   // "=== Tier 4 PR6: Supervisor addons ===" block at the bottom of this
   // file.
   registerHaAddonRoutes();
+
+  // #115 PR7 — Tier 4 autonomy, HA core lifecycle + backup CRUD.
+  // check_config / restart / update / reload_yaml / version + backup
+  // info/details/generate/delete/restore/strategy. Uses PR1's WS client
+  // for the WS-only verbs (backup/*) and REST for the homeassistant
+  // service domain. See the "=== Tier 4 PR7: Core + Backups ===" block
+  // at the bottom of this file.
+  registerHaPr7CoreBackupRoutes();
 }
 
 /**
@@ -4767,3 +4781,676 @@ export function registerHaAddonRoutes(): void {
 }
 
 // === END Tier 4 PR6 ═══════════════════════════════════════════════════
+
+// ═════════════════════════════════════════════════════════════════════════
+// === Tier 4 PR7: Core + Backups ===
+// ═════════════════════════════════════════════════════════════════════════
+//
+// Issue #115 PR7 — HA core lifecycle (restart / update / check_config /
+// reload_yaml / version) + backup CRUD (info / details / generate /
+// delete / restore / strategy) + ledger ergonomics on `ha_backup_ref`.
+//
+// Wire layer
+// ----------
+// HA's core lifecycle verbs split across REST + WS:
+//
+//   * `homeassistant.check_config`   — REST POST /api/services/homeassistant/check_config
+//   * `homeassistant.restart`        — REST POST /api/services/homeassistant/restart
+//   * `homeassistant.reload_all`     — REST POST /api/services/homeassistant/reload_all
+//   * `core/update` (OTA)            — WS supervisor/api endpoint=/core/update method=post
+//   * `GET /api/config`              — REST (returns ha_version, installation_type, …)
+//   * `backup/info`                  — WS
+//   * `backup/details`               — WS
+//   * `backup/generate`              — WS (also used by PR1's snapshot helper)
+//   * `backup/delete`                — WS
+//   * `backup/restore`               — WS
+//   * `backup/strategy/info`         — WS
+//   * `backup/strategy/update`       — WS
+//
+// REST verbs use the same `callHaRest` helper PR3 introduced; WS verbs
+// go through the long-lived `getHaWsClient().wsCall(...)` PR1 shipped.
+//
+// Gates + auto-snapshot (locked YES 2026-05-29)
+// ---------------------------------------------
+// | Route                        | decision_ref | auto-snapshot |
+// |------------------------------|--------------|----------------|
+// | core/check_config            | no           | no             |
+// | core/reload_yaml             | no           | no             |
+// | core/version (GET)           | no           | no             |
+// | core/restart                 | REQUIRED     | YES            |
+// | core/update                  | REQUIRED     | YES            |
+// | backups GET list/details     | no           | no             |
+// | backups POST (create)        | no           | no             |
+// | backups DELETE               | REQUIRED     | no             |
+// | backups POST restore         | REQUIRED     | NO (restoring IS the recovery action)
+// | backups/strategy GET         | no           | no             |
+// | backups/strategy PUT         | REQUIRED     | no             |
+//
+// Auto-snapshot semantics
+// -----------------------
+// `triggerBackupBeforeAction(action, decision_ref)` from PR1 fires a real
+// HA backup (via WS `backup/generate`), persists a row in `ha_backup_ref`
+// with `triggered_by=<action>`, and returns `{id, ha_backup_id, name}`.
+// The route's response payload carries `backup_ref_id` + `ha_backup_id`
+// so the MCP tool surfaces "snapshot taken — id <id>" to Sir.
+//
+// If `triggerBackupBeforeAction` throws (no disk space, HA down, …) the
+// route propagates the error as 502 — destructive verbs MUST NOT run on
+// an unbackupped HA.
+//
+// ha_backup_ref ledger ergonomics
+// -------------------------------
+// Every PR7 entry-point that creates a backup (auto-snapshot OR explicit
+// user create OR HA's own strategy-auto) lands a row. The
+// `triggered_by` column distinguishes:
+//
+//   * `ha__core_restart` / `ha__core_update`         — auto-snapshot before another verb
+//   * `ha__create_backup` / `user`                   — explicit user request
+//   * `strategy:auto`                                — HA's scheduled backup strategy
+//                                                      (reserved — observable via the
+//                                                      backup_create event stream which
+//                                                      Tier 4 PR1's drainEvent will see
+//                                                      on later PRs)
+//
+// Sir can query "what backed up my system the last 30 days" by reading
+// `GET /api/v1/channels/ha/backups/ledger?days=30`.
+//
+// Restore semantics
+// -----------------
+// `backup/restore` is special — it IS the recovery action, so we don't
+// auto-snapshot before restoring (that'd be backing up to the same
+// volume HA's about to overwrite). We do require a `decision_ref` for
+// audit. The route also stops short of polling — HA returns success when
+// the restore is QUEUED, and HA itself restarts to apply it; we surface
+// the WS response verbatim and let the caller follow up via `/version`
+// + `/status` after HA comes back.
+//
+// MCP tools
+// ---------
+// `ha__core_check_config`, `ha__core_restart`, `ha__core_update`,
+// `ha__core_reload_yaml`, `ha__core_version`, `ha__list_backups`,
+// `ha__backup_info`, `ha__create_backup`, `ha__delete_backup`,
+// `ha__restore_backup`. (10 tools — strategy GET/PUT not currently surfaced
+// to the model; Sir adjusts HA's auto-backup schedule via the Desk if needed.)
+
+const HA_CORE_REST_TIMEOUT_MS = Number(
+  process.env.HA_CORE_REST_TIMEOUT_MS ?? "30000",
+);
+
+const HA_BACKUP_WS_TIMEOUT_MS = Number(
+  process.env.HA_BACKUP_WS_TIMEOUT_MS ?? "120000", // backups can take 60-120s
+);
+
+const HA_CORE_UPDATE_WS_TIMEOUT_MS = Number(
+  process.env.HA_CORE_UPDATE_WS_TIMEOUT_MS ?? "300000", // OTA can take 5min
+);
+
+/**
+ * Format the HA WS error message into the ApiError detail string.
+ * WS calls throw Error("HA WS error <code>: <message>") on failure;
+ * we re-wrap to keep the response envelope shape consistent with the
+ * REST surface.
+ */
+function wrapHaWsError(action: string, err: unknown): ApiError {
+  const msg = err instanceof Error ? err.message : String(err);
+  return new ApiError(502, "HA_WS_ERROR", `${action}: ${msg}`);
+}
+
+/**
+ * Backup id format guard. HA's backup ids are short slugs (e.g.
+ * `abc123def` from `backup/generate`) — printable ASCII no slash, length
+ * 1..128. Same shape we use for addon slugs (PR6) so the URL-traversal
+ * guard stays uniform.
+ */
+const HA_BACKUP_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.\-]{0,127}$/;
+
+function assertBackupId(raw: string): string {
+  if (!HA_BACKUP_ID_RE.test(raw)) {
+    throw new ValidationError(
+      "backup id must be 1..128 chars of [A-Za-z0-9_.-], starting with [A-Za-z0-9]",
+    );
+  }
+  return raw;
+}
+
+export function registerHaPr7CoreBackupRoutes(): void {
+  // ── core lifecycle ────────────────────────────────────────────────────
+
+  // GET /api/v1/channels/ha/version — read HA's /api/config.
+  // Returns `{ha_version, installation_type, location_name, …}` from HA
+  // verbatim. Cheap, no gate, no snapshot.
+  addRoute("GET", "/api/v1/channels/ha/version", async ({ res }) => {
+    const { haUrl, llat } = await loadHaCredentials();
+    const r = await callHaRest({
+      haUrl,
+      llat,
+      method: "GET",
+      path: "/api/config",
+    });
+    if (!r.ok) {
+      throw new ApiError(
+        r.status >= 400 && r.status < 600 ? r.status : 502,
+        "HA_UPSTREAM_ERROR",
+        r.detail,
+      );
+    }
+    // Pluck the canonical fields the MCP tool needs at the top level so
+    // the model doesn't have to dig — but pass the full data through too.
+    const d = (r.data ?? {}) as Record<string, unknown>;
+    sendJson(res, 200, {
+      ok: true,
+      ha_version: typeof d.version === "string" ? d.version : null,
+      installation_type:
+        typeof d.installation_type === "string" ? d.installation_type : null,
+      location_name:
+        typeof d.location_name === "string" ? d.location_name : null,
+      data: r.data,
+    });
+  });
+
+  // POST /api/v1/channels/ha/core/check_config — REST POST
+  // /api/services/homeassistant/check_config. Read-only check (verifies
+  // configuration.yaml parses + restartable). No gate; idempotent.
+  addRoute(
+    "POST",
+    "/api/v1/channels/ha/core/check_config",
+    async ({ res }) => {
+      const { haUrl, llat } = await loadHaCredentials();
+      const r = await callHaRest({
+        haUrl,
+        llat,
+        method: "POST",
+        path: "/api/services/homeassistant/check_config",
+        body: {},
+      });
+      if (!r.ok) {
+        throw new ApiError(
+          r.status >= 400 && r.status < 600 ? r.status : 502,
+          "HA_UPSTREAM_ERROR",
+          r.detail,
+        );
+      }
+      sendJson(res, 200, { ok: true, data: r.data });
+    },
+  );
+
+  // POST /api/v1/channels/ha/core/reload_yaml — REST POST
+  // /api/services/homeassistant/reload_all. Reload every YAML-defined
+  // domain (automations, scripts, scenes, helpers, …) without
+  // restarting HA. No gate (idempotent + reversible: edit YAML +
+  // reload again).
+  addRoute(
+    "POST",
+    "/api/v1/channels/ha/core/reload_yaml",
+    async ({ res }) => {
+      const { haUrl, llat } = await loadHaCredentials();
+      const r = await callHaRest({
+        haUrl,
+        llat,
+        method: "POST",
+        path: "/api/services/homeassistant/reload_all",
+        body: {},
+      });
+      if (!r.ok) {
+        throw new ApiError(
+          r.status >= 400 && r.status < 600 ? r.status : 502,
+          "HA_UPSTREAM_ERROR",
+          r.detail,
+        );
+      }
+      sendJson(res, 200, { ok: true, data: r.data });
+    },
+  );
+
+  // POST /api/v1/channels/ha/core/restart — REST POST
+  // /api/services/homeassistant/restart. GATED + AUTO-SNAPSHOT.
+  // Body: { decision_ref }.
+  //
+  // Snapshot fires BEFORE the restart so a failed restart still has the
+  // backup to roll back to. HA returns immediately when the restart is
+  // queued; the WS connection (and thus the client) will reconnect once
+  // HA comes back up.
+  addRoute(
+    "POST",
+    "/api/v1/channels/ha/core/restart",
+    async ({ res, body }) => {
+      if (typeof body !== "object" || body === null) {
+        throw new ValidationError("body must be a JSON object");
+      }
+      const decision_ref = assertDecisionRef(
+        (body as Record<string, unknown>).decision_ref,
+      );
+      const { haUrl, llat } = await loadHaCredentials();
+      const snapshot = await triggerBackupBeforeAction(
+        "ha__core_restart",
+        decision_ref,
+      );
+      const r = await callHaRest({
+        haUrl,
+        llat,
+        method: "POST",
+        path: "/api/services/homeassistant/restart",
+        body: {},
+      });
+      if (!r.ok) {
+        throw new ApiError(
+          r.status >= 400 && r.status < 600 ? r.status : 502,
+          "HA_UPSTREAM_ERROR",
+          r.detail,
+          { backup_ref_id: snapshot.id, ha_backup_id: snapshot.ha_backup_id },
+        );
+      }
+      recordHaWriteToDaybook({
+        action: "ha__core_restart",
+        summary: `HA core restart queued (snapshot ${snapshot.name})`,
+        decision_ref,
+        extra: { ha_backup_id: snapshot.ha_backup_id },
+      });
+      sendJson(res, 200, {
+        ok: true,
+        decision_ref,
+        backup_ref_id: snapshot.id,
+        ha_backup_id: snapshot.ha_backup_id,
+        backup_name: snapshot.name,
+        data: r.data,
+      });
+    },
+  );
+
+  // POST /api/v1/channels/ha/core/update — WS supervisor/api endpoint=/core/update.
+  // GATED + AUTO-SNAPSHOT. Body: { decision_ref, version? }.
+  //
+  // HA Core update is run via Supervisor's API even on Container HA
+  // (Container HA gets a 5xx from supervisor/api with method=post that we
+  // pass through). On HAOS this triggers an OTA update — long-running
+  // (3-10min); we use a 5-minute WS timeout so the call doesn't hang the
+  // whole request loop.
+  addRoute(
+    "POST",
+    "/api/v1/channels/ha/core/update",
+    async ({ res, body }) => {
+      if (typeof body !== "object" || body === null) {
+        throw new ValidationError("body must be a JSON object");
+      }
+      const b = body as Record<string, unknown>;
+      const decision_ref = assertDecisionRef(b.decision_ref);
+      // Optional version pin — HA accepts {version: "2025.7.0"}.
+      let version: string | undefined;
+      if (b.version !== undefined && b.version !== null) {
+        if (typeof b.version !== "string" || b.version.length === 0) {
+          throw new ValidationError("version, if set, must be a non-empty string");
+        }
+        if (!/^[A-Za-z0-9._\-+]{1,32}$/.test(b.version)) {
+          throw new ValidationError(
+            "version must be 1..32 chars of [A-Za-z0-9._-+]",
+          );
+        }
+        version = b.version;
+      }
+      // Defensive: ensure HA is connected before paying snapshot cost.
+      await loadHaCredentials();
+      const snapshot = await triggerBackupBeforeAction(
+        "ha__core_update",
+        decision_ref,
+      );
+      const wsPayload: Record<string, unknown> = {
+        endpoint: "/core/update",
+        method: "post",
+      };
+      if (version !== undefined) {
+        wsPayload.data = { version };
+      }
+      let result: unknown;
+      try {
+        result = await getHaWsClient().wsCall(
+          "supervisor/api",
+          wsPayload,
+          HA_CORE_UPDATE_WS_TIMEOUT_MS,
+        );
+      } catch (err) {
+        throw wrapHaWsError("ha__core_update", err);
+      }
+      recordHaWriteToDaybook({
+        action: "ha__core_update",
+        summary:
+          version !== undefined
+            ? `HA core update queued → ${version} (snapshot ${snapshot.name})`
+            : `HA core update queued (snapshot ${snapshot.name})`,
+        decision_ref,
+        extra: { ha_backup_id: snapshot.ha_backup_id },
+      });
+      sendJson(res, 200, {
+        ok: true,
+        decision_ref,
+        backup_ref_id: snapshot.id,
+        ha_backup_id: snapshot.ha_backup_id,
+        backup_name: snapshot.name,
+        target_version: version ?? null,
+        data: result,
+      });
+    },
+  );
+
+  // ── backups CRUD ──────────────────────────────────────────────────────
+
+  // GET /api/v1/channels/ha/backups — WS backup/info.
+  // List every backup HA knows about. Read-only, no gate.
+  addRoute("GET", "/api/v1/channels/ha/backups", async ({ res }) => {
+    await loadHaCredentials(); // 409 if HA not connected
+    let result: unknown;
+    try {
+      result = await getHaWsClient().wsCall(
+        "backup/info",
+        {},
+        HA_BACKUP_WS_TIMEOUT_MS,
+      );
+    } catch (err) {
+      throw wrapHaWsError("backup/info", err);
+    }
+    sendJson(res, 200, { ok: true, data: result });
+  });
+
+  // GET /api/v1/channels/ha/backups/strategy — WS backup/strategy/info.
+  // Read the auto-backup schedule (HA 2025.1+).
+  //
+  // Registered BEFORE /backups/:id so the `strategy` segment doesn't get
+  // shadowed by the `:id` capture.
+  addRoute(
+    "GET",
+    "/api/v1/channels/ha/backups/strategy",
+    async ({ res }) => {
+      await loadHaCredentials();
+      let result: unknown;
+      try {
+        result = await getHaWsClient().wsCall(
+          "backup/strategy/info",
+          {},
+          HA_BACKUP_WS_TIMEOUT_MS,
+        );
+      } catch (err) {
+        throw wrapHaWsError("backup/strategy/info", err);
+      }
+      sendJson(res, 200, { ok: true, data: result });
+    },
+  );
+
+  // PUT /api/v1/channels/ha/backups/strategy — WS backup/strategy/update.
+  // GATED. Body: { decision_ref, strategy: { …HA strategy fields… } }.
+  addRoute(
+    "PUT",
+    "/api/v1/channels/ha/backups/strategy",
+    async ({ res, body }) => {
+      if (typeof body !== "object" || body === null) {
+        throw new ValidationError("body must be a JSON object");
+      }
+      const b = body as Record<string, unknown>;
+      const decision_ref = assertDecisionRef(b.decision_ref);
+      if (
+        b.strategy === undefined ||
+        b.strategy === null ||
+        typeof b.strategy !== "object" ||
+        Array.isArray(b.strategy)
+      ) {
+        throw new ValidationError("strategy is required and must be a JSON object");
+      }
+      await loadHaCredentials();
+      let result: unknown;
+      try {
+        result = await getHaWsClient().wsCall(
+          "backup/strategy/update",
+          b.strategy as Record<string, unknown>,
+          HA_BACKUP_WS_TIMEOUT_MS,
+        );
+      } catch (err) {
+        throw wrapHaWsError("backup/strategy/update", err);
+      }
+      recordHaWriteToDaybook({
+        action: "ha__backup_strategy_update",
+        summary: "HA backup strategy updated",
+        decision_ref,
+      });
+      sendJson(res, 200, { ok: true, decision_ref, data: result });
+    },
+  );
+
+  // GET /api/v1/channels/ha/backups/ledger — read our own ha_backup_ref
+  // ledger. Sir can answer "what backed up my system the last 30 days"
+  // without touching HA at all. Optional ?days=N (default 30, max 365).
+  //
+  // Registered BEFORE /backups/:id so the `ledger` segment isn't
+  // shadowed.
+  addRoute(
+    "GET",
+    "/api/v1/channels/ha/backups/ledger",
+    async ({ res, query }) => {
+      const daysRaw = query.get("days");
+      let days = 30;
+      if (daysRaw !== null) {
+        const n = Number(daysRaw);
+        if (!Number.isFinite(n) || n <= 0) {
+          throw new ValidationError("days must be a positive number");
+        }
+        days = Math.min(365, Math.floor(n));
+      }
+      const limitRaw = query.get("limit");
+      let limit = 200;
+      if (limitRaw !== null) {
+        const n = Number(limitRaw);
+        if (!Number.isFinite(n) || n <= 0) {
+          throw new ValidationError("limit must be a positive number");
+        }
+        limit = Math.min(500, Math.floor(n));
+      }
+      const since = new Date(Date.now() - days * 24 * 3600 * 1000).toISOString();
+      const refs = listBackupRefs({ since, limit });
+      sendJson(res, 200, {
+        ok: true,
+        days,
+        since,
+        count: refs.length,
+        refs,
+      });
+    },
+  );
+
+  // GET /api/v1/channels/ha/backups/:id — WS backup/details.
+  addRoute(
+    "GET",
+    "/api/v1/channels/ha/backups/:id",
+    async ({ res, params }) => {
+      const backup_id = assertBackupId(params.id);
+      await loadHaCredentials();
+      let result: unknown;
+      try {
+        result = await getHaWsClient().wsCall(
+          "backup/details",
+          { backup_id },
+          HA_BACKUP_WS_TIMEOUT_MS,
+        );
+      } catch (err) {
+        throw wrapHaWsError("backup/details", err);
+      }
+      sendJson(res, 200, { ok: true, backup_id, data: result });
+    },
+  );
+
+  // POST /api/v1/channels/ha/backups — WS backup/generate.
+  // No gate (cheap; explicit user-initiated backups are always fine).
+  //
+  // Body: optional fields HA's backup/generate accepts:
+  //   { name?, password?, include_addons?, include_database?,
+  //     include_homeassistant?, include_folders? }.
+  //
+  // We persist a `ha_backup_ref` row with `triggered_by='user'` (the
+  // default when decision_ref is absent) so the ledger keeps a complete
+  // picture of every Alfred-triggered backup.
+  addRoute(
+    "POST",
+    "/api/v1/channels/ha/backups",
+    async ({ res, body }) => {
+      const raw = (body ?? {}) as Record<string, unknown>;
+      if (body !== undefined && body !== null && typeof body !== "object") {
+        throw new ValidationError("body must be a JSON object");
+      }
+      const wsPayload: Record<string, unknown> = {};
+      if (raw.name !== undefined) {
+        if (typeof raw.name !== "string" || raw.name.length === 0) {
+          throw new ValidationError("name, if set, must be a non-empty string");
+        }
+        wsPayload.name = raw.name;
+      }
+      if (raw.password !== undefined) {
+        if (typeof raw.password !== "string" || raw.password.length === 0) {
+          throw new ValidationError(
+            "password, if set, must be a non-empty string",
+          );
+        }
+        wsPayload.password = raw.password;
+      }
+      for (const k of [
+        "include_addons",
+        "include_database",
+        "include_homeassistant",
+        "include_folders",
+      ] as const) {
+        if (raw[k] !== undefined) {
+          wsPayload[k] = raw[k];
+        }
+      }
+      await loadHaCredentials();
+      let result: unknown;
+      try {
+        result = await getHaWsClient().wsCall(
+          "backup/generate",
+          wsPayload,
+          HA_BACKUP_WS_TIMEOUT_MS,
+        );
+      } catch (err) {
+        throw wrapHaWsError("backup/generate", err);
+      }
+      // Persist into ha_backup_ref so the ledger has every user-initiated
+      // backup alongside the auto-snapshots. PR1's helper takes (action,
+      // decision_ref); for user-initiated we use the `user` sentinel and
+      // call the same persistence path inline.
+      const r = (result ?? {}) as Record<string, unknown>;
+      const ha_backup_id =
+        (typeof r.slug === "string" && r.slug) ||
+        (typeof r.backup_id === "string" && r.backup_id) ||
+        (typeof r.id === "string" && r.id) ||
+        "";
+      let backup_ref_id: string | null = null;
+      if (ha_backup_id) {
+        backup_ref_id = ulid();
+        const ts = new Date().toISOString();
+        try {
+          getStateDb()
+            .prepare(
+              `INSERT INTO ha_backup_ref (id, ha_backup_id, triggered_by, decision_ref, ts)
+               VALUES (?, ?, ?, ?, ?)`,
+            )
+            .run(backup_ref_id, ha_backup_id, "user", null, ts);
+        } catch {
+          // best-effort — never block the route on the ledger write
+          backup_ref_id = null;
+        }
+      }
+      // No daybook entry — explicit user backups are cheap and Sir asked
+      // for the backup, the daybook would be noise.
+      sendJson(res, 200, {
+        ok: true,
+        backup_ref_id,
+        ha_backup_id: ha_backup_id || null,
+        data: result,
+      });
+    },
+  );
+
+  // DELETE /api/v1/channels/ha/backups/:id — WS backup/delete.
+  // GATED. Body: { decision_ref }.
+  addRoute(
+    "DELETE",
+    "/api/v1/channels/ha/backups/:id",
+    async ({ res, body, params }) => {
+      const backup_id = assertBackupId(params.id);
+      if (typeof body !== "object" || body === null) {
+        throw new ValidationError("body must be a JSON object");
+      }
+      const decision_ref = assertDecisionRef(
+        (body as Record<string, unknown>).decision_ref,
+      );
+      await loadHaCredentials();
+      let result: unknown;
+      try {
+        result = await getHaWsClient().wsCall(
+          "backup/delete",
+          { backup_id },
+          HA_BACKUP_WS_TIMEOUT_MS,
+        );
+      } catch (err) {
+        throw wrapHaWsError("backup/delete", err);
+      }
+      recordHaWriteToDaybook({
+        action: "ha__delete_backup",
+        summary: `Backup ${backup_id} deleted`,
+        decision_ref,
+        extra: { ha_backup_id: backup_id },
+      });
+      sendJson(res, 200, {
+        ok: true,
+        backup_id,
+        decision_ref,
+        data: result,
+      });
+    },
+  );
+
+  // POST /api/v1/channels/ha/backups/:id/restore — WS backup/restore.
+  // GATED, NO snapshot (restoring IS the recovery action).
+  // Body: { decision_ref, password? }.
+  addRoute(
+    "POST",
+    "/api/v1/channels/ha/backups/:id/restore",
+    async ({ res, body, params }) => {
+      const backup_id = assertBackupId(params.id);
+      if (typeof body !== "object" || body === null) {
+        throw new ValidationError("body must be a JSON object");
+      }
+      const b = body as Record<string, unknown>;
+      const decision_ref = assertDecisionRef(b.decision_ref);
+      const wsPayload: Record<string, unknown> = { backup_id };
+      if (b.password !== undefined) {
+        if (typeof b.password !== "string" || b.password.length === 0) {
+          throw new ValidationError(
+            "password, if set, must be a non-empty string",
+          );
+        }
+        wsPayload.password = b.password;
+      }
+      await loadHaCredentials();
+      let result: unknown;
+      try {
+        result = await getHaWsClient().wsCall(
+          "backup/restore",
+          wsPayload,
+          HA_BACKUP_WS_TIMEOUT_MS,
+        );
+      } catch (err) {
+        throw wrapHaWsError("backup/restore", err);
+      }
+      recordHaWriteToDaybook({
+        action: "ha__restore_backup",
+        summary: `Backup ${backup_id} restored (HA will restart)`,
+        decision_ref,
+        extra: { ha_backup_id: backup_id },
+      });
+      sendJson(res, 200, {
+        ok: true,
+        backup_id,
+        decision_ref,
+        data: result,
+      });
+    },
+  );
+}
+
+// === END Tier 4 PR7 ═══════════════════════════════════════════════════

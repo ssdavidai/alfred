@@ -20,6 +20,7 @@ import {
   HASS_READ_TOOLS,
   HASS_DEFERRED_TOOLS,
   HASS_ADDON_TOOLS,
+  HASS_PR7_TOOLS,
 } from "./hass.js";
 import { SUPPORTED_APPS, isAppId, getToolsForApp } from "./registry.js";
 
@@ -31,20 +32,22 @@ function getTool(name: string) {
 
 // ─── catalogue shape ────────────────────────────────────────────────────
 
-test("hass catalogue: exactly 36 tools (11 read + 15 write + 10 PR6 addon)", () => {
+test("hass catalogue: exactly 46 tools (11 read + 15 write + 10 PR6 addon + 10 PR7 core+backup)", () => {
   assert.equal(HASS_READ_TOOLS.length, 11);
   // After #115 PR3 splice: PR4's 5 + PR3's 10 = 15 writes.
   assert.equal(HASS_DEFERRED_TOOLS.length, 15);
   // PR6: 10 supervisor addon tools.
   assert.equal(HASS_ADDON_TOOLS.length, 10);
-  assert.equal(ALL_HASS_TOOLS.length, 36);
+  // PR7: 10 core lifecycle + backup CRUD tools.
+  assert.equal(HASS_PR7_TOOLS.length, 10);
+  assert.equal(ALL_HASS_TOOLS.length, 46);
 });
 
-test("registry: hass is a supported app and registers all 36 tools", () => {
+test("registry: hass is a supported app and registers all 46 tools", () => {
   assert.ok(isAppId("hass"));
   assert.ok((SUPPORTED_APPS as Set<string>).has("hass"));
   const tools = getToolsForApp("hass");
-  assert.equal(tools.length, 36);
+  assert.equal(tools.length, 46);
 });
 
 test("hass: every tool name is unique", () => {
@@ -1110,4 +1113,267 @@ test("PR6 addon tool slug guard: rejects empty + slash on the 9 slug-bearing too
       `${name} must reject slug with '/'`,
     );
   }
+});
+
+// ─── #115 PR7 — Core lifecycle + backup CRUD tools ──────────────────────
+
+const PR7_TOOL_NAMES = [
+  "ha__core_version",
+  "ha__core_check_config",
+  "ha__core_reload_yaml",
+  "ha__core_restart",
+  "ha__core_update",
+  "ha__list_backups",
+  "ha__backup_info",
+  "ha__create_backup",
+  "ha__delete_backup",
+  "ha__restore_backup",
+];
+
+test("PR7: every core+backup tool name is registered and unique", () => {
+  for (const name of PR7_TOOL_NAMES) {
+    const t = HASS_PR7_TOOLS.find((x) => x.name === name);
+    assert.ok(t, `${name} missing from HASS_PR7_TOOLS`);
+  }
+  const names = HASS_PR7_TOOLS.map((t) => t.name);
+  assert.equal(new Set(names).size, names.length);
+});
+
+test("PR7 ha__core_version: empty input, GET /version", () => {
+  const t = getTool("ha__core_version");
+  assert.equal(t.inputSchema.safeParse({}).success, true);
+  const r = t.buildRequest({});
+  assert.equal(r.method, "GET");
+  assert.equal(r.path, "/api/v1/channels/ha/version");
+});
+
+test("PR7 ha__core_check_config: empty input, POST /core/check_config with empty body", () => {
+  const t = getTool("ha__core_check_config");
+  assert.equal(t.inputSchema.safeParse({}).success, true);
+  const r = t.buildRequest({});
+  assert.equal(r.method, "POST");
+  assert.equal(r.path, "/api/v1/channels/ha/core/check_config");
+  assert.deepEqual(r.body, {});
+});
+
+test("PR7 ha__core_reload_yaml: empty input, POST /core/reload_yaml with empty body", () => {
+  const t = getTool("ha__core_reload_yaml");
+  assert.equal(t.inputSchema.safeParse({}).success, true);
+  const r = t.buildRequest({});
+  assert.equal(r.method, "POST");
+  assert.equal(r.path, "/api/v1/channels/ha/core/reload_yaml");
+  assert.deepEqual(r.body, {});
+});
+
+test("PR7 ha__core_restart: requires decision_ref; builds POST /core/restart", () => {
+  const t = getTool("ha__core_restart");
+  // empty — fails.
+  assert.equal(t.inputSchema.safeParse({}).success, false);
+  // short decision_ref rejected.
+  assert.equal(
+    t.inputSchema.safeParse({ decision_ref: "abc" }).success,
+    false,
+    "min 6 chars",
+  );
+  // whitespace rejected.
+  assert.equal(
+    t.inputSchema.safeParse({ decision_ref: "abc def" }).success,
+    false,
+  );
+  // valid.
+  const args = { decision_ref: "decision/2026-05-29-restart.md" };
+  assert.equal(t.inputSchema.safeParse(args).success, true);
+  const r = t.buildRequest(args);
+  assert.equal(r.method, "POST");
+  assert.equal(r.path, "/api/v1/channels/ha/core/restart");
+  assert.deepEqual(r.body, { decision_ref: args.decision_ref });
+});
+
+test("PR7 ha__core_update: requires decision_ref, optional version pin", () => {
+  const t = getTool("ha__core_update");
+  // missing decision_ref — fails.
+  assert.equal(t.inputSchema.safeParse({}).success, false);
+  assert.equal(
+    t.inputSchema.safeParse({ version: "2025.7.0" }).success,
+    false,
+    "decision_ref required",
+  );
+  // happy path without version.
+  const noVer = { decision_ref: "decision/2026-05-29-update.md" };
+  assert.equal(t.inputSchema.safeParse(noVer).success, true);
+  const r1 = t.buildRequest(noVer);
+  assert.equal(r1.method, "POST");
+  assert.equal(r1.path, "/api/v1/channels/ha/core/update");
+  assert.deepEqual(r1.body, { decision_ref: noVer.decision_ref });
+  // happy path with version.
+  const withVer = {
+    version: "2025.7.0",
+    decision_ref: "decision/2026-05-29-update.md",
+  };
+  assert.equal(t.inputSchema.safeParse(withVer).success, true);
+  const r2 = t.buildRequest(withVer);
+  assert.deepEqual(r2.body, {
+    decision_ref: withVer.decision_ref,
+    version: withVer.version,
+  });
+  // bad version chars rejected.
+  assert.equal(
+    t.inputSchema.safeParse({
+      version: "bad version",
+      decision_ref: "decision/x-2026-05-29.md",
+    }).success,
+    false,
+  );
+});
+
+test("PR7 ha__list_backups: empty input, GET /backups", () => {
+  const t = getTool("ha__list_backups");
+  assert.equal(t.inputSchema.safeParse({}).success, true);
+  const r = t.buildRequest({});
+  assert.equal(r.method, "GET");
+  assert.equal(r.path, "/api/v1/channels/ha/backups");
+});
+
+test("PR7 ha__backup_info: backup_id required + format-gated, GET /backups/:id", () => {
+  const t = getTool("ha__backup_info");
+  assert.equal(t.inputSchema.safeParse({}).success, false);
+  assert.equal(
+    t.inputSchema.safeParse({ backup_id: "abc123" }).success,
+    true,
+  );
+  // slash rejected (URL-traversal guard).
+  assert.equal(
+    t.inputSchema.safeParse({ backup_id: "abc/123" }).success,
+    false,
+  );
+  // leading-special rejected.
+  assert.equal(
+    t.inputSchema.safeParse({ backup_id: "_abc" }).success,
+    false,
+  );
+  const r = t.buildRequest({ backup_id: "abc123def" });
+  assert.equal(r.method, "GET");
+  assert.equal(r.path, "/api/v1/channels/ha/backups/abc123def");
+});
+
+test("PR7 ha__create_backup: all-optional, NO gate; builds POST /backups with optional fields", () => {
+  const t = getTool("ha__create_backup");
+  // empty is valid — cheap, no gate.
+  assert.equal(t.inputSchema.safeParse({}).success, true);
+  const empty = t.buildRequest({});
+  assert.equal(empty.method, "POST");
+  assert.equal(empty.path, "/api/v1/channels/ha/backups");
+  assert.deepEqual(empty.body, {});
+  // populated.
+  const args = {
+    name: "alfred-pre-zwave-fw",
+    password: "secret",
+    include_addons: ["core_mosquitto"],
+    include_database: false,
+    include_homeassistant: true,
+    include_folders: ["share"],
+  };
+  assert.equal(t.inputSchema.safeParse(args).success, true);
+  const r = t.buildRequest(args);
+  assert.deepEqual(r.body, args);
+});
+
+test("PR7 ha__delete_backup: requires decision_ref + backup_id, DELETE", () => {
+  const t = getTool("ha__delete_backup");
+  // both required.
+  assert.equal(t.inputSchema.safeParse({}).success, false);
+  assert.equal(
+    t.inputSchema.safeParse({ backup_id: "abc" }).success,
+    false,
+    "decision_ref required",
+  );
+  assert.equal(
+    t.inputSchema.safeParse({ decision_ref: "decision/x-2026-05-29.md" }).success,
+    false,
+    "backup_id required",
+  );
+  // happy path.
+  const args = {
+    backup_id: "abc123",
+    decision_ref: "decision/2026-05-29-prune.md",
+  };
+  assert.equal(t.inputSchema.safeParse(args).success, true);
+  const r = t.buildRequest(args);
+  assert.equal(r.method, "DELETE");
+  assert.equal(r.path, "/api/v1/channels/ha/backups/abc123");
+  assert.deepEqual(r.body, { decision_ref: args.decision_ref });
+});
+
+test("PR7 ha__restore_backup: requires decision_ref + backup_id, optional password", () => {
+  const t = getTool("ha__restore_backup");
+  // missing decision_ref → fails.
+  assert.equal(
+    t.inputSchema.safeParse({ backup_id: "abc" }).success,
+    false,
+  );
+  // happy path no password.
+  const noPw = {
+    backup_id: "abc123",
+    decision_ref: "decision/2026-05-29-restore.md",
+  };
+  assert.equal(t.inputSchema.safeParse(noPw).success, true);
+  const r1 = t.buildRequest(noPw);
+  assert.equal(r1.method, "POST");
+  assert.equal(r1.path, "/api/v1/channels/ha/backups/abc123/restore");
+  assert.deepEqual(r1.body, { decision_ref: noPw.decision_ref });
+  // with password.
+  const withPw = {
+    backup_id: "abc123",
+    password: "encrypted-archive-pass",
+    decision_ref: "decision/2026-05-29-restore.md",
+  };
+  assert.equal(t.inputSchema.safeParse(withPw).success, true);
+  const r2 = t.buildRequest(withPw);
+  assert.deepEqual(r2.body, {
+    decision_ref: withPw.decision_ref,
+    password: withPw.password,
+  });
+});
+
+test("PR7: every gated tool description mentions decision_ref + warns destructive", () => {
+  const GATED = [
+    "ha__core_restart",
+    "ha__core_update",
+    "ha__delete_backup",
+    "ha__restore_backup",
+  ];
+  for (const name of GATED) {
+    const t = getTool(name);
+    assert.ok(
+      t.description.toLowerCase().includes("decision_ref"),
+      `${name} description must mention decision_ref`,
+    );
+    assert.ok(
+      /destructive|stops? ha|offline|irreversible|several minutes/i.test(
+        t.description,
+      ),
+      `${name} description must warn about its blast radius`,
+    );
+  }
+});
+
+test("PR7: snapshot-on-trigger tools describe the auto-snapshot semantics", () => {
+  const SNAPSHOTTED = ["ha__core_restart", "ha__core_update"];
+  for (const name of SNAPSHOTTED) {
+    const t = getTool(name);
+    assert.ok(
+      /auto-snapshot|snapshot taken|backup_ref_id|ha_backup_id/i.test(
+        t.description,
+      ),
+      `${name} description must explain the auto-snapshot semantics`,
+    );
+  }
+});
+
+test("PR7 ha__restore_backup: description explicitly warns 'stops HA for several minutes'", () => {
+  const t = getTool("ha__restore_backup");
+  assert.ok(
+    /stops? ha|several minutes/i.test(t.description),
+    "ha__restore_backup description must spell out the HA-stop blast radius",
+  );
 });

@@ -1039,12 +1039,288 @@ export const HASS_ADDON_TOOLS: ToolDef[] = [
 // === END Tier 4 PR6 ═══════════════════════════════════════════════════
 // ═════════════════════════════════════════════════════════════════════════
 
-// Final catalogue: 36 tools total = 11 read + 15 writes (5 PR4 + 10 PR3 CRUD)
-// + 10 PR6 supervisor addon. Order kept deliberately (reads first, writes
-// next, addon-CRUD last) so the model that lists the catalogue sees the
-// safe read surface before the destructive surfaces.
+// ═════════════════════════════════════════════════════════════════════════
+// === Tier 4 PR7: Core lifecycle + Backup CRUD ===
+// ═════════════════════════════════════════════════════════════════════════
+//
+// Issue #115 PR7 — 10 new tools fronting ctrl-api's
+// /api/v1/channels/ha/core/* + /api/v1/channels/ha/backups/* + /version
+// surfaces.
+//
+// Per the spec §4 gate matrix (locked YES 2026-05-29 by Sir):
+//
+// | Tool                  | decision_ref | auto-snapshot |
+// |-----------------------|--------------|---------------|
+// | ha__core_version      | no           | no            |
+// | ha__core_check_config | no           | no            |
+// | ha__core_reload_yaml  | no           | no            |
+// | ha__core_restart      | REQUIRED     | YES           |
+// | ha__core_update       | REQUIRED     | YES           |
+// | ha__list_backups      | no           | no            |
+// | ha__backup_info       | no           | no            |
+// | ha__create_backup     | no           | no (this IS a backup)
+// | ha__delete_backup     | REQUIRED     | no            |
+// | ha__restore_backup    | REQUIRED     | NO (restoring IS the recovery)
+//
+// Why these particular gates:
+//   * core_restart / core_update: HA goes down for 2-10 min. Sir's
+//     household notices. decision_ref + auto-snapshot mandatory.
+//   * delete_backup: backups themselves are how we roll back; deleting
+//     one is unrecoverable. decision_ref required.
+//   * restore_backup: HA stops for several minutes during the restore,
+//     comes back at a different state. decision_ref required. No
+//     snapshot because restoring IS the recovery action — backing up
+//     the broken state we're about to overwrite would be backwards.
+//   * create_backup: explicit Sir-asked backups are always fine; no
+//     gate. ctrl-api still persists a `ha_backup_ref` row with
+//     `triggered_by='user'` so the ledger is complete.
+
+const CoreDecisionRefParam = z
+  .string()
+  .min(6)
+  .max(256)
+  .regex(
+    /^[\x21-\x7E]+$/,
+    "decision_ref must be printable ASCII with no whitespace",
+  )
+  .describe(
+    "Vault path or ulid of the `decision/` record that authorised this destructive HA core/backup write. REQUIRED — Alfred refuses without it.",
+  );
+
+const BackupIdParam = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(
+    /^[A-Za-z0-9][A-Za-z0-9_.\-]{0,127}$/,
+    "backup_id must be 1..128 chars of [A-Za-z0-9_.-], starting with [A-Za-z0-9]",
+  )
+  .describe(
+    "HA backup id (slug). Read via `ha__list_backups` (each backup's `slug` / `backup_id` field) — never invent.",
+  );
+
+export const HASS_PR7_TOOLS: ToolDef[] = [
+  {
+    name: "ha__core_version",
+    description:
+      "Read HA's `/api/config` — returns `{ha_version, installation_type, location_name, data}` where `ha_version` is the running HA version (e.g. `2025.6.1`) and `installation_type` is one of `Home Assistant OS` / `Home Assistant Container` / `Home Assistant Core` / `Home Assistant Supervised`. **When to call:** before `ha__core_update` (to read current vs latest), when Sir asks 'what HA am I on?', or as a cheap connectivity probe. No gate. Idempotent.",
+    inputSchema: z.object({}),
+    buildRequest: () => ({
+      method: "GET",
+      path: "/api/v1/channels/ha/version",
+    }),
+  },
+
+  {
+    name: "ha__core_check_config",
+    description:
+      "Run HA's config check — verifies configuration.yaml parses cleanly and HA could restart without crashing. Resolves to `POST /api/services/homeassistant/check_config`. **When to call:** ALWAYS before `ha__core_restart` (so a malformed yaml doesn't take HA down) and after a `ha__core_reload_yaml` that hits an error. No gate. Idempotent. Returns the HA service-call result verbatim.",
+    inputSchema: z.object({}),
+    buildRequest: () => ({
+      method: "POST",
+      path: "/api/v1/channels/ha/core/check_config",
+      body: {},
+    }),
+  },
+
+  {
+    name: "ha__core_reload_yaml",
+    description:
+      "Reload every HA YAML-defined domain (automations / scripts / scenes / helpers / templates / customise) without restarting HA. Resolves to `POST /api/services/homeassistant/reload_all`. **When to call:** after editing yaml that's outside the REST CRUD surface (most automations / scenes / scripts already reload on their own POST/PUT; this is the broad refresh). No gate (idempotent — reloading again at any time is fine). NOT a restart — entities stay alive. Returns the HA service-call result verbatim.",
+    inputSchema: z.object({}),
+    buildRequest: () => ({
+      method: "POST",
+      path: "/api/v1/channels/ha/core/reload_yaml",
+      body: {},
+    }),
+  },
+
+  {
+    name: "ha__core_restart",
+    description:
+      "Restart HA's core process. **DESTRUCTIVE** — HA is OFFLINE for 30-120s while it comes back. Entities go unavailable; automations don't fire. **GATED** — requires `decision_ref`. **AUTO-SNAPSHOT** — ctrl-api triggers a real HA backup via `backup/generate` BEFORE the restart and records it in `ha_backup_ref`. The success envelope returns `backup_ref_id` + `ha_backup_id` + `backup_name`; mention 'snapshot taken' to Sir. **Always `ha__core_check_config` FIRST** — restarting on a broken config takes HA down hard.",
+    inputSchema: z.object({
+      decision_ref: CoreDecisionRefParam,
+    }),
+    buildRequest: ({ decision_ref }) => ({
+      method: "POST",
+      path: "/api/v1/channels/ha/core/restart",
+      body: { decision_ref },
+    }),
+  },
+
+  {
+    name: "ha__core_update",
+    description:
+      "Update HA Core to a newer version via Supervisor's OTA path. **HAOS / Supervised ONLY** — Container HA's update is pulled-image swap (Sir does that with docker compose). **DESTRUCTIVE** — HA is OFFLINE for 3-10 min during the update. **GATED** — requires `decision_ref`. **AUTO-SNAPSHOT** — ctrl-api triggers a real HA backup BEFORE the update and records it in `ha_backup_ref`; rollback is `ha__restore_backup({backup_id: ha_backup_id, …})`. Optional `version` pin (e.g. `2025.7.0`); omit for the latest stable. Read `ha__core_version` first to compare current vs target.",
+    inputSchema: z.object({
+      version: z
+        .string()
+        .min(1)
+        .max(32)
+        .regex(
+          /^[A-Za-z0-9._\-+]+$/,
+          "version must be 1..32 chars of [A-Za-z0-9._-+]",
+        )
+        .optional()
+        .describe(
+          "Pin the update to a specific HA Core version (e.g. `2025.7.0`). Omit to install the latest stable. Read the current version via `ha__core_version` first.",
+        ),
+      decision_ref: CoreDecisionRefParam,
+    }),
+    buildRequest: ({ version, decision_ref }) => ({
+      method: "POST",
+      path: "/api/v1/channels/ha/core/update",
+      body: {
+        decision_ref,
+        ...(version !== undefined ? { version } : {}),
+      },
+    }),
+  },
+
+  {
+    name: "ha__list_backups",
+    description:
+      "List every backup HA knows about — both Alfred-triggered (recorded in `ha_backup_ref`) and HA's own strategy/auto/user-initiated ones. Resolves to WS `backup/info`. Returns `data` straight from HA, typically `{backups: [{slug, name, date, size, type, …}, ...]}`. **When to call:** before `ha__restore_backup` (to find the right slug), when Sir asks 'what backups do I have?', or after `ha__create_backup` to confirm it landed. No gate. Idempotent.",
+    inputSchema: z.object({}),
+    buildRequest: () => ({
+      method: "GET",
+      path: "/api/v1/channels/ha/backups",
+    }),
+  },
+
+  {
+    name: "ha__backup_info",
+    description:
+      "Full details for one HA backup — date, size, addons included, folders included, password-protected y/n, compatible HA version. Resolves to WS `backup/details`. **When to call:** before `ha__restore_backup` (to confirm the backup includes what Sir needs back), when Sir asks 'what's in that backup?'. No gate. Idempotent.",
+    inputSchema: z.object({
+      backup_id: BackupIdParam,
+    }),
+    buildRequest: ({ backup_id }) => ({
+      method: "GET",
+      path: `/api/v1/channels/ha/backups/${encodeURIComponent(backup_id)}`,
+    }),
+  },
+
+  {
+    name: "ha__create_backup",
+    description:
+      "Generate a fresh HA backup. Resolves to WS `backup/generate`. **No gate** — explicit user-requested backups are always fine, and ctrl-api records the result in `ha_backup_ref` with `triggered_by='user'` so the ledger is complete. **When to call:** Sir asks 'back up HA', or Alfred proactively snapshots before a risky change Alfred can't trigger via a gated verb (e.g. before a long manual session). All fields optional — pass `{}` for the default backup. `password` encrypts the archive; `include_addons` etc. let Sir choose a partial backup.",
+    inputSchema: z.object({
+      name: z
+        .string()
+        .min(1)
+        .max(128)
+        .optional()
+        .describe(
+          "Human-readable backup name. HA assigns one if omitted; pass an Alfred-flavour name (e.g. `alfred-pre-zwave-firmware-2026-05-29`) when the trigger is contextual.",
+        ),
+      password: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Optional password — encrypts the backup archive. Without it the backup is plaintext on Sir's disk.",
+        ),
+      include_addons: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "Optional addon slug list. Omit for HA's default (all addons).",
+        ),
+      include_database: z
+        .boolean()
+        .optional()
+        .describe(
+          "Include the HA recorder database. Default true; setting false drops the largest piece for a faster backup.",
+        ),
+      include_homeassistant: z
+        .boolean()
+        .optional()
+        .describe(
+          "Include the HA core (config + state). Default true — flipping false produces an addons-only backup.",
+        ),
+      include_folders: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "Optional list of supervisor-known folders to include (e.g. `share`, `media`, `ssl`). Omit for HA's default set.",
+        ),
+    }),
+    buildRequest: ({
+      name,
+      password,
+      include_addons,
+      include_database,
+      include_homeassistant,
+      include_folders,
+    }) => ({
+      method: "POST",
+      path: "/api/v1/channels/ha/backups",
+      body: {
+        ...(name !== undefined ? { name } : {}),
+        ...(password !== undefined ? { password } : {}),
+        ...(include_addons !== undefined ? { include_addons } : {}),
+        ...(include_database !== undefined ? { include_database } : {}),
+        ...(include_homeassistant !== undefined ? { include_homeassistant } : {}),
+        ...(include_folders !== undefined ? { include_folders } : {}),
+      },
+    }),
+  },
+
+  {
+    name: "ha__delete_backup",
+    description:
+      "Delete an HA backup. Resolves to WS `backup/delete`. **DESTRUCTIVE + IRREVERSIBLE** — backups themselves are how Alfred rolls back; once a backup is gone, that point-in-time is gone. **GATED** — requires `decision_ref`. **NO snapshot** (we don't auto-snapshot backups before deleting them; that'd be silly). **When to call:** Sir asks to prune old backups, or after a successful restore Sir wants the staging backup gone. ctrl-api records the delete in the daybook.",
+    inputSchema: z.object({
+      backup_id: BackupIdParam,
+      decision_ref: CoreDecisionRefParam,
+    }),
+    buildRequest: ({ backup_id, decision_ref }) => ({
+      method: "DELETE",
+      path: `/api/v1/channels/ha/backups/${encodeURIComponent(backup_id)}`,
+      body: { decision_ref },
+    }),
+  },
+
+  {
+    name: "ha__restore_backup",
+    description:
+      "Restore HA from a backup. **DESTRUCTIVE — THIS STOPS HA FOR SEVERAL MINUTES.** HA shuts down, the backup is unpacked over the current state, HA restarts at the backup's snapshot point. State + automations + addons that existed at the backup time come back; anything changed since the backup is LOST. **GATED** — requires `decision_ref`. **NO auto-snapshot** — restoring IS the recovery action; backing up the broken state we're about to overwrite would be backwards. **When to call:** Sir says 'roll back', OR an Alfred-triggered destructive verb (core_restart/core_update/addon_install) failed and Sir wants the pre-snapshot state back. Read `ha__backup_info` FIRST to confirm the backup includes what Sir needs. The MCP envelope returns when the restore is QUEUED — HA itself restarts to apply it; follow up with `ha__core_version` after a minute to confirm it came back.",
+    inputSchema: z.object({
+      backup_id: BackupIdParam,
+      password: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Password for the backup if it was created encrypted. Omit for unencrypted backups; pass the password Sir used at `ha__create_backup` time otherwise.",
+        ),
+      decision_ref: CoreDecisionRefParam,
+    }),
+    buildRequest: ({ backup_id, password, decision_ref }) => ({
+      method: "POST",
+      path: `/api/v1/channels/ha/backups/${encodeURIComponent(backup_id)}/restore`,
+      body: {
+        decision_ref,
+        ...(password !== undefined ? { password } : {}),
+      },
+    }),
+  },
+];
+
+// ═════════════════════════════════════════════════════════════════════════
+// === END Tier 4 PR7 ═══════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════════════════════
+
+// Final catalogue: 46 tools total = 11 read + 15 writes (5 PR4 + 10 PR3 CRUD)
+// + 10 PR6 supervisor addon + 10 PR7 core+backups. Order kept deliberately
+// (reads first, automations/scenes/scripts next, addon-CRUD next, core+backups
+// last) so the model that lists the catalogue sees the safe read surface
+// before the destructive surfaces.
 export const ALL_HASS_TOOLS: ToolDef[] = [
   ...HASS_READ_TOOLS,
   ...HASS_DEFERRED_TOOLS,
   ...HASS_ADDON_TOOLS,
+  ...HASS_PR7_TOOLS,
 ];
