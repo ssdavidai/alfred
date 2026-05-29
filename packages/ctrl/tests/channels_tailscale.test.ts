@@ -264,7 +264,7 @@ describe("POST /api/v1/channels/tailscale/connect — paste-authkey path", () =>
       return true;
     });
     const r = await invoke("POST", "/api/v1/channels/tailscale/connect", {
-      authkey: "tskey-auth-kE2GFQ-XYZ",
+      authkey: "tskey-auth-FIXTUREONLY-FIXTURE",
     });
     assert.equal(r.status, 200);
     assert.equal(r.payload.ok, true);
@@ -272,10 +272,10 @@ describe("POST /api/v1/channels/tailscale/connect — paste-authkey path", () =>
     assert.equal(r.payload.vault_write_ok, true);
     assert.equal(r.payload.state, "starting");
     // Vault was given the right key.
-    assert.equal(vaultArg, "tskey-auth-kE2GFQ-XYZ");
+    assert.equal(vaultArg, "tskey-auth-FIXTUREONLY-FIXTURE");
     // .env now carries both keys.
     const env = readEnv();
-    assert.equal(env.TAILSCALE_AUTHKEY, "tskey-auth-kE2GFQ-XYZ");
+    assert.equal(env.TAILSCALE_AUTHKEY, "tskey-auth-FIXTUREONLY-FIXTURE");
     assert.equal(env.TAILSCALE_ENABLED, "true");
     // docker compose --profile tailscale up -d tailscale was invoked.
     assert.equal(dockerComposeCalls.length, 1);
@@ -316,7 +316,7 @@ describe("POST /api/v1/channels/tailscale/connect — paste-authkey path", () =>
       )
       .run(Date.now(), Date.now());
     const r = await invoke("POST", "/api/v1/channels/tailscale/connect", {
-      authkey: "tskey-auth-xx",
+      authkey: "tskey-auth-FIXTUREONLY-A",
     });
     assert.equal(r.status, 409);
     assert.equal(r.payload.error.code, "ALREADY_CONNECTED");
@@ -329,7 +329,7 @@ describe("POST /api/v1/channels/tailscale/connect — paste-authkey path", () =>
       throw new Error("network unreachable");
     };
     const r = await invoke("POST", "/api/v1/channels/tailscale/connect", {
-      authkey: "tskey-auth-yy",
+      authkey: "tskey-auth-FIXTUREONLY-B",
     });
     assert.equal(r.status, 502);
     assert.equal(r.payload.error.code, "DOCKER_COMPOSE_FAILED");

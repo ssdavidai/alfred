@@ -1,0 +1,8 @@
+# GitGuardian repo-level config.
+# Reference: https://docs.gitguardian.com/ggshield-docs/reference/secret-scan/all-options#yaml-configuration
+version: 2
+secret:
+  ignored-paths:
+    # Test fixtures contain synthetic auth-key shaped strings that match the
+    # Tailscale `tskey-auth-…` pattern. They are clearly marked FIXTUREONLY.
+    - "packages/ctrl/tests/channels_tailscale.test.ts"
