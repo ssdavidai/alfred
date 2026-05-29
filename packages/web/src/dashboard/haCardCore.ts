@@ -566,3 +566,197 @@ function pickNonEmpty(s: string | null | undefined): string | null {
   const t = s.trim();
   return t.length > 0 ? t : null;
 }
+
+// ── PR6 — gaps + proposals ───────────────────────────────────────────────
+
+/** A single ha_gap row as returned by GET /api/v1/channels/ha/gaps. */
+export interface HaGapRow {
+  id?: string;
+  kind: string;
+  summary: string;
+  severity?: "low" | "medium" | "high" | string;
+  area_id?: string | null;
+  device_id?: string | null;
+  discovered_at?: string;
+  proposal_ref?: string | null;
+  status?: string;
+}
+
+export interface HaGapsResponse {
+  open: HaGapRow[];
+  closed: HaGapRow[];
+}
+
+/** A single ha_proposal row as returned by GET /api/v1/channels/ha/proposals. */
+export interface HaProposalRow {
+  id: string;
+  kind: string;
+  summary: string;
+  yaml: string;
+  gap_id?: string | null;
+  status: string;
+  ts?: string;
+  applied_at?: string | null;
+}
+
+export interface HaProposalsResponse {
+  pending: HaProposalRow[];
+  applied: HaProposalRow[];
+  other: HaProposalRow[];
+}
+
+/** The 8 baseline kinds Phase B can emit. */
+export const HA_GAP_KIND_LABELS: Record<string, string> = {
+  no_morning_routine: "Morning lighting",
+  no_bedtime_routine: "Bedtime routine",
+  no_motion_lighting: "Motion lighting",
+  no_away_mode: "Away mode",
+  no_security_camera_notification: "Camera notify",
+  no_vacation_mode: "Vacation mode",
+  no_climate_schedule: "Climate schedule",
+  no_party_mode: "Party mode",
+};
+
+export function labelForGapKind(kind: string | null | undefined): string {
+  if (typeof kind !== "string") return "Gap";
+  return HA_GAP_KIND_LABELS[kind] ?? kind;
+}
+
+export interface HaGapSummary {
+  totalOpen: number;
+  totalClosed: number;
+  highCount: number;
+  mediumCount: number;
+  lowCount: number;
+  /** Top 5 open gaps already pre-sorted by the server (high → low,
+   *  then discovered_at desc). */
+  topOpen: HaGapRow[];
+}
+
+export function summariseGaps(
+  resp: HaGapsResponse | null | undefined,
+): HaGapSummary {
+  const open = Array.isArray(resp?.open) ? resp!.open : [];
+  const closed = Array.isArray(resp?.closed) ? resp!.closed : [];
+  let high = 0;
+  let medium = 0;
+  let low = 0;
+  for (const g of open) {
+    switch (g.severity) {
+      case "high":
+        high += 1;
+        break;
+      case "medium":
+        medium += 1;
+        break;
+      default:
+        low += 1;
+        break;
+    }
+  }
+  return {
+    totalOpen: open.length,
+    totalClosed: closed.length,
+    highCount: high,
+    mediumCount: medium,
+    lowCount: low,
+    topOpen: open.slice(0, 5),
+  };
+}
+
+export interface HaProposalSummary {
+  pendingCount: number;
+  appliedCount: number;
+  topPending: HaProposalRow[];
+}
+
+export function summariseProposals(
+  resp: HaProposalsResponse | null | undefined,
+): HaProposalSummary {
+  const pending = Array.isArray(resp?.pending) ? resp!.pending : [];
+  const applied = Array.isArray(resp?.applied) ? resp!.applied : [];
+  return {
+    pendingCount: pending.length,
+    appliedCount: applied.length,
+    topPending: pending.slice(0, 5),
+  };
+}
+
+// ── Proposal-modal state machine ─────────────────────────────────────────
+//
+// The modal renders against one of four states:
+//   • closed       — no proposal selected
+//   • viewing      — proposal loaded, [Apply] + [Reject] live
+//   • applying     — Apply CTA pressed, request in flight
+//   • applied      — request resolved ok, calm "Done" copy + Close CTA
+//   • error        — request failed, surface the error + Retry CTA
+//
+// The pure transition function below is unit-tested; the React
+// component just wires the events.
+
+export type HaProposalModalMode =
+  | "closed"
+  | "viewing"
+  | "applying"
+  | "applied"
+  | "rejecting"
+  | "rejected"
+  | "error";
+
+export interface HaProposalModalState {
+  mode: HaProposalModalMode;
+  proposal: HaProposalRow | null;
+  error: string | null;
+}
+
+export type HaProposalModalEvent =
+  | { type: "OPEN"; proposal: HaProposalRow }
+  | { type: "APPLY" }
+  | { type: "REJECT" }
+  | { type: "APPLY_OK" }
+  | { type: "REJECT_OK" }
+  | { type: "FAIL"; error: string }
+  | { type: "RETRY" }
+  | { type: "CLOSE" };
+
+export const PROPOSAL_MODAL_CLOSED: HaProposalModalState = {
+  mode: "closed",
+  proposal: null,
+  error: null,
+};
+
+export function proposalModalReduce(
+  state: HaProposalModalState,
+  event: HaProposalModalEvent,
+): HaProposalModalState {
+  switch (event.type) {
+    case "OPEN":
+      return { mode: "viewing", proposal: event.proposal, error: null };
+    case "APPLY":
+      if (state.mode !== "viewing" && state.mode !== "error") return state;
+      return { ...state, mode: "applying", error: null };
+    case "REJECT":
+      if (state.mode !== "viewing" && state.mode !== "error") return state;
+      return { ...state, mode: "rejecting", error: null };
+    case "APPLY_OK":
+      if (state.mode !== "applying") return state;
+      return { ...state, mode: "applied", error: null };
+    case "REJECT_OK":
+      if (state.mode !== "rejecting") return state;
+      return { ...state, mode: "rejected", error: null };
+    case "FAIL":
+      // Stay open for the operator to retry / close. Pre-apply error
+      // (from viewing) keeps the proposal mounted.
+      return { ...state, mode: "error", error: event.error };
+    case "RETRY":
+      if (state.mode !== "error") return state;
+      // Return to viewing — the React layer decides whether the next
+      // press is Apply or Reject based on which button the operator
+      // clicks.
+      return { ...state, mode: "viewing", error: null };
+    case "CLOSE":
+      return PROPOSAL_MODAL_CLOSED;
+    default:
+      return state;
+  }
+}

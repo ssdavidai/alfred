@@ -28,9 +28,17 @@ import {
   isProbablyValidLlat,
   summariseRegistry,
   pickRecentRuns,
+  summariseGaps,
+  summariseProposals,
+  labelForGapKind,
+  proposalModalReduce,
+  PROPOSAL_MODAL_CLOSED,
   type HaStatus,
   type HaRegistry,
   type HaRunRow,
+  type HaGapsResponse,
+  type HaProposalsResponse,
+  type HaProposalRow,
 } from "./haCardCore";
 
 const BASE: HaStatus = {
@@ -439,4 +447,149 @@ test("pickRecentRuns: tolerates non-array + malformed timestamps", () => {
 
 test("pickRecentRuns: empty array returns empty array", () => {
   assert.deepEqual(pickRecentRuns([]), []);
+});
+
+// ── PR6 — summariseGaps + summariseProposals + modal reducer ────────────
+
+test("summariseGaps: empty/null input → all-zero summary", () => {
+  const s = summariseGaps(null);
+  assert.equal(s.totalOpen, 0);
+  assert.equal(s.totalClosed, 0);
+  assert.equal(s.highCount, 0);
+  assert.equal(s.mediumCount, 0);
+  assert.equal(s.lowCount, 0);
+  assert.deepEqual(s.topOpen, []);
+});
+
+test("summariseGaps: counts by severity, slices top 5", () => {
+  const resp: HaGapsResponse = {
+    open: [
+      { id: "1", kind: "no_security_camera_notification", summary: "x", severity: "high" },
+      { id: "2", kind: "no_morning_routine", summary: "x", severity: "medium" },
+      { id: "3", kind: "no_motion_lighting", summary: "x", severity: "low" },
+      { id: "4", kind: "no_motion_lighting", summary: "x", severity: "low" },
+      { id: "5", kind: "no_motion_lighting", summary: "x", severity: "low" },
+      { id: "6", kind: "no_motion_lighting", summary: "x", severity: "low" },
+    ],
+    closed: [
+      { id: "7", kind: "no_party_mode", summary: "x", severity: "low" },
+    ],
+  };
+  const s = summariseGaps(resp);
+  assert.equal(s.totalOpen, 6);
+  assert.equal(s.totalClosed, 1);
+  assert.equal(s.highCount, 1);
+  assert.equal(s.mediumCount, 1);
+  assert.equal(s.lowCount, 4);
+  assert.equal(s.topOpen.length, 5);
+});
+
+test("summariseProposals: handles empty + counts pending/applied", () => {
+  assert.deepEqual(
+    summariseProposals(null),
+    { pendingCount: 0, appliedCount: 0, topPending: [] },
+  );
+  const resp: HaProposalsResponse = {
+    pending: [
+      { id: "a", kind: "no_morning_routine", summary: "x", yaml: "x", status: "pending" },
+      { id: "b", kind: "no_bedtime_routine", summary: "x", yaml: "x", status: "pending" },
+    ],
+    applied: [
+      { id: "c", kind: "no_away_mode", summary: "x", yaml: "x", status: "applied" },
+    ],
+    other: [],
+  };
+  const s = summariseProposals(resp);
+  assert.equal(s.pendingCount, 2);
+  assert.equal(s.appliedCount, 1);
+  assert.equal(s.topPending.length, 2);
+});
+
+test("labelForGapKind: maps known kinds, falls back to raw kind", () => {
+  assert.equal(labelForGapKind("no_morning_routine"), "Morning lighting");
+  assert.equal(labelForGapKind("no_motion_lighting"), "Motion lighting");
+  assert.equal(labelForGapKind("no_party_mode"), "Party mode");
+  assert.equal(labelForGapKind("future_kind_alfred_invents"), "future_kind_alfred_invents");
+  assert.equal(labelForGapKind(null), "Gap");
+  assert.equal(labelForGapKind(undefined), "Gap");
+});
+
+// ── Proposal modal state machine ─────────────────────────────────────────
+
+const SAMPLE_PROPOSAL: HaProposalRow = {
+  id: "p1",
+  kind: "no_morning_routine",
+  summary: "Wake the lights.",
+  yaml: "alias: x\ntrigger: []\naction: []\n",
+  status: "pending",
+};
+
+test("proposalModalReduce: OPEN takes closed → viewing with proposal", () => {
+  const next = proposalModalReduce(PROPOSAL_MODAL_CLOSED, {
+    type: "OPEN",
+    proposal: SAMPLE_PROPOSAL,
+  });
+  assert.equal(next.mode, "viewing");
+  assert.equal(next.proposal?.id, "p1");
+  assert.equal(next.error, null);
+});
+
+test("proposalModalReduce: APPLY → applying → APPLY_OK → applied", () => {
+  const opened = proposalModalReduce(PROPOSAL_MODAL_CLOSED, {
+    type: "OPEN",
+    proposal: SAMPLE_PROPOSAL,
+  });
+  const applying = proposalModalReduce(opened, { type: "APPLY" });
+  assert.equal(applying.mode, "applying");
+  const applied = proposalModalReduce(applying, { type: "APPLY_OK" });
+  assert.equal(applied.mode, "applied");
+});
+
+test("proposalModalReduce: REJECT → rejecting → REJECT_OK → rejected", () => {
+  const opened = proposalModalReduce(PROPOSAL_MODAL_CLOSED, {
+    type: "OPEN",
+    proposal: SAMPLE_PROPOSAL,
+  });
+  const rejecting = proposalModalReduce(opened, { type: "REJECT" });
+  assert.equal(rejecting.mode, "rejecting");
+  const rejected = proposalModalReduce(rejecting, { type: "REJECT_OK" });
+  assert.equal(rejected.mode, "rejected");
+});
+
+test("proposalModalReduce: FAIL preserves proposal + RETRY returns to viewing", () => {
+  const opened = proposalModalReduce(PROPOSAL_MODAL_CLOSED, {
+    type: "OPEN",
+    proposal: SAMPLE_PROPOSAL,
+  });
+  const applying = proposalModalReduce(opened, { type: "APPLY" });
+  const failed = proposalModalReduce(applying, {
+    type: "FAIL",
+    error: "HA timed out",
+  });
+  assert.equal(failed.mode, "error");
+  assert.equal(failed.error, "HA timed out");
+  assert.equal(failed.proposal?.id, "p1");
+
+  const retried = proposalModalReduce(failed, { type: "RETRY" });
+  assert.equal(retried.mode, "viewing");
+  assert.equal(retried.error, null);
+});
+
+test("proposalModalReduce: CLOSE always returns the closed state", () => {
+  const opened = proposalModalReduce(PROPOSAL_MODAL_CLOSED, {
+    type: "OPEN",
+    proposal: SAMPLE_PROPOSAL,
+  });
+  const closed = proposalModalReduce(opened, { type: "CLOSE" });
+  assert.equal(closed, PROPOSAL_MODAL_CLOSED);
+});
+
+test("proposalModalReduce: out-of-order events are no-ops", () => {
+  // APPLY_OK without preceding APPLY: state stays unchanged.
+  const opened = proposalModalReduce(PROPOSAL_MODAL_CLOSED, {
+    type: "OPEN",
+    proposal: SAMPLE_PROPOSAL,
+  });
+  const same = proposalModalReduce(opened, { type: "APPLY_OK" });
+  assert.equal(same, opened);
 });

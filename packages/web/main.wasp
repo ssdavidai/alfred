@@ -1061,6 +1061,36 @@ action refreshHaRegistry {
   entities: []
 }
 
+// #110 PR6 — gap detection + proposal generation read/write surface.
+// The HaBootstrapWorkflow Phase B + C run inside the same workflow
+// the "Refresh registry" CTA above triggers; these five ops let the
+// HaCard read the resulting ha_gap / ha_proposal rows and take
+// principal action on them.
+query getHaGaps {
+  fn: import { getHaGaps } from "@src/dashboard/operations",
+  entities: []
+}
+
+query getHaProposals {
+  fn: import { getHaProposals } from "@src/dashboard/operations",
+  entities: []
+}
+
+action applyHaProposal {
+  fn: import { applyHaProposal } from "@src/dashboard/operations",
+  entities: []
+}
+
+action dismissHaGap {
+  fn: import { dismissHaGap } from "@src/dashboard/operations",
+  entities: []
+}
+
+action rejectHaProposal {
+  fn: import { rejectHaProposal } from "@src/dashboard/operations",
+  entities: []
+}
+
 query getAgentConfig {
   fn: import { getAgentConfig } from "@src/dashboard/operations",
   entities: []

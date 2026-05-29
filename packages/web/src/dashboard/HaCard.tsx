@@ -33,21 +33,35 @@
 // ctrl-api's /status route does NOT echo the LLAT; it only carries the
 // vault_item_id in state.db.
 
-import { useEffect, useState } from "react";
+import { useEffect, useReducer, useState } from "react";
 import {
   useQuery,
   getHaStatus,
   getHaRegistry,
+  getHaGaps,
+  getHaProposals,
   connectHa,
   disconnectHa,
   refreshHaRegistry,
+  applyHaProposal,
+  dismissHaGap,
+  rejectHaProposal,
 } from "wasp/client/operations";
 import {
   deriveHaCardState,
   isProbablyValidLlat,
+  labelForGapKind,
   parseHaUrl,
+  proposalModalReduce,
+  PROPOSAL_MODAL_CLOSED,
   redactLlat,
+  summariseGaps,
+  summariseProposals,
   summariseRegistry,
+  type HaGapRow,
+  type HaGapsResponse,
+  type HaProposalRow,
+  type HaProposalsResponse,
   type HaRegistry,
   type HaStatus,
 } from "./haCardCore";
@@ -162,6 +176,36 @@ export function HaCard() {
   );
   const registry = (registryData as HaRegistry | undefined) ?? null;
   const summary = summariseRegistry(registry);
+
+  // #110 PR6 — gaps + proposals. Empty {open:[],closed:[]} / {pending:[]…}
+  // shape on cold start; the polling cadence is driven by the refresh CTA
+  // (we refetch ~35s after a refresh queues, same window as the registry).
+  const { data: gapsData, refetch: refetchGaps } = useQuery(
+    getHaGaps,
+    undefined,
+    { retry: false },
+  );
+  const gaps = (gapsData as HaGapsResponse | undefined) ?? null;
+  const gapSummary = summariseGaps(gaps);
+
+  const { data: proposalsData, refetch: refetchProposals } = useQuery(
+    getHaProposals,
+    undefined,
+    { retry: false },
+  );
+  const proposals =
+    (proposalsData as HaProposalsResponse | undefined) ?? null;
+  const proposalSummary = summariseProposals(proposals);
+
+  // Proposal modal — reducer-driven so the state machine is unit-tested
+  // (proposalModalReduce in haCardCore.ts).
+  const [modal, dispatchModal] = useReducer(
+    proposalModalReduce,
+    PROPOSAL_MODAL_CLOSED,
+  );
+
+  // Per-gap dismiss spinners — keyed by gap id.
+  const [gapBusy, setGapBusy] = useState<Set<string>>(new Set());
 
   // Connect-form state (kept local; never persisted).
   const [haUrl, setHaUrl] = useState("");
@@ -288,6 +332,73 @@ export function HaCard() {
       window.setTimeout(() => {
         setRefreshBusy(false);
       }, 5_000);
+    }
+  }
+
+  async function onDismissGap(gap: HaGapRow) {
+    const id = gap.id;
+    if (!id) return;
+    if (gapBusy.has(id)) return;
+    setGapBusy((prev) => {
+      const next = new Set(prev);
+      next.add(id);
+      return next;
+    });
+    try {
+      await dismissHaGap({ gapId: id });
+      refetchGaps();
+    } catch (e) {
+      console.error("ha gap dismiss failed", e);
+    } finally {
+      setGapBusy((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+    }
+  }
+
+  function onOpenProposalForGap(gap: HaGapRow) {
+    // Look up the proposal whose gap_id matches; fall back to a
+    // matching-kind proposal if Phase C hasn't refreshed the FK yet.
+    if (!proposals) return;
+    const byGap = proposals.pending.find((p) => p.gap_id === gap.id);
+    if (byGap) {
+      dispatchModal({ type: "OPEN", proposal: byGap });
+      return;
+    }
+    const byKind = proposals.pending.find((p) => p.kind === gap.kind);
+    if (byKind) {
+      dispatchModal({ type: "OPEN", proposal: byKind });
+    }
+  }
+
+  async function onApplyProposal() {
+    if (!modal.proposal) return;
+    dispatchModal({ type: "APPLY" });
+    try {
+      await applyHaProposal({ proposalId: modal.proposal.id });
+      dispatchModal({ type: "APPLY_OK" });
+      refetchProposals();
+      refetchGaps();
+    } catch (e: any) {
+      const message =
+        e?.message ?? e?.data?.error ?? "Couldn't apply that proposal.";
+      dispatchModal({ type: "FAIL", error: String(message) });
+    }
+  }
+
+  async function onRejectProposal() {
+    if (!modal.proposal) return;
+    dispatchModal({ type: "REJECT" });
+    try {
+      await rejectHaProposal({ proposalId: modal.proposal.id });
+      dispatchModal({ type: "REJECT_OK" });
+      refetchProposals();
+    } catch (e: any) {
+      const message =
+        e?.message ?? e?.data?.error ?? "Couldn't reject that proposal.";
+      dispatchModal({ type: "FAIL", error: String(message) });
     }
   }
 
@@ -640,7 +751,36 @@ export function HaCard() {
           {/* Voice-surface expander — the 4 read routes voice-bridge can
               call against HA per the #110 PR1 spec. */}
           {voiceOpen && <VoiceSurfaceSection />}
+
+          {/* #110 PR6 — Alfred-sees-these-gaps section. Always rendered
+              in the connected view; an empty registry still shows the
+              calm "Alfred is still listening" copy via summariseGaps. */}
+          <GapsSection
+            gaps={gaps}
+            summary={gapSummary}
+            busy={gapBusy}
+            onOpenProposal={onOpenProposalForGap}
+            onDismiss={onDismissGap}
+          />
+
+          {/* #110 PR6 — Pending proposals section. */}
+          <ProposalsSection
+            proposals={proposals}
+            summary={proposalSummary}
+            onOpen={(p) => dispatchModal({ type: "OPEN", proposal: p })}
+          />
         </div>
+      )}
+
+      {/* Proposal modal — letterpress overlay with YAML preview + apply/reject CTAs. */}
+      {modal.mode !== "closed" && modal.proposal && (
+        <ProposalModal
+          state={modal}
+          onApply={onApplyProposal}
+          onReject={onRejectProposal}
+          onClose={() => dispatchModal({ type: "CLOSE" })}
+          onRetry={() => dispatchModal({ type: "RETRY" })}
+        />
       )}
 
       {/* ERROR — verbatim last_error + retry CTA + disconnect. */}
@@ -763,6 +903,301 @@ function RunsSection() {
         / proposal-apply ledger. Until then, this section is intentionally
         quiet.
       </p>
+    </div>
+  );
+}
+
+function GapsSection({
+  gaps,
+  summary,
+  busy,
+  onOpenProposal,
+  onDismiss,
+}: {
+  gaps: HaGapsResponse | null;
+  summary: ReturnType<typeof summariseGaps>;
+  busy: Set<string>;
+  onOpenProposal: (gap: HaGapRow) => void;
+  onDismiss: (gap: HaGapRow) => void;
+}) {
+  const open = Array.isArray(gaps?.open) ? gaps!.open : [];
+  if (summary.totalOpen === 0 && summary.totalClosed === 0) {
+    return (
+      <div className="border-t border-rule pt-3 space-y-1">
+        <div
+          className="font-mono text-[10px] uppercase tracking-[0.22em] pb-1"
+          style={{ color: "var(--marginalia)" }}
+        >
+          Alfred sees these gaps
+        </div>
+        <p
+          className="font-body italic text-[12px]"
+          style={{ color: "var(--marginalia)" }}
+        >
+          Nothing yet — Alfred re-runs the audit every 6h. The next pass
+          will surface any missing baselines.
+        </p>
+      </div>
+    );
+  }
+  return (
+    <div className="border-t border-rule pt-3 space-y-2">
+      <div
+        className="font-mono text-[10px] uppercase tracking-[0.22em]"
+        style={{ color: "var(--marginalia)" }}
+      >
+        Alfred sees these gaps ({summary.totalOpen} open
+        {summary.highCount > 0 ? `, ${summary.highCount} high` : ""})
+      </div>
+      {open.map((gap) => {
+        const id = gap.id ?? "";
+        const sev = gap.severity ?? "low";
+        const sevColor =
+          sev === "high"
+            ? "var(--brass)"
+            : sev === "medium"
+              ? "var(--ink)"
+              : "var(--marginalia)";
+        return (
+          <div
+            key={id || `${gap.kind}-${gap.area_id ?? ""}`}
+            className="flex items-baseline gap-3 font-mono text-[11px]"
+          >
+            <span style={{ color: sevColor }}>{labelForGapKind(gap.kind)}</span>
+            <span
+              className="flex-1 italic"
+              style={{ color: "var(--marginalia)" }}
+            >
+              {gap.summary}
+            </span>
+            <button
+              onClick={() => onOpenProposal(gap)}
+              className="btn-link"
+              title="Open the templated proposal for this gap."
+            >
+              Open proposal
+            </button>
+            <button
+              onClick={() => onDismiss(gap)}
+              disabled={!id || busy.has(id)}
+              className="btn-link"
+              title="Hide this gap. Alfred won't re-surface it."
+            >
+              {busy.has(id) ? "Dismissing…" : "Dismiss"}
+            </button>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function ProposalsSection({
+  proposals,
+  summary,
+  onOpen,
+}: {
+  proposals: HaProposalsResponse | null;
+  summary: ReturnType<typeof summariseProposals>;
+  onOpen: (p: HaProposalRow) => void;
+}) {
+  const pending = Array.isArray(proposals?.pending) ? proposals!.pending : [];
+  if (pending.length === 0 && summary.appliedCount === 0) {
+    return null;
+  }
+  return (
+    <div className="border-t border-rule pt-3 space-y-2">
+      <div
+        className="font-mono text-[10px] uppercase tracking-[0.22em]"
+        style={{ color: "var(--marginalia)" }}
+      >
+        Pending proposals ({pending.length}
+        {summary.appliedCount > 0
+          ? ` · ${summary.appliedCount} applied`
+          : ""}
+        )
+      </div>
+      {pending.length === 0 ? (
+        <p
+          className="font-body italic text-[12px]"
+          style={{ color: "var(--marginalia)" }}
+        >
+          No pending proposals. Alfred queues a new one as gaps come back.
+        </p>
+      ) : (
+        pending.map((p) => (
+          <div
+            key={p.id}
+            className="flex items-baseline gap-3 font-mono text-[11px]"
+          >
+            <span style={{ color: "var(--ink)" }}>{labelForGapKind(p.kind)}</span>
+            <span
+              className="flex-1 italic"
+              style={{ color: "var(--marginalia)" }}
+            >
+              {p.summary}
+            </span>
+            <button
+              onClick={() => onOpen(p)}
+              className="btn-link"
+              title="View YAML preview, apply, or reject."
+            >
+              Review
+            </button>
+          </div>
+        ))
+      )}
+    </div>
+  );
+}
+
+function ProposalModal({
+  state,
+  onApply,
+  onReject,
+  onClose,
+  onRetry,
+}: {
+  state: ReturnType<typeof proposalModalReduce>;
+  onApply: () => void;
+  onReject: () => void;
+  onClose: () => void;
+  onRetry: () => void;
+}) {
+  // The state machine guarantees state.proposal is non-null when mode
+  // is anything other than "closed".
+  const p = state.proposal;
+  if (!p) return null;
+  const mode = state.mode;
+  const errorMsg = state.error;
+  const busy = mode === "applying" || mode === "rejecting";
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="ha-proposal-title"
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.4)",
+        zIndex: 50,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: "1rem",
+      }}
+      onClick={() => {
+        if (!busy) onClose();
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="border border-rule"
+        style={{
+          background: "var(--paper)",
+          padding: "1.25rem",
+          maxWidth: "640px",
+          width: "100%",
+          maxHeight: "80vh",
+          overflowY: "auto",
+        }}
+      >
+        <div
+          id="ha-proposal-title"
+          className="font-display text-2xl mb-2"
+          style={{ color: "var(--ink)" }}
+        >
+          {labelForGapKind(p.kind)}
+        </div>
+        <p
+          className="font-body italic text-[13px] mb-3"
+          style={{ color: "var(--marginalia)" }}
+        >
+          {p.summary}
+        </p>
+        <pre
+          className="font-mono text-[11px] border border-rule p-3 mb-3"
+          style={{
+            color: "var(--ink)",
+            background: "transparent",
+            whiteSpace: "pre-wrap",
+            wordBreak: "break-word",
+          }}
+        >
+          {p.yaml}
+        </pre>
+
+        {mode === "applied" && (
+          <p
+            className="font-body italic text-[13px] mb-2"
+            style={{ color: "var(--ink)" }}
+          >
+            Applied. Alfred snapshotted the previous automation; you can
+            roll back from the Recent runs ledger.
+          </p>
+        )}
+        {mode === "rejected" && (
+          <p
+            className="font-body italic text-[13px] mb-2"
+            style={{ color: "var(--marginalia)" }}
+          >
+            Rejected. Alfred won't re-queue this one until you ask.
+          </p>
+        )}
+        {mode === "error" && errorMsg && (
+          <p
+            className="font-body italic text-[13px] mb-2"
+            style={{ color: "var(--brass)" }}
+          >
+            {errorMsg}
+          </p>
+        )}
+
+        <div className="flex flex-wrap gap-3 items-baseline pt-2">
+          {(mode === "viewing" || mode === "error") && (
+            <>
+              <button
+                onClick={onApply}
+                disabled={busy}
+                className="btn-ghost"
+              >
+                Apply
+              </button>
+              <button
+                onClick={onReject}
+                disabled={busy}
+                className="btn-link"
+              >
+                Reject
+              </button>
+            </>
+          )}
+          {mode === "applying" && (
+            <span
+              className="font-mono text-[11px]"
+              style={{ color: "var(--marginalia)" }}
+            >
+              Applying…
+            </span>
+          )}
+          {mode === "rejecting" && (
+            <span
+              className="font-mono text-[11px]"
+              style={{ color: "var(--marginalia)" }}
+            >
+              Rejecting…
+            </span>
+          )}
+          {mode === "error" && (
+            <button onClick={onRetry} className="btn-link">
+              Try again
+            </button>
+          )}
+          <button onClick={onClose} disabled={busy} className="btn-link">
+            Close
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

@@ -132,6 +132,13 @@ const VOICE_BRIDGE_ALLOWLIST: ReadonlySet<string> = new Set([
   "GET:/api/v1/channels/ha/status",
   "GET:/api/v1/channels/ha/registry",
   "GET:/api/v1/channels/ha/automations",
+  // #110 PR6 — gap detection + proposal generation read surfaces.
+  // Voice CAN ask "what gaps does Alfred see?" / "what proposals are
+  // pending?" — but CANNOT trigger applyHaProposal (that stays through
+  // the MCP write surface so the loop-guard + snapshot pattern in
+  // PR4 still wraps every write).
+  "GET:/api/v1/channels/ha/gaps",
+  "GET:/api/v1/channels/ha/proposals",
   // ── Files store, read-only — issue #114 PR4 (voice-bridge files surface). ─
   // The voice agent surfaces four read-only `files__*` tools (list / stat /
   // read_text / search). list + usage have no path params; stat + blob carry

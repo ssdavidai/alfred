@@ -3014,3 +3014,135 @@ export const refreshHaRegistry = async (_args: unknown, context: any) => {
     path: "/api/v1/channels/ha/registry/refresh",
   });
 };
+
+// ============================================================
+// Home Assistant — gap detection + proposal generation (#110 PR6).
+// HaBootstrapWorkflow Phase B + C surface their results through these
+// five ops:
+//
+//   getHaGaps         → { open: [...], closed: [...] }
+//                       Both halves of the audit ledger sorted by
+//                       severity then discovered_at desc.
+//   getHaProposals    → { pending: [...], applied: [...], other: [...] }
+//                       The pending list is what the HaCard "Pending
+//                       proposals" section iterates over.
+//   applyHaProposal   → POST proposal apply with a server-minted
+//                       decision_ref. Routes through PR4's existing
+//                       /proposal/:id/apply (loop guard + snapshot).
+//   dismissHaGap      → PATCH gap with dismissed_at semantic.
+//                       No HA write.
+//   rejectHaProposal  → POST proposal reject (no HA write).
+//
+// Voice cannot trigger applyHaProposal — write actions stay through
+// alfred__act_on_decision per the voice-bridge contract. The voice
+// surface CAN call getHaGaps + getHaProposals (read-only).
+// ============================================================
+
+export const getHaGaps = async (_args: unknown, context: any) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    path: "/api/v1/channels/ha/gaps",
+  });
+};
+
+export const getHaProposals = async (_args: unknown, context: any) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    path: "/api/v1/channels/ha/proposals",
+  });
+};
+
+/**
+ * Apply an HA proposal through the PR4 loop-guard + snapshot pattern.
+ *
+ * The PR4 route requires a `decision_ref` (formatted ulid). We mint
+ * it server-side here so the principal doesn't have to think about
+ * it. The same value goes into the ha_proposal row + the ha_run row,
+ * closing the audit loop.
+ *
+ * Body the client passes:  { proposalId: string, automationId?: string }
+ *
+ * Voice cannot reach this op — Wasp auth + the voice-bridge token
+ * scope both forbid it.
+ */
+export const applyHaProposal = async (
+  args: { proposalId: string; automationId?: string },
+  context: any,
+) => {
+  if (!args?.proposalId?.trim()) {
+    throw new HttpError(400, "proposalId is required");
+  }
+  const instance = await getUserInstance(context);
+  // Mint a decision_ref — same shape PR4's assertDecisionRef expects
+  // (ULID-ish: 26 chars, Crockford base32). Use crypto.randomUUID and
+  // strip dashes to get a 32-char alphanumeric — PR4 accepts either
+  // shape via its format-gate. For maximum compat we just generate a
+  // ULID-shaped string using timestamp + random.
+  const decision_ref = mintDecisionRef();
+  const body: Record<string, string> = {
+    decision_ref,
+  };
+  if (typeof args.automationId === "string" && args.automationId.trim()) {
+    body.automation_id = args.automationId.trim();
+  }
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: `/api/v1/channels/ha/proposal/${encodeURIComponent(
+      args.proposalId.trim(),
+    )}/apply`,
+    body,
+  });
+};
+
+export const dismissHaGap = async (
+  args: { gapId: string },
+  context: any,
+) => {
+  if (!args?.gapId?.trim()) {
+    throw new HttpError(400, "gapId is required");
+  }
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "PATCH",
+    path: `/api/v1/channels/ha/gap/${encodeURIComponent(args.gapId.trim())}/dismiss`,
+  });
+};
+
+export const rejectHaProposal = async (
+  args: { proposalId: string },
+  context: any,
+) => {
+  if (!args?.proposalId?.trim()) {
+    throw new HttpError(400, "proposalId is required");
+  }
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: `/api/v1/channels/ha/proposal/${encodeURIComponent(
+      args.proposalId.trim(),
+    )}/reject`,
+  });
+};
+
+// ── decision_ref minter ──────────────────────────────────────────────────
+//
+// Crockford base32, 26 chars — the ULID shape PR4's
+// `assertDecisionRef` accepts. We don't need cryptographic ULID
+// monotonicity here (one proposal-apply per user click), so a simple
+// timestamp + random suffix is fine.
+const _ULID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+function mintDecisionRef(): string {
+  const now = Date.now();
+  let timeChars = "";
+  let t = now;
+  for (let i = 0; i < 10; i++) {
+    timeChars = _ULID_ALPHABET[t & 31] + timeChars;
+    t = Math.floor(t / 32);
+  }
+  let randChars = "";
+  for (let i = 0; i < 16; i++) {
+    randChars += _ULID_ALPHABET[Math.floor(Math.random() * 32)];
+  }
+  return timeChars + randChars;
+}

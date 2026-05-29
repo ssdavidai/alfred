@@ -693,6 +693,16 @@ from src.activities.ha_bootstrap import (
     write_ha_registry,
 )
 
+# HA gap detection + proposal generation (#110 PR6) — Phase B + Phase C
+# of HaBootstrapWorkflow. detect_ha_gaps re-reads the registry, runs
+# the 8 baseline detectors, and bulk-upserts ha_gap. generate_ha_proposals
+# templates a concrete YAML automation per open gap and POSTs each to
+# ctrl-api as a `pending` ha_proposal.
+from src.activities.ha_gap_detection import (
+    detect_ha_gaps,
+    generate_ha_proposals,
+)
+
 # Validators used as activities
 from src.validators.frontmatter import validate_classification
 
@@ -1177,6 +1187,10 @@ ALL_ACTIVITIES = [
     # src.workflows.ha_bootstrap.HaBootstrapWorkflow.
     pull_ha_registry,
     write_ha_registry,
+    # HA gap detection + proposal generation (#110 PR6) — Phase B + C
+    # run inside the same HaBootstrapWorkflow after Phase A's write.
+    detect_ha_gaps,
+    generate_ha_proposals,
 ]
 
 

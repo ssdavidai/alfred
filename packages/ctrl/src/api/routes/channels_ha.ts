@@ -2339,6 +2339,472 @@ export function registerHaBootstrapRoutes(): void {
       eta: "30s",
     });
   });
+
+  // #110 PR6 — Phase B (gap detection) + Phase C (proposal generation)
+  // bulk-upsert + read routes. The alfred-learn workflow drives:
+  //
+  //   POST /api/v1/channels/ha/gaps/bulk   — operator-only bulk upsert
+  //                                          (dedup by kind+area_id,
+  //                                          tombstone vanished gaps)
+  //   GET  /api/v1/channels/ha/gaps        — open + closed gap surfaces
+  //   GET  /api/v1/channels/ha/proposals   — pending + applied proposals
+  //   PATCH /api/v1/channels/ha/gap/:id/dismiss     — principal hides a gap
+  //   POST /api/v1/channels/ha/proposal/:id/reject  — principal kills a proposal
+  //
+  // The gap+proposal reads are voice-bridge readable; the bulk-write is
+  // operator-only and the dismiss/reject writes carry the channel-token
+  // chain (no `decision_ref` needed — dismiss/reject don't touch HA).
+  registerHaGapRoutes();
+}
+
+// ── PR6 routes — gap detection + proposal lifecycle ────────────────────
+
+// Bulk-upsert body shape. Mirrors the structure detect_gaps() returns
+// in alfred-learn.
+interface HaGapBulkInputRow {
+  kind: string;
+  summary: string;
+  severity: string;
+  area_id: string | null;
+  device_id: string | null;
+  discovered_at: string;
+  evidence: Record<string, unknown>;
+}
+
+// Stored shape (reflects the PR1 ha_gap schema: id/ts/kind/evidence/
+// fix_pack/proposal_ref/status/created_at). The optional spec fields
+// (area_id/device_id/summary/severity) ride inside `evidence` so we
+// don't need a new migration.
+interface HaGapStoredRow {
+  id: string;
+  ts: string;
+  kind: string;
+  evidence: string | null;
+  fix_pack: string | null;
+  proposal_ref: string | null;
+  status: string;
+  created_at: string;
+}
+
+// The 8 kinds Phase B emits. Anything else gets dropped at parse time
+// so a misbehaving activity can't push a row that the dashboard can't
+// surface.
+const HA_GAP_KINDS = new Set([
+  "no_morning_routine",
+  "no_bedtime_routine",
+  "no_motion_lighting",
+  "no_away_mode",
+  "no_security_camera_notification",
+  "no_vacation_mode",
+  "no_climate_schedule",
+  "no_party_mode",
+]);
+
+const HA_GAP_SEVERITIES = new Set(["low", "medium", "high"]);
+
+function parseGapBulkBody(raw: unknown): HaGapBulkInputRow[] {
+  if (typeof raw !== "object" || raw === null) {
+    throw new ValidationError("body must be a JSON object");
+  }
+  const b = raw as Record<string, unknown>;
+  if (!Array.isArray(b.rows)) {
+    throw new ValidationError("rows must be an array");
+  }
+  const out: HaGapBulkInputRow[] = [];
+  for (const r of b.rows) {
+    if (typeof r !== "object" || r === null) continue;
+    const row = r as Record<string, unknown>;
+    if (typeof row.kind !== "string" || !HA_GAP_KINDS.has(row.kind)) continue;
+    const summary = typeof row.summary === "string" ? row.summary : "";
+    if (summary.length === 0) continue;
+    const severity =
+      typeof row.severity === "string" && HA_GAP_SEVERITIES.has(row.severity)
+        ? row.severity
+        : "low";
+    const area_id = typeof row.area_id === "string" && row.area_id ? row.area_id : null;
+    const device_id =
+      typeof row.device_id === "string" && row.device_id ? row.device_id : null;
+    const discovered_at =
+      typeof row.discovered_at === "string" && row.discovered_at
+        ? row.discovered_at
+        : new Date().toISOString();
+    let evidence: Record<string, unknown> = {};
+    if (row.evidence && typeof row.evidence === "object") {
+      evidence = row.evidence as Record<string, unknown>;
+    }
+    out.push({
+      kind: row.kind,
+      summary,
+      severity,
+      area_id,
+      device_id,
+      discovered_at,
+      evidence,
+    });
+  }
+  return out;
+}
+
+/** Dedup key for upsert + tombstone passes — gap is the SAME gap iff
+ *  (kind, area_id) match. area_id=null is a valid first-class key (the
+ *  whole-home gaps like no_morning_routine fall here). */
+function gapDedupeKey(kind: string, area_id: string | null): string {
+  return `${kind}::${area_id ?? ""}`;
+}
+
+interface HaGapBulkResult {
+  inserted: number;
+  updated: number;
+  /** Gaps that vanished from input AND were still open → closed via
+   *  status='addressed'. */
+  addressed: number;
+  /** Convenience: 0 — dismiss is a principal action, never auto. */
+  dismissed: number;
+  /** The current open + addressed-this-call rows the workflow needs
+   *  to template proposals against. Each row carries its id + the
+   *  evidence-blob fields (kind, summary, severity, area_id…). */
+  gaps: Array<Record<string, unknown>>;
+}
+
+function decodeGapForResponse(
+  row: HaGapStoredRow,
+): Record<string, unknown> {
+  let evidence: Record<string, unknown> = {};
+  if (row.evidence) {
+    try {
+      const parsed = JSON.parse(row.evidence);
+      if (parsed && typeof parsed === "object") {
+        evidence = parsed as Record<string, unknown>;
+      }
+    } catch {
+      // best-effort — leave evidence empty
+    }
+  }
+  return {
+    id: row.id,
+    kind: row.kind,
+    summary: typeof evidence.summary === "string" ? evidence.summary : row.kind,
+    severity: typeof evidence.severity === "string" ? evidence.severity : "low",
+    area_id: typeof evidence.area_id === "string" ? evidence.area_id : null,
+    device_id: typeof evidence.device_id === "string" ? evidence.device_id : null,
+    discovered_at: row.ts,
+    evidence: typeof evidence.evidence === "object" ? evidence.evidence : evidence,
+    proposal_ref: row.proposal_ref,
+    status: row.status,
+  };
+}
+
+function bulkUpsertHaGaps(rows: HaGapBulkInputRow[]): HaGapBulkResult {
+  const db = getStateDb();
+  // We dedupe within the input batch by (kind, area_id) — the spec says
+  // we don't re-discover the same gap every 6h.
+  const seen = new Map<string, HaGapBulkInputRow>();
+  for (const r of rows) {
+    seen.set(gapDedupeKey(r.kind, r.area_id), r);
+  }
+  const inputRows = [...seen.values()];
+  const inputKeys = new Set(seen.keys());
+
+  let inserted = 0;
+  let updated = 0;
+  let addressed = 0;
+
+  db.exec("BEGIN");
+  try {
+    const existing = db
+      .prepare("SELECT id, kind, evidence, status, proposal_ref, ts FROM ha_gap")
+      .all() as Array<{
+      id: string;
+      kind: string;
+      evidence: string | null;
+      status: string;
+      proposal_ref: string | null;
+      ts: string;
+    }>;
+
+    // Index existing OPEN rows by (kind, area_id).
+    const openByKey = new Map<string, typeof existing[number]>();
+    for (const row of existing) {
+      if (row.status !== "open") continue;
+      let area_id: string | null = null;
+      if (row.evidence) {
+        try {
+          const ev = JSON.parse(row.evidence) as Record<string, unknown>;
+          if (typeof ev.area_id === "string") area_id = ev.area_id;
+        } catch {
+          // best-effort
+        }
+      }
+      openByKey.set(gapDedupeKey(row.kind, area_id), row);
+    }
+
+    const insertStmt = db.prepare(
+      `INSERT INTO ha_gap (id, ts, kind, evidence, fix_pack, status)
+       VALUES (?, ?, ?, ?, ?, 'open')`,
+    );
+    const updateStmt = db.prepare(
+      `UPDATE ha_gap
+          SET ts = ?, evidence = ?, fix_pack = ?
+        WHERE id = ?`,
+    );
+
+    for (const r of inputRows) {
+      const key = gapDedupeKey(r.kind, r.area_id);
+      const existing = openByKey.get(key);
+      // The evidence blob carries the spec fields the PR1 schema
+      // doesn't have a column for. Keys are flat — no nesting —
+      // so the dashboard `decodeGapForResponse` can lift them out
+      // without recursion.
+      const evidence = JSON.stringify({
+        summary: r.summary,
+        severity: r.severity,
+        area_id: r.area_id,
+        device_id: r.device_id,
+        evidence: r.evidence,
+      });
+      if (existing) {
+        updateStmt.run(r.discovered_at, evidence, r.kind, existing.id);
+        updated += 1;
+      } else {
+        insertStmt.run(ulid(), r.discovered_at, r.kind, evidence, r.kind);
+        inserted += 1;
+      }
+    }
+
+    // Tombstone open rows whose (kind, area_id) vanished from input
+    // → status='addressed' (the spec's "closed_at" semantic).
+    const addressedStmt = db.prepare(
+      `UPDATE ha_gap
+          SET status = 'addressed'
+        WHERE id = ? AND status = 'open'`,
+    );
+    for (const [key, row] of openByKey) {
+      if (inputKeys.has(key)) continue;
+      addressedStmt.run(row.id);
+      addressed += 1;
+    }
+
+    db.exec("COMMIT");
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
+  }
+
+  // Re-read the still-open rows so Phase C has fresh `id` + status
+  // values to attach to its proposal POSTs.
+  const openRows = db
+    .prepare(
+      `SELECT id, ts, kind, evidence, fix_pack, proposal_ref, status, created_at
+         FROM ha_gap
+        WHERE status = 'open'
+        ORDER BY ts DESC`,
+    )
+    .all() as HaGapStoredRow[];
+  return {
+    inserted,
+    updated,
+    addressed,
+    dismissed: 0,
+    gaps: openRows.map(decodeGapForResponse),
+  };
+}
+
+function listHaGaps(): {
+  open: Array<Record<string, unknown>>;
+  closed: Array<Record<string, unknown>>;
+} {
+  const db = getStateDb();
+  let rows: HaGapStoredRow[] = [];
+  try {
+    rows = db
+      .prepare(
+        `SELECT id, ts, kind, evidence, fix_pack, proposal_ref, status, created_at
+           FROM ha_gap
+          ORDER BY ts DESC`,
+      )
+      .all() as HaGapStoredRow[];
+  } catch {
+    // ha_gap may not be present in an older test sandbox; treat as empty.
+    return { open: [], closed: [] };
+  }
+  const open: Array<Record<string, unknown>> = [];
+  const closed: Array<Record<string, unknown>> = [];
+  // Severity ranking for the sort.
+  const sev: Record<string, number> = { high: 0, medium: 1, low: 2 };
+  for (const r of rows) {
+    const view = decodeGapForResponse(r);
+    if (r.status === "open") {
+      open.push(view);
+    } else {
+      closed.push(view);
+    }
+  }
+  open.sort((a, b) => {
+    const da = sev[(a.severity as string) ?? "low"] ?? 2;
+    const db_ = sev[(b.severity as string) ?? "low"] ?? 2;
+    if (da !== db_) return da - db_;
+    return String(b.discovered_at).localeCompare(String(a.discovered_at));
+  });
+  closed.sort((a, b) =>
+    String(b.discovered_at).localeCompare(String(a.discovered_at)),
+  );
+  return { open, closed };
+}
+
+interface HaProposalListed {
+  id: string;
+  kind: string;
+  summary: string;
+  yaml: string;
+  gap_id: string | null;
+  status: string;
+  ts: string;
+  applied_at: string | null;
+}
+
+function listHaProposals(): {
+  pending: HaProposalListed[];
+  applied: HaProposalListed[];
+  other: HaProposalListed[];
+} {
+  const db = getStateDb();
+  let rows: Array<{
+    id: string;
+    ts: string;
+    scope: string;
+    summary: string;
+    payload_json: string;
+    status: string;
+    applied_at: string | null;
+  }> = [];
+  try {
+    rows = db
+      .prepare(
+        `SELECT id, ts, scope, summary, payload_json, status, applied_at
+           FROM ha_proposal
+          ORDER BY ts DESC`,
+      )
+      .all() as typeof rows;
+  } catch {
+    return { pending: [], applied: [], other: [] };
+  }
+  const pending: HaProposalListed[] = [];
+  const applied: HaProposalListed[] = [];
+  const other: HaProposalListed[] = [];
+  for (const r of rows) {
+    let yaml = "";
+    let gap_id: string | null = null;
+    try {
+      const p = JSON.parse(r.payload_json) as Record<string, unknown>;
+      if (typeof p.yaml === "string") yaml = p.yaml;
+      if (typeof p.gap_id === "string") gap_id = p.gap_id;
+    } catch {
+      // best-effort
+    }
+    const view: HaProposalListed = {
+      id: r.id,
+      kind: r.scope,
+      summary: r.summary,
+      yaml,
+      gap_id,
+      status: r.status,
+      ts: r.ts,
+      applied_at: r.applied_at,
+    };
+    if (r.status === "pending" || r.status === "approved") {
+      pending.push(view);
+    } else if (r.status === "applied") {
+      applied.push(view);
+    } else {
+      other.push(view);
+    }
+  }
+  return { pending, applied, other };
+}
+
+function dismissHaGapRow(id: string): { ok: boolean; status: string } {
+  const db = getStateDb();
+  const existing = db
+    .prepare("SELECT status FROM ha_gap WHERE id = ?")
+    .get(id) as { status: string } | undefined;
+  if (!existing) {
+    throw new NotFoundError(`ha_gap ${id} not found`);
+  }
+  if (existing.status === "dismissed") {
+    return { ok: true, status: "dismissed" };
+  }
+  if (existing.status === "addressed") {
+    throw new ConflictError(
+      `ha_gap ${id} is already addressed — nothing to dismiss`,
+    );
+  }
+  db.prepare("UPDATE ha_gap SET status = 'dismissed' WHERE id = ?").run(id);
+  return { ok: true, status: "dismissed" };
+}
+
+function rejectHaProposalRow(id: string): { ok: boolean; status: string } {
+  const db = getStateDb();
+  const existing = db
+    .prepare("SELECT status FROM ha_proposal WHERE id = ?")
+    .get(id) as { status: string } | undefined;
+  if (!existing) {
+    throw new NotFoundError(`ha_proposal ${id} not found`);
+  }
+  if (existing.status === "rejected") {
+    return { ok: true, status: "rejected" };
+  }
+  if (existing.status === "applied") {
+    throw new ConflictError(
+      `ha_proposal ${id} was already applied — cannot reject`,
+    );
+  }
+  const now = new Date().toISOString();
+  db.prepare(
+    "UPDATE ha_proposal SET status = 'rejected', updated_at = ? WHERE id = ?",
+  ).run(now, id);
+  return { ok: true, status: "rejected" };
+}
+
+export function registerHaGapRoutes(): void {
+  // POST /api/v1/channels/ha/gaps/bulk — operator-only Phase B sink.
+  addRoute("POST", "/api/v1/channels/ha/gaps/bulk", async ({ req, res, body }) => {
+    requireOperatorBearer(req);
+    const rows = parseGapBulkBody(body);
+    const result = bulkUpsertHaGaps(rows);
+    sendJson(res, 200, { ok: true, ...result });
+  });
+
+  // GET /api/v1/channels/ha/gaps — voice-bridge readable.
+  addRoute("GET", "/api/v1/channels/ha/gaps", async ({ res }) => {
+    sendJson(res, 200, listHaGaps());
+  });
+
+  // GET /api/v1/channels/ha/proposals — voice-bridge readable.
+  addRoute("GET", "/api/v1/channels/ha/proposals", async ({ res }) => {
+    sendJson(res, 200, listHaProposals());
+  });
+
+  // PATCH /api/v1/channels/ha/gap/:gap_id/dismiss — principal action.
+  // No decision_ref needed; dismiss never touches HA.
+  addRoute(
+    "PATCH",
+    "/api/v1/channels/ha/gap/:gap_id/dismiss",
+    async ({ res, params }) => {
+      const r = dismissHaGapRow(params.gap_id);
+      sendJson(res, 200, r);
+    },
+  );
+
+  // POST /api/v1/channels/ha/proposal/:proposal_id/reject — principal action.
+  // Same — no decision_ref because nothing reaches HA.
+  addRoute(
+    "POST",
+    "/api/v1/channels/ha/proposal/:proposal_id/reject",
+    async ({ res, params }) => {
+      const r = rejectHaProposalRow(params.proposal_id);
+      sendJson(res, 200, r);
+    },
+  );
 }
 
 /** For tests only — clear the ha_registry between runs without recreating
@@ -2349,5 +2815,19 @@ export function _resetHaRegistryForTests(): void {
     getStateDb().prepare("DELETE FROM ha_registry").run();
   } catch {
     /* table may not exist on first boot; tests run migrations themselves */
+  }
+}
+
+/** For tests only — clear ha_gap + ha_proposal between runs. */
+export function _resetHaGapsForTests(): void {
+  try {
+    getStateDb().prepare("DELETE FROM ha_gap").run();
+  } catch {
+    // table may not exist; tests own migrations
+  }
+  try {
+    getStateDb().prepare("DELETE FROM ha_proposal").run();
+  } catch {
+    // table may not exist; tests own migrations
   }
 }

@@ -390,6 +390,8 @@ def _make_stubs(
     pull_result: dict[str, Any] | None = None,
     pull_raises_n: int = 0,
     write_result: dict[str, Any] | None = None,
+    detect_result: dict[str, Any] | None = None,
+    proposals_result: dict[str, Any] | None = None,
 ):
     """Build stub activities the workflow can execute under WorkflowEnvironment.
 
@@ -437,7 +439,31 @@ def _make_stubs(
             "total_after": len(rows),
         }
 
-    return [stub_pull, stub_write], call_log
+    # PR6 — Phase B + Phase C stubs. The default is "no gaps emitted"
+    # which means no proposals get queued either; tests that want to
+    # exercise the gap+proposal path can replace the stubs.
+    @activity.defn(name="detect_ha_gaps")
+    async def stub_detect() -> dict[str, Any]:
+        call_log.append(("detect", 0))
+        if detect_result is not None:
+            return detect_result
+        return {
+            "ok": True,
+            "gaps": [],
+            "inserted": 0,
+            "updated": 0,
+            "addressed": 0,
+            "dismissed": 0,
+        }
+
+    @activity.defn(name="generate_ha_proposals")
+    async def stub_proposals(gaps: list[dict[str, Any]]) -> dict[str, Any]:
+        call_log.append(("proposals", len(gaps)))
+        if proposals_result is not None:
+            return proposals_result
+        return {"ok": True, "created": 0, "skipped": 0}
+
+    return [stub_pull, stub_write, stub_detect, stub_proposals], call_log
 
 
 async def _run_workflow(stubs: list) -> dict[str, Any]:
@@ -490,8 +516,14 @@ class TestWorkflow:
         assert result["ok"] is True
         assert result["rows"] == 1
         assert result["write"]["inserted"] == 1
-        # Pull happened once + write happened once.
-        assert [c[0] for c in log] == ["pull", "write"]
+        # Pull happened once + write happened once + detect (Phase B)
+        # ran once. With an empty gap list, the proposal phase (C) is
+        # short-circuited.
+        steps = [c[0] for c in log]
+        assert steps[:2] == ["pull", "write"]
+        assert "detect" in steps
+        # No gaps emitted by the stub → Phase C is skipped.
+        assert "proposals" not in steps
 
     def test_workflow_retries_transient_pull_failure(self):
         # First pull raises (network blip); retry policy retries up to 3
@@ -550,4 +582,52 @@ class TestWorkflow:
         assert result["ok"] is True
         assert result["rows"] == 0
         assert result["write"]["tombstoned"] == 5
-        assert [c[0] for c in log] == ["pull", "write"]
+        # PR6 — Phase B always runs after a successful write, even with
+        # zero rows (the registry may have just been cleared and the gap
+        # detector should re-evaluate accordingly).
+        steps = [c[0] for c in log]
+        assert steps[:2] == ["pull", "write"]
+        assert "detect" in steps
+
+    def test_workflow_runs_phase_b_and_c_when_gaps_present(self):
+        # Phase B emits two gaps → Phase C runs against them.
+        stubs, log = _make_stubs(
+            detect_result={
+                "ok": True,
+                "gaps": [
+                    {
+                        "id": "01HX0000000000000000000001",
+                        "kind": "no_morning_routine",
+                        "summary": "No morning lighting.",
+                        "severity": "medium",
+                        "area_id": None,
+                        "status": "open",
+                    },
+                    {
+                        "id": "01HX0000000000000000000002",
+                        "kind": "no_motion_lighting",
+                        "summary": "No motion light in hallway.",
+                        "severity": "low",
+                        "area_id": "hallway",
+                        "status": "open",
+                    },
+                ],
+                "inserted": 2,
+                "updated": 0,
+                "addressed": 0,
+                "dismissed": 0,
+            },
+            proposals_result={"ok": True, "created": 2, "skipped": 0},
+        )
+        result = asyncio.run(_run_workflow(stubs))
+        assert result["ok"] is True
+        assert result["gap_phase"]["ok"] is True
+        assert result["gap_phase"]["gap_count"] == 2
+        assert result["proposal_phase"]["ok"] is True
+        assert result["proposal_phase"]["created"] == 2
+        steps = [c[0] for c in log]
+        # Pull → write → detect → proposals, in that order.
+        assert steps == ["pull", "write", "detect", "proposals"]
+        # Phase C received the two gaps from Phase B.
+        prop_invocation = next(c for c in log if c[0] == "proposals")
+        assert prop_invocation[1] == 2
