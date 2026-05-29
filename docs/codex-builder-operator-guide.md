@@ -178,3 +178,37 @@ the new hosts (resolved via dig at boot).
 * **Deploy key:** generate a new pair → register on github (replacing the old one) → update `CODEX_BUILDER_DEPLOY_KEY_B64` in /opt/alfred/.env → `docker compose up -d --force-recreate init hermes`. Old key is automatically replaced on next init boot.
 * **codex CLI bump:** see `[[codex-builder-pr1-cli-installed]]` — update `ARG CODEX_CLI_REF=...` in packages/hermes/Dockerfile, PR, build-hermes rolls.
 * **ChatGPT account:** swap the OAuth token by re-running `hermes -p main auth login` against the new account; restart hermes; supervisor's mirror block propagates.
+
+
+## Codex CLI authentication (one-time per tenant)
+
+Hermes-main and the codex CLI use **different OAuth schemas** even though both
+authenticate against ChatGPT Plus/Pro. Hermes-main's `auth.json` (Hermes-shape,
+2-token: access + refresh) **does not satisfy** the codex CLI, which needs the
+full 4-token shape (id_token + access_token + refresh_token + account_id).
+Mirroring Hermes's auth.json into `~/.codex/auth.json` looks superficially
+correct but `codex doctor` will report:
+
+  ✗ auth   stored credentials are incomplete
+
+So a separate one-time `codex login` ritual is required, scoped to the
+codex-builder profile:
+
+```
+docker exec -it --user codex-builder \
+  -e HOME=/hermes-state/profiles/codex-builder \
+  alfred-black-hermes-1 \
+  codex login --device-auth
+```
+
+This prints a URL + code. Open the URL in any browser, approve on ChatGPT,
+return to the terminal. The CLI writes a complete
+`/hermes-state/profiles/codex-builder/.codex/auth.json`.
+
+After that, `codex login status` returns "Logged in using ChatGPT" AND `codex
+doctor` reports `✓ auth`.
+
+> **Do NOT run `hermes auth login`** as previously documented — that refreshes
+> Hermes's own auth.json (the chat path), which is a separate concern and is
+> typically already valid.
+
