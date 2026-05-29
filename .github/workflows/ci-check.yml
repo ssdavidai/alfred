@@ -175,3 +175,27 @@ jobs:
         # zero-CLI Paperclip seed for every new tenant, so we lint it
         # alongside the host bootstrap script.
         run: shellcheck packages/hermes/init/bootstrap-paperclip.sh
+
+  workflow-lint:
+    # actionlint catches the foot-guns we previously discovered the hard way:
+    # missing `secrets.` prefix, ill-formed matrix entries, `if:` expressions
+    # that always evaluate true, and shell-script syntax in `run:` blocks.
+    # We've shipped deploy workflows before that were syntactically valid YAML
+    # but broken at expand-time; actionlint is the lightest defence.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install actionlint
+        run: |
+          set -euo pipefail
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          ./actionlint -version
+      - name: Lint all workflows
+        # Lint every workflow; deploy-compose.yml is the immediate reason we
+        # added the check, but the project is small enough that the full sweep
+        # is free and catches regressions in the build-*.yml family too.
+        # We disable actionlint's shellcheck integration here — the
+        # bootstrap-lint job already runs shellcheck on the scripts we care
+        # about, and the inline `run:` blocks are short and intentional
+        # (e.g. `SC2029` for ssh remote-side expansion of $SHA is desired).
+        run: ./actionlint -color -shellcheck=
