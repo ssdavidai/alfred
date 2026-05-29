@@ -899,6 +899,103 @@ export const dispatchRecallBot = async (
   });
 };
 
+// === Recall PR5: in-meeting voice ===
+// Four ops bind the RecallCard's live-bots section against the new
+// PR5 ctrl-api routes. The bot speaks AS ALFRED in the meeting — these
+// ops drive Alfred's voice; they never impersonate the principal.
+//
+// Wasp Payload-trap note: each op below is annotated `Promise<any>` so
+// Wasp's TypeScript generator doesn't squeeze the proxied response into
+// an unrelated Payload type (see the same pattern on validateRecallApiKey
+// above for the rationale).
+
+/** Mute Alfred-in-meeting on a live Recall bot. Pauses the
+ *  wake-word→speak loop without dropping the WS subscriber; the
+ *  transcript stream keeps flowing. */
+export const muteRecallBot = async (
+  args: { bot_id: string },
+  context: any,
+): Promise<any> => {
+  if (typeof args?.bot_id !== "string" || args.bot_id.trim().length === 0) {
+    throw new HttpError(400, "bot_id required");
+  }
+  const instance = await getUserInstance(context);
+  const safe = encodeURIComponent(args.bot_id.trim());
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: `/api/v1/channels/recall/bots/${safe}/mute`,
+  });
+};
+
+/** Unmute Alfred-in-meeting — resume the wake-word→speak loop. */
+export const unmuteRecallBot = async (
+  args: { bot_id: string },
+  context: any,
+): Promise<any> => {
+  if (typeof args?.bot_id !== "string" || args.bot_id.trim().length === 0) {
+    throw new HttpError(400, "bot_id required");
+  }
+  const instance = await getUserInstance(context);
+  const safe = encodeURIComponent(args.bot_id.trim());
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: `/api/v1/channels/recall/bots/${safe}/unmute`,
+  });
+};
+
+/** Operator-CTA: "Speak now" — render `text` through OpenAI TTS and
+ *  upload to Recall so the bot speaks the line into the meeting. The
+ *  rendered voice is ALFRED's voice (the same config.openaiVoice the
+ *  phone path uses), never the principal's. */
+export const recallBotSpeak = async (
+  args: { bot_id: string; text: string; voice?: string },
+  context: any,
+): Promise<any> => {
+  if (typeof args?.bot_id !== "string" || args.bot_id.trim().length === 0) {
+    throw new HttpError(400, "bot_id required");
+  }
+  if (typeof args?.text !== "string" || args.text.trim().length === 0) {
+    throw new HttpError(400, "text required");
+  }
+  const body: Record<string, string> = { text: args.text.trim() };
+  if (typeof args.voice === "string" && args.voice.trim().length > 0) {
+    body.voice = args.voice.trim();
+  }
+  const instance = await getUserInstance(context);
+  const safe = encodeURIComponent(args.bot_id.trim());
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: `/api/v1/channels/recall/bots/${safe}/respond`,
+    body,
+  });
+};
+
+/** Pull the most-recent transcript fragments for a Recall bot. The
+ *  upstream `/transcript-stream` route is an SSE — the SaaS proxy
+ *  can't proxy SSE through the JSON-shaped tenant proxy, so this
+ *  query polls a non-SSE companion. The dashboard polls at 2s. */
+export const getRecallBotTranscript = async (
+  args: { bot_id: string },
+  context: any,
+): Promise<any> => {
+  if (typeof args?.bot_id !== "string" || args.bot_id.trim().length === 0) {
+    throw new HttpError(400, "bot_id required");
+  }
+  const instance = await getUserInstance(context);
+  const safe = encodeURIComponent(args.bot_id.trim());
+  try {
+    return await proxyToTenant(instance, {
+      method: "GET",
+      path: `/api/v1/channels/recall/bots/${safe}/transcript`,
+    });
+  } catch (err: any) {
+    // Tolerant fallback: if the route isn't there (older tenants), surface
+    // an empty list rather than blow up the card.
+    return { bot_id: args.bot_id, events: [], unavailable: true };
+  }
+};
+// === end Recall PR5 ===
+
 // ============================================================
 // Dashboard Home
 // ============================================================

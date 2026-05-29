@@ -37,6 +37,14 @@ import {
 import { announceEsphomeMdns } from "./esphome-mdns.js";
 import { EsphomeVoiceSession } from "./esphome-session.js";
 import { startWyomingServer, type WyomingServerHandle } from "./wyoming-server.js";
+// === Recall PR5: in-meeting voice ===
+// One Recall bot = one short OpenAI Realtime turn per wake-word hit.
+// ctrl-api drives the wake-word detection on its side and POSTs the
+// transcript here. The handler enforces the persona constraint
+// (bot speaks AS ALFRED, never as the principal) via the system
+// prompt assembled in recall-meeting-context.ts.
+import { handleRecallTurnRequest } from "./recall-server.js";
+// === end Recall PR5 ===
 
 export function verifySig(tenantId: string, sig: string | null | undefined): boolean {
   if (!sig) return false;
@@ -146,6 +154,30 @@ const httpServer = http.createServer((req, res) => {
     res.end(JSON.stringify(payload));
     return;
   }
+  // === Recall PR5: in-meeting voice ===
+  // /voice/recall-turn — ctrl-api calls here on every wake-word hit
+  // inside an active Recall meeting. Bearer is the shared internal
+  // token; we run ONE OpenAI Realtime turn (stateless, fresh session
+  // per turn) and reply with rendered audio + Alfred's response text.
+  //
+  // Persona constraint (Sir explicit, 2026-05-29 evening): the system
+  // prompt assembled by buildRecallInstructions() / buildMeetingPrefix()
+  // forces the model to speak AS ALFRED, never as the principal — this
+  // is the SOLE place in the active half of Recall where the bot's
+  // voice is set, and the prompt embeds the three-layer enforcement
+  // (opening identity + announce-on-join + closing CRITICAL guardrail).
+  if (req.url === "/voice/recall-turn" && req.method === "POST") {
+    handleRecallTurnRequest(req, res).catch((err) => {
+      console.error("[recall-turn] handler error", err);
+      bumpMetric("errors");
+      if (!res.headersSent) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: String(err) }));
+      }
+    });
+    return;
+  }
+  // === end Recall PR5 ===
   // Twilio "A CALL COMES IN" webhook — returns TwiML pointing at the
   // WSS endpoint below. See twiml.ts for the full handler + the security
   // model (X-Twilio-Signature verification, fail-soft when token unset).

@@ -474,3 +474,117 @@ class TestDispatchRecallBot:
         out = await dispatch_recall_bot(meeting_url="")
         assert out["ok"] is False
         assert "required" in out["error"]
+
+
+# ---------------------------------------------------------------------------
+# PR5 — realtime subscriber attachment (#113 PR5)
+# ---------------------------------------------------------------------------
+#
+# PR5 ships the active half of Recall: ctrl-api's webhook handler kicks
+# off subscribeBotRealtime() whenever a bot transitions to in_meeting.
+# The dispatcher itself does NOT call subscribe — the WS attach happens
+# downstream on the webhook side. These tests verify the dispatcher
+# round-trip leaves the contract intact: ctrl-api POSTs to /bots are
+# what schedule the bot, and the bot row downstream carries the
+# realtime_url surfaced by the create-bot response.
+
+
+class TestRealtimeAttachContract:
+    """The dispatcher hands off to ctrl-api; ctrl-api attaches the WS
+    subscriber. These tests guard the integration seam — the dispatcher
+    must surface bot_id + recall_url in its response so the workflow
+    log records who got dispatched, even though the WS attachment is
+    not the dispatcher's responsibility."""
+
+    @pytest.mark.asyncio
+    async def test_dispatch_response_carries_bot_id_for_subscriber(self, mock_ctrl):
+        # Simulate ctrl-api returning the bot id + a realtime_url. The
+        # dispatcher must preserve the bot_id so the workflow can log
+        # which bot was attached.
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "bot_id": "bot-rt-1",
+                    "status": "requested",
+                    "recall_url": "wss://api.recall.ai/api/v2/bot/bot-rt-1/realtime_endpoint",
+                },
+            )
+
+        mock_ctrl["handler"] = handler
+        out = await dispatch_recall_bot(
+            meeting_url="https://zoom.us/j/123",
+            bot_name="Alfred",
+            calendar_event_id="gcal-rt-1",
+        )
+        assert out["ok"] is True
+        assert out["bot_id"] == "bot-rt-1"
+        # The realtime URL is opaque to the dispatcher but must survive
+        # the round-trip so ctrl-api can populate recall_bot.realtime_url
+        # for the in_meeting subscribe.
+        assert (
+            out["recall_url"]
+            == "wss://api.recall.ai/api/v2/bot/bot-rt-1/realtime_endpoint"
+        )
+
+    @pytest.mark.asyncio
+    async def test_dispatch_idempotent_response_short_circuits_subscribe(
+        self, mock_ctrl
+    ):
+        # When ctrl-api detects an existing bot for the calendar_event_id,
+        # it returns 200 with `note: "existing bot for this calendar_event_id"`.
+        # The dispatcher must surface that response untouched so the
+        # workflow doesn't double-count or double-attach a subscriber.
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "bot_id": "bot-existing",
+                    "status": "in_meeting",
+                    "recall_url": None,
+                    "note": "existing bot for this calendar_event_id",
+                },
+            )
+
+        mock_ctrl["handler"] = handler
+        out = await dispatch_recall_bot(
+            meeting_url="https://zoom.us/j/123",
+            calendar_event_id="gcal-dedupe",
+        )
+        assert out["ok"] is True
+        assert out["bot_id"] == "bot-existing"
+        # Idempotent response: the recall_url is None (no second bot
+        # created) but bot_id is the existing row. ctrl-api would not
+        # re-attach the subscriber because subscribeBotRealtime() is
+        # itself idempotent on the bot_id key.
+
+    @pytest.mark.asyncio
+    async def test_dispatch_4xx_does_not_attach_subscriber(self, mock_ctrl):
+        # When ctrl-api refuses the dispatch (4xx — e.g. meeting URL
+        # malformed), the dispatcher returns ok=False. No bot row is
+        # created and therefore no subscriber should ever be attached
+        # downstream — the contract is that subscribers attach only via
+        # the in_meeting webhook, which only fires after a successful
+        # create. This test guards that the dispatcher does NOT
+        # synthesise a bot_id on the failure path.
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                400,
+                json={
+                    "error": {
+                        "code": "VALIDATION_ERROR",
+                        "message": "meeting_url must point at zoom/meet/teams",
+                    }
+                },
+            )
+
+        mock_ctrl["handler"] = handler
+        out = await dispatch_recall_bot(
+            meeting_url="https://example.com/not-a-meeting",
+            calendar_event_id="gcal-bad",
+        )
+        assert out["ok"] is False
+        assert out["bot_id"] is None
+        # The error string must point the operator at the underlying
+        # ctrl-api refusal so the realtime attach is never attempted.
+        assert "meeting_url" in (out["error"] or "")

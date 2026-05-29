@@ -38,6 +38,14 @@ import {
   setRecallApiKey,
   testRecallWebhook,
   terminateRecallBot,
+  // === Recall PR5: in-meeting voice ===
+  // Live-bots section ops. The bot speaks AS ALFRED — these ops drive
+  // Alfred's voice, never the principal's.
+  getRecallBotTranscript,
+  muteRecallBot,
+  unmuteRecallBot,
+  recallBotSpeak,
+  // === end Recall PR5 ===
 } from "wasp/client/operations";
 import {
   RECALL_AUTO_JOIN_POLICY_OPTIONS,
@@ -1009,6 +1017,31 @@ function RecallConfiguredPanel({
         )}
       </form>
 
+      {/* === Recall PR5: in-meeting voice — Live bots panel === */}
+      {/* Bots currently in_meeting get a live transcript feed, mute/unmute,
+       *  and a "Speak now" textarea. The voice in the meeting is ALFRED's
+       *  (the RP butler persona seeded in voice-bridge's
+       *  buildMeetingPrefix) — these controls drive Alfred's voice, never
+       *  the principal's. */}
+      {visibleBots.filter((b) => b.status === "in_meeting").length > 0 && (
+        <div className="space-y-2">
+          <div
+            className="font-mono text-[10px] uppercase tracking-[0.22em]"
+            style={{ color: "var(--marginalia)" }}
+          >
+            Live bots — Alfred in-meeting
+          </div>
+          <div className="space-y-3">
+            {visibleBots
+              .filter((b) => b.status === "in_meeting")
+              .map((b) => (
+                <RecallLiveBotRow key={b.id} botId={b.id} />
+              ))}
+          </div>
+        </div>
+      )}
+      {/* === end Recall PR5 === */}
+
       {/* Recent (active) bots table */}
       {visibleBots.length > 0 && (
         <div className="space-y-2">
@@ -1149,6 +1182,216 @@ function RecallConfiguredPanel({
     </div>
   );
 }
+
+// === Recall PR5: in-meeting voice ===
+// Live-bot row component — one card per in_meeting bot. Polls the
+// transcript-stream JSON companion at 2s, surfaces a "Speak now" CTA
+// that drives Alfred's voice into the meeting, and renders the
+// wake-word triggers + muted state from the same poll.
+//
+// Persona constraint (Sir explicit, 2026-05-29 evening): the bot that
+// speaks is ALFRED — the RP butler persona configured in
+// voice-bridge's buildMeetingPrefix(). When the operator types text in
+// the "Speak now" textarea, that text is rendered through OpenAI TTS
+// with config.openaiVoice (Alfred's voice). The label says "Alfred
+// says" not "you say" to keep the principal aware that the voice in
+// the meeting is the butler's, not theirs.
+
+function RecallLiveBotRow({ botId }: { botId: string }) {
+  const [transcript, setTranscript] = useState<{
+    wake_word_triggers: number;
+    muted: boolean;
+    events: Array<{
+      id: number;
+      kind: string;
+      speaker: string | null;
+      text: string;
+      ts_ms: number;
+    }>;
+    unavailable?: boolean;
+  } | null>(null);
+  const [speakText, setSpeakText] = useState("");
+  const [speakBusy, setSpeakBusy] = useState(false);
+  const [muteBusy, setMuteBusy] = useState(false);
+  const [feedback, setFeedback] = useState<
+    { kind: "ok" | "err"; text: string } | null
+  >(null);
+
+  // Poll the transcript every 2s while the bot is in the meeting. The
+  // upstream SSE stream would be lower-latency but the SaaS proxy
+  // can't proxy SSE through the JSON-shaped tenant proxy; this is the
+  // pragmatic equivalent.
+  useEffect(() => {
+    let cancelled = false;
+    async function tick() {
+      try {
+        const result: any = await getRecallBotTranscript({ bot_id: botId });
+        if (cancelled) return;
+        setTranscript(result);
+      } catch {
+        // Tolerant — if the route is unreachable we just stop showing
+        // the transcript; the card doesn't blow up.
+      }
+    }
+    void tick();
+    const handle = window.setInterval(tick, 2_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(handle);
+    };
+  }, [botId]);
+
+  async function toggleMute() {
+    if (muteBusy || !transcript) return;
+    setMuteBusy(true);
+    try {
+      if (transcript.muted) {
+        await unmuteRecallBot({ bot_id: botId });
+      } else {
+        await muteRecallBot({ bot_id: botId });
+      }
+      setTranscript((t) => (t ? { ...t, muted: !t.muted } : t));
+    } catch (err: any) {
+      setFeedback({
+        kind: "err",
+        text: err?.message ?? "Couldn't toggle mute.",
+      });
+    } finally {
+      setMuteBusy(false);
+    }
+  }
+
+  async function speak(e?: React.FormEvent) {
+    if (e) e.preventDefault();
+    const text = speakText.trim();
+    if (!text || speakBusy) return;
+    setSpeakBusy(true);
+    setFeedback(null);
+    try {
+      // The bot speaks AS ALFRED in the meeting — Alfred's voice, never
+      // the principal's. The ctrl-api side persists the response with
+      // speaker="Alfred" to match.
+      await recallBotSpeak({ bot_id: botId, text });
+      setFeedback({
+        kind: "ok",
+        text: "Alfred said it into the meeting.",
+      });
+      setSpeakText("");
+    } catch (err: any) {
+      setFeedback({
+        kind: "err",
+        text: err?.message ?? "Couldn't speak into the meeting.",
+      });
+    } finally {
+      setSpeakBusy(false);
+    }
+  }
+
+  const recentEvents = (transcript?.events ?? []).slice(-8).reverse();
+
+  return (
+    <div className="border border-rule p-3 space-y-2">
+      <div className="flex items-baseline justify-between gap-3">
+        <div className="font-mono text-[11px]" style={{ color: "var(--ink)" }}>
+          {truncateBotId(botId)}
+        </div>
+        <div
+          className="font-mono text-[10px] uppercase tracking-[0.18em]"
+          style={{ color: "var(--marginalia)" }}
+        >
+          wakes: {transcript?.wake_word_triggers ?? 0}
+          {transcript?.muted ? " · muted" : ""}
+        </div>
+      </div>
+
+      {/* Live transcript — most recent fragments first. */}
+      <div
+        className="border border-rule overflow-y-auto"
+        style={{ maxHeight: "8rem" }}
+      >
+        {recentEvents.length === 0 ? (
+          <div
+            className="p-2 font-body italic text-[12px]"
+            style={{ color: "var(--marginalia)" }}
+          >
+            {transcript?.unavailable
+              ? "Live transcript not available on this tenant yet."
+              : "Listening — waiting for the meeting to talk."}
+          </div>
+        ) : (
+          <ul className="font-mono text-[11px] divide-y divide-rule">
+            {recentEvents.map((ev) => (
+              <li key={ev.id} className="p-2">
+                <span
+                  className="font-mono text-[10px] uppercase tracking-[0.18em] mr-2"
+                  style={{ color: "var(--marginalia)" }}
+                >
+                  {ev.speaker ?? ev.kind}
+                </span>
+                {ev.text}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      {/* Mute toggle + Speak-now form. */}
+      <div className="flex items-baseline gap-3">
+        <button
+          type="button"
+          onClick={toggleMute}
+          disabled={muteBusy || !transcript}
+          className="btn-link"
+        >
+          {muteBusy
+            ? "…"
+            : transcript?.muted
+              ? "Unmute Alfred"
+              : "Mute Alfred"}
+        </button>
+      </div>
+
+      <form onSubmit={speak} className="space-y-2">
+        <label
+          className="font-mono text-[10px] uppercase tracking-[0.22em] block"
+          style={{ color: "var(--marginalia)" }}
+        >
+          Alfred says (his voice, his RP butler persona — not yours)
+        </label>
+        <textarea
+          value={speakText}
+          onChange={(e) => setSpeakText(e.target.value)}
+          rows={2}
+          maxLength={1000}
+          disabled={speakBusy || transcript?.muted}
+          placeholder="Alfred will say this, in his butler voice, into the meeting."
+          className="w-full bg-transparent border border-rule p-2 font-mono text-[12px]"
+        />
+        <div className="flex items-baseline gap-3">
+          <button
+            type="submit"
+            disabled={speakBusy || !speakText.trim() || transcript?.muted}
+            className="btn-ghost"
+          >
+            {speakBusy ? "Speaking…" : "Speak now"}
+          </button>
+          {feedback && (
+            <span
+              className="font-body italic text-[12px]"
+              style={{
+                color:
+                  feedback.kind === "ok" ? "var(--brass)" : "var(--carmine)",
+              }}
+            >
+              {feedback.text}
+            </span>
+          )}
+        </div>
+      </form>
+    </div>
+  );
+}
+// === end Recall PR5 ===
 
 // ─── tiny presentational helpers ─────────────────────────────────────────
 

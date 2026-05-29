@@ -148,6 +148,14 @@ const VOICE_BRIDGE_ALLOWLIST: ReadonlySet<string> = new Set([
   // bridge/src/files-tools.ts for the per-tool rationale.
   "GET:/api/v1/files/list",
   "GET:/api/v1/files/usage",
+  // ── Recall PR5: in-meeting voice ────────────────────────────────────
+  // The voice-bridge calls /api/v1/voice-bridge/recall-turn synchronously
+  // when ctrl-api's realtime subscriber wants Alfred to speak into a
+  // meeting — passing the wake-word transcript + meeting context, getting
+  // back rendered audio for output_audio. Scoped, write-narrow. Bot
+  // speaks AS ALFRED (the RP butler persona enforced in voice-bridge's
+  // buildMeetingPrefix), never as the principal.
+  "POST:/api/v1/voice-bridge/recall-turn",
 ]);
 
 /**

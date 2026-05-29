@@ -61,6 +61,25 @@ import { getStateDb } from "../../db/state.js";
 import { dockerComposeCmd, COMPOSE_DIR } from "../helpers.js";
 import { requireOperatorBearer } from "../auth.js";
 import type { DatabaseSync } from "node:sqlite";
+// === Recall PR5: in-meeting voice ===
+// PR5 ships the active half of Recall — bots that SPEAK into the meeting
+// in response to the wake word and via the operator's manual CTA. The
+// realtime subscriber (recall_realtime.ts) owns the WS to Recall's
+// per-bot transcript stream + the dispatch to voice-bridge. Persona
+// constraint enforced in voice-bridge/recall-meeting-context.ts: the
+// bot speaks AS ALFRED, never as the principal.
+import {
+  subscribeBotRealtime,
+  stopBotRealtime,
+  subscribeTranscriptStream,
+  speakIntoMeeting,
+  renderTtsToBase64,
+  persistTranscriptEvent,
+  writeSseFrame,
+  _recallRealtimeInternals,
+  type TranscriptStreamFrame,
+} from "./recall_realtime.js";
+// === end Recall PR5 ===
 
 // ── Recall API endpoint helpers ───────────────────────────────────────────
 
@@ -904,6 +923,37 @@ function extractTranscriptUrl(payload: unknown): string | null {
   return null;
 }
 
+// === Recall PR5: in-meeting voice ===
+/** Extract the per-bot Recall realtime WS URL from a webhook payload.
+ *  Recall surfaces the URL on a small handful of event shapes (create
+ *  ack + `bot.in_meeting` follow-on); we tolerate three known nesting
+ *  shapes plus a flat top-level for forward-compat. Returns null when
+ *  no URL is present — caller leaves the existing realtime_url alone. */
+export function extractRealtimeUrl(payload: unknown): string | null {
+  if (typeof payload !== "object" || payload === null) return null;
+  const p = payload as Record<string, unknown>;
+  if (typeof p.realtime_url === "string") return p.realtime_url;
+  if (typeof p.recall_url === "string") return p.recall_url;
+  const data = p.data;
+  if (typeof data === "object" && data !== null) {
+    const d = data as Record<string, unknown>;
+    if (typeof d.realtime_url === "string") return d.realtime_url;
+    if (typeof d.recall_url === "string") return d.recall_url;
+    const bot = d.bot;
+    if (typeof bot === "object" && bot !== null) {
+      const bo = bot as Record<string, unknown>;
+      if (typeof bo.realtime_url === "string") return bo.realtime_url;
+      const rt = bo.realtime_endpoint;
+      if (typeof rt === "object" && rt !== null) {
+        const e = rt as Record<string, unknown>;
+        if (typeof e.url === "string") return e.url;
+      }
+    }
+  }
+  return null;
+}
+// === end Recall PR5 ===
+
 /** Persist one verified webhook event. Transactional: the recall_event
  *  row + any recall_bot.status update land together so a crashed
  *  ctrl-api never produces an event row without its row-update side
@@ -982,6 +1032,11 @@ export const _recallInternals = {
   upsertRecallVaultItem,
   withPersistLock,
   keyFirst6,
+  // === Recall PR5: in-meeting voice ===
+  extractRealtimeUrl,
+  // Re-exposed so tests don't have to import recall_realtime.js separately.
+  realtime: _recallRealtimeInternals,
+  // === end Recall PR5 ===
 };
 
 // ── Routes ────────────────────────────────────────────────────────────────
@@ -1768,6 +1823,329 @@ export function registerChannelsRecallRoutes(): void {
       });
     },
   );
+
+  // === Recall PR5: in-meeting voice ===
+  // The active half of Recall: bots can SPEAK into the meeting in
+  // response to the wake word + via the operator's manual CTA. The
+  // realtime subscriber that drives the wake-word path lives in
+  // recall_realtime.ts; these routes give the dashboard + MCP the verbs
+  // to mute, unmute, speak, and stream the live transcript.
+  //
+  // Persona constraint (Sir explicit, 2026-05-29 evening):
+  // The bot in the meeting speaks AS ALFRED — the RP butler persona
+  // assembled in voice-bridge/src/recall-meeting-context.ts —
+  // and NEVER impersonates the principal. The /respond route below
+  // renders the operator's text through OpenAI TTS using config-
+  // dot-openaiVoice (Alfred's voice, the same one the phone path uses).
+
+  // POST /api/v1/channels/recall/bots/:bot_id/respond
+  //
+  // Manual TTS — accepts `{text, voice?}` body, renders the text through
+  // OpenAI TTS, then uploads the audio to Recall's output_audio
+  // endpoint. The text is persisted as a `response` transcript event so
+  // it shows up in the SSE stream + the post-meeting transcript.
+  addRoute(
+    "POST",
+    "/api/v1/channels/recall/bots/:bot_id/respond",
+    async ({ res, body, params }) => {
+      const botId = params.bot_id;
+      if (!botId || botId.length > 200) {
+        throw new ValidationError("bot_id must be a non-empty string ≤200 chars");
+      }
+      const b = (body ?? {}) as { text?: unknown; voice?: unknown };
+      if (typeof b.text !== "string" || b.text.trim().length === 0) {
+        throw new ValidationError("text (non-empty string) is required");
+      }
+      const text = b.text.trim().slice(0, 1000);
+      const voice =
+        typeof b.voice === "string" && b.voice.trim().length > 0
+          ? b.voice.trim().slice(0, 64)
+          : undefined;
+      const db = getStateDb();
+      const row = db
+        .prepare(`SELECT id, status, muted FROM recall_bot WHERE id = ?`)
+        .get(botId) as { id: string; status: string; muted: number } | undefined;
+      if (!row) {
+        throw new ApiError(404, "NOT_FOUND", `bot ${botId} not found`);
+      }
+      if (row.status === "done" || row.status === "fail") {
+        throw new ApiError(
+          409,
+          "BOT_TERMINAL",
+          `bot ${botId} is no longer in the meeting`,
+        );
+      }
+      let rendered: { audio_base64: string; sample_rate: number; format: string };
+      try {
+        rendered = await renderTtsToBase64(text, { voice });
+      } catch (err) {
+        throw new ApiError(
+          502,
+          "TTS_FAILED",
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+      try {
+        await speakIntoMeeting(botId, rendered.audio_base64, {
+          kind: rendered.format === "wav" ? "audio/wav" : "audio/pcm",
+          sampleRate: rendered.sample_rate,
+        });
+      } catch (err) {
+        throw new ApiError(
+          502,
+          "RECALL_UPLOAD_FAILED",
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+      // speaker label is "Alfred" — never the principal — to match the
+      // persona constraint (the voice in the meeting IS Alfred, so the
+      // transcript ledger attributes responses to Alfred).
+      persistTranscriptEvent(db, botId, "response", text, { speaker: "Alfred" });
+      sendJson(res, 200, {
+        ok: true,
+        bot_id: botId,
+        text,
+        bytes: Buffer.from(rendered.audio_base64, "base64").length,
+      });
+    },
+  );
+
+  // POST /api/v1/channels/recall/bots/:bot_id/{mute,unmute}
+  //
+  // Toggle the in-meeting voice OFF/ON. The wake-word detector still
+  // runs while muted (we keep the audit trail) but Alfred won't speak.
+  // The detector emits a `wake_word_hit` SSE event regardless, so the
+  // operator can see whether the meeting is summoning Alfred even
+  // while muted.
+  for (const verb of ["mute", "unmute"] as const) {
+    const muteFlag = verb === "mute" ? 1 : 0;
+    addRoute(
+      "POST",
+      `/api/v1/channels/recall/bots/:bot_id/${verb}`,
+      async ({ res, params }) => {
+        const botId = params.bot_id;
+        if (!botId || botId.length > 200) {
+          throw new ValidationError(
+            "bot_id must be a non-empty string ≤200 chars",
+          );
+        }
+        const db = getStateDb();
+        const row = db
+          .prepare(`SELECT id, status FROM recall_bot WHERE id = ?`)
+          .get(botId) as { id: string; status: string } | undefined;
+        if (!row) {
+          throw new ApiError(404, "NOT_FOUND", `bot ${botId} not found`);
+        }
+        db.prepare(`UPDATE recall_bot SET muted = ? WHERE id = ?`).run(
+          muteFlag,
+          botId,
+        );
+        sendJson(res, 200, {
+          ok: true,
+          bot_id: botId,
+          muted: muteFlag === 1,
+        });
+      },
+    );
+  }
+
+  // GET /api/v1/channels/recall/bots/:bot_id/transcript-stream
+  //
+  // Server-Sent Events: live transcript fragments + wake-word hits +
+  // Alfred's responses for ONE bot. The dashboard consumes this via
+  // EventSource; one connection per browser tab is fine.
+  //
+  // On open we replay the last 20 persisted fragments so a refreshed
+  // tab shows context, then switch to live emission.
+  addRoute(
+    "GET",
+    "/api/v1/channels/recall/bots/:bot_id/transcript-stream",
+    async ({ res, params }) => {
+      const botId = params.bot_id;
+      if (!botId || botId.length > 200) {
+        throw new ValidationError(
+          "bot_id must be a non-empty string ≤200 chars",
+        );
+      }
+      const db = getStateDb();
+      const row = db
+        .prepare(`SELECT id FROM recall_bot WHERE id = ?`)
+        .get(botId) as { id: string } | undefined;
+      if (!row) {
+        throw new ApiError(404, "NOT_FOUND", `bot ${botId} not found`);
+      }
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache, no-transform",
+        Connection: "keep-alive",
+        "X-Accel-Buffering": "no",
+      });
+      const recent = db
+        .prepare(
+          `SELECT kind, speaker, text, ts_ms, meeting_ms
+             FROM recall_transcript_event
+            WHERE bot_id = ?
+            ORDER BY id DESC
+            LIMIT 20`,
+        )
+        .all(botId) as Array<{
+        kind: string;
+        speaker: string | null;
+        text: string;
+        ts_ms: number;
+        meeting_ms: number | null;
+      }>;
+      for (const r of recent.reverse()) {
+        const k = r.kind as TranscriptStreamFrame["kind"];
+        writeSseFrame(res as unknown as { write: (chunk: string) => void }, {
+          kind: k,
+          speaker: r.speaker,
+          text: r.text,
+          ts_ms: r.ts_ms,
+          meeting_ms: r.meeting_ms,
+        });
+      }
+      // Heartbeat — every 25s send a `:keepalive` comment to keep
+      // intermediaries from killing the connection. `.unref()` so the
+      // timer doesn't keep the node event loop alive in tests (or in
+      // process shutdown).
+      const hb = setInterval(() => {
+        try {
+          res.write(`: keepalive ${Date.now()}\n\n`);
+        } catch {
+          /* swallow */
+        }
+      }, 25_000);
+      if (typeof (hb as { unref?: () => void }).unref === "function") {
+        (hb as { unref: () => void }).unref();
+      }
+      const unsubscribe = subscribeTranscriptStream(botId, (frame) => {
+        try {
+          writeSseFrame(res as unknown as { write: (chunk: string) => void }, frame);
+        } catch {
+          /* swallow */
+        }
+      });
+      const close = () => {
+        clearInterval(hb);
+        unsubscribe();
+        try {
+          res.end();
+        } catch {
+          /* swallow */
+        }
+      };
+      (res as unknown as { on: (e: string, fn: () => void) => void }).on(
+        "close",
+        close,
+      );
+    },
+  );
+
+  // GET /api/v1/channels/recall/bots/:bot_id/transcript
+  //
+  // Polling companion to the SSE transcript-stream — returns the last
+  // 100 fragments as a JSON list. Sized for the SaaS proxy + the live-
+  // bots UI's 2-second poll cadence; SSE remains the lower-latency
+  // path for clients that can hit ctrl-api directly.
+  addRoute(
+    "GET",
+    "/api/v1/channels/recall/bots/:bot_id/transcript",
+    async ({ res, params, query }) => {
+      const botId = params.bot_id;
+      if (!botId || botId.length > 200) {
+        throw new ValidationError(
+          "bot_id must be a non-empty string ≤200 chars",
+        );
+      }
+      const sinceRaw = query.get("since_id");
+      const sinceId = sinceRaw ? Number.parseInt(sinceRaw, 10) : 0;
+      const db = getStateDb();
+      const rows = db
+        .prepare(
+          `SELECT id, kind, speaker, text, ts_ms, meeting_ms
+             FROM recall_transcript_event
+            WHERE bot_id = ? AND id > ?
+            ORDER BY id ASC
+            LIMIT 100`,
+        )
+        .all(botId, Number.isFinite(sinceId) ? sinceId : 0) as Array<{
+        id: number;
+        kind: string;
+        speaker: string | null;
+        text: string;
+        ts_ms: number;
+        meeting_ms: number | null;
+      }>;
+      const botRow = db
+        .prepare(
+          `SELECT wake_word_triggers, muted FROM recall_bot WHERE id = ?`,
+        )
+        .get(botId) as
+        | { wake_word_triggers: number; muted: number }
+        | undefined;
+      sendJson(res, 200, {
+        bot_id: botId,
+        wake_word_triggers: botRow?.wake_word_triggers ?? 0,
+        muted: botRow?.muted === 1,
+        events: rows,
+      });
+    },
+  );
+
+  // POST /api/v1/voice-bridge/recall-turn
+  //
+  // Internal endpoint: voice-bridge can call this synchronously to push
+  // a wake-word turn directly into ctrl-api. This is the inverse of the
+  // realtime path — used when the bridge is the driver (e.g. an MCP
+  // tool, a scheduled "speak into Sir's standup" cron) and ctrl-api is
+  // the speaker. The realtime subscriber uses the bridge as the
+  // synchronous reply path; THIS route lets the bridge push a turn
+  // independently. Auth: VOICE_BRIDGE_ALLOWLIST in auth.ts gates the
+  // scoped voice-bridge bearer to this route.
+  addRoute(
+    "POST",
+    "/api/v1/voice-bridge/recall-turn",
+    async ({ res, body }) => {
+      const b = (body ?? {}) as {
+        bot_id?: unknown;
+        text?: unknown;
+        voice?: unknown;
+      };
+      if (typeof b.bot_id !== "string" || b.bot_id.trim().length === 0) {
+        throw new ValidationError("bot_id (non-empty string) is required");
+      }
+      if (typeof b.text !== "string" || b.text.trim().length === 0) {
+        throw new ValidationError("text (non-empty string) is required");
+      }
+      const botId = b.bot_id.trim();
+      const text = b.text.trim().slice(0, 1000);
+      const voice =
+        typeof b.voice === "string" && b.voice.trim().length > 0
+          ? b.voice.trim().slice(0, 64)
+          : undefined;
+      const db = getStateDb();
+      const row = db
+        .prepare(`SELECT id, status FROM recall_bot WHERE id = ?`)
+        .get(botId) as { id: string; status: string } | undefined;
+      if (!row) throw new ApiError(404, "NOT_FOUND", `bot ${botId} not found`);
+      if (row.status === "done" || row.status === "fail") {
+        throw new ApiError(
+          409,
+          "BOT_TERMINAL",
+          `bot ${botId} is no longer in the meeting`,
+        );
+      }
+      const rendered = await renderTtsToBase64(text, { voice });
+      await speakIntoMeeting(botId, rendered.audio_base64, {
+        kind: rendered.format === "wav" ? "audio/wav" : "audio/pcm",
+        sampleRate: rendered.sample_rate,
+      });
+      persistTranscriptEvent(db, botId, "response", text, { speaker: "Alfred" });
+      sendJson(res, 200, { ok: true, bot_id: botId, text });
+    },
+  );
+  // === end Recall PR5 ===
 }
 
 // ── Inbound webhook (separate registrar so server.ts can mark its path
@@ -1826,6 +2204,30 @@ export function registerRecallWebhookRoute(): void {
     try {
       const db = getStateDb();
       const result = persistWebhookEvent(db, payload, Date.now());
+      // === Recall PR5: in-meeting voice ===
+      // On `in_meeting` we subscribe to the per-bot real-time WS; on a
+      // terminal status we drop the WS + any SSE listeners. The
+      // realtime_url column is populated either by the create-bot
+      // response or by a follow-on webhook event that carries
+      // `realtime_url` — we surface it here best-effort. Subscribe is
+      // fire-and-forget; the subscriber owns its own reconnect loop.
+      const realtimeUrl = extractRealtimeUrl(payload);
+      if (realtimeUrl && result.bot_id) {
+        db.prepare(
+          `UPDATE recall_bot SET realtime_url = COALESCE(realtime_url, ?) WHERE id = ?`,
+        ).run(realtimeUrl, result.bot_id);
+      }
+      if (result.bot_id && result.new_status === "in_meeting") {
+        void subscribeBotRealtime(result.bot_id);
+      } else if (
+        result.bot_id &&
+        (result.new_status === "done" ||
+          result.new_status === "fail" ||
+          result.new_status === "leaving")
+      ) {
+        stopBotRealtime(result.bot_id);
+      }
+      // === end Recall PR5 ===
       sendJson(res, 200, {
         ok: true,
         event_type: result.event_type,
