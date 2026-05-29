@@ -132,6 +132,15 @@ const VOICE_BRIDGE_ALLOWLIST: ReadonlySet<string> = new Set([
   "GET:/api/v1/channels/ha/status",
   "GET:/api/v1/channels/ha/registry",
   "GET:/api/v1/channels/ha/automations",
+  // ── Files store, read-only — issue #114 PR4 (voice-bridge files surface). ─
+  // The voice agent surfaces four read-only `files__*` tools (list / stat /
+  // read_text / search). list + usage have no path params; stat + blob carry
+  // the `<ULID>/<safe-name>` tail and live in the PATTERN allowlist below.
+  // Writes (POST /upload, PATCH /:path, DELETE /:path) are INTENTIONALLY
+  // omitted — voice never writes to the files store. See packages/voice-
+  // bridge/src/files-tools.ts for the per-tool rationale.
+  "GET:/api/v1/files/list",
+  "GET:/api/v1/files/usage",
 ]);
 
 /**
@@ -185,6 +194,19 @@ const VOICE_BRIDGE_PATTERN_ALLOWLIST: ReadonlyArray<{
   // [^/]+ is the right shape (no nested paths under /state/). Added by
   // issue #110 PR1 alongside the route implementation.
   { method: "GET", regex: /^\/api\/v1\/channels\/ha\/state\/[^/]+$/ },
+  // GET /api/v1/files/stat/<path> — metadata for one stored file. The
+  // ctrl-api route is `/api/v1/files/stat/*` (splat-tail captures the
+  // entire `<ULID>/<safe-name>` shape, which CONTAINS a `/`), so the
+  // regex tail is `.+` not `[^/]+`. The leading anchor on `/stat/` keeps
+  // the privilege from leaking to a future `/stats/...` neighbour.
+  // Added by issue #114 PR4.
+  { method: "GET", regex: /^\/api\/v1\/files\/stat\/.+$/ },
+  // GET /api/v1/files/blob/<path> — stream the raw bytes. Same `.+` tail
+  // shape as /stat/. Voice-bridge's `files__read_text` short-circuits via
+  // stat first, so a 5 MB blob never crosses the wire from this token
+  // (the dispatcher refuses to fetch if stat reports size > 64 KB).
+  // Added by issue #114 PR4.
+  { method: "GET", regex: /^\/api\/v1\/files\/blob\/.+$/ },
 ];
 
 function voiceBridgeRouteAllowed(method: string, pathname: string): boolean {

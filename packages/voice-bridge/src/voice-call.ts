@@ -43,6 +43,11 @@ import {
   getVoiceMcpToolDefs,
   isMcpToolName,
 } from "./mcp-clients.js";
+import {
+  FILES_TOOLS,
+  dispatchFilesTool,
+  isFilesToolName,
+} from "./files-tools.js";
 
 const VOICE_DEBUG = process.env.VOICE_BRIDGE_DEBUG === "1";
 
@@ -124,11 +129,12 @@ export class VoiceCall {
     this.realtime = new OpenAIRealtimeClient(this.callId);
     this.realtime.on((event) => this.onRealtimeEvent(event));
     const voiceMcpTools = getVoiceMcpToolDefs();
-    const totalTools = ALL_TOOLS.length + voiceMcpTools.length;
+    const totalTools = ALL_TOOLS.length + FILES_TOOLS.length + voiceMcpTools.length;
     if (VOICE_DEBUG) {
       console.log(
         `[call ${this.callId}] curated tool catalog: ${totalTools} tools ` +
-          `(${ALL_TOOLS.length} static + ${voiceMcpTools.length} MCP; ` +
+          `(${ALL_TOOLS.length} static + ${FILES_TOOLS.length} files + ` +
+          `${voiceMcpTools.length} MCP; ` +
           `ceiling is 16384 tokens for instructions+tools per OpenAI Realtime)`,
       );
     }
@@ -150,7 +156,14 @@ export class VoiceCall {
         // We deliberately ship a CURATED voice subset (getVoiceMcpToolDefs)
         // rather than the full 157-tool union — see mcp-clients.ts allowlist
         // header for the 16,384-token Realtime ceiling rationale.
-        tools: [...ALL_TOOLS, ...voiceMcpTools],
+        //
+        // FILES_TOOLS are the read-only files surface (#114 PR4) — four
+        // tools (list / stat / read_text / search) that wrap the principal-
+        // facing /files store. Writes (delete / create / describe) and
+        // base64 reads are intentionally absent — voice doesn't write to
+        // the files store, and a 5 MB binary blob isn't useful in a
+        // Realtime turn. See files-tools.ts for the rationale.
+        tools: [...ALL_TOOLS, ...FILES_TOOLS, ...voiceMcpTools],
       });
     } catch (err) {
       console.error(`[call ${this.callId}] OpenAI Realtime connect failed`, err);
@@ -359,6 +372,11 @@ export class VoiceCall {
       result = await dispatchSelf(this.tenantCtx, args);
     } else if (name === "composio_execute") {
       result = await dispatchComposioExecute(this.tenantCtx, args);
+    } else if (isFilesToolName(name)) {
+      // files__* — the read-only files surface added by #114 PR4. The
+      // dispatcher lives in files-tools.ts and short-circuits read_text
+      // when the file is binary or larger than the 32 KB voice ceiling.
+      result = await dispatchFilesTool(name, this.tenantCtx, args);
     } else if (isMcpToolName(name)) {
       // <server>__<tool> shape — route to the MCP client we connected at
       // voice-bridge boot. See mcp-clients.ts for the dispatcher.
