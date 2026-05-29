@@ -67,13 +67,22 @@ RUN pip install --no-cache-dir --no-deps /alfred-src
 
 # Jinja2 — renders the per-profile Hermes config.yaml + .env from .njk
 # templates (Nunjucks `.njk` is a Jinja2-compatible subset here).
-RUN pip install --no-cache-dir "jinja2==3.1.6"
+# ruamel.yaml — round-trip YAML editor (preserves comments + quotes +
+# ordering) used by the ADD-only config.yaml mutators (render_sms_gateway,
+# render_mcp_servers). PyYAML would reformat the operator-owned config on
+# every write; ruamel.yaml leaves the surrounding file byte-stable when it
+# only needs to graft a new sub-block.
+RUN pip install --no-cache-dir "jinja2==3.1.6" "ruamel.yaml==0.18.6"
 
 # Build context is the alfred-black monorepo root. All COPY paths below are
 # repo-relative.
 COPY packages/hermes/init/entrypoint.sh        ./entrypoint.sh
 COPY packages/hermes/init/render_hermes.py     ./render_hermes.py
 COPY packages/hermes/init/render_sms_gateway.py ./render_sms_gateway.py
+# render_mcp_servers.py — idempotent ADD-only mutator that backfills new
+# required MCP server entries (e.g. `hass` PR #128, `files` PR #130) into
+# the operator-owned per-profile config.yaml. Sibling of render_sms_gateway.
+COPY packages/hermes/init/render_mcp_servers.py ./render_mcp_servers.py
 # Paperclip auto-bootstrap. Invoked as the entrypoint of the sibling
 # `paperclip-init` compose service (see docker-compose.yaml). Not run by
 # this image's default entrypoint.sh — keeps the main init container

@@ -252,21 +252,39 @@ if [[ -f "$MCP_SRC" ]]; then
 fi
 
 # --- 2e. 5-app stdio MCP bundle ----------------------------------------------
+# UNCONDITIONAL rsync — the bundle is a build artifact baked into the init
+# image (see Dockerfile `COPY --from=mcp-builder /mcp-server/dist
+# ./mcp-stdio/...`), not operator config. Its source of truth is the IMAGE,
+# not the volume. The previous hash-gate (a content-hash file at
+# `.mcp-stdio.content-hash`) was load-bearing only if the hash compute itself
+# stayed honest across image bumps; on home (2026-05-29) the bundle on disk
+# stayed pre-#128/#130 even after `docker compose pull` of the init image,
+# leaving Hermes' main profile without the `hass` + `files` MCP servers
+# (chat-Alfred answered "no, I'm not connected to HA" while ctrl-api was
+# actively pulling 1078 HA registry rows). Whatever caused the hash gate to
+# silently misfire isn't worth chasing — the gate optimises a copy that takes
+# milliseconds. `rsync -a --delete` is the same shape as the previous slow
+# path and treats the image as authoritative, which is what we want for a
+# build artifact.
+#
+# Critically NOT in the operator-preserve / runtime-key list (see
+# render_hermes.py `_RUNTIME_KEY_PREFIXES`): an operator never edits this
+# directory by hand. The two operator-owned Hermes assets are config.yaml
+# (preserved by render_hermes.py) and the runtime-managed `.env` keys
+# (merge-preserved by render_hermes.py's `_merge_preserve_runtime_keys`).
+# Everything else under <profile_dir>/ — mcp-stdio/, mcp/, skills/,
+# AGENTS.md, SOUL.md — is a build artifact and re-syncs from the image.
 MCP_STDIO_SRC="/setup/mcp-stdio"
 if [[ -d "$MCP_STDIO_SRC" ]]; then
-    BUNDLE_HASH=$(find "$MCP_STDIO_SRC" -type f -not -name '.*' \
-        -exec md5sum {} \; | sort | md5sum | cut -d' ' -f1)
     for profile in "${PROFILES[@]}"; do
         MCP_STDIO_DST="$HERMES_DATA_DIR/profiles/$profile/mcp-stdio"
-        HASH_FILE="$HERMES_DATA_DIR/profiles/$profile/.mcp-stdio.content-hash"
-        if [[ -f "$HASH_FILE" ]] && [[ "$(cat "$HASH_FILE")" == "$BUNDLE_HASH" ]]; then
-            echo "[init] MCP stdio bundle unchanged in $profile, skipping"
-        else
-            mkdir -p "$MCP_STDIO_DST"
-            rsync -a --delete "$MCP_STDIO_SRC/" "$MCP_STDIO_DST/"
-            echo "$BUNDLE_HASH" > "$HASH_FILE"
-            echo "[init] MCP stdio bundle deployed to $profile"
-        fi
+        mkdir -p "$MCP_STDIO_DST"
+        rsync -a --delete "$MCP_STDIO_SRC/" "$MCP_STDIO_DST/"
+        # Stale hash file from the pre-2026-05-29 gate. Remove so a future
+        # operator inspecting the dir doesn't think the bundle's currency is
+        # being tracked here (it isn't — the IMAGE is the source of truth).
+        rm -f "$HERMES_DATA_DIR/profiles/$profile/.mcp-stdio.content-hash"
+        echo "[init] MCP stdio bundle synced to $profile (unconditional)"
     done
 fi
 
@@ -490,6 +508,23 @@ for profile in "${PROFILES_RENDERED[@]}"; do
             /setup \
             "$GATEWAY_TOKEN"
     echo "[init] Rendered Hermes profile: $profile"
+
+    # --- 6a. Backfill required mcp_servers entries -----------------------
+    # render_hermes.py preserves an existing operator-owned config.yaml.
+    # When a new MCP server lands in the template (e.g. `hass` PR #128 or
+    # `files` PR #130), existing tenants never see it because their
+    # config.yaml predates the addition. render_mcp_servers.py is an
+    # idempotent ADD-only mutator that backfills any missing
+    # required-server entry on every init boot (preserving operator
+    # customisations / explicit disables). codex-builder is hard-skipped
+    # (sealed runtime: mcp_servers: {} by design). See the script docstring.
+    if [[ -f "$INIT_PROFILE_DIR/config.yaml" ]]; then
+        PROFILE_DIR="$INIT_PROFILE_DIR" \
+        HERMES_RUNTIME_PROFILE_DIR="$RUNTIME_PROFILE_DIR" \
+        CTRL_API_URL="${CTRL_API_URL:-http://ctrl-api:3100}" \
+            python3 /setup/render_mcp_servers.py "$profile" \
+            || echo "[init] WARN: render_mcp_servers.py failed for $profile (non-fatal)"
+    fi
 done
 
 # --- 6b. Telegram gateway block — INTENTIONALLY UNMANAGED HERE --------------
