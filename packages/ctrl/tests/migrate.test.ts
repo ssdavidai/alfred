@@ -36,15 +36,11 @@ describe("state.db migration runner", () => {
     const db = new DatabaseSync(":memory:");
     db.exec(schema);
     const v = runMigrations(db);
-    // Latest version moves as new migrations land. Today: 4
+    // Latest version moves as new migrations land. Today: 6
     // (0001_fix_pack + 0002_alfred_journal + 0003_tailscale_connection
-    // + 0004_channel_tokens).
+    // + 0004_channel_tokens + 0005_ha_channel + 0006_files_table).
     assert.equal(v, 6, "migrated to latest version");
     assert.equal(userVersion(db), 6);
-=======
-    assert.equal(v, 4, "migrated to latest version");
-    assert.equal(userVersion(db), 4);
->>>>>>> 37313a3f (feat(ctrl,db): 0003_ha_channel migration — 7 ha_* tables + loop-guard index (#110 PR1))
     assert.ok(cols(db, "observation").includes("processed_at"), "0001: processed_at present after migrate");
     // 0002: alfred_journal + alfred_principal tables present.
     const tables = (
