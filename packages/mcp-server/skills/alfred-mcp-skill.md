@@ -6,7 +6,9 @@ license: alfred-platform internal — see the parent monorepo's LICENSE
 
 # Alfred MCP — claude.ai Custom Connector
 
-This connector exposes Sir's tenant ctrl-api content surface to claude.ai. The 18 tools below are the ONLY way you reach his box from a claude.ai conversation — there is no shell, no `bash`, no direct HTTP. Everything goes through this MCP server's bearer token, which is bound to one tenant for one hour.
+This connector exposes Sir's tenant ctrl-api content surface to claude.ai. The tools below — 18 generic Alfred tools plus 85 Home Assistant tools (the `ha__*` surface, #115 PR1-PR8) — are the ONLY way you reach his box from a claude.ai conversation. Everything goes through this MCP server's bearer token, which is bound to one tenant for one hour.
+
+For Sir's home tenant (home.alfred.black, an HAOS install at `100.70.124.6`) there are also two non-MCP access paths Alfred can use when the MCP catalogue doesn't fit: the **alfred-ha Supervisor bridge** (9 `alfred.supervisor_*` HA services callable via the LLAT-authenticated REST API) and **SSH** (root shell on HA OS via `mcp_alfred_execute_*`). The "Picking the right HA access path" section below is the decision tree.
 
 The catalogue is intentionally narrow. Container restarts, credential rotation, device revocation, env mutation, log streaming, and similar high-blast-radius operations are NOT exposed here — they live behind in-tenant agents (Alfred main, chores) where trust is scoped. If Sir asks for one of those over claude.ai, route him back to his Alfred channel rather than improvising.
 
@@ -477,6 +479,318 @@ Tier 4:
      can drop the row from HACS's UI if anything looks wrong; no gate.
   2. `ha__hacs_search` to find the id HACS assigned the new repo.
   3. Continue at step 4 of the install flow above.
+
+---
+
+## Home Assistant — full capability surface & decision tree
+
+Alfred has **three** access paths to Sir's Home Assistant. They overlap on
+purpose — the matrix at the end of this section tells you which to pick
+for each task. The first rule is non-negotiable: **prefer the path with
+the tightest audit trail that can do the job.** MCP gates and
+auto-snapshots are the only reason Tier 4 autonomy is safe; never reach
+for the bridge or SSH when an `ha__*` tool covers the verb.
+
+### Path 1 — `ha__*` MCP tools (85 tools, PR1-PR8 of #115)
+
+The primary path. Every Tier 4 verb's audit trail (decision_ref → `ha_run`
+ledger → daybook entry → optional `ha_backup_ref` snapshot) lives in this
+path. The 85 tools split into nine groups:
+
+**Reads (11) — no gate, cheap, idempotent.** Use these for any question
+about HA state, history, or registry. Reach for them BEFORE any write so
+you resolve entity/area/device ids cleanly.
+
+  - `ha__connection_status` — is the WS bridge up?
+  - `ha__list_entities` (filter by `domain` / `area`) — cached `ha_registry`
+  - `ha__get_state(entity_id)` — current state + attrs
+  - `ha__get_history(entity_id, start/end)` — recorder history
+  - `ha__get_logbook(entity_id?, start/end)` — human-readable timeline
+  - `ha__list_areas` — area registry
+  - `ha__list_devices(area?)` — device registry
+  - `ha__list_automations` — slim index (alias / id / state only)
+  - `ha__list_scripts` — slim index
+  - `ha__get_calendars` — calendar entities + events
+  - `ha__resolve_entity(query)` — fuzzy name → entity_id
+
+**Writes / events (5) — gated where destructive.**
+
+  - `ha__call_service(domain, service, target?, data?, decision_ref)` —
+    **GATED** with 60s loop-guard. The universal HA service-call seam.
+  - `ha__propose_automation(...)` — queues a draft into `ha_proposal`
+    for Sir's Desk approval; no apply.
+  - `ha__apply_proposal(proposal_id, decision_ref)` — installs an
+    approved proposal; snapshot captured first.
+  - `ha__rollback_snapshot(snapshot_id, decision_ref)` — restore the
+    pre-apply YAML for an automation.
+  - `ha__subscribe_events(event_type?)` — open a server-side stream;
+    used internally by HaWatcherWorkflow, rarely by you.
+
+**Automations / scenes / scripts CRUD (10, PR3).** `list_automations_full`
++ `create_*` / `update_*` (no gate — Sir can disable in HA UI in 5 seconds)
++ `delete_automation` (**gated** — irreversible without a backup). Scene
+and script `create/update/delete` are all cheap, no gates.
+
+**Registries CRUD (16, PR2).** Cheap reversible verbs over areas, devices,
+entities, labels:
+
+  - Areas: `area_create` / `area_update` / `area_delete`
+  - Devices: `device_set_area` / `device_set_name` / `device_disable` /
+    `device_label`
+  - Entities: `entity_rename` / `entity_set_area` / `entity_hide` /
+    `entity_disable` / `entity_label`
+  - Labels: `label_create` / `label_update` / `label_delete` /
+    `label_apply`
+
+None gated. None auto-snapshot. Label / device-label writes do FULL
+REPLACE — read current, append, ship merged.
+
+**Integrations / config_flow (7, PR4).** `list_integrations`,
+`list_available_integrations`, `integration_info`, `integration_discover`
+(no gate, returns `flow_id`), `integration_configure` (**gated +
+auto-snapshot per step**), `integration_reload` (no gate),
+`integration_remove` (**gated + auto-snapshot**). Flows are NEVER
+one-shot — loop on `configure` until `step.type` reaches `create_entry`
+or `abort`.
+
+**HACS catalogue (8, PR5).** `hacs_info`, `hacs_search`, `hacs_repo_info`,
+`hacs_add_custom_repo` (no gate), `hacs_install` (**gated +
+auto-snapshot**), `hacs_remove` (**gated + auto-snapshot**),
+`hacs_refresh`, `hacs_pending_updates`.
+
+**Supervisor addons (10, PR6 — HAOS-ONLY).** All 10 tools return a 501
+`{error: "supervisor_not_available"}` envelope on non-HAOS installs.
+
+  - Reads: `list_addons`, `addon_info`, `addon_logs` (default tail 200,
+    max 2000)
+  - Lifecycle: `addon_start` / `addon_stop` / `addon_restart` (no gate)
+  - Mutate: `addon_install` (**gated + snapshot**), `addon_uninstall`
+    (**gated + snapshot**), `addon_configure` (**gated**, no snapshot —
+    options swap is reversible), `addon_update` (**gated + snapshot**)
+
+**Core lifecycle + backups (10, PR7).**
+
+  - Reads: `core_version`, `core_check_config`, `list_backups`,
+    `backup_info`
+  - Reload-only: `core_reload_yaml` (no gate; entities stay alive)
+  - **Gated + snapshot:** `core_restart` (HA OFFLINE 30-120s),
+    `core_update` (HAOS/Supervised only; HA OFFLINE 3-10 min)
+  - Backups: `create_backup` (no gate — backing up is always safe),
+    `delete_backup` (**gated**, irreversible, no snapshot),
+    `restore_backup` (**gated**, no auto-snapshot — restoring IS the
+    recovery, snapshotting the broken state is backwards)
+
+**Users + LLATs (8, PR8).** `list_users`, `user_info`,
+`list_user_llats` (reads, no gate), `create_user` / `update_user` /
+`delete_user` / `mint_llat` / `revoke_llat` (**all gated**). `mint_llat`
+masks the raw token at the ctrl-api layer (`?safe=1`); the response
+carries `{llat_vw_id, ha_token_id, expiry_at, redacted: true}` and the
+value lands in Vaultwarden as a Login item. **NEVER include a minted
+LLAT in any user-facing message.** Refer to it by `llat_vw_id` only.
+
+### Path 2 — alfred-ha Supervisor bridge (9 services, v1.1.0+)
+
+The bridge ships as the **alfred** HA custom_component (one config_entry
+per HA install). It exposes 9 services callable via HA's standard
+service-call REST endpoint:
+
+  `POST /api/services/alfred/<service_name>`
+  `Authorization: Bearer <LLAT>`
+  `Content-Type: application/json`
+
+The LLAT gates **who** (HA-side auth — Alfred uses the LLAT stored in
+Vaultwarden under `HA — alfred`); the bridge handlers gate **what**
+(addon REST, `/share/...`, host info). Every service returns a
+`ServiceResponse` JSON envelope rather than raising — branch on `error`,
+don't expect a 500.
+
+**Services + error envelopes:**
+
+| Service | Body | Returns | Error envelopes |
+|---|---|---|---|
+| `alfred.supervisor_call` | `{method, path, json_body?}` | `{status, body}` | `{error: "supervisor_unavailable", installation_type, hint}` |
+| `alfred.supervisor_addon_info` | `{slug}` | `{status, body}` (full addon config + options) | `supervisor_unavailable` |
+| `alfred.supervisor_addon_options_update` | `{slug, options, restart?}` | `{options: {…}, restart?: {…}}` | `supervisor_unavailable` |
+| `alfred.supervisor_host_info` | `{}` | `{status, body}` (kernel / chassis / hostname) | `supervisor_unavailable` |
+| `alfred.supervisor_os_info` | `{}` | `{status, body}` (board / version / boot slot) | `supervisor_unavailable` |
+| `alfred.supervisor_share_write` | `{path, content_base64, create_parents?}` | `{ok, path, bytes}` | `supervisor_unavailable`, `share_root_missing`, `unsafe_path`, `bad_base64`, `too_large`, `write_failed` |
+| `alfred.supervisor_share_read` | `{path}` | `{path, content_base64, bytes}` | `share_root_missing`, `unsafe_path`, `not_found`, `not_a_file`, `too_large`, `read_failed` |
+| `alfred.supervisor_share_list` | `{path}` | `{path, entries:[…]}` | `share_root_missing`, `unsafe_path`, `not_found`, `not_a_directory`, `list_failed` |
+| `alfred.supervisor_share_delete` | `{path}` | `{ok, path}` | `share_root_missing`, `unsafe_path`, `not_found`, `is_a_directory`, `delete_failed` |
+
+**Path-safety contract.** `safe_share_path` confines every `path` to
+`/share/`. Path traversal (`..`), absolute paths outside `/share`, and
+symlinks that escape `/share` all return `unsafe_path`. `MAX_SHARE_BYTES`
+caps the body — calls with payloads above the cap return `too_large` with
+`size` + `max` for telemetry.
+
+**When the bridge beats MCP.** Addon **options** writes go through the
+bridge, not MCP — `ha__addon_configure` exists but the bridge's
+`supervisor_addon_options_update` carries the optional `restart: true`
+flag in the same call, which is what you want when applying a config
+that needs the addon bounced (e.g. swapping Mosquitto credentials).
+`/share/` writes are bridge-only — there is no `ha__share_*` MCP tool.
+Host/OS info is bridge-only — `ha__core_version` reads HA Core's `/api/config`,
+not the host kernel.
+
+**HAOS caveat (same as MCP addon tools).** Every Supervisor service
+returns `{error: "supervisor_unavailable", installation_type: "container_or_core"}`
+on Container/Core installs. Read `installation_type` and explain to Sir;
+don't retry.
+
+**Invocation from Alfred.** The bridge is reachable two ways:
+
+  1. Through ctrl-api's HA channel — anything Alfred can do via `ha__call_service`
+     pointing at `domain: "alfred"` is bridge-routed. Use this when an `ha__*`
+     tool covers the verb's HA-side signature.
+  2. Directly via Composio's `mcp_alfred_execute_*` against HA's REST API
+     when ctrl-api isn't in the loop (rare; usually for ad-hoc `/share/`
+     reads from inside a Hermes subagent).
+
+### Path 3 — SSH (root shell on HA OS)
+
+Tonight's addition. `core_ssh` ("Terminal & SSH") on Sir's HAOS has
+Alfred's Hermes ed25519 pubkey added to `authorized_keys`. Alfred reaches
+this surface via the `execute` MCP server (`mcp_alfred_execute_*` tools)
+running a `ssh ...` command line.
+
+**Connection details** (also stored in Vaultwarden as item
+`aa180bde-9951-49d3-bd21-386e4cdc521b`, name **"HA SSH (Alfred Hermes)"**,
+folder **"Home Assistant"**):
+
+  - Host: `100.70.124.6` (Tailscale, reachable anywhere) — preferred.
+    LAN fallback: `192.168.1.219`
+  - Port: `22`
+  - User: `root`
+  - Auth: publickey, ed25519
+  - Private key: `/hermes-state/ssh/ha_id_ed25519` inside the
+    `alfred-black-hermes-1` container (`chmod 600`, 432 bytes)
+  - Public key fingerprint: `SHA256:Oz3sYrl5rNzIMA1nr0gMDn9rnazdcRYU2R0NgxN5LPQ`
+
+**Canonical invocation:**
+
+```
+ssh -i /hermes-state/ssh/ha_id_ed25519 -p 22 root@100.70.124.6 '<command>'
+```
+
+Hostkey-checking is off by default in the addon's sshd config; if you
+hit a host-key prompt, add `-o StrictHostKeyChecking=accept-new` once,
+then commit the resulting known_hosts line.
+
+**Key-restore path** (volume reset, key gone):
+
+  1. `vaultwarden__get_vault_item({id: "aa180bde-9951-49d3-bd21-386e4cdc521b"})`
+  2. Decode `login.password` (the 432-byte OpenSSH ed25519 private key) and
+     write it to `/hermes-state/ssh/ha_id_ed25519`
+  3. `chmod 600 /hermes-state/ssh/ha_id_ed25519`
+  4. `ssh-keygen -y -f /hermes-state/ssh/ha_id_ed25519 > /hermes-state/ssh/ha_id_ed25519.pub`
+
+**Why SSH at all.** Two reasons MCP + bridge can't reach: (1) disk /
+process / log inspection on HA OS itself (`df`, `top`, s6-rc service
+state, `journalctl`, log-tail), and (2) editing files under `/config/`
+that aren't covered by HA's REST CRUD (the canonical example is
+`configuration.yaml` itself — bridge `share_write` is sandboxed to
+`/share/`, not `/config/`). HA OS uses s6 as PID 1; `s6-svc -r
+/run/service/<name>` is the supervised restart primitive when something
+short of `ha__core_restart` is needed.
+
+**Why SSH is the LAST resort.** SSH bypasses ctrl-api entirely. No
+`decision_ref` is checked. No `ha_run` row lands. No auto-snapshot fires.
+No daybook entry is written. The whole audit-trail spine that makes Tier
+4 safe lives in MCP + bridge — every SSH session is invisible to the
+Desk. **Therefore: SSH is only valid for verbs no `ha__*` tool and no
+`alfred.supervisor_*` service can express.** When you reach for SSH,
+write a `daybook/` entry yourself naming the command and the reason —
+manual audit-trail upkeep until those verbs grow MCP coverage.
+
+### Picking the right HA access path — the decision tree
+
+The rule of thumb is one sentence: **MCP first; bridge second when it's
+specifically about addon options / `/share/` / host info; SSH only when
+the verb has no MCP-or-bridge equivalent.** The matrix:
+
+| Sir says / system needs | First-choice path | Tool / command | Why |
+|---|---|---|---|
+| "Is the kitchen light on?" | MCP | `ha__list_entities({area: "kitchen"})` → `ha__get_state` | cheapest, scoped, no shell |
+| "Turn off the bedroom light" | MCP | `ha__call_service({domain:"light", service:"turn_off", target:{entity_id:"light.bedroom"}, decision_ref})` | gated service-call seam |
+| "What happened with the front door today?" | MCP | `ha__get_logbook({entity_id:"binary_sensor.front_door"})` | recorder-backed timeline |
+| "Rename the front door sensor" | MCP | `ha__entity_rename` | cheap registry CRUD, no gate |
+| "Move the new motion sensor into the Garage" | MCP | `ha__device_set_area` | cheap registry CRUD, no gate |
+| "Tag the thermostat as critical" | MCP | `ha__device_label` (read current labels first; full-replace) | cheap registry CRUD, no gate |
+| "Author a bedtime scene" | MCP | `ha__create_scene` | cheap, reversible |
+| "Set up a sunrise automation" | MCP | `ha__create_automation` (initial_state OFF by default) | cheap, reversible |
+| "Drop that old automation" | MCP | `ha__delete_automation({automation_id, decision_ref})` | gated; back the YAML up in a decision/ record first |
+| "Install the Hue integration" | MCP | `ha__integration_discover` → loop on `ha__integration_configure` | gated + auto-snapshot per step |
+| "Reload the failing Nest integration" | MCP | `ha__integration_reload({entry_id})` | no gate, often fixes transient failures |
+| "Install this HACS plugin" | MCP | `ha__hacs_install` | gated + auto-snapshot |
+| "Restart HA" | MCP | `ha__core_check_config` → `ha__core_restart({decision_ref})` | gated + auto-snapshot; always check_config first |
+| "Update HA core" | MCP | `ha__core_version` → `ha__core_update({decision_ref})` | gated + auto-snapshot; HAOS/Supervised only |
+| "Back up HA before I flash the Z-Wave dongle" | MCP | `ha__create_backup({name})` | no gate, backups are always safe |
+| "Roll back to last night's backup" | MCP | `ha__list_backups` → `ha__backup_info` → `ha__restore_backup({decision_ref})` | gated; no auto-snapshot (restoring IS recovery) |
+| "Install Mosquitto" | MCP | `ha__addon_install({slug, decision_ref})` → `ha__addon_configure` → `ha__addon_start` | gated + snapshot; HAOS-only |
+| "Restart the openWakeWord addon" | MCP | `ha__addon_restart({slug})` | no gate, reversible |
+| "Tail the Mosquitto logs" | MCP | `ha__addon_logs({slug, tail: 200})` | up to 2000 lines, MCP path |
+| "Create an HA user account" | MCP | `ha__create_user({decision_ref})` → `ha__mint_llat` | gated; LLAT lands in Vaultwarden, masked in MCP response |
+| "Rotate the kid's HA token" | MCP | `ha__list_user_llats` → `ha__revoke_llat({decision_ref})` → `ha__mint_llat` | gated; never paste the new token in chat |
+| "Read the openWakeWord addon's current options" | **Bridge** | `alfred.supervisor_addon_info({slug: "openwakeword"})` | the bridge returns the full options object; MCP's `ha__addon_info` does too but the bridge is the single-call seam Alfred typically reaches for |
+| "Update openWakeWord's options + bounce it" | **Bridge** | `alfred.supervisor_addon_options_update({slug, options, restart: true})` | one-call set-and-restart; MCP would need two |
+| "Drop a wake-word `.tflite` into `/share/openwakeword/`" | **Bridge** | `alfred.supervisor_share_write({path: "openwakeword/alfred.tflite", content_base64})` | `/share/` writes are bridge-only; no MCP tool exists |
+| "Read a file out of `/share/`" | **Bridge** | `alfred.supervisor_share_read({path})` | `/share/` reads are bridge-only |
+| "List `/share/` contents" | **Bridge** | `alfred.supervisor_share_list({path: "/"})` | bridge-only |
+| "Delete a `/share/` file" | **Bridge** | `alfred.supervisor_share_delete({path})` | bridge-only |
+| "What's the HA OS version / host kernel?" | **Bridge** | `alfred.supervisor_os_info` / `alfred.supervisor_host_info` | host-layer reads MCP doesn't surface; `ha__core_version` reads only HA Core |
+| "Hit an undocumented Supervisor REST endpoint" | **Bridge** | `alfred.supervisor_call({method, path, json_body?})` | the escape hatch — covers any Supervisor route MCP doesn't wrap |
+| "Check disk usage on HA" | **SSH** | `ssh ... 'df -h /'` | shell-only; no MCP or bridge equivalent |
+| "Tail HA Core's log live" | **SSH** | `ssh ... 'tail -n 500 /config/home-assistant.log'` (or `tail -f` for streaming) | log-streaming is shell-best; MCP's `addon_logs` only covers addons |
+| "Inspect a stuck s6 service on HA OS" | **SSH** | `ssh ... 's6-svstat /run/service/<name>'` | HA OS PID 1 is s6; no REST surface |
+| "Restart a stuck s6 service without restarting HA" | **SSH** | `ssh ... 's6-svc -r /run/service/<name>'` | shell-only primitive; `ha__core_restart` is too heavy |
+| "Edit `/config/configuration.yaml`" | **SSH** | `ssh ... 'vi /config/configuration.yaml'` (or `sed -i` for scripted edits) | bridge `share_write` is sandboxed to `/share/`, not `/config/` |
+| "Run a one-off shell command on the HA OS" | **SSH** | `ssh ... '<command>'` | shell-only |
+| "Read the openWakeWord addon's *log files on disk*" | **SSH** | `ssh ... 'docker logs addon_openwakeword 2>&1 \| tail -200'` (or the addon's `/data/` files) | when `ha__addon_logs` is truncated; deeper than the MCP tail |
+
+### Anti-patterns
+
+  - **Never SSH for a verb MCP covers.** Restart HA via SSH (`ha core
+    restart`) skips the gate, the snapshot, and the daybook. Use
+    `ha__core_restart` always.
+  - **Never SSH for a verb the bridge covers.** A `/share/` write via
+    `ssh ... 'echo … > /share/...'` skips the path-safety contract +
+    the bridge's size cap.
+  - **Never bridge a verb MCP covers AND audits.** `ha__addon_install`
+    snapshots and audits; the bridge's `supervisor_call` (POST
+    `/addons/<slug>/install`) doesn't. Same outcome, weaker trail.
+  - **Never paste a minted LLAT in chat.** Even though it's a string
+    Sir asked for, it never leaves Vaultwarden via MCP — refer to it
+    by `llat_vw_id`.
+  - **Never invent a `decision_ref`.** The middleware reads
+    `/vault/decision/<id>.md` and rejects unknown ids. If there's no
+    Desk decision yet, create one (or escalate to Sir for one); don't
+    "decision/2026-05-29-quick-fix.md" yourself.
+  - **Never reach for the bridge or SSH "to be safe" when the MCP path
+    works.** The MCP path IS the safe path — every audit primitive is
+    wired there.
+  - **Never use SSH from a claude.ai conversation.** SSH lives behind
+    Hermes-side `mcp_alfred_execute_*`, not behind this MCP server.
+    Claude.ai sessions don't have it. If Sir asks for a shell-only
+    verb from claude.ai, route him back to his Alfred channel — that
+    channel reaches Hermes, which reaches `execute`, which reaches HA.
+
+### Locked-YES policy (recap)
+
+These three rules apply to every Tier 4 MCP write and every Tier 4
+bridge call (SSH is on you):
+
+  1. Destructive verbs (anything that flips Sir's home in a way he
+     can't undo from HA's UI in <2 minutes) REQUIRE a `decision_ref`
+     pointing at a Desk decision Sir created. The middleware enforces
+     it with `400 DECISION_REF_MISSING` / `400 DECISION_REF_REVERSED`.
+  2. The four heaviest verbs (`core_restart`, `core_update`,
+     `addon_install`, the `integration_configure` final step) AND
+     `hacs_install` AUTO-SNAPSHOT before firing. The response carries
+     `backup_ref_id` and `ha_backup_id`; mention "snapshot taken" to
+     Sir.
+  3. Every non-trivial write records a `## HA writes` daybook entry.
+     SSH bypasses this — author the daybook entry yourself.
 
 ---
 
