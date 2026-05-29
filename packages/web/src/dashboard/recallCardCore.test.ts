@@ -98,7 +98,12 @@ test("derive: disabled — no API key on file (fresh tenant pre-paste)", () => {
 test("derive: configured — config + usage live; pill = Connected", () => {
   const status: RecallStatus = {
     enabled: true,
-    config: BASE_CONFIG,
+    config: {
+      ...BASE_CONFIG,
+      // Both flags must be true for the configured branch — fix/recall-card.
+      api_key_set: true,
+      webhook_secret_set: true,
+    },
     usage: { this_month_hours: 12.5, monthly_hours_cap: 60, bot_count_active: 1 },
     active_bots: [],
     error: null,
@@ -113,6 +118,53 @@ test("derive: configured — config + usage live; pill = Connected", () => {
   // Address bakes the live usage rollup.
   assert.match(card.address, /12.50h \/ 60h this month/);
   assert.match(card.address, /1 bot active/);
+});
+
+test("derive: partial — API key set but webhook_secret_set=false → 'Webhook not wired'", () => {
+  // The bug Sir flagged: api_key_set=true but webhook_secret_set=false
+  // (the most-common state immediately after PR #153 persisted the API
+  // key but before the operator pasted the signing secret). Pill must
+  // surface "Webhook not wired" so the principal knows to paste it; the
+  // dial form is still editable; test webhook is disabled because the
+  // synthetic delivery would 503 on the missing secret.
+  const status: RecallStatus = {
+    enabled: true,
+    config: {
+      ...BASE_CONFIG,
+      api_key_set: true,
+      webhook_secret_set: false,
+    },
+    usage: { this_month_hours: 0, monthly_hours_cap: 60, bot_count_active: 0 },
+    active_bots: [],
+    error: null,
+  };
+  const card = deriveRecallCardState(status, FROZEN_NOW);
+  assert.equal(card.status, "partial");
+  assert.equal(card.pillLabel, "Webhook not wired");
+  assert.equal(card.pillTone, "error");
+  assert.equal(card.canEditDials, true);
+  assert.equal(card.canTest, false);
+  assert.match(card.description, /webhook/i);
+});
+
+test("derive: configured — when webhook_secret_set is omitted (pre-#153 ctrl-api), do not regress", () => {
+  // The conservative default for an absent flag is "wired" so older
+  // deployments that lack the field don't render a yellow pill they
+  // can't clear from the UI.
+  const status: RecallStatus = {
+    enabled: true,
+    config: {
+      ...BASE_CONFIG,
+      api_key_set: true,
+      // webhook_secret_set intentionally omitted
+    },
+    usage: { this_month_hours: 0, monthly_hours_cap: 60, bot_count_active: 0 },
+    active_bots: [],
+    error: null,
+  };
+  const card = deriveRecallCardState(status, FROZEN_NOW);
+  assert.equal(card.status, "configured");
+  assert.equal(card.pillTone, "active");
 });
 
 test("derive: error — enabled but probe failed; surface verbatim error", () => {

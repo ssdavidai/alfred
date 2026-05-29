@@ -337,6 +337,42 @@ describe("/api/v1/channels/recall/* + webhook — #113 PR2", () => {
       assert.equal(r.payload.wake_word, "Alfred");
       assert.deepEqual(r.payload.cost_alert_thresholds, [80, 100]);
       assert.equal(typeof r.payload.updated_at, "number");
+      // PR3a — api_key_set + webhook_secret_set fingerprints drive the
+      // card's pill state. Pre-paste neither env var is set, so both
+      // flags read false and the first6 fields are null.
+      assert.equal(r.payload.api_key_set, false);
+      assert.equal(r.payload.api_key_first6, null);
+      assert.equal(r.payload.webhook_secret_set, false);
+      assert.equal(r.payload.webhook_secret_first6, null);
+      // webhook_url is derived from DOMAIN; the test fixture sets
+      // DOMAIN=test.alfred.black, so the route emits the canonical URL.
+      assert.equal(
+        r.payload.webhook_url,
+        "https://test.alfred.black/api/v1/webhooks/recall",
+      );
+    });
+
+    it("GET surfaces api_key_set + webhook_secret_set when env vars are present", async () => {
+      // Mutating process.env is the only signal rowToApiConfig reads
+      // off — the route deliberately doesn't round-trip the .env at GET
+      // time (that would be a fs read on every dashboard tick).
+      process.env.RECALL_API_KEY = "rcl_test_first6_morechars";
+      process.env.RECALL_WEBHOOK_SECRET = "whsec_first6_morechars_base64";
+      try {
+        const r = await invokeRoute("GET", "/api/v1/channels/recall/config");
+        assert.equal(r.status, 200);
+        assert.equal(r.payload.api_key_set, true);
+        assert.equal(r.payload.api_key_first6, "rcl_te");
+        assert.equal(r.payload.webhook_secret_set, true);
+        assert.equal(r.payload.webhook_secret_first6, "whsec_");
+        // The full values must NEVER be echoed.
+        const body = JSON.stringify(r.payload);
+        assert.equal(body.includes("rcl_test_first6_morechars"), false);
+        assert.equal(body.includes("whsec_first6_morechars_base64"), false);
+      } finally {
+        delete process.env.RECALL_API_KEY;
+        delete process.env.RECALL_WEBHOOK_SECRET;
+      }
     });
 
     it("PATCH updates fields and the next GET reflects them", async () => {

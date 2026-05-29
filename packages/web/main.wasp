@@ -992,6 +992,15 @@ action setRecallApiKey {
   entities: []
 }
 
+// Persist the Svix signing secret Recall.ai's webhook dashboard mints.
+// Card-side companion to setRecallApiKey — required before any inbound
+// webhook delivery can be verified, otherwise ctrl-api's
+// /api/v1/webhooks/recall handler 503s with NOT_CONFIGURED.
+action setRecallWebhookSecret {
+  fn: import { setRecallWebhookSecret } from "@src/dashboard/operations",
+  entities: []
+}
+
 action testRecallWebhook {
   fn: import { testRecallWebhook } from "@src/dashboard/operations",
   entities: []

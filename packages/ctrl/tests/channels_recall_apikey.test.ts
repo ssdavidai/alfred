@@ -656,3 +656,156 @@ describe("_recallInternals.atomicPatchEnv", () => {
     assert.equal(_recallInternals.keyFirst6("short"), "short");
   });
 });
+
+// ── POST /webhook-secret — sibling to /api-key, .env-only persistence ────
+
+describe("POST /api/v1/channels/recall/webhook-secret — Svix signing secret", () => {
+  before(() => {
+    getStateDb();
+    // The api-key describe block's `after()` rm-rf's the shared tmp dir
+    // when its tests finish. If those tests ran first (suite ordering is
+    // declaration-order in node:test), composeDir is gone before we get
+    // here — re-create it idempotently.
+    fs.mkdirSync(composeDir, { recursive: true });
+  });
+
+  beforeEach(() => {
+    composeCalls.length = 0;
+    composeShouldFail = false;
+    fs.mkdirSync(composeDir, { recursive: true });
+    fs.writeFileSync(
+      ENV_PATH,
+      "# header comment\nALREADY=present\nFOO=bar\n",
+      { mode: 0o600 },
+    );
+    try {
+      fs.unlinkSync(ENV_TMP_PATH);
+    } catch {
+      /* swallow */
+    }
+    delete process.env.RECALL_WEBHOOK_SECRET;
+    _resetAuthForTests();
+  });
+
+  it("writes the secret to .env and triggers a restart on success", async () => {
+    const secret = "whsec_abcdef1234567890_base64_payload";
+    const r = await invokeRoute(
+      "POST",
+      "/api/v1/channels/recall/webhook-secret",
+      { webhook_secret: secret },
+    );
+    assert.equal(r.status, 200, JSON.stringify(r.payload));
+    assert.equal(r.payload.ok, true);
+    assert.equal(r.payload.secret_first6, "whsec_");
+    assert.deepEqual(r.payload.persisted_to, [".env"]);
+    assert.deepEqual(r.payload.restarted, ["ctrl-api", "alfred-learn"]);
+
+    // .env merged.
+    const envText = fs.readFileSync(ENV_PATH, "utf-8");
+    assert.match(
+      envText,
+      new RegExp(`^RECALL_WEBHOOK_SECRET=${secret}$`, "m"),
+    );
+    // Unrelated lines preserved.
+    assert.match(envText, /^ALREADY=present$/m);
+    assert.match(envText, /^FOO=bar$/m);
+
+    // process.env updated in-process so verifySvixSignature picks it up
+    // before the restart lands.
+    assert.equal(process.env.RECALL_WEBHOOK_SECRET, secret);
+
+    await new Promise((r) => setTimeout(r, 10));
+    const restartArgs = composeCalls
+      .filter((c) => c.args[0] === "restart")
+      .map((c) => c.args[1]);
+    assert.deepEqual(restartArgs, ["ctrl-api", "alfred-learn"]);
+  });
+
+  it("is idempotent when the same secret is already on file", async () => {
+    const secret = "whsec_already_present_value_b64_xyz";
+    fs.writeFileSync(
+      ENV_PATH,
+      `ALREADY=present\nRECALL_WEBHOOK_SECRET=${secret}\n`,
+      { mode: 0o600 },
+    );
+    const r = await invokeRoute(
+      "POST",
+      "/api/v1/channels/recall/webhook-secret",
+      { webhook_secret: secret },
+    );
+    assert.equal(r.status, 200, JSON.stringify(r.payload));
+    assert.equal(r.payload.ok, true);
+    assert.equal(r.payload.idempotent, true);
+    assert.equal(r.payload.secret_first6, "whsec_");
+    assert.deepEqual(r.payload.persisted_to, []);
+    assert.deepEqual(r.payload.restarted, []);
+    assert.equal(composeCalls.length, 0);
+  });
+
+  it("400 VALIDATION_ERROR when webhook_secret is missing", async () => {
+    const r = await invokeRoute(
+      "POST",
+      "/api/v1/channels/recall/webhook-secret",
+      {},
+    );
+    assert.equal(r.status, 400);
+    assert.equal(r.payload.error.code, "VALIDATION_ERROR");
+  });
+
+  it("400 VALIDATION_ERROR when webhook_secret is too short", async () => {
+    const r = await invokeRoute(
+      "POST",
+      "/api/v1/channels/recall/webhook-secret",
+      { webhook_secret: "whsec_xx" },
+    );
+    assert.equal(r.status, 400);
+    assert.equal(r.payload.error.code, "VALIDATION_ERROR");
+    assert.match(r.payload.error.message, /too short/i);
+  });
+
+  it("400 VALIDATION_ERROR on non-base64 payload", async () => {
+    const r = await invokeRoute(
+      "POST",
+      "/api/v1/channels/recall/webhook-secret",
+      { webhook_secret: "whsec_not space alphabet $$$" },
+    );
+    assert.equal(r.status, 400);
+    assert.equal(r.payload.error.code, "VALIDATION_ERROR");
+  });
+
+  it("rejects non-operator bearers with 403", async () => {
+    setApiKey(MASTER_KEY);
+    setVoiceBridgeKey(VOICE_KEY);
+    const r = await invokeRoute(
+      "POST",
+      "/api/v1/channels/recall/webhook-secret",
+      { webhook_secret: "whsec_abcdef_base64_payload_xx" },
+      authHeader(VOICE_KEY),
+    );
+    assert.equal(r.status, 403, JSON.stringify(r.payload));
+    assert.equal(r.payload.error.code, "FORBIDDEN");
+    // No env write, no restart.
+    const envText = fs.readFileSync(ENV_PATH, "utf-8");
+    assert.ok(!envText.includes("RECALL_WEBHOOK_SECRET"));
+    assert.equal(composeCalls.length, 0);
+  });
+
+  it("never returns the full secret on GET /config", async () => {
+    // Round-trip: save then GET /config and confirm only first6 leaks.
+    const secret = "whsec_supersecret_value_abc123_xx";
+    await invokeRoute(
+      "POST",
+      "/api/v1/channels/recall/webhook-secret",
+      { webhook_secret: secret },
+    );
+    const g = await invokeRoute("GET", "/api/v1/channels/recall/config");
+    assert.equal(g.status, 200);
+    assert.equal(g.payload.webhook_secret_set, true);
+    assert.equal(g.payload.webhook_secret_first6, "whsec_");
+    const wire = JSON.stringify(g.payload);
+    assert.ok(
+      !wire.includes(secret),
+      "GET /config must not echo the full secret",
+    );
+  });
+});

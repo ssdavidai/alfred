@@ -179,7 +179,28 @@ function rowToApiConfig(row: RecallConfigRow): Record<string, unknown> {
   // Expose key_first6 + api_key_set so the /channels card can render
   // the rotation row ("first 6 chars …") without ever round-tripping
   // the full value. PR3a adds this; the field was previously absent.
+  //
+  // Mirror the same posture for RECALL_WEBHOOK_SECRET (the Svix signing
+  // secret the inbound webhook verifies against). The card's pill
+  // distinguishes three states off these flags:
+  //
+  //   • api_key_set=false               → "Unconfigured" (gray)
+  //   • api_key_set=true,
+  //     webhook_secret_set=false        → "API key set · webhook not
+  //                                        wired" (yellow)
+  //   • both set                        → "Connected" (green)
+  //
+  // The full secret is NEVER returned; the first6 fingerprint is the
+  // operator-visible recognition string. webhook_url is the URL the
+  // operator pastes into Recall.ai's webhook dashboard (derived from
+  // the tenant's DOMAIN env). Both fields are stable on the wire — pre-
+  // PR3a ctrl-api versions simply omit them and the web layer's
+  // optional-field-aware deserialiser still parses cleanly.
   const apiKey = process.env.RECALL_API_KEY?.trim() ?? "";
+  const webhookSecret = process.env.RECALL_WEBHOOK_SECRET?.trim() ?? "";
+  const domain = process.env.DOMAIN?.trim() ?? "";
+  const webhookUrl =
+    domain.length > 0 ? `https://${domain}/api/v1/webhooks/recall` : null;
   return {
     region: row.region,
     bot_name: row.bot_name,
@@ -194,6 +215,10 @@ function rowToApiConfig(row: RecallConfigRow): Record<string, unknown> {
     updated_at: row.updated_at,
     api_key_set: apiKey.length > 0,
     api_key_first6: apiKey.length > 0 ? apiKey.slice(0, 6) : null,
+    webhook_secret_set: webhookSecret.length > 0,
+    webhook_secret_first6:
+      webhookSecret.length > 0 ? webhookSecret.slice(0, 6) : null,
+    webhook_url: webhookUrl,
   };
 }
 
@@ -1197,6 +1222,124 @@ export function registerChannelsRecallRoutes(): void {
 
       // Send the response BEFORE kicking the restart — restarting
       // ctrl-api tears down this socket.
+      sendJson(res, 200, result.envelope);
+      if (result.shouldRestart) {
+        restartForRecallKey();
+      }
+    },
+  );
+
+  // POST /api/v1/channels/recall/webhook-secret
+  //
+  // Operator-only setter for the Svix signing secret Recall.ai's
+  // webhook dashboard mints. We don't round-trip-validate it (Recall
+  // exposes no "verify this secret" endpoint — verification is local,
+  // happening on the next inbound delivery in `verifySvixSignature`).
+  // We DO sanity-check the shape: a Svix secret is `whsec_` followed
+  // by base64; we accept either that or a raw base64 string with at
+  // least 16 chars of entropy so the operator can't accidentally
+  // paste `"x"` and lock the channel.
+  //
+  // Persistence path mirrors /api-key:
+  //   1. shape check (no network round-trip);
+  //   2. idempotence: same value already in .env → noop;
+  //   3. atomic .env merge for RECALL_WEBHOOK_SECRET (tempfile + rename);
+  //   4. background-restart ctrl-api so the new secret is picked up by
+  //      the verifySvixSignature path on the next inbound delivery.
+  //
+  // We DO NOT round-trip through Vaultwarden here — the secret is
+  // operator-pasted from Recall's dashboard and only consumed by
+  // ctrl-api's webhook verifier (alfred-learn doesn't touch it). The
+  // .env-only persistence keeps the surface tight; a future PR can add
+  // a vault item if multi-tenant operations require it.
+  //
+  // Concurrency: same withPersistLock as /api-key so a concurrent
+  // /api-key + /webhook-secret can't double-restart.
+  addRoute(
+    "POST",
+    "/api/v1/channels/recall/webhook-secret",
+    async ({ req, res, body }) => {
+      requireOperatorBearer(req);
+
+      const b = (body ?? {}) as { webhook_secret?: unknown };
+      if (
+        typeof b.webhook_secret !== "string" ||
+        b.webhook_secret.trim().length === 0
+      ) {
+        throw new ValidationError(
+          "webhook_secret (non-empty string) is required",
+        );
+      }
+      const secret = b.webhook_secret.trim();
+      // Shape check — accept `whsec_<base64>` or a raw base64 string of
+      // sufficient entropy. Reject anything obviously short / non-printable.
+      const payload = secret.startsWith("whsec_")
+        ? secret.slice("whsec_".length)
+        : secret;
+      if (payload.length < 16) {
+        throw new ValidationError(
+          "webhook_secret looks too short — paste the full value from Recall.ai",
+        );
+      }
+      if (!/^[A-Za-z0-9+/=_-]+$/.test(payload)) {
+        throw new ValidationError(
+          "webhook_secret must be base64 (Recall.ai → Webhooks → Signing secret)",
+        );
+      }
+
+      const first6 = secret.slice(0, 6);
+
+      const result = await withPersistLock(async () => {
+        // Idempotence — same secret already on disk?
+        const envOnDisk = readEnvFile(RECALL_ENV_PATH);
+        if (envOnDisk.RECALL_WEBHOOK_SECRET === secret) {
+          return {
+            envelope: {
+              ok: true,
+              idempotent: true,
+              secret_first6: first6,
+              persisted_to: [] as string[],
+              restarted: [] as string[],
+              eta_seconds: 0,
+            },
+            shouldRestart: false,
+          };
+        }
+
+        // Atomic .env write.
+        try {
+          atomicPatchEnv(RECALL_ENV_PATH, {
+            RECALL_WEBHOOK_SECRET: secret,
+          });
+        } catch (err) {
+          throw new ApiError(
+            500,
+            "ENV_WRITE_FAILED",
+            err instanceof Error ? err.message : String(err),
+          );
+        }
+
+        // Reflect into our own process.env so the inbound-webhook handler
+        // can verify deliveries before the restart lands.
+        process.env.RECALL_WEBHOOK_SECRET = secret;
+
+        console.log(
+          `[recall/webhook-secret] persisted secret ${first6}… (.env). ` +
+            `Restarting ${RECALL_RESTART_SERVICES.join(", ")}.`,
+        );
+
+        return {
+          envelope: {
+            ok: true,
+            secret_first6: first6,
+            persisted_to: [".env"],
+            restarted: [...RECALL_RESTART_SERVICES],
+            eta_seconds: RECALL_RESTART_ETA_SECONDS,
+          },
+          shouldRestart: true,
+        };
+      });
+
       sendJson(res, 200, result.envelope);
       if (result.shouldRestart) {
         restartForRecallKey();

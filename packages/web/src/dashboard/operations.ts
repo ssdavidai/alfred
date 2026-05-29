@@ -684,6 +684,7 @@ interface RecallCompositeStatus {
   error: string | null;
   webhook_url?: string;
   webhook_secret_first6?: string | null;
+  webhook_secret_set?: boolean;
 }
 
 async function safeProxy(
@@ -727,16 +728,28 @@ export const getRecallChannelStatus = async (
 
   let error: string | null = null;
   const probes = [configRes, usageRes, botsRes];
-  // enabled = at least usage came back successfully (it doesn't depend on
-  // RECALL_API_KEY; if the tenant has the route at all + state.db open
-  // it returns 200). config also doesn't gate on the key. So we treat
-  // the surface as "enabled" once both succeed AND a key is on file —
-  // which we infer from a non-503 active-bots probe (the bots GET is
-  // also key-free, but PR3a will replace this signal with an explicit
-  // "key on file" flag).
-  const usageOk = usageRes.ok;
+  // `enabled` is the "do we have a working API key on file" signal.
+  // The /config + /usage + /bots routes don't gate on RECALL_API_KEY —
+  // they return 200 on a fresh tenant with no key. Earlier versions of
+  // this code derived enabled from "all three probes succeeded" which
+  // mis-classified the no-key state as `configured` and rendered the
+  // card with NO API key paste field (PR #153 shipped the persistence
+  // endpoint; the card never got the input). Drive it off the
+  // explicit api_key_set flag instead — when the field is absent on
+  // the wire (pre-#153 ctrl-api) fall back to the old heuristic so the
+  // card stays renderable.
   const configOk = configRes.ok;
-  const enabled = usageOk && configOk;
+  const apiKeySet =
+    config && typeof config.api_key_set === "boolean"
+      ? config.api_key_set === true
+      : null;
+  const usageOk = usageRes.ok;
+  const enabled =
+    configOk &&
+    (apiKeySet === true ||
+      // Fallback: no explicit flag on the wire → treat both-routes-up as
+      // "good enough" (pre-#153 contract).
+      (apiKeySet === null && usageOk));
 
   // Surface the first hard error (non-503) we saw — 503 is the
   // "expected" pre-paste state and shouldn't render as an error.
@@ -747,12 +760,32 @@ export const getRecallChannelStatus = async (
     }
   }
 
+  // Pull through the webhook posture so the card's pill + setup expander
+  // can render off them without a second proxy hop. The fields are
+  // optional on the wire (older ctrl-api may omit) so the card layer
+  // treats `undefined` as "unknown" rather than "false".
+  const webhookSecretSet =
+    config && typeof config.webhook_secret_set === "boolean"
+      ? config.webhook_secret_set
+      : undefined;
+  const webhookSecretFirst6 =
+    config && typeof config.webhook_secret_first6 === "string"
+      ? config.webhook_secret_first6
+      : null;
+  const webhookUrl =
+    config && typeof config.webhook_url === "string"
+      ? config.webhook_url
+      : undefined;
+
   return {
     enabled,
     config,
     usage,
     active_bots,
     error,
+    webhook_url: webhookUrl,
+    webhook_secret_first6: webhookSecretFirst6,
+    webhook_secret_set: webhookSecretSet,
   };
 };
 
@@ -837,6 +870,37 @@ export const setRecallApiKey = async (
     method: "POST",
     path: "/api/v1/channels/recall/api-key",
     body,
+  });
+};
+
+/** Persist the Svix signing secret Recall.ai's webhook dashboard mints.
+ *  Operator-only; ctrl-api atomically merges RECALL_WEBHOOK_SECRET into
+ *  the compose .env and restarts ctrl-api so the next inbound delivery
+ *  verifies against the new secret. The secret NEVER enters the SaaS
+ *  layer's logs — the response carries only `secret_first6`.
+ *
+ *  Return shape on fresh writes:
+ *    { ok, secret_first6, persisted_to: ['.env'], restarted: [...],
+ *      eta_seconds }
+ *  On a re-paste of the same secret:
+ *    { ok: true, idempotent: true, secret_first6, ... }
+ *
+ *  Annotation `Promise<any>` — the Wasp Payload trap. */
+export const setRecallWebhookSecret = async (
+  args: { webhook_secret: string },
+  context: any,
+): Promise<any> => {
+  if (
+    typeof args?.webhook_secret !== "string" ||
+    args.webhook_secret.trim().length === 0
+  ) {
+    throw new HttpError(400, "webhook_secret required");
+  }
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/channels/recall/webhook-secret",
+    body: { webhook_secret: args.webhook_secret.trim() },
   });
 };
 

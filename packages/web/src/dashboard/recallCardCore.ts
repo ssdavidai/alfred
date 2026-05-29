@@ -119,6 +119,15 @@ export interface RecallConfig {
   updated_at: number;
   api_key_set?: boolean;
   api_key_first6?: string | null;
+  /** True iff RECALL_WEBHOOK_SECRET is on file in the live ctrl-api .env.
+   *  Mirrors api_key_set; optional on the wire (older ctrl-api omits). */
+  webhook_secret_set?: boolean;
+  /** First 6 chars of the Svix signing secret, or null when unset. The
+   *  full value is NEVER round-tripped. */
+  webhook_secret_first6?: string | null;
+  /** The URL the operator pastes into Recall.ai's webhook dashboard
+   *  (ctrl-api builds it from $DOMAIN). Optional on the wire. */
+  webhook_url?: string | null;
 }
 
 /** GET /api/v1/channels/recall/usage response. */
@@ -173,11 +182,37 @@ export interface RecallStatus {
    * ctrl-api may omit).
    */
   webhook_secret_first6?: string | null;
+  /**
+   * True iff RECALL_WEBHOOK_SECRET is on file in the live ctrl-api .env.
+   * Drives the "API key set · webhook not wired" pill and the inline
+   * webhook-secret paste field on the configured panel. Optional on
+   * the wire (older ctrl-api may omit; the card treats `undefined` as
+   * "unknown" and assumes wired so older deployments don't regress).
+   */
+  webhook_secret_set?: boolean;
 }
 
 // ── derived card state ────────────────────────────────────────────────────
 
-export type RecallCardStatusKind = "disabled" | "configured" | "error";
+/**
+ * Four top-level card states the React layer renders off:
+ *
+ *   • disabled    — no API key on file. Pill = "Not connected".
+ *                   Render the API-key paste form.
+ *   • partial     — API key present, but RECALL_WEBHOOK_SECRET missing.
+ *                   Pill = "Webhook not wired". Render the full dial
+ *                   form AND a prominent webhook-secret paste field at
+ *                   the top — Recall.ai's bot deliveries will 401 at
+ *                   ctrl-api's inbound until the secret lands.
+ *   • configured  — both API key + webhook secret on file. Pill =
+ *                   "Connected". Full surface.
+ *   • error       — enabled but a probe returned a hard error.
+ */
+export type RecallCardStatusKind =
+  | "disabled"
+  | "partial"
+  | "configured"
+  | "error";
 
 export interface RecallCardState {
   /** Which top-level block renders. */
@@ -606,6 +641,35 @@ export function deriveRecallCardState(
       : `Bot in ${formValues.region}`;
 
   void now; // reserved for relative-time formatting on the address line.
+
+  // Webhook-secret posture. The flag is optional on the wire — pre-#153
+  // ctrl-api omits it; older deployments shouldn't regress to a yellow
+  // pill they have no way to clear, so an absent flag is treated as
+  // "wired" (the conservative default). Only an explicit `false`
+  // triggers the partial state.
+  const webhookSet =
+    s.config && typeof s.config.webhook_secret_set === "boolean"
+      ? s.config.webhook_secret_set
+      : null;
+  if (webhookSet === false) {
+    return {
+      status: "partial",
+      pillLabel: "Webhook not wired",
+      pillTone: "error",
+      heading: "Recall.ai webhook not wired",
+      description:
+        "API key set, but RECALL_WEBHOOK_SECRET is missing. Inbound " +
+        "deliveries from Recall.ai will be rejected until you paste " +
+        "the Svix signing secret below.",
+      address,
+      formValues,
+      visibleBots,
+      canEditDials: true,
+      canTest: false,
+      monthHours,
+      costAlertTriggered,
+    };
+  }
 
   return {
     status: "configured",

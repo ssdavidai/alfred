@@ -36,6 +36,7 @@ import {
   updateRecallConfig,
   validateRecallApiKey,
   setRecallApiKey,
+  setRecallWebhookSecret,
   testRecallWebhook,
   terminateRecallBot,
 } from "wasp/client/operations";
@@ -84,12 +85,17 @@ function ChannelCard({
   address,
   note,
   status,
+  pillOverride,
   children,
 }: {
   name: string;
   address: string;
   note: string;
   status: ChannelStatus;
+  /** Override the default pill string for this status tone — used by
+   *  RecallCard to surface "Unconfigured" / "Webhook not wired" instead
+   *  of the generic "Not connected" / "Needs attention" defaults. */
+  pillOverride?: string;
   children?: React.ReactNode;
 }) {
   const pillColor =
@@ -97,7 +103,8 @@ function ChannelCard({
       ? "var(--brass)"
       : "var(--marginalia)";
   const pillText =
-    status === "active"
+    pillOverride ??
+    (status === "active"
       ? "Connected"
       : status === "soon"
         ? "Coming soon"
@@ -105,7 +112,7 @@ function ChannelCard({
           ? "Starting"
           : status === "error"
             ? "Needs attention"
-            : "Not connected";
+            : "Not connected");
   return (
     <div className="border border-rule p-6 card-hover h-full">
       <div className="flex items-baseline justify-between mb-3">
@@ -142,17 +149,28 @@ export default function RecallCard() {
   const status = (statusData as RecallStatus | undefined) ?? null;
   const card = deriveRecallCardState(status);
 
+  // Pill copy upgrade — the four-state pill text Sir asked for. The
+  // ChannelCard's defaults render "Not connected" / "Needs attention";
+  // we override per-status so the principal sees the actual condition.
+  const pillOverride =
+    card.status === "disabled"
+      ? "Unconfigured"
+      : card.status === "partial"
+        ? "Webhook not wired"
+        : undefined;
+
   return (
     <ChannelCard
       name="Meeting bot"
       address={card.address}
       note="A second pair of ears for Zoom, Meet, Teams (via Recall.ai)."
       status={card.pillTone}
+      pillOverride={pillOverride}
     >
       {card.status === "disabled" && (
         <RecallDisabledPanel onValidated={refetch} />
       )}
-      {card.status === "configured" && (
+      {(card.status === "configured" || card.status === "partial") && (
         <RecallConfiguredPanel
           status={status}
           formInitial={card.formValues}
@@ -346,10 +364,11 @@ function RecallDisabledPanel({ onValidated }: { onValidated: () => void }) {
             type="password"
             value={apiKey}
             onChange={(e) => setApiKey(e.target.value)}
-            placeholder="Paste from recall.ai → Settings → API keys"
+            placeholder="rcl_… (paste from recall.ai → Settings → API keys)"
             autoComplete="off"
             spellCheck={false}
             disabled={busy}
+            aria-label="Recall.ai API key"
             className="w-full bg-transparent border border-rule px-2 py-1 font-mono text-[12px]"
           />
         </div>
@@ -583,9 +602,17 @@ function RecallConfiguredPanel({
     (typeof window !== "undefined" ? window.location.origin : "");
   const webhookUrl = useMemo(() => formatRecallWebhookUrl(origin), [origin]);
   const secretFirst6 =
-    typeof status?.webhook_secret_first6 === "string"
-      ? status.webhook_secret_first6
-      : null;
+    typeof status?.config?.webhook_secret_first6 === "string"
+      ? status.config.webhook_secret_first6
+      : typeof status?.webhook_secret_first6 === "string"
+        ? status.webhook_secret_first6
+        : null;
+  const webhookSecretSet =
+    typeof status?.config?.webhook_secret_set === "boolean"
+      ? status.config.webhook_secret_set
+      : typeof status?.webhook_secret_set === "boolean"
+        ? status.webhook_secret_set
+        : null;
   // RECALL_API_KEY fingerprint (PR3a) — surfaced on the rotation row.
   const keyFirst6 =
     typeof status?.config?.api_key_first6 === "string"
@@ -611,6 +638,84 @@ function RecallConfiguredPanel({
     { kind: "ok" | "err"; text: string } | null
   >(null);
   const rotateBusy = rotatePhase === "validating" || rotatePhase === "saving";
+
+  // ─── webhook-secret paste state ─────────────────────────────────────
+  //
+  // Mirrors the api-key rotate flow: a password input + Save button
+  // that calls setRecallWebhookSecret. Lives in the configured panel so
+  // both the "partial" (api_key set, webhook not wired — input shown
+  // open by default) and "configured" (both wired — input behind a
+  // Rotate affordance) states share one code path.
+  const [wsOpen, setWsOpen] = useState<boolean>(webhookSecretSet === false);
+  const [wsValue, setWsValue] = useState("");
+  const [wsPhase, setWsPhase] = useState<
+    "idle" | "saving" | "done" | "err"
+  >("idle");
+  const [wsMsg, setWsMsg] = useState<
+    { kind: "ok" | "err"; text: string } | null
+  >(null);
+  const wsBusy = wsPhase === "saving";
+
+  // Re-open the input automatically if the upstream flips to "not set"
+  // (e.g. after a tenant reset). Closing it requires an explicit
+  // Cancel.
+  useEffect(() => {
+    if (webhookSecretSet === false) setWsOpen(true);
+  }, [webhookSecretSet]);
+
+  async function saveWebhookSecret(e?: React.FormEvent) {
+    if (e) e.preventDefault();
+    const trimmed = wsValue.trim();
+    if (!trimmed || wsBusy) return;
+    setWsPhase("saving");
+    setWsMsg(null);
+    try {
+      const p: any = await setRecallWebhookSecret({
+        webhook_secret: trimmed,
+      });
+      if (!p?.ok) {
+        setWsPhase("err");
+        setWsMsg({
+          kind: "err",
+          text:
+            typeof p?.reason === "string" && p.reason
+              ? p.reason
+              : "ctrl-api refused to persist the webhook secret.",
+        });
+        return;
+      }
+      setWsPhase("done");
+      const first6 =
+        typeof p?.secret_first6 === "string" ? p.secret_first6 : null;
+      setWsMsg({
+        kind: "ok",
+        text:
+          p?.idempotent === true
+            ? `Same secret on file (${first6 ?? "?"}…). Nothing to do.`
+            : `Webhook wired (${first6 ?? "saved"}…). Restarting ctrl-api.`,
+      });
+      setWsValue("");
+      const eta =
+        typeof p?.eta_seconds === "number" && p.eta_seconds > 0
+          ? Math.min(p.eta_seconds, 30) * 1000
+          : 1500;
+      window.setTimeout(() => {
+        setWsOpen(false);
+        setWsMsg(null);
+        setWsPhase("idle");
+        onSettled();
+      }, eta);
+    } catch (err: any) {
+      setWsPhase("err");
+      setWsMsg({
+        kind: "err",
+        text:
+          err?.message ??
+          err?.data?.error ??
+          "Couldn't reach ctrl-api. Try again.",
+      });
+    }
+  }
 
   async function rotate(e?: React.FormEvent) {
     if (e) e.preventDefault();
@@ -745,6 +850,7 @@ function RecallConfiguredPanel({
               autoComplete="off"
               spellCheck={false}
               disabled={rotateBusy}
+              aria-label="Recall.ai API key"
               className="w-full bg-transparent border border-rule px-2 py-1 font-mono text-[12px]"
             />
             <div className="flex gap-3 items-baseline">
@@ -785,6 +891,123 @@ function RecallConfiguredPanel({
               >
                 {rotateMsg.kind === "ok" ? "✓ " : "✗ "}
                 {rotateMsg.text}
+              </p>
+            )}
+          </form>
+        )}
+      </div>
+
+      {/* Webhook signing secret row — sibling to the API-key row. Always
+          renders so the operator never has to dig into an expander to
+          find where to paste the signing secret. When the secret IS on
+          file we collapse to first6+Rotate; when it's NOT, the input is
+          open by default (driven by webhookSecretSet === false). */}
+      <div
+        className="border border-rule p-3 space-y-2"
+        style={
+          webhookSecretSet === false
+            ? { borderColor: "var(--brass)" }
+            : undefined
+        }
+      >
+        <div className="flex flex-wrap items-baseline gap-3 justify-between">
+          <div className="flex items-baseline gap-3 flex-wrap">
+            <div
+              className="font-mono text-[10px] uppercase tracking-[0.22em]"
+              style={{ color: "var(--marginalia)" }}
+            >
+              Webhook signing secret
+            </div>
+            <code
+              className="font-mono text-[12px]"
+              style={{ color: "var(--ink)" }}
+            >
+              {secretFirst6 ? `${secretFirst6}…` : "—"}
+            </code>
+            {webhookSecretSet === false && (
+              <span
+                className="font-body italic text-[12px]"
+                style={{ color: "var(--brass)" }}
+              >
+                Required — inbound deliveries 401 until set.
+              </span>
+            )}
+          </div>
+          {!wsOpen && (
+            <button
+              type="button"
+              onClick={() => {
+                setWsOpen(true);
+                setWsMsg(null);
+                setWsPhase("idle");
+              }}
+              disabled={wsBusy}
+              className="btn-ghost"
+            >
+              {webhookSecretSet === true ? "Rotate" : "Paste secret"}
+            </button>
+          )}
+        </div>
+        <p
+          className="font-body italic text-[12px]"
+          style={{ color: "var(--marginalia)" }}
+        >
+          From recall.ai → Webhooks → Signing secret. Starts with{" "}
+          <code>whsec_</code>.
+        </p>
+        {wsOpen && (
+          <form onSubmit={saveWebhookSecret} className="space-y-2 pt-2">
+            <input
+              type="password"
+              value={wsValue}
+              onChange={(e) => setWsValue(e.target.value)}
+              placeholder="whsec_…"
+              autoComplete="off"
+              spellCheck={false}
+              disabled={wsBusy}
+              aria-label="Recall.ai webhook signing secret"
+              className="w-full bg-transparent border border-rule px-2 py-1 font-mono text-[12px]"
+            />
+            <div className="flex gap-3 items-baseline">
+              <button
+                type="submit"
+                disabled={wsBusy || wsValue.trim().length === 0}
+                className="btn-ghost"
+              >
+                {wsPhase === "saving"
+                  ? "Saving + restarting…"
+                  : webhookSecretSet === true
+                    ? "Rotate secret"
+                    : "Save secret"}
+              </button>
+              {webhookSecretSet === true && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setWsOpen(false);
+                    setWsValue("");
+                    setWsMsg(null);
+                    setWsPhase("idle");
+                  }}
+                  disabled={wsBusy}
+                  className="btn-link"
+                >
+                  Cancel
+                </button>
+              )}
+            </div>
+            {wsMsg && (
+              <p
+                className="font-body italic text-[12px]"
+                style={{
+                  color:
+                    wsMsg.kind === "ok"
+                      ? "var(--marginalia)"
+                      : "var(--brass)",
+                }}
+              >
+                {wsMsg.kind === "ok" ? "✓ " : "✗ "}
+                {wsMsg.text}
               </p>
             )}
           </form>
@@ -1118,28 +1341,58 @@ function RecallConfiguredPanel({
                 className="font-mono text-[10px] uppercase tracking-[0.22em]"
                 style={{ color: "var(--marginalia)" }}
               >
-                Webhook secret (first 6)
+                Subscribe to these events
               </div>
-              <div className="flex items-center gap-3">
+              <ul
+                className="font-mono text-[12px] list-disc ml-5 space-y-1"
+                style={{ color: "var(--ink)" }}
+              >
+                <li>
+                  <code>bot.status_change</code> — lifecycle transitions
+                  (joining → in-meeting → leaving → done).
+                </li>
+                <li>
+                  <code>bot.done</code> — bot left the meeting cleanly.
+                </li>
+                <li>
+                  <code>bot.fatal</code> — bot failed to join or crashed
+                  mid-call.
+                </li>
+                <li>
+                  <code>bot.recording_done</code> — recording artefact is
+                  ready; ctrl-api persists the transcript URL onto the
+                  bot row.
+                </li>
+              </ul>
+              <p
+                className="font-body italic text-[12px]"
+                style={{ color: "var(--marginalia)" }}
+              >
+                <code>bot.transcription.message</code> is deferred — only
+                subscribe to it once in-meeting voice (PR #154) ships.
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <div
+                className="font-mono text-[10px] uppercase tracking-[0.22em]"
+                style={{ color: "var(--marginalia)" }}
+              >
+                Signing secret on file (first 6)
+              </div>
+              <div className="flex flex-wrap items-center gap-3">
                 <code
                   className="font-mono text-[12px] border border-rule p-2"
                   style={{ color: "var(--ink)" }}
                 >
                   {secretFirst6 ? `${secretFirst6}…` : "—"}
                 </code>
-                <button
-                  type="button"
-                  disabled
-                  title="Secret rotation lands in #113 PR3a; for now the secret is fixed at tenant init."
-                  className="btn-ghost opacity-50 cursor-not-allowed"
-                >
-                  Rotate secret
-                </button>
                 <span
                   className="font-body italic text-[12px]"
                   style={{ color: "var(--marginalia)" }}
                 >
-                  coming soon
+                  Pasted in the &ldquo;Webhook signing secret&rdquo;
+                  block above.
                 </span>
               </div>
             </div>
