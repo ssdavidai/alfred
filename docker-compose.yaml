@@ -695,6 +695,29 @@ services:
       MCP_APPROVAL_SECRET: ${MCP_APPROVAL_SECRET}
       MAX_CALL_SECONDS: "1800"
       IDLE_HANGUP_SECONDS: "60"
+      # ESPHome Native API listener (issue #112 — HA Voice). PR1 ships the
+      # connect+pair+idle skeleton; the voice_assistant audio flow lands in
+      # PR2/PR3 and the per-area budget in PR7. ESPHOME_API_ENABLED defaults
+      # to "0" inside the container — we flip it to "1" here so single-VM
+      # tenants pair with HA out of the box. HA_VOICE_API_TOKEN stays empty
+      # in PR1 (tailnet boundary per spec §5.5 Q7); PR2 wires it into the
+      # channel_tokens table from #111.
+      ESPHOME_API_ENABLED: "${ESPHOME_API_ENABLED:-1}"
+      ESPHOME_API_PORT: "6053"
+      ESPHOME_API_BIND: "0.0.0.0"
+      HA_VOICE_API_TOKEN: "${HA_VOICE_API_TOKEN:-}"
+      # Stable per-tenant seed for the synthetic ESPHome device's MAC. Empty
+      # default falls back to os.hostname(); tenants on shared hostnames
+      # (none today) would set this explicitly.
+      ESPHOME_TENANT_SEED: "${ESPHOME_TENANT_SEED:-}"
+      ESPHOME_FRIENDLY_NAME: "${ESPHOME_FRIENDLY_NAME:-Alfred}"
+    ports:
+      # ESPHome Native API on the tailnet. Plain TCP — not HTTP — so Caddy
+      # can't terminate it; HA's ESPHome integration expects no TLS on :6053
+      # (the noise-encrypted variant is out of scope for PR1, see spec §5.5).
+      # mDNS auto-discovery only works when this port is reachable from the
+      # network HA lives on; on a tailnet-only deploy, addressed by IP.
+      - "6053:6053"
     healthcheck:
       test: ["CMD-SHELL", "node -e \"require('http').get('http://127.0.0.1:9000/health', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))\""]
       interval: 30s

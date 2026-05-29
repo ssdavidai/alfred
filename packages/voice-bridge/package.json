@@ -18,6 +18,9 @@
     "ws": "^8.18.0",
     "@modelcontextprotocol/sdk": "^1.29.0"
   },
+  "optionalDependencies": {
+    "bonjour-service": "^1.4.0"
+  },
   "devDependencies": {
     "@types/node": "^22.10.0",
     "@types/ws": "^8.5.13",

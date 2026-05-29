@@ -28,6 +28,8 @@ import { config } from "./config.js";
 import { VoiceCall } from "./voice-call.js";
 import { handleTwimlInbound, TWIML_INBOUND_PATH } from "./twiml.js";
 import { connectAllMcp } from "./mcp-clients.js";
+import { computeIdentity, startEsphomeServer } from "./esphome-server.js";
+import { announceEsphomeMdns } from "./esphome-mdns.js";
 
 export function verifySig(tenantId: string, sig: string | null | undefined): boolean {
   if (!sig) return false;
@@ -157,6 +159,37 @@ httpServer.listen(config.port, () => {
 void connectAllMcp().catch((err) => {
   console.error("[mcp] connectAllMcp threw (continuing):", err);
 });
+
+// ── ESPHome Native API listener (issue #112, PR1 skeleton) ──────────────────
+// Boots a second TCP listener on :6053 that speaks the ESPHome Native API.
+// Opt-in via ESPHOME_API_ENABLED so we don't surprise existing tenants on
+// rollout — flip to "1" in docker-compose once the audio path is wired in PR2.
+// The Twilio path above is untouched; both listeners share the Node event
+// loop but the codecs are unrelated.
+if (config.esphomeApiEnabled) {
+  const identity = computeIdentity({
+    tenantSeed: config.esphomeTenantSeed || undefined,
+    friendlyName: config.esphomeFriendlyName,
+  });
+  const handle = startEsphomeServer({
+    port: config.esphomeApiPort,
+    bindHost: config.esphomeApiBind,
+    identity,
+    password: config.haVoiceApiToken || undefined,
+  });
+  handle.ready
+    .then(() =>
+      announceEsphomeMdns({
+        port: config.esphomeApiPort,
+        identity,
+      }),
+    )
+    .catch((err) => {
+      console.error("[esphome] startup failed (continuing without HA leg):", err);
+    });
+} else {
+  console.log("[esphome] ESPHOME_API_ENABLED!=1 — HA voice leg disabled");
+}
 
 // Surface uncaught failures rather than dying silently.
 process.on("uncaughtException", (err) => {
