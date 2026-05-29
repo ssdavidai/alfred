@@ -60,6 +60,7 @@ import { registerPaperclipChannelRoutes } from "./routes/channels_paperclip.js";
 import { registerComposioWebhookRoutes } from "./routes/composioWebhook.js";
 import { registerAlfredJournalRoutes } from "./routes/alfredJournal.js";
 import { registerAlfredDeliverRoutes } from "./routes/alfredDeliver.js";
+import { registerFilesRoutes } from "./routes/files.js";
 
 export interface RouteParams {
   [key: string]: string;
@@ -181,6 +182,11 @@ export function createApiServer(): http.Server {
   // ONE Alfred, always. See docs/design/one-alfred.md.
   registerAlfredJournalRoutes();
   registerAlfredDeliverRoutes();
+  // Store 5 (files) — principal-facing blob store. Issue #114 PR 1
+  // ships volume + table + REST routes; PR 2 wires the MCP tools,
+  // PR 3 the dashboard, PR 4 content extraction. See
+  // docs/specs/issue-114-local-file-storage.md.
+  registerFilesRoutes();
 
   const server = http.createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const start = Date.now();

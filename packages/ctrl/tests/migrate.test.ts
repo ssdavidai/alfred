@@ -38,8 +38,8 @@ describe("state.db migration runner", () => {
     const v = runMigrations(db);
     // The latest version moves as new migrations land. Today: 3
     // (0001_fix_pack + 0002_alfred_journal + 0003_tailscale_connection).
-    assert.equal(v, 3, "migrated to latest version");
-    assert.equal(userVersion(db), 3);
+    assert.equal(v, 6, "migrated to latest version");
+    assert.equal(userVersion(db), 6);
     assert.ok(cols(db, "observation").includes("processed_at"), "0001: processed_at present after migrate");
     // 0002: alfred_journal + alfred_principal tables present.
     const tables = (
@@ -99,7 +99,7 @@ describe("state.db migration runner", () => {
     db.exec(schema);
     runMigrations(db);
     const v2 = runMigrations(db);
-    assert.equal(v2, 3);
+    assert.equal(v2, 6);
     assert.equal(
       cols(db, "observation").filter((c) => c === "processed_at").length,
       1,

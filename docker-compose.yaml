@@ -289,6 +289,12 @@ services:
       # service: the run data is not even visible to the rest of the stack.
       # See docs/codex-builder-runtime.md §5.
       - hermes_codex_work:/work
+      # Store 5 (files) — read-only mount of the principal-facing blob
+      # volume. PR 2 of issue #114 will give Hermes a files__read MCP
+      # tool that reaches blobs via this mount; ctrl-api is the SOLE
+      # writer (mounted :rw in its own stanza below). docs/specs/
+      # issue-114-local-file-storage.md §5.1.
+      - files_data:/files:ro
     tmpfs:
       - /tmp:size=256m
     environment:
@@ -389,6 +395,11 @@ services:
       - vault_data:/vault
       - alfred_data:/app/data
       - hermes_data:/root/.hermes
+      # Store 5 (files) — read-only mount of the principal-facing blob
+      # volume. The vault daemon's PR-4 extraction pipeline will read
+      # uploaded files via this mount; ctrl-api stays the SOLE writer.
+      # docs/specs/issue-114-local-file-storage.md §5.1.
+      - files_data:/files:ro
     tmpfs:
       - /tmp:size=256m
     environment:
@@ -436,6 +447,11 @@ services:
       - state_data:/state
       - ingest_data:/ingest
       - cold_data:/cold
+      # Store 5 (files) — principal-facing blob volume. ctrl-api is the
+      # SOLE writer (`:rw`); hermes + the alfred daemon mount this same
+      # volume `:ro` and write only through POST /api/v1/files/upload.
+      # Issue #114 PR 1; see docs/specs/issue-114-local-file-storage.md §5.1.
+      - files_data:/files
       # ctrl-api restarts sibling containers (worker ops, chore runs).
       - /var/run/docker.sock:/var/run/docker.sock
       # The host compose dir, bind-mounted RW. ctrl-api modules
@@ -1737,6 +1753,11 @@ services:
 
 volumes:
   vault_data:
+  # Store 5 (files) — principal-facing opaque blob volume. ctrl-api
+  # owns this volume :rw; hermes + the alfred daemon mount it :ro and
+  # write only through POST /api/v1/files/upload. Issue #114 PR 1.
+  # docs/specs/issue-114-local-file-storage.md.
+  files_data:
   hermes_data:
   # Sealed builder runtime workspace — used by the codex-builder Hermes
   # profile only. Owned uid 10001 mode 0700 by the init container (PR 4).

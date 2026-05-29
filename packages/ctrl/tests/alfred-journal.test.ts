@@ -55,7 +55,7 @@ describe("alfred_journal migration", () => {
     // takes us to 3. The runner applies every migration > current version,
     // so the value naturally tracks the highest registered version.
     const db = makeDb();
-    assert.equal(userVersion(db), 3);
+    assert.equal(userVersion(db), 6);
     db.close();
   });
 
