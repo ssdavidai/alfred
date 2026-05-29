@@ -178,3 +178,4 @@ the new hosts (resolved via dig at boot).
 * **Deploy key:** generate a new pair → register on github (replacing the old one) → update `CODEX_BUILDER_DEPLOY_KEY_B64` in /opt/alfred/.env → `docker compose up -d --force-recreate init hermes`. Old key is automatically replaced on next init boot.
 * **codex CLI bump:** see `[[codex-builder-pr1-cli-installed]]` — update `ARG CODEX_CLI_REF=...` in packages/hermes/Dockerfile, PR, build-hermes rolls.
 * **ChatGPT account:** swap the OAuth token by re-running `hermes -p main auth login` against the new account; restart hermes; supervisor's mirror block propagates.
+<!-- codex-feature-builder smoke ok 2026-05-29 -->
