@@ -22,6 +22,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  test-naming-guard:
+    # Cheap fail-fast guard against the glob-escape bug PR #133 fixed: the
+    # ctrl/web test runners glob `tests/*.test.ts` (suffix convention). A file
+    # named `test_foo.ts` (prefix convention) is silently invisible to the
+    # runner — that's how #110 PR1's whole batch of HA-channel tests shipped
+    # without running. This step rejects the prefix shape so the regression
+    # cannot recur.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reject tests/test_*.ts naming (must be *.test.ts)
+        run: |
+          bad=$(find packages/ctrl/tests packages/web/src -name 'test_*.ts' -not -name '*.test.ts' 2>/dev/null || true)
+          if [ -n "$bad" ]; then
+            echo "FAIL — these test files use the prefix-naming convention which the runner glob skips:"
+            echo "$bad"
+            echo "Rename to *.test.ts (suffix convention) so they actually run."
+            exit 1
+          fi
+
   build-ctrl:
     runs-on: ubuntu-latest
     steps:
