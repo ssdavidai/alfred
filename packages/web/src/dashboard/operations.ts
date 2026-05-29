@@ -2757,7 +2757,10 @@ function wireRowToCardRow(r: ChannelTokenWireRow) {
  *  shipped in #111 PR4. Returns `{ tokens: ChannelTokenRow[] }` — the
  *  card's haConversationCardCore.ts reads `t.scope.haInstanceId`, so
  *  we normalise the wire's `scope_json` → `scope` here. */
-export const getHaInstalledTokens = async (_args: unknown, context: any) => {
+export const getHaInstalledTokens = async (
+  _args: unknown,
+  context: any,
+): Promise<any> => {
   const instance = await getUserInstance(context);
   try {
     const raw = (await proxyToTenant(instance, {
@@ -2792,7 +2795,7 @@ export const getHaInstalledTokens = async (_args: unknown, context: any) => {
 export const mintHaChannelToken = async (
   args: { label?: string; installId?: string },
   context: any,
-) => {
+): Promise<any> => {
   const label =
     typeof args?.label === "string" && args.label.trim()
       ? args.label.trim()
