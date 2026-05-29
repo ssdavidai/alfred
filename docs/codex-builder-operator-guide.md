@@ -212,3 +212,4 @@ doctor` reports `✓ auth`.
 > Hermes's own auth.json (the chat path), which is a separate concern and is
 > typically already valid.
 
+<!-- codex-feature-builder smoke ok 2026-05-29 -->
