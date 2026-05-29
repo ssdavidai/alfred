@@ -82,6 +82,8 @@ resolve_host() {
 BUILTIN_HOSTS=(
     # OpenAI (codex CLI's only LLM provider)
     api.openai.com
+    auth.openai.com         # device-auth flow (codex login --device-auth)
+    platform.openai.com     # codex login follow-up
     chatgpt.com
     # Package registries (a codex-driven `npm ci` / `pip install` / etc).
     registry.npmjs.org
