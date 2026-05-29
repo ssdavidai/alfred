@@ -36,11 +36,12 @@ describe("state.db migration runner", () => {
     const db = new DatabaseSync(":memory:");
     db.exec(schema);
     const v = runMigrations(db);
-    // Latest version moves as new migrations land. Today: 6
+    // Latest version moves as new migrations land. Today: 8
     // (0001_fix_pack + 0002_alfred_journal + 0003_tailscale_connection
-    // + 0004_channel_tokens + 0005_ha_channel + 0006_files_table).
-    assert.equal(v, 6, "migrated to latest version");
-    assert.equal(userVersion(db), 6);
+    // + 0004_channel_tokens + 0005_ha_channel + 0006_files_table
+    // + 0007_recall + 0008_ha_event_subscription).
+    assert.equal(v, 8, "migrated to latest version");
+    assert.equal(userVersion(db), 8);
     assert.ok(cols(db, "observation").includes("processed_at"), "0001: processed_at present after migrate");
     // 0002: alfred_journal + alfred_principal tables present.
     const tables = (
@@ -106,6 +107,25 @@ describe("state.db migration runner", () => {
       );
     }
 
+    // 0008: ha_event_subscription table present (issue #110 PR 4).
+    assert.ok(
+      tables.includes("ha_event_subscription"),
+      "0008: ha_event_subscription table created",
+    );
+    const subCols = cols(db, "ha_event_subscription");
+    for (const required of [
+      "id",
+      "filter_json",
+      "started_at",
+      "last_event_at",
+      "closed_at",
+    ]) {
+      assert.ok(
+        subCols.includes(required),
+        `0008: ha_event_subscription.${required} present`,
+      );
+    }
+
     db.close();
   });
 
@@ -114,7 +134,7 @@ describe("state.db migration runner", () => {
     db.exec(schema);
     runMigrations(db);
     const v2 = runMigrations(db);
-    assert.equal(v2, 6);
+    assert.equal(v2, 8);
     assert.equal(
       cols(db, "observation").filter((c) => c === "processed_at").length,
       1,

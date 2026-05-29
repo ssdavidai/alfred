@@ -7,39 +7,45 @@
 //
 // SPEC: docs/specs/issue-110-ha-deep-integration.md §3 (MCP surface) +
 //       §5 (the seven /api/v1/channels/ha/* contracts) +
-//       §6 PR2 (this PR's scope).
+//       §6 PR2 (read tools) + §6 PR4 (write tools).
 //
-// This file ships ONLY the read-side wave of the tool catalogue. The write
-// half — ha__call_service, ha__propose_automation, ha__apply_proposal,
-// ha__rollback_snapshot, ha__subscribe_events — is reserved for PR3 and
-// stubbed below as `{ deferred: true, target_pr: "PR3" }` placeholders so
-// the catalogue's shape is final from PR2 forward (no rename + skill-file
-// churn between PR2 and PR3). The placeholders are intentionally callable:
-// a workers-profile agent that picks one up gets a deterministic
-// "this lands in PR3" response instead of a tool-not-found error.
+// CATALOGUE — 16 tools:
+//   * 11 reads in HASS_READ_TOOLS (PR2)
+//   * 5 writes in HASS_WRITE_TOOLS (PR4) — alias `HASS_DEFERRED_TOOLS`
+//     kept for back-compat with the PR2 wave.
 //
 // ──────────────────────────────────────────────────────────────────────
-// Loop-guard contract — what PR3 inherits from PR1, restated here so the
-// reader of this file sees it (the spec lives in
-// packages/ctrl/src/db/migrations/0005_ha_channel.sql header).
+// Loop-guard contract (PR1 schema → PR4 enforcement). Load-bearing.
 // ──────────────────────────────────────────────────────────────────────
 //
-// Every PR3 write tool will:
+// The fundamental safety boundary between #110 (Alfred → HA writes) and
+// #111 (HA → Alfred conversation agent) is that Alfred's OWN writes
+// must not flow back through the WS event stream as principal-relevant
+// signals. Without the guard, `ha__call_service` toggling the kitchen
+// light would echo back as a state_changed event → ingest as a
+// stream_event → matter the Desk presents as a card → propose a chore
+// → call ha__call_service again. A closed loop.
 //
-//   1. mint a `decision_ref` (ulid) BEFORE the upstream HA call,
-//   2. persist a row in `ha_run` keyed (entity_id, created_at,
-//      decision_ref) BEFORE the upstream HA call,
-//   3. then issue the HA REST/WS request.
+// Every PR4 write tool:
+//   1. takes a `decision_ref` (vault path or ulid) in its input — the
+//      agent's contract is "I decided X based on signal Y, run it";
+//   2. delegates to ctrl-api, which persists a row in `ha_run` keyed
+//      (entity_id, created_at, decision_ref) BEFORE issuing the upstream
+//      HA request;
+//   3. then ctrl-api issues the HA REST/WS request.
 //
-// HaWatcherWorkflow (lands separately in PR3 alongside ha__subscribe_events)
-// uses the partial index `idx_ha_run_entity_recent` from migration 0005 to
-// SUPPRESS state_changed events that fall inside a 30s window of an
-// Alfred-originated write. Without this guard, Alfred toggling the kitchen
-// light would echo back as a signal → Desk card → propose chore → call
-// ha__call_service again. A closed loop.
+// HaWatcherWorkflow (PR3, in alfred-learn) uses the partial index
+// `idx_ha_run_entity_recent` from migration 0005 to SUPPRESS state_changed
+// events that fall inside a 30s window of an Alfred-originated write.
 //
-// PR2 does not write — but the file header reserves the contract so any
-// PR3 implementer reads this comment block before touching a write tool.
+// Loop guard on the ctrl-api side: a second write to the SAME entity_id
+// within HA_LOOP_GUARD_COOLDOWN_MS (default 60s) with the SAME
+// decision_ref returns 409 CONFLICT. A different decision_ref always
+// passes — that means the agent re-derived a decision from a NEW signal.
+//
+// The MCP tool's zod schema enforces decision_ref presence + shape on
+// ha__call_service / ha__apply_proposal / ha__rollback_snapshot BEFORE
+// any ctrl-api call fires.
 
 import { z } from "zod";
 import type { ToolDef } from "./types.js";
@@ -56,37 +62,6 @@ const EntityIdParam = z
   .describe(
     "An HA entity id in dotted form `<domain>.<object_id>` (e.g. `light.kitchen_main`, `binary_sensor.front_door`). NEVER invent these — resolve via `ha__list_entities` or `ha__resolve_entity` first.",
   );
-
-// The marker every PR3-deferred tool returns so callers can distinguish
-// "tool not implemented yet" from "tool failed at runtime".
-const DEFERRED_MARKER = { deferred: true, target_pr: "PR3" } as const;
-
-// Helper: build a ProxyOptions that lands on a synthetic ctrl-api route
-// which doesn't exist yet. Each deferred tool wires the same path it
-// WILL hit in PR3 so the catalogue's surface area is the spec-final
-// shape. Until PR3 wires those routes, the call returns 404 from
-// ctrl-api — but the description block tells the caller (and the
-// model) "this is a PR3 surface", and the schema is already shaped
-// for PR3's signature. PR3's diff against PR2 is then a 1-line
-// `deferred: false` flip plus the implementation.
-//
-// The deferred buildRequest is never actually fired by the MCP server's
-// tool-call wrapper — we override it inside runTool via a sentinel path
-// match. Concretely: stdio-app + index.ts invoke `runTool(ctx, tool,
-// args)` which calls `tool.buildRequest(args)` and then `proxyToCtrl()`.
-// Both of those produce a structurally-valid ProxyOptions object but
-// the actual `path` is "/api/v1/channels/ha/__deferred__/<tool>" — a
-// path ctrl-api WILL 404 on, which is fine: the test suite calls
-// `tool.buildRequest()` directly and asserts the `deferred` marker
-// (see hass.test.ts), and the at-runtime case is documented in each
-// deferred tool's description so the model surfaces the PR3 message.
-function deferredRequest(toolName: string) {
-  return {
-    method: "POST" as const,
-    path: `/api/v1/channels/ha/__deferred__/${toolName}`,
-    body: { ...DEFERRED_MARKER, tool: toolName },
-  };
-}
 
 // ─── 11 read tools (PR2 scope) ──────────────────────────────────────────
 
@@ -287,19 +262,24 @@ export const HASS_READ_TOOLS: ToolDef[] = [
   },
 ];
 
-// ─── 5 PR3-deferred placeholders (write/proposal/event surfaces) ────────
+// ─── 5 write/proposal/event tools (PR4 scope) ───────────────────────────
 //
-// Each placeholder pins the spec-final tool name + input schema PR3 will
-// implement. PR3's diff = swap each `buildRequest: () => deferredRequest()`
-// for the real ProxyOptions builder, remove the deferred-marker comment
-// at the bottom of the tool's description, and wire the loop-guard
-// contract restated in this file's header.
+// PR4 fills in what PR2 left as `deferred` stubs. The exported binding
+// `HASS_DEFERRED_TOOLS` is kept (alias) so the registry that pinned
+// `HASS_READ_TOOLS + HASS_DEFERRED_TOOLS = 16` still resolves, AND so
+// downstream callers that imported the old name keep working.
+//
+// LOOP-GUARD CONTRACT — see this file's header. ha__call_service requires
+// `decision_ref` (no client-side mint) — the agent must have already
+// derived a decision from a signal before it calls this tool. The MCP
+// tool returns an error WITHOUT calling ctrl-api when `decision_ref` is
+// missing (the zod schema enforces it).
 
-export const HASS_DEFERRED_TOOLS: ToolDef[] = [
+export const HASS_WRITE_TOOLS: ToolDef[] = [
   {
     name: "ha__call_service",
     description:
-      "PR3. Call any HA service (REST `POST /api/services/:domain/:service`) — turn lights on/off, set thermostat, lock doors, play media. **PR3 contract:** writes a `ha_run` audit row with a freshly-minted `decision_ref` BEFORE issuing the upstream call (loop-guard — see this file's header). PR2 returns `{deferred: true, target_pr: \"PR3\"}` so a workers-profile agent that reaches for it gets a clear message instead of a runtime error.",
+      "Call any HA service (REST `POST /api/services/:domain/:service`) — turn lights on/off, set thermostat, lock doors, play media. **Loop-guard contract:** REQUIRES a `decision_ref` (vault path or ulid of the decision row that authorised this write). ctrl-api persists a `ha_run` row with that decision_ref BEFORE firing the upstream call; HaWatcherWorkflow uses the same key to suppress the echo event so Alfred never loops on his own writes. A second call within 60s to the same entity_id with the SAME decision_ref returns 409 LOOP_GUARD — pass a different decision_ref (= you re-derived the decision from a new signal) or wait the cooldown.",
     inputSchema: z.object({
       domain: z
         .string()
@@ -309,14 +289,11 @@ export const HASS_DEFERRED_TOOLS: ToolDef[] = [
         .string()
         .min(1)
         .describe("Service within the domain (e.g. `turn_on`, `turn_off`, `set_temperature`)."),
-      entity_id: EntityIdParam.optional().describe(
-        "Target entity. Either `entity_id` or `area_id` (or both) — at least one required when PR3 ships.",
-      ),
-      area_id: z
-        .string()
+      target: z
+        .record(z.string(), z.unknown())
         .optional()
         .describe(
-          "Target area. Service applies to every matching entity in the area.",
+          "HA target block (e.g. `{entity_id: 'light.kitchen_main'}` or `{area_id: 'kitchen'}`).",
         ),
       data: z
         .record(z.string(), z.unknown())
@@ -324,49 +301,75 @@ export const HASS_DEFERRED_TOOLS: ToolDef[] = [
         .describe(
           "Service-specific payload (e.g. `{brightness_pct: 60, transition: 2}` for `light.turn_on`).",
         ),
+      decision_ref: z
+        .string()
+        .min(6)
+        .max(256)
+        .regex(
+          /^[\x21-\x7E]+$/,
+          "decision_ref must be printable ASCII with no whitespace",
+        )
+        .describe(
+          "Vault path or ulid of the `decision/` record that authorised this write. REQUIRED. Alfred refuses without it (no client-side mint — the contract is 'I decided X based on signal Y, run it').",
+        ),
     }),
-    buildRequest: () => deferredRequest("ha__call_service"),
+    buildRequest: ({ domain, service, target, data, decision_ref }) => ({
+      method: "POST",
+      path: "/api/v1/channels/ha/service",
+      body: {
+        domain,
+        service,
+        ...(target !== undefined ? { target } : {}),
+        ...(data !== undefined ? { data } : {}),
+        decision_ref,
+      },
+    }),
   },
 
   {
     name: "ha__propose_automation",
     description:
-      "PR3. Enqueue an automation proposal — a draft YAML + a description of what it does — into the `ha_proposal` queue for principal approval. Does NOT apply anything. Returns `{proposal_id}` once PR3 ships; PR2 returns `{deferred: true, target_pr: \"PR3\"}`. The approval gate is `/api/v1/channels/ha/proposal/approve` and Sir's Brief card; only after approval does Alfred call the apply path (which respects the loop-guard).",
+      "Enqueue a baseline automation pack proposal — a draft YAML + a one-line summary — into `ha_proposal` for principal approval. Does NOT apply anything by itself; surfaces on the Desk/Brief approval card. Returns `{proposal_id, status:'pending'}`. The principal approves via the Desk card, and `ha__apply_proposal(proposal_id, decision_ref)` then runs the actual writes (with the loop-guard).",
     inputSchema: z.object({
-      alias: z
+      kind: z
         .string()
         .min(1)
-        .describe("Human-readable name (e.g. 'Morning routine — weekdays')."),
-      description: z
+        .describe(
+          "Pack kind (e.g. `automation`, `scene`, `morning_routine`, `motion_lighting`).",
+        ),
+      summary: z
+        .string()
+        .min(1)
+        .describe("One-line description Sir sees in the Brief approval card."),
+      yaml: z
+        .string()
+        .min(1)
+        .describe(
+          "The full HA automation YAML to install on approval (multi-line string).",
+        ),
+      gap_id: z
         .string()
         .optional()
         .describe(
-          "Plain-language explanation Sir sees in the approval card.",
+          "If this proposal addresses a row in `ha_gap`, link it here so the gap closes when applied.",
         ),
-      mode: z
-        .enum(["single", "restart", "queued", "parallel"])
-        .optional()
-        .describe(
-          "HA automation `mode` field. Default `single` — see HA docs.",
-        ),
-      triggers: z
-        .array(z.record(z.string(), z.unknown()))
-        .describe("HA trigger blocks — at least one."),
-      conditions: z
-        .array(z.record(z.string(), z.unknown()))
-        .optional()
-        .describe("HA condition blocks. Optional."),
-      actions: z
-        .array(z.record(z.string(), z.unknown()))
-        .describe("HA action blocks — at least one."),
     }),
-    buildRequest: () => deferredRequest("ha__propose_automation"),
+    buildRequest: ({ kind, summary, yaml, gap_id }) => ({
+      method: "POST",
+      path: "/api/v1/channels/ha/proposal",
+      body: {
+        kind,
+        summary,
+        yaml,
+        ...(gap_id !== undefined ? { gap_id } : {}),
+      },
+    }),
   },
 
   {
     name: "ha__apply_proposal",
     description:
-      "PR3. Apply an already-approved `ha_proposal` — installs automations + scenes + helpers + area assignments listed in the proposal pack. Requires the proposal's status to be `approved` AND a `decision_ref` (the Desk/Brief click that authorised it — Alfred refuses without). Every write minted by this call rides the loop-guard contract (see this file's header). PR2 returns `{deferred: true, target_pr: \"PR3\"}`.",
+      "Apply an approved `ha_proposal` — installs the automation YAML against HA's `automation/config/<id>` endpoint, captures a snapshot of the prior YAML first (for rollback), persists a `ha_run` row with the loop-guard `decision_ref`. Returns `{proposal_id, snapshot_id, run_id}`.",
     inputSchema: z.object({
       proposal_id: z
         .string()
@@ -374,45 +377,93 @@ export const HASS_DEFERRED_TOOLS: ToolDef[] = [
         .describe("ULID of the row in `ha_proposal` to apply."),
       decision_ref: z
         .string()
-        .min(1)
+        .min(6)
+        .max(256)
+        .regex(
+          /^[\x21-\x7E]+$/,
+          "decision_ref must be printable ASCII with no whitespace",
+        )
         .describe(
-          "Vault path of the `decision/` record that authorised this apply. Alfred refuses without it.",
+          "Vault path or ulid of the `decision/` record that authorised this apply. REQUIRED.",
+        ),
+      automation_id: z
+        .string()
+        .optional()
+        .describe(
+          "Override the HA automation id the proposal installs under. Defaults to the proposal id.",
         ),
     }),
-    buildRequest: () => deferredRequest("ha__apply_proposal"),
+    buildRequest: ({ proposal_id, decision_ref, automation_id }) => ({
+      method: "POST",
+      path: `/api/v1/channels/ha/proposal/${encodeURIComponent(proposal_id)}/apply`,
+      body: {
+        decision_ref,
+        ...(automation_id !== undefined ? { automation_id } : {}),
+      },
+    }),
   },
 
   {
     name: "ha__rollback_snapshot",
     description:
-      "PR3. Roll back a previously-applied automation/scene write to the YAML snapshot ctrl-api captured BEFORE the change (table `ha_snapshot`, populated by `ha__apply_proposal`). **When to call:** Sir says 'undo that' or the Brief surfaces a rollback affordance after a failed apply. PR2 returns `{deferred: true, target_pr: \"PR3\"}`.",
+      "Roll back to a previously-captured `ha_snapshot`'s YAML — restores the pre-apply automation config to HA. **When to call:** Sir says 'undo that' OR the Brief surfaces a rollback affordance after a failed apply. Snapshot is consumed (the row gets `restored_at` set) — rolling back twice returns 409 CONFLICT.",
     inputSchema: z.object({
       snapshot_id: z
         .string()
         .min(1)
         .describe("ULID of the row in `ha_snapshot` to restore."),
+      decision_ref: z
+        .string()
+        .min(6)
+        .max(256)
+        .regex(
+          /^[\x21-\x7E]+$/,
+          "decision_ref must be printable ASCII with no whitespace",
+        )
+        .describe(
+          "Vault path or ulid of the `decision/` record that authorised the rollback. REQUIRED.",
+        ),
     }),
-    buildRequest: () => deferredRequest("ha__rollback_snapshot"),
+    buildRequest: ({ snapshot_id, decision_ref }) => ({
+      method: "POST",
+      path: `/api/v1/channels/ha/snapshot/${encodeURIComponent(snapshot_id)}/rollback`,
+      body: { decision_ref },
+    }),
   },
 
   {
     name: "ha__subscribe_events",
     description:
-      "PR3. Subscribe to a filtered HA WS event stream (e.g. `state_changed` for one entity, or `automation_triggered` for one automation). Returns a subscription handle PR3 will wire through HaWatcherWorkflow's long-lived WS connection — the watcher is the only thing in the stack that holds the actual WS, and the loop-guard suppresses Alfred-originated echoes here. PR2 returns `{deferred: true, target_pr: \"PR3\"}`.",
+      "Open a long-lived HA WS event subscription. Returns `{subscription_id, filter, started_at}`. ctrl-api spawns a WS subscriber against HA's `subscribe_events` and streams matching events into `ha_event` (the diagnostic ring). Close with `ha__unsubscribe_events(subscription_id)` (PR4 — DELETE /subscribe/:id). NOTE: the HaWatcherWorkflow already runs a household-wide watcher in PR3 — this tool is for narrow, agent-driven follow-up subscriptions (e.g. 'watch this door for the next 5 minutes').",
     inputSchema: z.object({
-      event_type: z
-        .string()
-        .min(1)
-        .describe(
-          "HA event type (e.g. `state_changed`, `automation_triggered`, `call_service`).",
-        ),
-      entity_id: EntityIdParam.optional().describe(
-        "Optional entity-id filter — narrows the firehose to one entity.",
-      ),
+      filter: z
+        .object({
+          event_type: z
+            .string()
+            .min(1)
+            .optional()
+            .describe(
+              "HA event type to subscribe to (e.g. `state_changed`, `automation_triggered`).",
+            ),
+          entity_id: EntityIdParam.optional().describe(
+            "Narrow to one entity. Filter applied client-side after the WS event arrives.",
+          ),
+        })
+        .optional()
+        .describe("Optional filter — omit to subscribe to the household firehose."),
     }),
-    buildRequest: () => deferredRequest("ha__subscribe_events"),
+    buildRequest: ({ filter }) => ({
+      method: "POST",
+      path: "/api/v1/channels/ha/subscribe",
+      body: filter !== undefined ? { filter } : {},
+    }),
   },
 ];
+
+// Back-compat alias — PR2 exported these stubs under `HASS_DEFERRED_TOOLS`,
+// and downstream callers (registry.ts, tests) referenced that name. Keep
+// the binding live so the PR2→PR4 transition doesn't churn import sites.
+export const HASS_DEFERRED_TOOLS: ToolDef[] = HASS_WRITE_TOOLS;
 
 // Final catalogue: 16 tools total = 11 read + 5 PR3 placeholders. Order
 // kept deliberately (reads first, deferred last) so the model that lists

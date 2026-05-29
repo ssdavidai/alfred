@@ -28,11 +28,13 @@
 //     here.
 
 import { addRoute } from "../server.js";
-import { sendJson, ValidationError, ApiError } from "../errors.js";
+import { sendJson, ValidationError, ApiError, ConflictError, NotFoundError } from "../errors.js";
 import { getStateDb } from "../../db/state.js";
 import { appendJournal } from "../../db/alfredJournal.js";
 import { channelTokenBearer } from "../auth.js";
+import { ulid } from "../../db/ulid.js";
 import fs from "node:fs";
+import { WebSocket } from "ws";
 
 const HERMES_MAIN_URL =
   process.env.HERMES_GATEWAY_URL ?? "http://hermes:18789";
@@ -970,6 +972,13 @@ export function registerHaChannelRoutes(): void {
   addRoute("GET", "/api/v1/channels/ha/registry", async ({ res }) => {
     sendJson(res, 200, readRegistry());
   });
+
+  // #110 PR4 — the write surface (call_service, proposal create/apply,
+  // snapshot rollback, subscribe/unsubscribe). Registration deferred
+  // here so the write routes are colocated with the read routes for
+  // server.ts wiring AND callable from a single registerHaChannelRoutes()
+  // entry point.
+  registerHaWriteRoutes();
 }
 
 /**
@@ -982,3 +991,1038 @@ export function registerHaChannelRoutes(): void {
  * of routes.
  */
 export const registerChannelsHaRoutes = registerHaChannelRoutes;
+
+// ═════════════════════════════════════════════════════════════════════════
+// #110 PR4 — HA WRITE SURFACE
+// ═════════════════════════════════════════════════════════════════════════
+//
+// PR4 fills in the 5 PR3-deferred MCP tools (ha__call_service /
+// propose_automation / apply_proposal / rollback_snapshot /
+// subscribe_events) by adding the matching ctrl-api routes.
+//
+// LOAD-BEARING CONTRACT — every write must:
+//   1. carry a non-empty `decision_ref` in the body (the agent's contract:
+//      "I decided X based on signal Y, run it");
+//   2. persist a `ha_run` row with that `decision_ref` BEFORE the upstream
+//      HA call returns (so the loop-guard partial index `idx_ha_run_entity_recent`
+//      lights up in HaWatcherWorkflow's probe);
+//   3. respect the loop guard — a second write to the same entity within
+//      HA_LOOP_GUARD_COOLDOWN_MS (default 60s) is rejected 409 unless the
+//      new decision_ref is different (different decision = fresh signal).
+//
+// None of these write routes are added to VOICE_BRIDGE_ALLOWLIST — voice
+// writes flow through `alfred__act_on_decision`, not raw `ha__call_service`.
+
+const HA_LOOP_GUARD_COOLDOWN_MS = Number(
+  process.env.HA_LOOP_GUARD_COOLDOWN_MS ?? "60000",
+);
+
+const HA_WRITE_TIMEOUT_MS = Number(
+  process.env.HA_WRITE_TIMEOUT_MS ?? "15000",
+);
+
+// `decision_ref` accepts vault paths ("decision/2026-05-29-foo.md"), ulids,
+// or short slugs. Format gate: must be a non-empty string of printable ASCII,
+// length 6..256 — keeps the agents honest without locking us in to a single
+// encoding.
+const DECISION_REF_RE = /^[\x21-\x7E]{6,256}$/;
+
+function assertDecisionRef(raw: unknown): string {
+  if (typeof raw !== "string" || raw.length === 0) {
+    throw new ValidationError("decision_ref is required and must be a non-empty string");
+  }
+  if (!DECISION_REF_RE.test(raw)) {
+    throw new ValidationError(
+      "decision_ref must be 6..256 printable ASCII chars (no whitespace, no control chars)",
+    );
+  }
+  return raw;
+}
+
+// ── target → entity_id extraction ────────────────────────────────────────
+//
+// HA's call_service `target` can be `{entity_id: "..."|["..."]}` or
+// `{area_id: ...}` or `{device_id: ...}`. The loop guard keys on
+// entity_id, so we extract the first entity_id we can find. If `target`
+// names an area/device, we still write a `ha_run` row but with NULL
+// entity_id — the watcher's partial index covers (entity_id, created_at)
+// so NULL rows are excluded from the guard. That is the right behaviour:
+// area-level service calls don't echo back as a single-entity
+// state_changed event, so they don't need single-entity suppression.
+function extractEntityId(target: unknown, data: unknown): string | null {
+  for (const candidate of [target, data]) {
+    if (!candidate || typeof candidate !== "object") continue;
+    const eid = (candidate as Record<string, unknown>).entity_id;
+    if (typeof eid === "string" && eid.length > 0) return eid;
+    if (Array.isArray(eid) && eid.length > 0 && typeof eid[0] === "string") {
+      return eid[0];
+    }
+  }
+  return null;
+}
+
+// ── LLAT retrieval (read the password off the Vaultwarden item) ─────────
+//
+// Every HA call needs the LLAT from the vault item that PR1 stored on
+// /connect. We never cache it in-process across requests (the principal
+// can disconnect/reconnect to rotate; a stale cache would lock writes
+// out post-rotation). Each write fetches fresh.
+
+async function readHaLlat(): Promise<string> {
+  const row = getHaConnectionRow();
+  if (!row || row.state !== "connected") {
+    throw new ApiError(
+      409,
+      "HA_NOT_CONNECTED",
+      "Home Assistant is not connected. POST /api/v1/channels/ha/connect first.",
+    );
+  }
+  const r = await fetch(
+    `${VAULT_CLI_URL}/object/item/${row.vault_item_id}`,
+    { signal: AbortSignal.timeout(VAULT_TIMEOUT_MS) },
+  );
+  if (!r.ok) {
+    throw new ApiError(
+      502,
+      "VAULT_UNREACHABLE",
+      `vault-cli GET /object/item/${row.vault_item_id} returned HTTP ${r.status}`,
+    );
+  }
+  const j = (await r.json()) as {
+    data?: { data?: { login?: { password?: string } } };
+  };
+  const pw = j?.data?.data?.login?.password;
+  if (typeof pw !== "string" || pw.length === 0) {
+    throw new ApiError(
+      502,
+      "VAULT_LLAT_MISSING",
+      "vault-cli returned an HA item without a login.password",
+    );
+  }
+  return pw;
+}
+
+// ── ha_run helpers ──────────────────────────────────────────────────────
+
+interface HaRunArgs {
+  kind: string;
+  domain: string | null;
+  service: string | null;
+  entity_id: string | null;
+  decision_ref: string;
+  payload: unknown;
+  outcome: "ok" | "error";
+  ha_response: unknown;
+  error: string | null;
+  actor?: string;
+}
+
+function insertHaRun(args: HaRunArgs): { id: string; created_at: number } {
+  const db = getStateDb();
+  const id = ulid();
+  const createdAt = Date.now();
+  const ts = new Date(createdAt).toISOString();
+  db.prepare(
+    `INSERT INTO ha_run (
+       id, ts, actor, kind, domain, service, entity_id,
+       payload_json, outcome, ha_response, error, decision_ref, created_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    id,
+    ts,
+    args.actor ?? "alfred-ceo",
+    args.kind,
+    args.domain,
+    args.service,
+    args.entity_id,
+    JSON.stringify(args.payload ?? null),
+    args.outcome,
+    args.ha_response === null || args.ha_response === undefined
+      ? null
+      : JSON.stringify(args.ha_response),
+    args.error,
+    args.decision_ref,
+    createdAt,
+  );
+  return { id, created_at: createdAt };
+}
+
+/** Loop guard: returns the conflicting row id if a write to `entity_id`
+ *  within the cooldown window already carries a decision_ref AND that
+ *  decision_ref is the SAME as the incoming one. Different decision_refs
+ *  always pass — the contract is "the agent re-derived a decision from a
+ *  new signal, this is not a loop". */
+function loopGuardConflict(
+  entity_id: string | null,
+  decision_ref: string,
+): { id: string; decision_ref: string } | null {
+  if (!entity_id) return null; // area/device writes can't loop-guard by entity
+  const cutoff = Date.now() - HA_LOOP_GUARD_COOLDOWN_MS;
+  const row = getStateDb()
+    .prepare(
+      `SELECT id, decision_ref FROM ha_run
+        WHERE entity_id = ?
+          AND decision_ref IS NOT NULL
+          AND created_at > ?
+        ORDER BY created_at DESC
+        LIMIT 1`,
+    )
+    .get(entity_id, cutoff) as
+    | { id: string; decision_ref: string }
+    | undefined;
+  if (!row) return null;
+  if (row.decision_ref === decision_ref) return row;
+  return null;
+}
+
+// ── ha_proposal / ha_snapshot helpers ───────────────────────────────────
+
+interface HaProposalRow {
+  id: string;
+  ts: string;
+  scope: string;
+  summary: string;
+  payload_json: string;
+  status: string;
+  decision_ref: string | null;
+  applied_at: string | null;
+  applied_summary: string | null;
+}
+
+function insertHaProposal(args: {
+  kind: string;
+  summary: string;
+  yaml: string;
+  gap_id: string | null;
+}): { id: string; status: string } {
+  const id = ulid();
+  const ts = new Date().toISOString();
+  const payload = {
+    kind: args.kind,
+    yaml: args.yaml,
+    gap_id: args.gap_id,
+  };
+  getStateDb()
+    .prepare(
+      `INSERT INTO ha_proposal (id, ts, scope, summary, payload_json, status)
+       VALUES (?, ?, ?, ?, ?, 'pending')`,
+    )
+    .run(id, ts, args.kind, args.summary, JSON.stringify(payload));
+  return { id, status: "pending" };
+}
+
+function getHaProposal(id: string): HaProposalRow | undefined {
+  return getStateDb()
+    .prepare("SELECT * FROM ha_proposal WHERE id = ?")
+    .get(id) as HaProposalRow | undefined;
+}
+
+function insertHaSnapshot(args: {
+  kind: string;
+  ha_id: string;
+  proposal_ref: string | null;
+  yaml: string;
+}): { id: string } {
+  const id = ulid();
+  const ts = new Date().toISOString();
+  getStateDb()
+    .prepare(
+      `INSERT INTO ha_snapshot (id, ts, kind, ha_id, proposal_ref, payload_json)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    )
+    .run(id, ts, args.kind, args.ha_id, args.proposal_ref, args.yaml);
+  return { id };
+}
+
+interface HaSnapshotRow {
+  id: string;
+  ts: string;
+  kind: string;
+  ha_id: string;
+  proposal_ref: string | null;
+  payload_json: string;
+  restored_at: string | null;
+  created_at: string;
+}
+
+function getHaSnapshot(id: string): HaSnapshotRow | undefined {
+  return getStateDb()
+    .prepare("SELECT * FROM ha_snapshot WHERE id = ?")
+    .get(id) as HaSnapshotRow | undefined;
+}
+
+// ── ha_event_subscription helpers ───────────────────────────────────────
+
+interface HaSubscriptionRow {
+  id: string;
+  filter_json: string | null;
+  started_at: string;
+  last_event_at: string | null;
+  closed_at: string | null;
+}
+
+// In-process registry of open WS subscribers. The DB table is the durable
+// record; this map carries the live socket handles. On restart the WS
+// connections drop; PR5 will wire a resume.
+const liveSubscriptions = new Map<string, WebSocket>();
+
+export function _resetHaSubscriptionsForTests(): void {
+  for (const ws of liveSubscriptions.values()) {
+    try {
+      ws.close();
+    } catch {
+      // best-effort
+    }
+  }
+  liveSubscriptions.clear();
+}
+
+function insertHaSubscription(filter: unknown): HaSubscriptionRow {
+  const id = ulid();
+  const filterJson =
+    filter === undefined || filter === null ? null : JSON.stringify(filter);
+  const startedAt = new Date().toISOString();
+  getStateDb()
+    .prepare(
+      `INSERT INTO ha_event_subscription (id, filter_json, started_at)
+       VALUES (?, ?, ?)`,
+    )
+    .run(id, filterJson, startedAt);
+  return {
+    id,
+    filter_json: filterJson,
+    started_at: startedAt,
+    last_event_at: null,
+    closed_at: null,
+  };
+}
+
+function getHaSubscription(id: string): HaSubscriptionRow | undefined {
+  return getStateDb()
+    .prepare("SELECT * FROM ha_event_subscription WHERE id = ?")
+    .get(id) as HaSubscriptionRow | undefined;
+}
+
+function closeHaSubscription(id: string): void {
+  getStateDb()
+    .prepare(
+      `UPDATE ha_event_subscription SET closed_at = datetime('now') WHERE id = ?`,
+    )
+    .run(id);
+}
+
+function bumpSubscriptionLastEvent(id: string): void {
+  try {
+    getStateDb()
+      .prepare(
+        `UPDATE ha_event_subscription SET last_event_at = datetime('now') WHERE id = ?`,
+      )
+      .run(id);
+  } catch {
+    // best-effort
+  }
+}
+
+function recordHaEvent(
+  subscriptionId: string,
+  evt: { event_type?: string; data?: { entity_id?: string } } & Record<
+    string,
+    unknown
+  >,
+): void {
+  try {
+    const id = ulid();
+    const ts = new Date().toISOString();
+    const eventType =
+      typeof evt.event_type === "string" ? evt.event_type : "unknown";
+    const entityId =
+      evt.data && typeof evt.data === "object"
+        ? typeof (evt.data as Record<string, unknown>).entity_id === "string"
+          ? ((evt.data as Record<string, unknown>).entity_id as string)
+          : null
+        : null;
+    getStateDb()
+      .prepare(
+        `INSERT INTO ha_event (id, ts, event_type, entity_id, payload_json, signaled)
+         VALUES (?, ?, ?, ?, ?, 0)`,
+      )
+      .run(id, ts, eventType, entityId, JSON.stringify(evt));
+    bumpSubscriptionLastEvent(subscriptionId);
+  } catch (e) {
+    console.warn(
+      "[channels_ha] recordHaEvent failed:",
+      e instanceof Error ? e.message : String(e),
+    );
+  }
+}
+
+// ── HA service call helper ──────────────────────────────────────────────
+
+async function callHaService(args: {
+  ha_url: string;
+  llat: string;
+  domain: string;
+  service: string;
+  target: unknown;
+  data: unknown;
+}): Promise<{ ok: true; response: unknown } | { ok: false; status: number; detail: string }> {
+  const body: Record<string, unknown> = {};
+  if (args.data && typeof args.data === "object") {
+    Object.assign(body, args.data);
+  }
+  if (args.target && typeof args.target === "object") {
+    // Merge target into body — HA accepts entity_id/area_id/device_id at the
+    // top level of the service-call payload.
+    Object.assign(body, args.target);
+  }
+  let resp: Response;
+  try {
+    resp = await fetch(
+      `${args.ha_url}/api/services/${encodeURIComponent(args.domain)}/${encodeURIComponent(args.service)}`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${args.llat}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(HA_WRITE_TIMEOUT_MS),
+      },
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, status: 502, detail: `HA unreachable: ${msg}` };
+  }
+  if (!resp.ok) {
+    let detail = `HA service call returned HTTP ${resp.status}`;
+    try {
+      const t = await resp.text();
+      if (t) detail = `${detail}: ${t.slice(0, 500)}`;
+    } catch {
+      // best-effort
+    }
+    return { ok: false, status: resp.status, detail };
+  }
+  let parsed: unknown = null;
+  try {
+    parsed = await resp.json();
+  } catch {
+    parsed = null;
+  }
+  return { ok: true, response: parsed };
+}
+
+// ── HA automation config write helpers ─────────────────────────────────
+//
+// HA exposes `POST /api/config/automation/config/<automation_id>` to write
+// (create/replace) an automation YAML, and `GET /api/config/automation/config/<id>`
+// to read the current YAML (we use this to snapshot before a destructive
+// write so rollback works). Same auth bearer.
+
+async function fetchHaAutomationYaml(
+  haUrl: string,
+  llat: string,
+  automationId: string,
+): Promise<string | null> {
+  try {
+    const r = await fetch(
+      `${haUrl}/api/config/automation/config/${encodeURIComponent(automationId)}`,
+      {
+        method: "GET",
+        headers: { Authorization: `Bearer ${llat}` },
+        signal: AbortSignal.timeout(HA_WRITE_TIMEOUT_MS),
+      },
+    );
+    if (!r.ok) return null;
+    return await r.text();
+  } catch {
+    return null;
+  }
+}
+
+async function writeHaAutomationYaml(args: {
+  haUrl: string;
+  llat: string;
+  automationId: string;
+  yaml: string;
+}): Promise<{ ok: true; response: unknown } | { ok: false; status: number; detail: string }> {
+  let resp: Response;
+  try {
+    resp = await fetch(
+      `${args.haUrl}/api/config/automation/config/${encodeURIComponent(args.automationId)}`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${args.llat}`,
+          "Content-Type": "application/json",
+        },
+        body: args.yaml,
+        signal: AbortSignal.timeout(HA_WRITE_TIMEOUT_MS),
+      },
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, status: 502, detail: `HA unreachable: ${msg}` };
+  }
+  if (!resp.ok) {
+    return {
+      ok: false,
+      status: resp.status,
+      detail: `HA automation config write returned HTTP ${resp.status}`,
+    };
+  }
+  let parsed: unknown = null;
+  try {
+    parsed = await resp.json();
+  } catch {
+    parsed = null;
+  }
+  return { ok: true, response: parsed };
+}
+
+// ── parseService body ───────────────────────────────────────────────────
+
+interface ServiceBody {
+  domain: string;
+  service: string;
+  target: Record<string, unknown> | null;
+  data: Record<string, unknown> | null;
+  decision_ref: string;
+}
+
+function parseServiceBody(raw: unknown): ServiceBody {
+  if (typeof raw !== "object" || raw === null) {
+    throw new ValidationError("body must be a JSON object");
+  }
+  const b = raw as Record<string, unknown>;
+  if (typeof b.domain !== "string" || b.domain.length === 0) {
+    throw new ValidationError("domain must be a non-empty string");
+  }
+  if (typeof b.service !== "string" || b.service.length === 0) {
+    throw new ValidationError("service must be a non-empty string");
+  }
+  let target: Record<string, unknown> | null = null;
+  if (b.target !== undefined && b.target !== null) {
+    if (typeof b.target !== "object" || Array.isArray(b.target)) {
+      throw new ValidationError("target must be a JSON object when present");
+    }
+    target = b.target as Record<string, unknown>;
+  }
+  let data: Record<string, unknown> | null = null;
+  if (b.data !== undefined && b.data !== null) {
+    if (typeof b.data !== "object" || Array.isArray(b.data)) {
+      throw new ValidationError("data must be a JSON object when present");
+    }
+    data = b.data as Record<string, unknown>;
+  }
+  const decision_ref = assertDecisionRef(b.decision_ref);
+  return { domain: b.domain, service: b.service, target, data, decision_ref };
+}
+
+// ── parseProposalBody ───────────────────────────────────────────────────
+
+interface ProposalBody {
+  kind: string;
+  summary: string;
+  yaml: string;
+  gap_id: string | null;
+}
+
+function parseProposalBody(raw: unknown): ProposalBody {
+  if (typeof raw !== "object" || raw === null) {
+    throw new ValidationError("body must be a JSON object");
+  }
+  const b = raw as Record<string, unknown>;
+  if (typeof b.kind !== "string" || b.kind.length === 0) {
+    throw new ValidationError("kind must be a non-empty string");
+  }
+  if (typeof b.summary !== "string" || b.summary.length === 0) {
+    throw new ValidationError("summary must be a non-empty string");
+  }
+  if (typeof b.yaml !== "string" || b.yaml.length === 0) {
+    throw new ValidationError("yaml must be a non-empty string");
+  }
+  let gap_id: string | null = null;
+  if (b.gap_id !== undefined && b.gap_id !== null) {
+    if (typeof b.gap_id !== "string") {
+      throw new ValidationError("gap_id must be a string when present");
+    }
+    gap_id = b.gap_id;
+  }
+  return { kind: b.kind, summary: b.summary, yaml: b.yaml, gap_id };
+}
+
+// ── HA WS subscribe (best-effort wiring) ────────────────────────────────
+//
+// HA's auth handshake on `ws://.../api/websocket`:
+//   1. server → {type:'auth_required', ha_version}
+//   2. client → {type:'auth', access_token: '<LLAT>'}
+//   3. server → {type:'auth_ok'} | {type:'auth_invalid'}
+//   4. client → {id:1, type:'subscribe_events', event_type?: '...'}
+//   5. server streams {type:'event', event:{...}, id:1}
+//
+// We surface the open WS to liveSubscriptions; events stream into ha_event.
+// All error paths are best-effort: a WS that fails to connect closes the
+// subscription row and frees the entry. Test override:
+// HA_WS_URL_OVERRIDE lets tests skip the real WS connect.
+
+function haWsUrlFromHttp(haUrl: string): string {
+  if (haUrl.startsWith("https://")) return `wss://${haUrl.slice("https://".length)}/api/websocket`;
+  if (haUrl.startsWith("http://")) return `ws://${haUrl.slice("http://".length)}/api/websocket`;
+  return `${haUrl}/api/websocket`;
+}
+
+function startHaWsSubscriber(
+  subscriptionId: string,
+  haUrl: string,
+  llat: string,
+  filter: { event_type?: string; entity_id?: string } | null,
+): void {
+  if (process.env.HA_WS_URL_OVERRIDE === "skip") {
+    // Test mode: don't actually open a WS. The DB row is what the tests
+    // assert on.
+    return;
+  }
+  let ws: WebSocket;
+  try {
+    ws = new WebSocket(haWsUrlFromHttp(haUrl));
+  } catch (e) {
+    console.warn(
+      "[channels_ha] WS construct failed:",
+      e instanceof Error ? e.message : String(e),
+    );
+    closeHaSubscription(subscriptionId);
+    return;
+  }
+  liveSubscriptions.set(subscriptionId, ws);
+  let subscribed = false;
+  ws.on("open", () => {
+    // wait for auth_required
+  });
+  ws.on("message", (raw: Buffer | string) => {
+    let msg: Record<string, unknown>;
+    try {
+      msg = JSON.parse(String(raw)) as Record<string, unknown>;
+    } catch {
+      return;
+    }
+    if (msg.type === "auth_required") {
+      ws.send(JSON.stringify({ type: "auth", access_token: llat }));
+      return;
+    }
+    if (msg.type === "auth_invalid") {
+      ws.close();
+      return;
+    }
+    if (msg.type === "auth_ok" && !subscribed) {
+      const sub: Record<string, unknown> = {
+        id: 1,
+        type: "subscribe_events",
+      };
+      if (filter?.event_type) sub.event_type = filter.event_type;
+      ws.send(JSON.stringify(sub));
+      subscribed = true;
+      return;
+    }
+    if (msg.type === "event" && typeof msg.event === "object") {
+      const evt = msg.event as Record<string, unknown>;
+      // Apply entity_id filter client-side (HA's subscribe_events doesn't
+      // accept entity_id natively).
+      if (filter?.entity_id) {
+        const data = evt.data as Record<string, unknown> | undefined;
+        if (!data || data.entity_id !== filter.entity_id) return;
+      }
+      recordHaEvent(subscriptionId, evt as Parameters<typeof recordHaEvent>[1]);
+    }
+  });
+  ws.on("close", () => {
+    liveSubscriptions.delete(subscriptionId);
+  });
+  ws.on("error", (e) => {
+    console.warn(
+      "[channels_ha] WS error:",
+      e instanceof Error ? e.message : String(e),
+    );
+  });
+}
+
+// ── PR4 routes ──────────────────────────────────────────────────────────
+
+export function registerHaWriteRoutes(): void {
+  // ────────────────────────────────────────────────────────────────────────
+  // POST /api/v1/channels/ha/service — call any HA service.
+  //
+  // Body: { domain, service, target?, data?, decision_ref }
+  //
+  // Order of operations:
+  //   1. Validate body (decision_ref REQUIRED + format-gated).
+  //   2. Loop-guard check: a recent (≤ HA_LOOP_GUARD_COOLDOWN_MS) ha_run on
+  //      the SAME entity_id with the SAME decision_ref → 409 LOOP_GUARD.
+  //   3. Fetch LLAT from Vaultwarden (via the ha_connection row).
+  //   4. POST /api/services/<domain>/<service> to HA.
+  //   5. Persist ha_run with outcome + decision_ref.
+  //   6. Return { ok, run_id, ha_response }.
+  // ────────────────────────────────────────────────────────────────────────
+  addRoute("POST", "/api/v1/channels/ha/service", async ({ res, body }) => {
+    const parsed = parseServiceBody(body);
+    const entity_id = extractEntityId(parsed.target, parsed.data);
+
+    // Loop guard.
+    const conflict = loopGuardConflict(entity_id, parsed.decision_ref);
+    if (conflict) {
+      throw new ConflictError(
+        `loop guard: ha_run ${conflict.id} already wrote to entity_id=${entity_id} ` +
+          `with the same decision_ref within ${HA_LOOP_GUARD_COOLDOWN_MS}ms. ` +
+          `Either pass a different decision_ref (you re-derived the decision from a ` +
+          `new signal) or wait for the cooldown.`,
+      );
+    }
+
+    // Fetch LLAT (this also asserts ha_connection.state === 'connected').
+    const llat = await readHaLlat();
+    const row = getHaConnectionRow()!;
+
+    // Fire the upstream service call.
+    const result = await callHaService({
+      ha_url: row.ha_url,
+      llat,
+      domain: parsed.domain,
+      service: parsed.service,
+      target: parsed.target,
+      data: parsed.data,
+    });
+
+    if (!result.ok) {
+      const run = insertHaRun({
+        kind: "service_call",
+        domain: parsed.domain,
+        service: parsed.service,
+        entity_id,
+        decision_ref: parsed.decision_ref,
+        payload: { target: parsed.target, data: parsed.data },
+        outcome: "error",
+        ha_response: null,
+        error: result.detail,
+      });
+      throw new ApiError(
+        result.status >= 400 && result.status < 600 ? result.status : 502,
+        "HA_UPSTREAM_ERROR",
+        result.detail,
+        { run_id: run.id },
+      );
+    }
+
+    const run = insertHaRun({
+      kind: "service_call",
+      domain: parsed.domain,
+      service: parsed.service,
+      entity_id,
+      decision_ref: parsed.decision_ref,
+      payload: { target: parsed.target, data: parsed.data },
+      outcome: "ok",
+      ha_response: result.response,
+      error: null,
+    });
+
+    sendJson(res, 200, {
+      ok: true,
+      run_id: run.id,
+      decision_ref: parsed.decision_ref,
+      ha_response: result.response,
+    });
+  });
+
+  // ────────────────────────────────────────────────────────────────────────
+  // POST /api/v1/channels/ha/proposal — queue a baseline automation pack.
+  // Body: { kind, summary, yaml, gap_id? }
+  // ────────────────────────────────────────────────────────────────────────
+  addRoute("POST", "/api/v1/channels/ha/proposal", async ({ res, body }) => {
+    const parsed = parseProposalBody(body);
+    const out = insertHaProposal(parsed);
+    sendJson(res, 200, { ok: true, proposal_id: out.id, status: out.status });
+  });
+
+  // ────────────────────────────────────────────────────────────────────────
+  // POST /api/v1/channels/ha/proposal/:proposal_id/apply — apply a proposal.
+  // Body: { decision_ref, automation_id? }
+  //
+  //   1. Fetch the proposal row (status must be pending|approved).
+  //   2. Snapshot the current HA automation YAML for the target id.
+  //   3. POST the proposal YAML to HA's automation/config endpoint.
+  //   4. Persist a ha_run + mark the proposal `applied`.
+  // ────────────────────────────────────────────────────────────────────────
+  addRoute(
+    "POST",
+    "/api/v1/channels/ha/proposal/:proposal_id/apply",
+    async ({ res, body, params }) => {
+      const proposalId = params.proposal_id;
+      if (typeof body !== "object" || body === null) {
+        throw new ValidationError("body must be a JSON object");
+      }
+      const b = body as Record<string, unknown>;
+      const decision_ref = assertDecisionRef(b.decision_ref);
+
+      const proposal = getHaProposal(proposalId);
+      if (!proposal) {
+        throw new NotFoundError(`ha_proposal ${proposalId} not found`);
+      }
+      if (proposal.status !== "pending" && proposal.status !== "approved") {
+        throw new ConflictError(
+          `ha_proposal ${proposalId} is in status '${proposal.status}', cannot apply`,
+        );
+      }
+
+      let payload: { kind?: string; yaml?: string; gap_id?: string | null } = {};
+      try {
+        payload = JSON.parse(proposal.payload_json) as typeof payload;
+      } catch {
+        throw new ApiError(
+          500,
+          "PROPOSAL_CORRUPT",
+          `ha_proposal ${proposalId} has unparseable payload_json`,
+        );
+      }
+      const yaml = payload.yaml;
+      if (!yaml || typeof yaml !== "string") {
+        throw new ValidationError(
+          `ha_proposal ${proposalId} payload missing yaml`,
+        );
+      }
+      // automation_id can be passed in (override) or extracted from the
+      // payload kind; fall back to the proposal id so a fresh automation
+      // gets a stable HA-side identifier.
+      const automation_id =
+        typeof b.automation_id === "string" && b.automation_id.length > 0
+          ? b.automation_id
+          : proposalId;
+
+      const llat = await readHaLlat();
+      const row = getHaConnectionRow()!;
+
+      // Snapshot the current YAML BEFORE the write so rollback works.
+      const preYaml = await fetchHaAutomationYaml(row.ha_url, llat, automation_id);
+      const snapshot = insertHaSnapshot({
+        kind: "automation",
+        ha_id: automation_id,
+        proposal_ref: proposalId,
+        yaml: preYaml ?? "",
+      });
+
+      const write = await writeHaAutomationYaml({
+        haUrl: row.ha_url,
+        llat,
+        automationId: automation_id,
+        yaml,
+      });
+
+      if (!write.ok) {
+        insertHaRun({
+          kind: "proposal_apply",
+          domain: "automation",
+          service: "config",
+          entity_id: `automation.${automation_id}`,
+          decision_ref,
+          payload: { proposal_id: proposalId, automation_id },
+          outcome: "error",
+          ha_response: null,
+          error: write.detail,
+        });
+        throw new ApiError(
+          write.status >= 400 && write.status < 600 ? write.status : 502,
+          "HA_UPSTREAM_ERROR",
+          write.detail,
+          { snapshot_id: snapshot.id },
+        );
+      }
+
+      const run = insertHaRun({
+        kind: "proposal_apply",
+        domain: "automation",
+        service: "config",
+        entity_id: `automation.${automation_id}`,
+        decision_ref,
+        payload: { proposal_id: proposalId, automation_id },
+        outcome: "ok",
+        ha_response: write.response,
+        error: null,
+      });
+
+      const now = new Date().toISOString();
+      getStateDb()
+        .prepare(
+          `UPDATE ha_proposal
+              SET status='applied', applied_at=?, applied_summary=?, decision_ref=?, updated_at=?
+            WHERE id=?`,
+        )
+        .run(now, "applied via PR4", decision_ref, now, proposalId);
+
+      sendJson(res, 200, {
+        ok: true,
+        proposal_id: proposalId,
+        snapshot_id: snapshot.id,
+        run_id: run.id,
+      });
+    },
+  );
+
+  // ────────────────────────────────────────────────────────────────────────
+  // POST /api/v1/channels/ha/snapshot/:snapshot_id/rollback — restore YAML.
+  // Body: { decision_ref }
+  // ────────────────────────────────────────────────────────────────────────
+  addRoute(
+    "POST",
+    "/api/v1/channels/ha/snapshot/:snapshot_id/rollback",
+    async ({ res, body, params }) => {
+      const snapshotId = params.snapshot_id;
+      if (typeof body !== "object" || body === null) {
+        throw new ValidationError("body must be a JSON object");
+      }
+      const b = body as Record<string, unknown>;
+      const decision_ref = assertDecisionRef(b.decision_ref);
+
+      const snap = getHaSnapshot(snapshotId);
+      if (!snap) {
+        throw new NotFoundError(`ha_snapshot ${snapshotId} not found`);
+      }
+      if (snap.restored_at) {
+        throw new ConflictError(
+          `ha_snapshot ${snapshotId} was already restored at ${snap.restored_at}`,
+        );
+      }
+
+      const llat = await readHaLlat();
+      const row = getHaConnectionRow()!;
+
+      // Restore the YAML — snap.payload_json holds the pre-write YAML.
+      const write = await writeHaAutomationYaml({
+        haUrl: row.ha_url,
+        llat,
+        automationId: snap.ha_id,
+        yaml: snap.payload_json,
+      });
+      if (!write.ok) {
+        insertHaRun({
+          kind: "snapshot_rollback",
+          domain: "automation",
+          service: "config",
+          entity_id: `automation.${snap.ha_id}`,
+          decision_ref,
+          payload: { snapshot_id: snapshotId, ha_id: snap.ha_id },
+          outcome: "error",
+          ha_response: null,
+          error: write.detail,
+        });
+        throw new ApiError(
+          write.status >= 400 && write.status < 600 ? write.status : 502,
+          "HA_UPSTREAM_ERROR",
+          write.detail,
+        );
+      }
+
+      const restoredAt = new Date().toISOString();
+      getStateDb()
+        .prepare(`UPDATE ha_snapshot SET restored_at = ? WHERE id = ?`)
+        .run(restoredAt, snapshotId);
+      const run = insertHaRun({
+        kind: "snapshot_rollback",
+        domain: "automation",
+        service: "config",
+        entity_id: `automation.${snap.ha_id}`,
+        decision_ref,
+        payload: { snapshot_id: snapshotId, ha_id: snap.ha_id },
+        outcome: "ok",
+        ha_response: write.response,
+        error: null,
+      });
+
+      sendJson(res, 200, {
+        ok: true,
+        snapshot_id: snapshotId,
+        run_id: run.id,
+        restored_at: restoredAt,
+      });
+    },
+  );
+
+  // ────────────────────────────────────────────────────────────────────────
+  // POST /api/v1/channels/ha/subscribe — open a WS event subscription.
+  // Body: { filter? } — filter is { event_type?, entity_id? }.
+  // ────────────────────────────────────────────────────────────────────────
+  addRoute("POST", "/api/v1/channels/ha/subscribe", async ({ res, body }) => {
+    let filter: { event_type?: string; entity_id?: string } | null = null;
+    if (body !== undefined && body !== null) {
+      if (typeof body !== "object") {
+        throw new ValidationError("body must be a JSON object");
+      }
+      const b = body as Record<string, unknown>;
+      const rawFilter = b.filter;
+      if (rawFilter !== undefined && rawFilter !== null) {
+        if (typeof rawFilter !== "object" || Array.isArray(rawFilter)) {
+          throw new ValidationError("filter must be a JSON object when present");
+        }
+        const f = rawFilter as Record<string, unknown>;
+        filter = {};
+        if (f.event_type !== undefined) {
+          if (typeof f.event_type !== "string" || f.event_type.length === 0) {
+            throw new ValidationError("filter.event_type must be a non-empty string");
+          }
+          filter.event_type = f.event_type;
+        }
+        if (f.entity_id !== undefined) {
+          if (typeof f.entity_id !== "string" || f.entity_id.length === 0) {
+            throw new ValidationError("filter.entity_id must be a non-empty string");
+          }
+          filter.entity_id = f.entity_id;
+        }
+      }
+    }
+
+    // Connection check + LLAT fetch.
+    const llat = await readHaLlat();
+    const row = getHaConnectionRow()!;
+
+    const sub = insertHaSubscription(filter);
+    // Best-effort WS spawn. The DB row is the durable contract; the WS
+    // is the live channel.
+    startHaWsSubscriber(sub.id, row.ha_url, llat, filter);
+
+    sendJson(res, 200, {
+      ok: true,
+      subscription_id: sub.id,
+      filter,
+      started_at: sub.started_at,
+    });
+  });
+
+  // ────────────────────────────────────────────────────────────────────────
+  // DELETE /api/v1/channels/ha/subscribe/:subscription_id — close it.
+  // ────────────────────────────────────────────────────────────────────────
+  addRoute(
+    "DELETE",
+    "/api/v1/channels/ha/subscribe/:subscription_id",
+    async ({ res, params }) => {
+      const id = params.subscription_id;
+      const sub = getHaSubscription(id);
+      if (!sub) {
+        throw new NotFoundError(`ha_event_subscription ${id} not found`);
+      }
+      if (sub.closed_at) {
+        // Idempotent close — already closed is a success.
+        sendJson(res, 200, { ok: true, closed_at: sub.closed_at, already_closed: true });
+        return;
+      }
+      const ws = liveSubscriptions.get(id);
+      if (ws) {
+        try {
+          ws.close();
+        } catch {
+          // best-effort
+        }
+        liveSubscriptions.delete(id);
+      }
+      closeHaSubscription(id);
+      const reread = getHaSubscription(id)!;
+      sendJson(res, 200, { ok: true, closed_at: reread.closed_at });
+    },
+  );
+}

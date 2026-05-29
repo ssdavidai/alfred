@@ -254,9 +254,15 @@ test("ha__resolve_entity: query required, GET /resolve with q param", () => {
   assert.deepEqual(req.query, { q: "kitchen light" });
 });
 
-// ─── deferred (PR3) placeholders ────────────────────────────────────────
+// ─── write tools (#110 PR4) ─────────────────────────────────────────────
+//
+// PR4 fills in what PR2 left as deferred stubs. The 5 write tools must:
+//   * carry real buildRequest mappings to /api/v1/channels/ha/* routes
+//   * require `decision_ref` on every actual write (ha__call_service,
+//     ha__apply_proposal, ha__rollback_snapshot)
+//   * route through the ctrl-api routes that own the loop guard
 
-const DEFERRED_TOOL_NAMES = [
+const WRITE_TOOL_NAMES = [
   "ha__call_service",
   "ha__propose_automation",
   "ha__apply_proposal",
@@ -264,79 +270,139 @@ const DEFERRED_TOOL_NAMES = [
   "ha__subscribe_events",
 ];
 
-for (const name of DEFERRED_TOOL_NAMES) {
-  test(`deferred tool exists: ${name}`, () => {
+for (const name of WRITE_TOOL_NAMES) {
+  test(`write tool exists: ${name}`, () => {
     const t = HASS_DEFERRED_TOOLS.find((x) => x.name === name);
     assert.ok(t, `${name} missing from HASS_DEFERRED_TOOLS`);
   });
-
-  test(`deferred tool ${name}: buildRequest carries the PR3 marker`, () => {
-    const t = HASS_DEFERRED_TOOLS.find((x) => x.name === name);
-    assert.ok(t, `${name} missing`);
-    // Build with a permissive-but-valid body — most deferred tools have
-    // required fields, but we're testing the buildRequest marker, not
-    // the schema. Pass a generic object that bypasses schema validation
-    // (buildRequest takes `any`).
-    const req = t.buildRequest({});
-    assert.equal(req.method, "POST");
-    assert.equal(req.path, `/api/v1/channels/ha/__deferred__/${name}`);
-    assert.deepEqual(req.body, {
-      deferred: true,
-      target_pr: "PR3",
-      tool: name,
-    });
-  });
 }
 
-test("ha__call_service schema: domain + service required", () => {
+// ── ha__call_service ──
+
+test("ha__call_service: requires decision_ref (no client-side mint)", () => {
   const t = getTool("ha__call_service");
-  assert.equal(t.inputSchema.safeParse({}).success, false);
-  assert.equal(
-    t.inputSchema.safeParse({ domain: "light" }).success,
-    false,
-    "service required",
-  );
+  // Without decision_ref — fails.
   assert.equal(
     t.inputSchema.safeParse({ domain: "light", service: "turn_on" }).success,
-    true,
+    false,
+    "decision_ref is REQUIRED — the agent must derive a decision before calling this",
   );
+  // With a short/whitespace decision_ref — fails the regex/min-length gate.
   assert.equal(
     t.inputSchema.safeParse({
       domain: "light",
       service: "turn_on",
-      entity_id: "light.kitchen_main",
+      decision_ref: "x x x",
+    }).success,
+    false,
+    "decision_ref must be ≥6 chars and contain no whitespace",
+  );
+  // With a valid decision_ref — passes.
+  assert.equal(
+    t.inputSchema.safeParse({
+      domain: "light",
+      service: "turn_on",
+      target: { entity_id: "light.kitchen_main" },
       data: { brightness_pct: 60 },
+      decision_ref: "decision/2026-05-29-kitchen-on.md",
     }).success,
     true,
   );
 });
 
-test("ha__propose_automation schema: alias + triggers + actions required", () => {
-  const t = getTool("ha__propose_automation");
+test("ha__call_service: builds POST /service with decision_ref in body", () => {
+  const t = getTool("ha__call_service");
+  const req = t.buildRequest({
+    domain: "light",
+    service: "turn_on",
+    target: { entity_id: "light.kitchen_main" },
+    data: { brightness_pct: 60 },
+    decision_ref: "decision/2026-05-29-kitchen-on.md",
+  });
+  assert.equal(req.method, "POST");
+  assert.equal(req.path, "/api/v1/channels/ha/service");
+  assert.deepEqual(req.body, {
+    domain: "light",
+    service: "turn_on",
+    target: { entity_id: "light.kitchen_main" },
+    data: { brightness_pct: 60 },
+    decision_ref: "decision/2026-05-29-kitchen-on.md",
+  });
+});
+
+test("ha__call_service: schema rejects domain or service missing", () => {
+  const t = getTool("ha__call_service");
   assert.equal(t.inputSchema.safeParse({}).success, false);
   assert.equal(
-    t.inputSchema.safeParse({ alias: "Morning routine" }).success,
+    t.inputSchema.safeParse({
+      service: "turn_on",
+      decision_ref: "decision/2026-05-29.md",
+    }).success,
+    false,
+    "domain required",
+  );
+  assert.equal(
+    t.inputSchema.safeParse({
+      domain: "light",
+      decision_ref: "decision/2026-05-29.md",
+    }).success,
+    false,
+    "service required",
+  );
+});
+
+// ── ha__propose_automation ──
+
+test("ha__propose_automation: accepts kind/summary/yaml + builds POST /proposal", () => {
+  const t = getTool("ha__propose_automation");
+  // kind + summary + yaml required.
+  assert.equal(t.inputSchema.safeParse({}).success, false);
+  assert.equal(
+    t.inputSchema.safeParse({ kind: "automation" }).success,
     false,
   );
   assert.equal(
     t.inputSchema.safeParse({
-      alias: "Morning routine",
-      triggers: [{ platform: "time", at: "06:30" }],
-      actions: [
-        { service: "light.turn_on", entity_id: "light.kitchen_main" },
-      ],
+      kind: "automation",
+      summary: "Morning routine",
+      yaml: "alias: morning\ntrigger:\n  - platform: time\n    at: '06:30'\naction: []\n",
     }).success,
     true,
   );
+
+  const req = t.buildRequest({
+    kind: "automation",
+    summary: "Morning routine",
+    yaml: "alias: morning\n",
+  });
+  assert.equal(req.method, "POST");
+  assert.equal(req.path, "/api/v1/channels/ha/proposal");
+  assert.deepEqual(req.body, {
+    kind: "automation",
+    summary: "Morning routine",
+    yaml: "alias: morning\n",
+  });
+
+  // With gap_id — passes through.
+  const req2 = t.buildRequest({
+    kind: "automation",
+    summary: "Morning routine",
+    yaml: "alias: morning\n",
+    gap_id: "gap-abc",
+  });
+  assert.equal((req2.body as Record<string, unknown>).gap_id, "gap-abc");
 });
 
-test("ha__apply_proposal schema: proposal_id + decision_ref required", () => {
+// ── ha__apply_proposal ──
+
+test("ha__apply_proposal: takes proposal_id + decision_ref, builds POST /proposal/:id/apply", () => {
   const t = getTool("ha__apply_proposal");
+  // decision_ref required.
   assert.equal(t.inputSchema.safeParse({}).success, false);
   assert.equal(
     t.inputSchema.safeParse({ proposal_id: "01HXYZ" }).success,
     false,
-    "decision_ref required to enforce loop-guard contract from PR1",
+    "decision_ref required to enforce loop-guard contract",
   );
   assert.equal(
     t.inputSchema.safeParse({
@@ -345,31 +411,85 @@ test("ha__apply_proposal schema: proposal_id + decision_ref required", () => {
     }).success,
     true,
   );
+
+  const req = t.buildRequest({
+    proposal_id: "01HXYZ",
+    decision_ref: "decision/2026-05-29-ha-baseline.md",
+  });
+  assert.equal(req.method, "POST");
+  assert.equal(req.path, "/api/v1/channels/ha/proposal/01HXYZ/apply");
+  assert.deepEqual(req.body, {
+    decision_ref: "decision/2026-05-29-ha-baseline.md",
+  });
 });
 
-test("ha__rollback_snapshot schema: snapshot_id required", () => {
+// ── ha__rollback_snapshot ──
+
+test("ha__rollback_snapshot: takes snapshot_id + decision_ref, builds POST /snapshot/:id/rollback", () => {
   const t = getTool("ha__rollback_snapshot");
-  assert.equal(t.inputSchema.safeParse({}).success, false);
-  assert.equal(
-    t.inputSchema.safeParse({ snapshot_id: "01HSNAP" }).success,
-    true,
-  );
-});
-
-test("ha__subscribe_events schema: event_type required, entity_id optional", () => {
-  const t = getTool("ha__subscribe_events");
-  assert.equal(t.inputSchema.safeParse({}).success, false);
-  assert.equal(
-    t.inputSchema.safeParse({ event_type: "state_changed" }).success,
-    true,
-  );
+  // decision_ref required.
+  assert.equal(t.inputSchema.safeParse({ snapshot_id: "01HSNAP" }).success, false);
   assert.equal(
     t.inputSchema.safeParse({
-      event_type: "state_changed",
-      entity_id: "binary_sensor.front_door",
+      snapshot_id: "01HSNAP",
+      decision_ref: "decision/2026-05-29-rollback.md",
     }).success,
     true,
   );
+
+  const req = t.buildRequest({
+    snapshot_id: "01HSNAP",
+    decision_ref: "decision/2026-05-29-rollback.md",
+  });
+  assert.equal(req.method, "POST");
+  assert.equal(req.path, "/api/v1/channels/ha/snapshot/01HSNAP/rollback");
+  assert.deepEqual(req.body, {
+    decision_ref: "decision/2026-05-29-rollback.md",
+  });
+});
+
+// ── ha__subscribe_events ──
+
+test("ha__subscribe_events: returns subscription_id-shaped POST /subscribe", () => {
+  const t = getTool("ha__subscribe_events");
+  // No filter is fine (household firehose).
+  assert.equal(t.inputSchema.safeParse({}).success, true);
+  // Filter with event_type.
+  assert.equal(
+    t.inputSchema.safeParse({
+      filter: { event_type: "state_changed" },
+    }).success,
+    true,
+  );
+  // Filter with entity_id (must be dotted form).
+  assert.equal(
+    t.inputSchema.safeParse({
+      filter: { entity_id: "binary_sensor.front_door" },
+    }).success,
+    true,
+  );
+  // Bad entity_id rejected.
+  assert.equal(
+    t.inputSchema.safeParse({
+      filter: { entity_id: "Bad Entity" },
+    }).success,
+    false,
+  );
+
+  const empty = t.buildRequest({});
+  assert.equal(empty.method, "POST");
+  assert.equal(empty.path, "/api/v1/channels/ha/subscribe");
+  assert.deepEqual(empty.body, {});
+
+  const filtered = t.buildRequest({
+    filter: { event_type: "state_changed", entity_id: "binary_sensor.front_door" },
+  });
+  assert.deepEqual(filtered.body, {
+    filter: {
+      event_type: "state_changed",
+      entity_id: "binary_sensor.front_door",
+    },
+  });
 });
 
 // ─── mock ctrl-api response → tool result shape (smoke) ─────────────────
