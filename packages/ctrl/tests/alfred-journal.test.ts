@@ -52,14 +52,14 @@ function tableNames(db: DatabaseSync): string[] {
 describe("alfred_journal migration", () => {
   it("bumps user_version to the latest migration", () => {
     // The runner applies every migration > current version, so the value
-    // naturally tracks the highest registered version. Today: 11
+    // naturally tracks the highest registered version. Today: 12
     // (0001 fix_pack + 0002 alfred_journal + 0003 tailscale_connection
     // + 0004 channel_tokens + 0005 ha_channel + 0006 files_table
     // + 0007 recall + 0008 ha_event_subscription
     // + 0009 ha_registry_vanished + 0010 files_cold_archive
-    // + 0011 ha_tier4).
+    // + 0011 ha_tier4 + 0012 ha_integration_ref_removed_at).
     const db = makeDb();
-    assert.equal(userVersion(db), 11);
+    assert.equal(userVersion(db), 12);
     db.close();
   });
 

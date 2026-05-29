@@ -1018,6 +1018,15 @@ export function registerHaChannelRoutes(): void {
   // bottom of this file marked `BEGIN #115 PR3`.
   registerHaPr3Routes();
 
+  // #115 PR4 — Tier 4 autonomy, Integrations (config_flow) CRUD. Drives
+  // HA's multi-step `config_entries/flow/*` WS surface through the
+  // long-lived ha_ws_client; gates `configure` (the submit step) and
+  // `remove` on a `decision_ref`; auto-snapshot YES on both. Writes a
+  // row to `ha_integration_ref` on successful create, soft-deletes on
+  // remove. See the "=== Tier 4 PR4: Integrations ===" block at the
+  // bottom of this file.
+  registerHaIntegrationsRoutes();
+
   // #115 PR6 — Tier 4 autonomy, Supervisor addon CRUD. HAOS-only; every
   // route guards on installation_type and 501s on Container HA. See the
   // "=== Tier 4 PR6: Supervisor addons ===" block at the bottom of this
@@ -3990,6 +3999,721 @@ export function registerHaPr3Routes(): void {
 }
 
 // === END #115 PR3 ═══════════════════════════════════════════════════════
+
+// ═════════════════════════════════════════════════════════════════════════
+// === Tier 4 PR4: Integrations ===
+// ═════════════════════════════════════════════════════════════════════════
+//
+// Issue #115 PR4 — Home Assistant integrations (config_flow) CRUD. Adds
+// 8 routes fronting HA's WebSocket `config_entries/*` and
+// `config_entries/flow/*` API surfaces, all driven through the
+// long-lived ha_ws_client (PR1). REST cannot reach these — every
+// integration lifecycle verb (init → step → submit → entry create →
+// reload → remove) is WS-only on modern HA, so PR4 is the first PR in
+// the Tier 4 fan-out that relies on PR1's WS client end-to-end.
+//
+// The shape of an HA "integration":
+//
+//   1. An integration *handler* (a.k.a. "domain" — `hue`, `mqtt`,
+//      `nest`, …) is something HA knows how to install.
+//      `config_entries/get_handlers` returns the list.
+//   2. Sir kicks off a *config flow* via `config_entries/flow/init`
+//      passing the domain. HA returns a flow_id + a first step
+//      descriptor (`{type: "form", step_id, data_schema, errors?}` or
+//      `{type: "external_step", url, ...}` for OAuth).
+//   3. Each step takes either form data (the user fills it in) or no
+//      data (e.g. "I pressed the Hue bridge button"); the agent POSTs to
+//      `config_entries/flow/configure` with the form values; HA
+//      returns either the NEXT step, an `abort` (no entry created — the
+//      flow failed), or a `create_entry` (the flow succeeded, an
+//      `entry_id` was minted).
+//   4. After creation, a config_entry can be `reload`ed (re-init the
+//      integration without re-running the flow) or `remove`d
+//      (uninstall).
+//
+// Per the spec §4 gate matrix (locked YES 2026-05-29):
+//
+// | Route                 | decision_ref | snapshot |
+// |-----------------------|--------------|----------|
+// | GET list / info / available | no     | no       |
+// | POST discover (flow_init) | no       | no       |
+// | GET flow progress     | no           | no       |
+// | POST configure (step) | REQUIRED     | YES      |
+// | POST reload           | no           | no       |
+// | DELETE remove         | REQUIRED     | YES      |
+//
+// Why `configure` gates rather than `discover`: discover is a cheap
+// inspection (it tells the agent what the first form looks like) — no
+// state changes on HA. The destructive moment is when the agent submits
+// the step that triggers the entry creation. Snapshot is recorded BEFORE
+// every configure step so even a multi-step flow has a snapshot trail at
+// the boundary.
+//
+// ha_integration_ref ledger
+// -------------------------
+// On a successful `configure` step that returns `type: "create_entry"`,
+// we write a row to `ha_integration_ref` (PR1 migration 0011 + PR4
+// migration 0012 added `removed_at`):
+//
+//   INSERT INTO ha_integration_ref (entry_id, installed_by='alfred',
+//                                   decision_ref, installed_at)
+//
+// On a successful `remove`, we soft-delete by setting `removed_at` —
+// the row stays so the Desk audit trail "Alfred installed and then
+// removed this integration" survives. Hard delete is reserved for
+// `ha_event` config_entries_updated events that observe a user-side
+// removal (those don't go through this route).
+//
+// Daybook
+// -------
+// Every successful `configure` step that lands a `create_entry` plus
+// every successful `remove` writes a daybook line via PR1's
+// `recordHaWriteToDaybook`. The intermediate form steps are silent —
+// daybook noise is undesirable until the flow lands.
+//
+// MCP tool surface (packages/mcp-server/src/tools/hass.ts under
+// HASS_INTEGRATION_TOOLS): ha__list_integrations / ha__integration_info /
+// ha__list_available_integrations / ha__integration_discover /
+// ha__integration_configure / ha__integration_reload /
+// ha__integration_remove.
+
+const HA_INTEGRATION_TIMEOUT_MS = Number(
+  process.env.HA_INTEGRATION_TIMEOUT_MS ?? "30000",
+);
+
+// flow_id and entry_id from HA are hex/ulid-ish strings — same shape
+// guard as ADDON_SLUG_RE but allowing a wider character set. HA uses
+// 16-32 hex/url-safe-base64 for flow_ids and entry_ids; we cap at 256
+// for safety against URL-injection on the `:flow_id` / `:entry_id`
+// path parameters.
+const HA_FLOW_ID_RE = /^[A-Za-z0-9_-]{1,256}$/;
+const HA_ENTRY_ID_RE = /^[A-Za-z0-9_-]{1,256}$/;
+const HA_DOMAIN_RE = /^[a-z][a-z0-9_]{0,127}$/;
+
+function assertHaFlowId(raw: string): string {
+  if (!HA_FLOW_ID_RE.test(raw)) {
+    throw new ValidationError(
+      "flow_id must be 1..256 chars of [A-Za-z0-9_-]",
+    );
+  }
+  return raw;
+}
+
+function assertHaEntryId(raw: string): string {
+  if (!HA_ENTRY_ID_RE.test(raw)) {
+    throw new ValidationError(
+      "entry_id must be 1..256 chars of [A-Za-z0-9_-]",
+    );
+  }
+  return raw;
+}
+
+function assertHaDomain(raw: unknown): string {
+  if (typeof raw !== "string" || raw.length === 0) {
+    throw new ValidationError("domain is required and must be a non-empty string");
+  }
+  if (!HA_DOMAIN_RE.test(raw)) {
+    throw new ValidationError(
+      "domain must be 1..128 chars of [a-z0-9_], starting with a..z",
+    );
+  }
+  return raw;
+}
+
+// ── ha_integration_ref helpers ──────────────────────────────────────────
+//
+// PR1 migration 0011 created the table; PR4 migration 0012 added the
+// `removed_at` column. We defensively guard against an older DB by
+// recreating both shapes idempotently — the migration runner is the
+// real contract but tests in older fixtures may skip it.
+
+function ensureHaIntegrationRefTable(): void {
+  try {
+    getStateDb()
+      .prepare(
+        `CREATE TABLE IF NOT EXISTS ha_integration_ref (
+           entry_id     TEXT PRIMARY KEY,
+           installed_by TEXT NOT NULL,
+           decision_ref TEXT,
+           installed_at TEXT NOT NULL,
+           removed_at   TEXT
+         )`,
+      )
+      .run();
+    // ALTER if the column was missed (older fixtures pre-0012).
+    const cols = getStateDb()
+      .prepare("PRAGMA table_info(ha_integration_ref)")
+      .all() as { name: string }[];
+    if (!cols.some((c) => c.name === "removed_at")) {
+      try {
+        getStateDb()
+          .prepare("ALTER TABLE ha_integration_ref ADD COLUMN removed_at TEXT")
+          .run();
+      } catch {
+        // best-effort; the column may have been added concurrently
+      }
+    }
+  } catch {
+    // best-effort — never block the upstream HA op on a defensive table create
+  }
+}
+
+/** Insert (or upsert) a row marking `entry_id` as Alfred-installed.
+ *  Returns the row inserted. Idempotent — re-running with the same
+ *  entry_id updates installed_by/decision_ref/installed_at and clears
+ *  any prior `removed_at` (the principal reinstalled what they had
+ *  earlier removed — that's a re-create, not a continuation). */
+function recordIntegrationInstall(args: {
+  entry_id: string;
+  decision_ref: string;
+}): { entry_id: string; installed_at: string } {
+  ensureHaIntegrationRefTable();
+  const installed_at = new Date().toISOString();
+  try {
+    getStateDb()
+      .prepare(
+        `INSERT INTO ha_integration_ref (entry_id, installed_by, decision_ref, installed_at, removed_at)
+         VALUES (?, 'alfred', ?, ?, NULL)
+         ON CONFLICT(entry_id) DO UPDATE SET
+           installed_by = 'alfred',
+           decision_ref = excluded.decision_ref,
+           installed_at = excluded.installed_at,
+           removed_at   = NULL`,
+      )
+      .run(args.entry_id, args.decision_ref, installed_at);
+  } catch (err) {
+    console.warn(
+      "[channels_ha:pr4] recordIntegrationInstall failed:",
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+  return { entry_id: args.entry_id, installed_at };
+}
+
+/** Soft-delete: stamp `removed_at` on the row. If the row doesn't exist
+ *  (i.e. Sir installed it directly through HA's UI, not Alfred), we still
+ *  upsert one with `installed_by='sir'` so the Desk has the audit trail.
+ */
+function recordIntegrationRemove(args: {
+  entry_id: string;
+  decision_ref: string;
+}): { entry_id: string; removed_at: string } {
+  ensureHaIntegrationRefTable();
+  const removed_at = new Date().toISOString();
+  try {
+    getStateDb()
+      .prepare(
+        `INSERT INTO ha_integration_ref (entry_id, installed_by, decision_ref, installed_at, removed_at)
+         VALUES (?, 'sir', ?, ?, ?)
+         ON CONFLICT(entry_id) DO UPDATE SET
+           removed_at = excluded.removed_at,
+           decision_ref = COALESCE(ha_integration_ref.decision_ref, excluded.decision_ref)`,
+      )
+      .run(args.entry_id, args.decision_ref, removed_at, removed_at);
+  } catch (err) {
+    console.warn(
+      "[channels_ha:pr4] recordIntegrationRemove failed:",
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+  return { entry_id: args.entry_id, removed_at };
+}
+
+// ── snapshot bridge (PR1 lib + PR6 placeholder fallback) ────────────────
+//
+// PR1's `triggerBackupBeforeAction` is the load-bearing snapshot helper:
+// it calls HA WS `backup/generate`, stamps `ha_backup_ref`, and returns
+// the ids. In test mode (HA_SNAPSHOT_DRY_RUN=1) the WS call is skipped
+// and a `dry-run-<ulid>` ha_backup_id is recorded — useful for our
+// integration tests which can't drive a real backup/generate round-trip.
+//
+// We import lazily inside the route handler to avoid a transitive cycle
+// with ha_ws_client.ts (which itself touches state.db at module init).
+
+async function snapshotBeforeIntegrationAction(args: {
+  action: string;
+  decision_ref: string;
+}): Promise<{ backup_ref_id: string; ha_backup_id: string }> {
+  if (process.env.HA_INTEGRATION_SNAPSHOT_DISABLED === "1") {
+    // Fallback path identical to PR6's placeholder. Stamps a row in
+    // ha_backup_ref so the audit trail still records intent even when
+    // the WS-backed snapshot path is disabled.
+    ensureHaBackupRefTable();
+    const id = ulid();
+    const ts = new Date().toISOString();
+    const ha_backup_id = `disabled-${id}`;
+    try {
+      getStateDb()
+        .prepare(
+          `INSERT INTO ha_backup_ref (id, ha_backup_id, triggered_by, decision_ref, ts)
+           VALUES (?, ?, ?, ?, ?)`,
+        )
+        .run(id, ha_backup_id, args.action, args.decision_ref, ts);
+    } catch {
+      // best-effort
+    }
+    return { backup_ref_id: id, ha_backup_id };
+  }
+  const mod = await import("../lib/ha_snapshot.js");
+  const rec = await mod.triggerBackupBeforeAction(args.action, args.decision_ref);
+  return { backup_ref_id: rec.id, ha_backup_id: rec.ha_backup_id };
+}
+
+// ── daybook bridge ─────────────────────────────────────────────────────
+
+async function tryRecordIntegrationDaybook(args: {
+  action: string;
+  summary: string;
+  decision_ref: string;
+  extra?: Record<string, unknown>;
+}): Promise<void> {
+  try {
+    const mod = await import("../lib/ha_daybook.js");
+    mod.recordHaWriteToDaybook({
+      action: args.action,
+      summary: args.summary,
+      decision_ref: args.decision_ref,
+      extra: args.extra,
+    });
+  } catch (err) {
+    // Daybook write is best-effort — failure must NOT block the HA action.
+    console.warn(
+      "[channels_ha:pr4] daybook write failed:",
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+}
+
+// ── WS client adapter ──────────────────────────────────────────────────
+//
+// Tests can override the WS client by stubbing `globalThis.__haWsTestStub`
+// — it must expose `wsCall(type, payload, timeoutMs?)` returning the
+// result. In production we delegate to `getHaWsClient().wsCall(...)`.
+
+interface HaWsCallable {
+  wsCall(type: string, payload?: Record<string, unknown>, timeoutMs?: number): Promise<unknown>;
+}
+
+async function loadHaWsClient(): Promise<HaWsCallable> {
+  const stub = (globalThis as { __haWsTestStub?: HaWsCallable }).__haWsTestStub;
+  if (stub) return stub;
+  const mod = await import("../lib/ha_ws_client.js");
+  return mod.getHaWsClient();
+}
+
+/** Wrap a WS call so we surface HA errors as 502 HA_WS_ERROR consistently. */
+async function wsCallOrThrow(
+  client: HaWsCallable,
+  type: string,
+  payload: Record<string, unknown> = {},
+): Promise<unknown> {
+  try {
+    return await client.wsCall(type, payload, HA_INTEGRATION_TIMEOUT_MS);
+  } catch (err) {
+    throw new ApiError(
+      502,
+      "HA_WS_ERROR",
+      `HA WS ${type} failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
+/** Test-only — reset the integration ref table between runs. */
+export function _resetHaIntegrationsForTests(): void {
+  try {
+    getStateDb().prepare("DELETE FROM ha_integration_ref").run();
+  } catch {
+    // best-effort
+  }
+}
+
+// ── route registration ─────────────────────────────────────────────────
+
+export function registerHaIntegrationsRoutes(): void {
+  // ────────────────────────────────────────────────────────────────────
+  // GET /api/v1/channels/ha/integrations
+  //
+  // List every config_entry HA knows about. No gate (read).
+  // Cross-references each entry against `ha_integration_ref` so the
+  // response includes Alfred's audit columns: `installed_by`,
+  // `decision_ref`, `installed_at`, `removed_at`.
+  // ────────────────────────────────────────────────────────────────────
+  addRoute("GET", "/api/v1/channels/ha/integrations", async ({ res }) => {
+    await loadHaCredentials(); // assert HA connected
+    const client = await loadHaWsClient();
+    const result = await wsCallOrThrow(client, "config_entries/get");
+    const entries = Array.isArray(result) ? result : [];
+    ensureHaIntegrationRefTable();
+    // Build a {entry_id -> ref} index in a single query.
+    const refs = (() => {
+      try {
+        return getStateDb()
+          .prepare(
+            "SELECT entry_id, installed_by, decision_ref, installed_at, removed_at FROM ha_integration_ref",
+          )
+          .all() as {
+          entry_id: string;
+          installed_by: string;
+          decision_ref: string | null;
+          installed_at: string;
+          removed_at: string | null;
+        }[];
+      } catch {
+        return [];
+      }
+    })();
+    const refIndex = new Map<string, (typeof refs)[number]>();
+    for (const r of refs) refIndex.set(r.entry_id, r);
+    const enriched = entries.map((e) => {
+      const entry_id =
+        typeof (e as Record<string, unknown>).entry_id === "string"
+          ? ((e as Record<string, unknown>).entry_id as string)
+          : null;
+      const ref = entry_id ? refIndex.get(entry_id) : undefined;
+      return {
+        ...(e as Record<string, unknown>),
+        alfred: ref
+          ? {
+              installed_by: ref.installed_by,
+              decision_ref: ref.decision_ref,
+              installed_at: ref.installed_at,
+              removed_at: ref.removed_at,
+            }
+          : { installed_by: "sir" as const, decision_ref: null, installed_at: null, removed_at: null },
+      };
+    });
+    sendJson(res, 200, { ok: true, entries: enriched });
+  });
+
+  // ────────────────────────────────────────────────────────────────────
+  // GET /api/v1/channels/ha/integrations/available
+  //
+  // List every domain HA can install (config_entries/get_handlers). No
+  // gate (read). Use this to resolve a user-friendly name like "Hue" to
+  // the domain string `hue` before calling `discover`.
+  //
+  // NOTE: route order matters — addRoute matches first-registered, so
+  // /available must come BEFORE /:entry_id below.
+  // ────────────────────────────────────────────────────────────────────
+  addRoute(
+    "GET",
+    "/api/v1/channels/ha/integrations/available",
+    async ({ res }) => {
+      await loadHaCredentials();
+      const client = await loadHaWsClient();
+      const result = await wsCallOrThrow(client, "config_entries/get_handlers");
+      sendJson(res, 200, { ok: true, handlers: result ?? [] });
+    },
+  );
+
+  // ────────────────────────────────────────────────────────────────────
+  // GET /api/v1/channels/ha/integrations/flow/:flow_id
+  //
+  // Inspect the current state of an in-flight config flow without
+  // advancing it. Returns the step descriptor the agent would see on
+  // the next `configure` call. No gate.
+  //
+  // Implementation: HA's WS surface has no read-only "peek" — the
+  // closest is `config_entries/flow/progress` which returns the list
+  // of in-progress flows. We filter to the one matching :flow_id; if
+  // it's not present (already completed or aborted), respond 404.
+  // ────────────────────────────────────────────────────────────────────
+  addRoute(
+    "GET",
+    "/api/v1/channels/ha/integrations/flow/:flow_id",
+    async ({ res, params }) => {
+      const flow_id = assertHaFlowId(params.flow_id);
+      await loadHaCredentials();
+      const client = await loadHaWsClient();
+      const result = await wsCallOrThrow(client, "config_entries/flow/progress");
+      const list = Array.isArray(result) ? (result as Record<string, unknown>[]) : [];
+      const match = list.find((f) => f.flow_id === flow_id);
+      if (!match) {
+        throw new NotFoundError(
+          `flow_id ${flow_id} is not in HA's in-progress list (already completed, aborted, or never existed)`,
+        );
+      }
+      sendJson(res, 200, { ok: true, flow_id, flow: match });
+    },
+  );
+
+  // ────────────────────────────────────────────────────────────────────
+  // GET /api/v1/channels/ha/integrations/:entry_id
+  //
+  // Info on one config_entry. No gate. Includes the `alfred` audit
+  // columns from `ha_integration_ref`.
+  // ────────────────────────────────────────────────────────────────────
+  addRoute(
+    "GET",
+    "/api/v1/channels/ha/integrations/:entry_id",
+    async ({ res, params }) => {
+      const entry_id = assertHaEntryId(params.entry_id);
+      await loadHaCredentials();
+      const client = await loadHaWsClient();
+      // No single-entry "get" exists; pull the list and filter.
+      const result = await wsCallOrThrow(client, "config_entries/get");
+      const entries = Array.isArray(result) ? (result as Record<string, unknown>[]) : [];
+      const match = entries.find((e) => e.entry_id === entry_id);
+      if (!match) {
+        throw new NotFoundError(`config_entry ${entry_id} not found in HA`);
+      }
+      ensureHaIntegrationRefTable();
+      let ref:
+        | {
+            installed_by: string;
+            decision_ref: string | null;
+            installed_at: string;
+            removed_at: string | null;
+          }
+        | undefined;
+      try {
+        ref = getStateDb()
+          .prepare(
+            "SELECT installed_by, decision_ref, installed_at, removed_at FROM ha_integration_ref WHERE entry_id = ?",
+          )
+          .get(entry_id) as typeof ref;
+      } catch {
+        ref = undefined;
+      }
+      sendJson(res, 200, {
+        ok: true,
+        entry_id,
+        entry: match,
+        alfred: ref
+          ? {
+              installed_by: ref.installed_by,
+              decision_ref: ref.decision_ref,
+              installed_at: ref.installed_at,
+              removed_at: ref.removed_at,
+            }
+          : { installed_by: "sir" as const, decision_ref: null, installed_at: null, removed_at: null },
+      });
+    },
+  );
+
+  // ────────────────────────────────────────────────────────────────────
+  // POST /api/v1/channels/ha/integrations/discover
+  //
+  // Initialise a config_flow. Body: `{domain, show_advanced_options?}`.
+  // No gate (discovery is read-shaped — the first step is just a form
+  // schema or a redirect URL). Returns the flow_id + first step.
+  //
+  // Calls HA WS `config_entries/flow/init` with
+  // `{handler: domain, show_advanced_options}`.
+  // ────────────────────────────────────────────────────────────────────
+  addRoute(
+    "POST",
+    "/api/v1/channels/ha/integrations/discover",
+    async ({ res, body }) => {
+      if (typeof body !== "object" || body === null) {
+        throw new ValidationError("body must be a JSON object");
+      }
+      const b = body as Record<string, unknown>;
+      const domain = assertHaDomain(b.domain);
+      const show_advanced_options =
+        typeof b.show_advanced_options === "boolean"
+          ? (b.show_advanced_options as boolean)
+          : false;
+      await loadHaCredentials();
+      const client = await loadHaWsClient();
+      const result = (await wsCallOrThrow(client, "config_entries/flow/init", {
+        handler: domain,
+        show_advanced_options,
+      })) as Record<string, unknown> | null;
+      if (!result || typeof result.flow_id !== "string") {
+        throw new ApiError(
+          502,
+          "HA_WS_ERROR",
+          `HA returned a flow_init response without a flow_id: ${JSON.stringify(result)}`,
+        );
+      }
+      sendJson(res, 200, {
+        ok: true,
+        flow_id: result.flow_id,
+        domain,
+        step: result,
+      });
+    },
+  );
+
+  // ────────────────────────────────────────────────────────────────────
+  // POST /api/v1/channels/ha/integrations/configure/:flow_id
+  //
+  // Submit one step of a config flow. Body: `{data, decision_ref}`. The
+  // `data` object is the form values for the current step (from the
+  // step descriptor's `data_schema`). The `decision_ref` is REQUIRED —
+  // every configure step is gated.
+  //
+  // Snapshot YES: before the upstream `flow/configure` call we trigger
+  // a HA snapshot via PR1's `triggerBackupBeforeAction`. The snapshot
+  // intent is recorded in `ha_backup_ref` with `triggered_by =
+  // 'ha__integration_configure'`.
+  //
+  // On a successful `create_entry` response (the flow's final step), we
+  // write a row to `ha_integration_ref` AND record a daybook entry.
+  // Intermediate `form` / `external_step` / `progress` responses pass
+  // through silently — the snapshot still fires (one per step) so a
+  // multi-step flow has a snapshot trail at every boundary.
+  // ────────────────────────────────────────────────────────────────────
+  addRoute(
+    "POST",
+    "/api/v1/channels/ha/integrations/configure/:flow_id",
+    async ({ res, body, params }) => {
+      const flow_id = assertHaFlowId(params.flow_id);
+      if (typeof body !== "object" || body === null) {
+        throw new ValidationError("body must be a JSON object");
+      }
+      const b = body as Record<string, unknown>;
+      const decision_ref = assertDecisionRef(b.decision_ref);
+      const data =
+        typeof b.data === "object" && b.data !== null
+          ? (b.data as Record<string, unknown>)
+          : {};
+      await loadHaCredentials();
+      const snapshot = await snapshotBeforeIntegrationAction({
+        action: "ha__integration_configure",
+        decision_ref,
+      });
+      const client = await loadHaWsClient();
+      const result = (await wsCallOrThrow(client, "config_entries/flow/configure", {
+        flow_id,
+        data,
+      })) as Record<string, unknown> | null;
+      if (!result || typeof result.type !== "string") {
+        throw new ApiError(
+          502,
+          "HA_WS_ERROR",
+          `HA returned a flow/configure response without a type: ${JSON.stringify(result)}`,
+        );
+      }
+      const stepType = result.type as string;
+      let entry_id: string | null = null;
+      if (stepType === "create_entry") {
+        const ce = result.result as Record<string, unknown> | undefined;
+        // HA returns the new entry under `result` on a create_entry step.
+        // Older HA versions used `entry_id` at the top of the response;
+        // accept both shapes.
+        if (ce && typeof ce.entry_id === "string") {
+          entry_id = ce.entry_id as string;
+        } else if (typeof result.entry_id === "string") {
+          entry_id = result.entry_id as string;
+        }
+        if (entry_id) {
+          recordIntegrationInstall({ entry_id, decision_ref });
+          const title =
+            (ce && typeof ce.title === "string" && (ce.title as string)) ||
+            (typeof result.title === "string" && (result.title as string)) ||
+            entry_id;
+          await tryRecordIntegrationDaybook({
+            action: "ha__integration_configure",
+            summary: `HA integration installed: ${title} (entry_id=${entry_id})`,
+            decision_ref,
+            extra: { entry_id, backup_ref_id: snapshot.backup_ref_id },
+          });
+        }
+      } else if (stepType === "abort") {
+        // The flow aborted (reason in `result.reason`); no entry was
+        // created so no audit row, but the daybook records the
+        // attempt + reason for the principal.
+        const reason =
+          typeof result.reason === "string"
+            ? (result.reason as string)
+            : "unknown";
+        await tryRecordIntegrationDaybook({
+          action: "ha__integration_configure",
+          summary: `HA integration flow aborted (flow_id=${flow_id}, reason=${reason})`,
+          decision_ref,
+          extra: { flow_id, reason, backup_ref_id: snapshot.backup_ref_id },
+        });
+      }
+      sendJson(res, 200, {
+        ok: true,
+        flow_id,
+        decision_ref,
+        backup_ref_id: snapshot.backup_ref_id,
+        ha_backup_id: snapshot.ha_backup_id,
+        entry_id,
+        step: result,
+      });
+    },
+  );
+
+  // ────────────────────────────────────────────────────────────────────
+  // POST /api/v1/channels/ha/integrations/:entry_id/reload
+  //
+  // Reload a config_entry — re-init the integration without re-running
+  // the flow. No gate (reload is reversible — it either succeeds or
+  // leaves the entry in `failed_setup` state, both of which the
+  // principal can fix).
+  // ────────────────────────────────────────────────────────────────────
+  addRoute(
+    "POST",
+    "/api/v1/channels/ha/integrations/:entry_id/reload",
+    async ({ res, params }) => {
+      const entry_id = assertHaEntryId(params.entry_id);
+      await loadHaCredentials();
+      const client = await loadHaWsClient();
+      const result = await wsCallOrThrow(client, "config_entries/reload", {
+        entry_id,
+      });
+      sendJson(res, 200, { ok: true, entry_id, result });
+    },
+  );
+
+  // ────────────────────────────────────────────────────────────────────
+  // DELETE /api/v1/channels/ha/integrations/:entry_id
+  //
+  // Remove a config_entry. Body: `{decision_ref}`. GATED + SNAPSHOT.
+  //
+  // The DELETE verb on Node's stock http server CAN carry a body, and
+  // the addRoute parser already lifts it; we accept it the same way the
+  // other gated PR3/PR6 surfaces do.
+  //
+  // On success, soft-delete the matching `ha_integration_ref` row
+  // (stamps `removed_at`) and write a daybook entry. The row stays so
+  // "Alfred installed and then removed this" survives in the audit
+  // trail.
+  // ────────────────────────────────────────────────────────────────────
+  addRoute(
+    "DELETE",
+    "/api/v1/channels/ha/integrations/:entry_id",
+    async ({ res, body, params }) => {
+      const entry_id = assertHaEntryId(params.entry_id);
+      if (typeof body !== "object" || body === null) {
+        throw new ValidationError("body must be a JSON object");
+      }
+      const decision_ref = assertDecisionRef(
+        (body as Record<string, unknown>).decision_ref,
+      );
+      await loadHaCredentials();
+      const snapshot = await snapshotBeforeIntegrationAction({
+        action: "ha__integration_remove",
+        decision_ref,
+      });
+      const client = await loadHaWsClient();
+      const result = await wsCallOrThrow(client, "config_entries/remove", {
+        entry_id,
+      });
+      recordIntegrationRemove({ entry_id, decision_ref });
+      await tryRecordIntegrationDaybook({
+        action: "ha__integration_remove",
+        summary: `HA integration removed: entry_id=${entry_id}`,
+        decision_ref,
+        extra: { entry_id, backup_ref_id: snapshot.backup_ref_id },
+      });
+      sendJson(res, 200, {
+        ok: true,
+        entry_id,
+        decision_ref,
+        backup_ref_id: snapshot.backup_ref_id,
+        ha_backup_id: snapshot.ha_backup_id,
+        result,
+      });
+    },
+  );
+}
+
+// === END Tier 4 PR4 ═══════════════════════════════════════════════════
 
 // ═════════════════════════════════════════════════════════════════════════
 // === Tier 4 PR6: Supervisor addons ===

@@ -25,6 +25,7 @@ import m0008 from "./migrations/0008_ha_event_subscription.sql";
 import m0009 from "./migrations/0009_ha_registry_vanished.sql";
 import m0010 from "./migrations/0010_files_cold_archive.sql";
 import m0011 from "./migrations/0011_ha_tier4.sql";
+import m0012 from "./migrations/0012_ha_integration_ref_removed_at.sql";
 
 interface Migration {
   version: number;
@@ -45,6 +46,7 @@ const MIGRATIONS: Migration[] = [
   { version: 9, name: "ha_registry_vanished", sql: m0009 },
   { version: 10, name: "files_cold_archive",  sql: m0010 },
   { version: 11, name: "ha_tier4",            sql: m0011 },
+  { version: 12, name: "ha_integration_ref_removed_at", sql: m0012 },
 ];
 
 /**

@@ -36,14 +36,14 @@ describe("state.db migration runner", () => {
     const db = new DatabaseSync(":memory:");
     db.exec(schema);
     const v = runMigrations(db);
-    // Latest version moves as new migrations land. Today: 11
+    // Latest version moves as new migrations land. Today: 12
     // (0001_fix_pack + 0002_alfred_journal + 0003_tailscale_connection
     // + 0004_channel_tokens + 0005_ha_channel + 0006_files_table
     // + 0007_recall + 0008_ha_event_subscription
     // + 0009_ha_registry_vanished + 0010_files_cold_archive
-    // + 0011_ha_tier4).
-    assert.equal(v, 11, "migrated to latest version");
-    assert.equal(userVersion(db), 11);
+    // + 0011_ha_tier4 + 0012_ha_integration_ref_removed_at).
+    assert.equal(v, 12, "migrated to latest version");
+    assert.equal(userVersion(db), 12);
     assert.ok(cols(db, "observation").includes("processed_at"), "0001: processed_at present after migrate");
     // 0002: alfred_journal + alfred_principal tables present.
     const tables = (
@@ -233,6 +233,11 @@ describe("state.db migration runner", () => {
         `0011: ha_integration_ref.${required} present`,
       );
     }
+    // 0012: PR4 follow-up — soft-delete column on ha_integration_ref.
+    assert.ok(
+      cols(db, "ha_integration_ref").includes("removed_at"),
+      "0012: ha_integration_ref.removed_at present",
+    );
     for (const required of ["ha_user_id", "name", "decision_ref", "llat_vw_id", "created_at"]) {
       assert.ok(
         cols(db, "ha_user_ref").includes(required),
@@ -248,7 +253,7 @@ describe("state.db migration runner", () => {
     db.exec(schema);
     runMigrations(db);
     const v2 = runMigrations(db);
-    assert.equal(v2, 11);
+    assert.equal(v2, 12);
     assert.equal(
       cols(db, "observation").filter((c) => c === "processed_at").length,
       1,

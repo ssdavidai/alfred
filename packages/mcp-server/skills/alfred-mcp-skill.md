@@ -89,6 +89,17 @@ The catalogue is intentionally narrow. Container restarts, credential rotation, 
 - `ha__delete_backup` — GATED: `decision_ref` REQUIRED; daybook entry recorded; irreversible
 - `ha__restore_backup` — GATED: `decision_ref` REQUIRED; NO snapshot (restoring IS the recovery); HA OFFLINE several minutes
 
+### Home Assistant — Tier 4 (#115 PR4, Integrations — config_flow CRUD)
+
+- `ha__list_integrations` / `ha__integration_info` — read-only; rows carry an `alfred` audit block (`installed_by`, `decision_ref`, `installed_at`, `removed_at`)
+- `ha__list_available_integrations` — list every domain HA can install (`get_handlers`); no gate
+- `ha__integration_discover` — kick off a config_flow for a domain; returns `flow_id` + first step descriptor; NO gate (inspection)
+- `ha__integration_configure` — advance one step of a flow; GATED: `decision_ref` REQUIRED; AUTO-SNAPSHOT before every step
+- `ha__integration_reload` — re-init an installed config_entry; no gate (reversible)
+- `ha__integration_remove` — uninstall an integration; GATED: `decision_ref` REQUIRED; AUTO-SNAPSHOT; soft-deletes the `ha_integration_ref` row (stamps `removed_at`, keeps audit trail)
+
+**Multi-step flow contract.** HA integrations are never one-shot. `ha__integration_discover` returns a `flow_id`; the agent calls `ha__integration_configure(flow_id, data, decision_ref)` repeatedly until the response's `step.type` reaches a terminal state. See the recipe section below for the full walk-through.
+
 ### DM pairing (1)
 
 - `approve_device` — approve a pending Hermes DM-pairing code by `platform` + `code` (the only pairing op exposed here)
@@ -244,6 +255,47 @@ Sir says "I'm about to flash my Z-Wave dongle, back HA up first" — Alfred can 
 
 ctrl-api exposes a ledger view at `GET /api/v1/channels/ha/backups/ledger?days=30` that reads `ha_backup_ref` directly — every Alfred-triggered snapshot, every Alfred-initiated user backup, plus future strategy-auto rows. The `triggered_by` column distinguishes `ha__core_restart` / `ha__core_update` (auto-snapshot before another verb), `user` (explicit user-initiated create), and `strategy:auto` (HA's scheduled backup strategy). Models don't need to call this directly — the dashboard / Desk surfaces it — but knowing it exists is useful when Sir asks "what's been backed up?".
 
+### "Install / remove / reload a Home Assistant integration" (Tier 4 — #115 PR4)
+
+The PR4 surface lets Alfred drive HA's `config_flow` API end-to-end: pick a domain, walk through whatever steps HA returns (form fields, "press the button" progress, OAuth external_step), and land on a completed `config_entry`. Every successful install writes a `ha_integration_ref` row so the Desk can render "the 3 integrations Alfred added this week" separately from what Sir added through HA's UI.
+
+**The multi-step pattern.** Integrations are NEVER one-shot. `ha__integration_discover` returns a `flow_id` + first step; the agent loops on `ha__integration_configure` until the step is terminal:
+
+| `step.type` | Meaning | What the agent does |
+|---|---|---|
+| `form` | HA wants form values for this step. `step.data_schema` lists fields; `step.errors` (if present) names a prior validation failure. | Fill in values from Sir's request, call `configure` again with `data: {field: value, …}`. |
+| `external_step` | HA wants the principal to complete OAuth in a browser. `step.url` is the URL. | Surface the URL to Sir ("open this to finish authenticating with Google"). STOP — there's no `configure` to send until Sir comes back. Use `ha__integration_flow_progress` to poll for the next step. |
+| `progress` | HA is doing async work the agent should wait on (e.g. "discovering Hue bridges on the network"). | Wait a few seconds, call `configure` again with empty `data: {}`. |
+| `create_entry` | The flow SUCCEEDED. `entry_id` is in the response top-level AND inside `step.result.entry_id`. | Surface "installed — the {title} integration is now live". `ha_integration_ref` is already stamped; the daybook is already written. |
+| `abort` | The flow FAILED. `step.reason` is the machine-readable reason (e.g. `already_configured` / `cannot_connect`). | Surface the reason to Sir and ask what to do next. The daybook records the attempt; no `ha_integration_ref` row is written. |
+
+**Recipe — install Hue with bridge IP 192.168.1.42 on Sir's home:**
+
+1. `ha__list_available_integrations()` — confirm `hue` is in `handlers`.
+2. Create a `decision/` record: e.g. `decision/2026-05-29-hue-install.md` describing the install.
+3. `ha__integration_discover({domain: "hue"})` → `{flow_id: "abc123", step: {type: "form", data_schema: [{name: "host"}]}}`
+4. `ha__integration_configure({flow_id: "abc123", data: {host: "192.168.1.42"}, decision_ref: "decision/2026-05-29-hue-install.md"})` → `{step: {type: "form", step_id: "link"}}` — HA wants Sir to press the bridge button.
+5. Surface to Sir: "Sir, please press the round button on top of the Hue bridge, then say go."
+6. When Sir says go: `ha__integration_configure({flow_id: "abc123", data: {}, decision_ref})` → `{entry_id: "01JC…", step: {type: "create_entry", result: {entry_id: "01JC…", title: "Hue Bridge 1"}}}`. Done — surface "installed, Sir; the Hue Bridge 1 integration is live (snapshot taken)".
+
+**Recipe — remove a half-broken integration:**
+
+1. `ha__list_integrations()` → find the entry_id and confirm Sir really wants THIS one (entry titles can be confusingly similar: "Hue Bridge 1" vs "Hue Bridge 2").
+2. `ha__integration_info({entry_id})` — read the current state. If state is `failed_setup`, consider `ha__integration_reload` first (no gate, often fixes transient failures without uninstalling).
+3. Create a `decision/` record for the removal.
+4. `ha__integration_remove({entry_id, decision_ref})` — snapshot taken before the upstream call; `ha_integration_ref` is soft-deleted (the audit trail "Alfred installed and then removed this" survives).
+
+**Recipe — reload after a config tweak:**
+
+1. `ha__integration_info({entry_id})` — confirm the entry's `source` and `state`.
+2. `ha__integration_reload({entry_id})` — no gate; HA either brings the integration back up or moves it to `failed_setup` (both fixable from there).
+
+**What NOT to do:**
+
+- DON'T poll `ha__integration_configure` with the same `data` over and over to "force" a step — HA's flow state machine doesn't work that way. If you get a `form` back twice, read the `errors` field; if it's empty, the prior submission was incomplete (some `data_schema` field was missing).
+- DON'T construct a `decision_ref` from thin air on a step that follows a `form` step. Re-use the SAME `decision_ref` across all steps of one flow — they're all the same install.
+- DON'T retry on `abort` — surface the reason to Sir, who decides whether to restart the flow with different inputs.
+
 ---
 
 ## Pre-requisites and chaining
@@ -299,7 +351,7 @@ pointing at a Desk decision Sir created. The middleware rejects with
 `400 DECISION_REF_MISSING` if absent and `400 DECISION_REF_REVERSED` if
 Sir reversed the decision before the verb fires.
 
-  - `ha__integration_configure` / `ha__integration_remove` / `ha__integration_reload`
+  - `ha__integration_configure` / `ha__integration_remove` (reload is gateless — see Tier 4 PR4 above)
   - `ha__hacs_install` / `ha__hacs_remove`
   - `ha__addon_install` / `ha__addon_uninstall` / `ha__addon_configure`
   - `ha__core_restart` / `ha__core_update`

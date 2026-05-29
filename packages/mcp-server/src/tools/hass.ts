@@ -1313,14 +1313,272 @@ export const HASS_PR7_TOOLS: ToolDef[] = [
 // === END Tier 4 PR7 ═══════════════════════════════════════════════════
 // ═════════════════════════════════════════════════════════════════════════
 
-// Final catalogue: 46 tools total = 11 read + 15 writes (5 PR4 + 10 PR3 CRUD)
-// + 10 PR6 supervisor addon + 10 PR7 core+backups. Order kept deliberately
-// (reads first, automations/scenes/scripts next, addon-CRUD next, core+backups
-// last) so the model that lists the catalogue sees the safe read surface
-// before the destructive surfaces.
+// ═════════════════════════════════════════════════════════════════════════
+// === Tier 4 PR4: Integrations (config_flow) ===
+// ═════════════════════════════════════════════════════════════════════════
+//
+// Issue #115 PR4 — 7 new tools fronting ctrl-api's
+// /api/v1/channels/ha/integrations/* surface. These drive HA's
+// multi-step config_flow API end-to-end: the agent picks a domain,
+// initiates a flow, walks through whatever steps HA returns (form,
+// external_step for OAuth, progress for "press the bridge button" —
+// each one round-trips through `ha__integration_configure`), and lands
+// on a completed config_entry. On a successful create_entry, ctrl-api
+// writes a row to `ha_integration_ref` recording installed_by='alfred'
+// + decision_ref + installed_at; on remove, the same row gets
+// `removed_at` stamped (soft-delete for audit).
+//
+// Per the spec §4 gate matrix (locked YES 2026-05-29 by Sir):
+//
+// | Tool                            | decision_ref | auto-snapshot |
+// |---------------------------------|--------------|---------------|
+// | ha__list_integrations           | no           | no            |
+// | ha__list_available_integrations | no           | no            |
+// | ha__integration_info            | no           | no            |
+// | ha__integration_discover        | no           | no            |
+// | ha__integration_configure       | REQUIRED     | YES (each step) |
+// | ha__integration_reload          | no           | no            |
+// | ha__integration_remove          | REQUIRED     | YES           |
+//
+// Why these gates: `discover` is read-shaped (it just inspects the
+// first form), `reload` is reversible (the entry either comes back up
+// or moves to `failed_setup` — both fixable). The two destructive
+// verbs are `configure` (the submit step that lands an entry — or one
+// of its intermediate boundaries) and `remove` (uninstall).
+//
+// The multi-step flow pattern (LLM-facing)
+// ----------------------------------------
+// HA integrations are NEVER one-shot. The agent must call
+// `ha__integration_discover` to obtain a flow_id, then call
+// `ha__integration_configure` repeatedly until the response's `step.type`
+// is `create_entry` or `abort`. Step types the agent will see:
+//
+//   * `form` — the agent must collect form values. `step.data_schema`
+//     describes the fields; `step.errors` (if present) names a prior
+//     validation failure to surface to Sir. The agent fills in values
+//     and re-calls configure with `data: {field: value, …}`.
+//
+//   * `external_step` — HA wants the principal to complete an OAuth
+//     dance in a browser. `step.url` is the URL. The agent should
+//     surface this to Sir ("open this URL to finish authenticating
+//     with Google") and STOP — there's no `configure` to send until
+//     Sir comes back, at which point HA will have moved the flow
+//     forward on its own. Poll with `ha__integration_flow_progress`
+//     (the GET surface) to see the next step.
+//
+//   * `progress` — HA is doing work the agent should wait on (e.g.
+//     "discovering Hue bridges on the network"). The agent should
+//     wait a few seconds and re-call configure with an EMPTY data
+//     object `{}`.
+//
+//   * `create_entry` — the flow succeeded; `entry_id` is in the
+//     response top-level AND inside `step.result.entry_id`. The
+//     `ha_integration_ref` row is already written; the agent can
+//     surface "installed — Sir, the {title} integration is now live"
+//     to the principal.
+//
+//   * `abort` — the flow failed; `step.reason` is HA's machine-readable
+//     reason (e.g. `already_configured` / `cannot_connect`). The
+//     daybook records the attempt; the agent surfaces the reason and
+//     waits for Sir's next decision.
+//
+// Example: install Hue with bridge IP 192.168.1.42
+//
+//   1. ha__integration_discover({domain: "hue"})
+//        → {flow_id: "abc123", step: {type: "form",
+//                                     data_schema: [{name: "host", ...}],
+//                                     step_id: "init"}}
+//
+//   2. ha__integration_configure({flow_id: "abc123",
+//                                 data: {host: "192.168.1.42"},
+//                                 decision_ref: "decision/2026-05-29-hue.md"})
+//        → {step: {type: "form", step_id: "link",
+//                  description_placeholders: {name: "Living Room bridge"}}}
+//
+//      (At this point HA wants Sir to press the Hue bridge button.
+//       The agent surfaces "Sir, please press the button on top of
+//       the Hue bridge, then say go".)
+//
+//   3. ha__integration_configure({flow_id: "abc123", data: {},
+//                                 decision_ref: "decision/2026-05-29-hue.md"})
+//        → {entry_id: "01JC...", step: {type: "create_entry",
+//                                       result: {entry_id: "01JC...",
+//                                                title: "Hue Bridge 1"}}}
+//
+//      (entry_id is now in `ha_integration_ref`, a daybook line is
+//       written, snapshot was taken before each configure call.)
+
+const IntegrationFlowIdParam = z
+  .string()
+  .min(1)
+  .max(256)
+  .regex(
+    /^[A-Za-z0-9_-]+$/,
+    "flow_id must be 1..256 chars of [A-Za-z0-9_-]",
+  )
+  .describe(
+    "Opaque flow id returned by `ha__integration_discover`. Resolve from the discover response — never invent.",
+  );
+
+const IntegrationEntryIdParam = z
+  .string()
+  .min(1)
+  .max(256)
+  .regex(
+    /^[A-Za-z0-9_-]+$/,
+    "entry_id must be 1..256 chars of [A-Za-z0-9_-]",
+  )
+  .describe(
+    "Config entry id (HA's `entry_id`). Resolve from `ha__list_integrations` or from a `create_entry` step's response — never invent.",
+  );
+
+const IntegrationDomainParam = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(
+    /^[a-z][a-z0-9_]*$/,
+    "domain must be 1..128 chars of [a-z0-9_], starting with a..z",
+  )
+  .describe(
+    "HA integration domain — the snake_case slug HA uses internally (e.g. `hue`, `mqtt`, `nest`, `google_assistant`). Resolve via `ha__list_available_integrations` — never invent.",
+  );
+
+const IntegrationDecisionRefParam = z
+  .string()
+  .min(6)
+  .max(256)
+  .regex(
+    /^[\x21-\x7E]+$/,
+    "decision_ref must be printable ASCII with no whitespace",
+  )
+  .describe(
+    "Vault path or ulid of the `decision/` record that authorised this integration write. REQUIRED on `configure` and `remove`. Alfred refuses without it — the contract is 'I decided X based on signal Y, run it'.",
+  );
+
+export const HASS_INTEGRATION_TOOLS: ToolDef[] = [
+  {
+    name: "ha__list_integrations",
+    description:
+      "List every Home Assistant config_entry — the installed integrations (Hue, Nest, etc.). Each entry carries an `alfred` audit block: `{installed_by: 'alfred'|'sir', decision_ref, installed_at, removed_at}` so the agent can tell what Alfred installed vs what the principal added directly through HA's UI. **When to call:** Sir asks 'what integrations do I have?' / 'is my Hue connected?' / before `ha__integration_remove` or `ha__integration_reload` to resolve an entry_id. No gate, no snapshot.",
+    inputSchema: z.object({}),
+    buildRequest: () => ({
+      method: "GET",
+      path: "/api/v1/channels/ha/integrations",
+    }),
+  },
+
+  {
+    name: "ha__list_available_integrations",
+    description:
+      "List every integration *domain* HA can install — the answer to 'what could I install?'. Returns the `handlers` array from `config_entries/get_handlers` (each entry is the snake_case domain string). **When to call:** Sir asks 'can I add X?' / 'does HA support Y?' / before `ha__integration_discover` to resolve a user-friendly name like 'Hue' to the domain `hue`. No gate.",
+    inputSchema: z.object({}),
+    buildRequest: () => ({
+      method: "GET",
+      path: "/api/v1/channels/ha/integrations/available",
+    }),
+  },
+
+  {
+    name: "ha__integration_info",
+    description:
+      "Info on one installed config_entry — title, state, source, options, etc. Includes the `alfred` audit block. **When to call:** before `ha__integration_reload` to confirm current state, before `ha__integration_remove` to confirm Sir really wants to remove it, or when Sir asks 'tell me about my Hue integration'.",
+    inputSchema: z.object({
+      entry_id: IntegrationEntryIdParam,
+    }),
+    buildRequest: ({ entry_id }) => ({
+      method: "GET",
+      path: `/api/v1/channels/ha/integrations/${encodeURIComponent(entry_id)}`,
+    }),
+  },
+
+  {
+    name: "ha__integration_discover",
+    description:
+      "Initialise an HA config_flow for a given domain. Returns `{flow_id, domain, step}` — the `flow_id` is the handle the agent must pass to every subsequent `ha__integration_configure` call. The `step` is HA's first descriptor (`type: 'form' | 'external_step' | 'progress'`); read the schema in `step.data_schema` and the human-readable text in `step.description_placeholders` to know what to ask Sir for next. **No gate** (inspection only — no entry is created here). Pass `show_advanced_options: true` to surface HA's advanced fields (rare; default false).",
+    inputSchema: z.object({
+      domain: IntegrationDomainParam,
+      show_advanced_options: z
+        .boolean()
+        .optional()
+        .describe(
+          "If true, HA includes its advanced-flag form fields. Default false — most installs don't need them.",
+        ),
+    }),
+    buildRequest: ({ domain, show_advanced_options }) => ({
+      method: "POST",
+      path: "/api/v1/channels/ha/integrations/discover",
+      body: {
+        domain,
+        ...(show_advanced_options !== undefined
+          ? { show_advanced_options }
+          : {}),
+      },
+    }),
+  },
+
+  {
+    name: "ha__integration_configure",
+    description:
+      "Advance a config_flow by one step. **GATED** — `decision_ref` REQUIRED. **AUTO-SNAPSHOT** — ctrl-api takes a HA snapshot via `triggerBackupBeforeAction` BEFORE the upstream `flow/configure` call (one per step). Pass `data` as the form values matching the current step's `data_schema` (e.g. `{host: '192.168.1.42'}` for the first Hue step, `{}` for a 'press the button' progress step). The response's `step.type` tells you what happened: `form` → another form to fill, `progress` → wait and re-call with `{}`, `external_step` → surface `step.url` to Sir and wait, `create_entry` → DONE (entry_id is in the response top-level AND `step.result.entry_id`; ha_integration_ref is now stamped), `abort` → flow failed, `step.reason` carries why. The snapshot's `backup_ref_id` is in every response so the agent can mention 'snapshot taken' if Sir asks.",
+    inputSchema: z.object({
+      flow_id: IntegrationFlowIdParam,
+      data: z
+        .record(z.string(), z.unknown())
+        .describe(
+          "Form values for the current step. Read `step.data_schema` from the previous response to know the field names; use `{}` for steps that just need acknowledgement (e.g. 'press the bridge button now').",
+        ),
+      decision_ref: IntegrationDecisionRefParam,
+    }),
+    buildRequest: ({ flow_id, data, decision_ref }) => ({
+      method: "POST",
+      path: `/api/v1/channels/ha/integrations/configure/${encodeURIComponent(flow_id)}`,
+      body: { data, decision_ref },
+    }),
+  },
+
+  {
+    name: "ha__integration_reload",
+    description:
+      "Reload an installed config_entry — re-init the integration without re-running the flow. Useful after Sir tweaked options that need a restart to apply, or after the integration moved to `failed_setup` state. **NO gate** (reversible — reload either succeeds or leaves the entry in `failed_setup`, both fixable). NO snapshot.",
+    inputSchema: z.object({
+      entry_id: IntegrationEntryIdParam,
+    }),
+    buildRequest: ({ entry_id }) => ({
+      method: "POST",
+      path: `/api/v1/channels/ha/integrations/${encodeURIComponent(entry_id)}/reload`,
+    }),
+  },
+
+  {
+    name: "ha__integration_remove",
+    description:
+      "Remove an installed config_entry — uninstall the integration. **GATED** — `decision_ref` REQUIRED. **AUTO-SNAPSHOT** — ctrl-api takes a HA snapshot BEFORE the upstream `config_entries/remove` call. On success the matching `ha_integration_ref` row is soft-deleted (a `removed_at` timestamp is stamped; the row stays so the audit trail 'Alfred installed and then removed this' survives). The response includes `backup_ref_id` — mention 'snapshot taken' in your reply. Use `ha__integration_info` first to confirm Sir wants to remove THIS entry (entry titles can be confusingly similar — Hue Bridge 1 vs Hue Bridge 2).",
+    inputSchema: z.object({
+      entry_id: IntegrationEntryIdParam,
+      decision_ref: IntegrationDecisionRefParam,
+    }),
+    buildRequest: ({ entry_id, decision_ref }) => ({
+      method: "DELETE",
+      path: `/api/v1/channels/ha/integrations/${encodeURIComponent(entry_id)}`,
+      body: { decision_ref },
+    }),
+  },
+];
+
+// ═════════════════════════════════════════════════════════════════════════
+// === END Tier 4 PR4 ═══════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════════════════════
+
+// Final catalogue: 53 tools total = 11 read + 15 writes (5 PR4 + 10 PR3 CRUD)
+// + 10 PR6 supervisor addon + 10 PR7 core+backups + 7 PR4 integration.
+// Order kept deliberately (reads first, writes next, addon-CRUD next,
+// core+backups next, integrations last) so the model that lists the
+// catalogue sees the safe read surface before the destructive surfaces.
 export const ALL_HASS_TOOLS: ToolDef[] = [
   ...HASS_READ_TOOLS,
   ...HASS_DEFERRED_TOOLS,
   ...HASS_ADDON_TOOLS,
   ...HASS_PR7_TOOLS,
+  ...HASS_INTEGRATION_TOOLS,
 ];

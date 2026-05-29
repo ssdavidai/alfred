@@ -21,6 +21,7 @@ import {
   HASS_DEFERRED_TOOLS,
   HASS_ADDON_TOOLS,
   HASS_PR7_TOOLS,
+  HASS_INTEGRATION_TOOLS,
 } from "./hass.js";
 import { SUPPORTED_APPS, isAppId, getToolsForApp } from "./registry.js";
 
@@ -32,7 +33,7 @@ function getTool(name: string) {
 
 // ─── catalogue shape ────────────────────────────────────────────────────
 
-test("hass catalogue: exactly 46 tools (11 read + 15 write + 10 PR6 addon + 10 PR7 core+backup)", () => {
+test("hass catalogue: exactly 53 tools (11 read + 15 write + 10 PR6 addon + 10 PR7 core+backup + 7 PR4 integration)", () => {
   assert.equal(HASS_READ_TOOLS.length, 11);
   // After #115 PR3 splice: PR4's 5 + PR3's 10 = 15 writes.
   assert.equal(HASS_DEFERRED_TOOLS.length, 15);
@@ -40,14 +41,16 @@ test("hass catalogue: exactly 46 tools (11 read + 15 write + 10 PR6 addon + 10 P
   assert.equal(HASS_ADDON_TOOLS.length, 10);
   // PR7: 10 core lifecycle + backup CRUD tools.
   assert.equal(HASS_PR7_TOOLS.length, 10);
-  assert.equal(ALL_HASS_TOOLS.length, 46);
+  // PR4 (issue #115): 7 integration tools.
+  assert.equal(HASS_INTEGRATION_TOOLS.length, 7);
+  assert.equal(ALL_HASS_TOOLS.length, 53);
 });
 
-test("registry: hass is a supported app and registers all 46 tools", () => {
+test("registry: hass is a supported app and registers all 53 tools", () => {
   assert.ok(isAppId("hass"));
   assert.ok((SUPPORTED_APPS as Set<string>).has("hass"));
   const tools = getToolsForApp("hass");
-  assert.equal(tools.length, 46);
+  assert.equal(tools.length, 53);
 });
 
 test("hass: every tool name is unique", () => {
@@ -1376,4 +1379,170 @@ test("PR7 ha__restore_backup: description explicitly warns 'stops HA for several
     /stops? ha|several minutes/i.test(t.description),
     "ha__restore_backup description must spell out the HA-stop blast radius",
   );
+});
+
+// ─── PR4: Integrations (#115) ───────────────────────────────────────────
+
+const INTEGRATION_TOOL_NAMES = [
+  "ha__list_integrations",
+  "ha__list_available_integrations",
+  "ha__integration_info",
+  "ha__integration_discover",
+  "ha__integration_configure",
+  "ha__integration_reload",
+  "ha__integration_remove",
+];
+
+test("PR4 integration: all 7 tool names registered", () => {
+  for (const name of INTEGRATION_TOOL_NAMES) {
+    getTool(name); // throws if missing
+  }
+  assert.equal(HASS_INTEGRATION_TOOLS.length, INTEGRATION_TOOL_NAMES.length);
+});
+
+test("PR4 integration: ha__list_integrations builds a GET /api/v1/channels/ha/integrations", () => {
+  const t = getTool("ha__list_integrations");
+  const req = t.buildRequest({});
+  assert.equal(req.method, "GET");
+  assert.equal(req.path, "/api/v1/channels/ha/integrations");
+});
+
+test("PR4 integration: ha__list_available_integrations builds a GET /api/v1/channels/ha/integrations/available", () => {
+  const t = getTool("ha__list_available_integrations");
+  const req = t.buildRequest({});
+  assert.equal(req.method, "GET");
+  assert.equal(req.path, "/api/v1/channels/ha/integrations/available");
+});
+
+test("PR4 integration: ha__integration_discover requires `domain` and builds POST with the body", () => {
+  const t = getTool("ha__integration_discover");
+  // missing domain
+  assert.equal(t.inputSchema.safeParse({}).success, false);
+  // invalid domain (uppercase)
+  assert.equal(t.inputSchema.safeParse({ domain: "Hue" }).success, false);
+  // valid
+  const ok = t.inputSchema.safeParse({ domain: "hue" });
+  assert.ok(ok.success);
+  const req = t.buildRequest({ domain: "hue" });
+  assert.equal(req.method, "POST");
+  assert.equal(req.path, "/api/v1/channels/ha/integrations/discover");
+  assert.deepEqual(req.body, { domain: "hue" });
+
+  const reqAdv = t.buildRequest({
+    domain: "hue",
+    show_advanced_options: true,
+  });
+  assert.deepEqual(reqAdv.body, { domain: "hue", show_advanced_options: true });
+});
+
+test("PR4 integration: ha__integration_configure requires decision_ref + flow_id + data", () => {
+  const t = getTool("ha__integration_configure");
+  // missing decision_ref
+  assert.equal(
+    t.inputSchema.safeParse({ flow_id: "abc", data: {} }).success,
+    false,
+    "rejects missing decision_ref",
+  );
+  // bad flow_id shape
+  assert.equal(
+    t.inputSchema.safeParse({
+      flow_id: "bad flow id",
+      data: {},
+      decision_ref: "decision/2026-05-29-x.md",
+    }).success,
+    false,
+    "rejects flow_id with whitespace",
+  );
+  // good shape
+  const ok = t.inputSchema.safeParse({
+    flow_id: "abc123",
+    data: { host: "192.168.1.42" },
+    decision_ref: "decision/2026-05-29-hue.md",
+  });
+  assert.ok(ok.success);
+  const req = t.buildRequest({
+    flow_id: "abc123",
+    data: { host: "192.168.1.42" },
+    decision_ref: "decision/2026-05-29-hue.md",
+  });
+  assert.equal(req.method, "POST");
+  assert.equal(
+    req.path,
+    "/api/v1/channels/ha/integrations/configure/abc123",
+  );
+  assert.deepEqual(req.body, {
+    data: { host: "192.168.1.42" },
+    decision_ref: "decision/2026-05-29-hue.md",
+  });
+});
+
+test("PR4 integration: ha__integration_remove gated on decision_ref + entry_id, builds DELETE", () => {
+  const t = getTool("ha__integration_remove");
+  // missing decision_ref
+  assert.equal(
+    t.inputSchema.safeParse({ entry_id: "01JC..." }).success,
+    false,
+    "rejects missing decision_ref",
+  );
+  // valid
+  const ok = t.inputSchema.safeParse({
+    entry_id: "01JC123",
+    decision_ref: "decision/2026-05-29-rm.md",
+  });
+  assert.ok(ok.success);
+  const req = t.buildRequest({
+    entry_id: "01JC123",
+    decision_ref: "decision/2026-05-29-rm.md",
+  });
+  assert.equal(req.method, "DELETE");
+  assert.equal(req.path, "/api/v1/channels/ha/integrations/01JC123");
+  assert.deepEqual(req.body, { decision_ref: "decision/2026-05-29-rm.md" });
+});
+
+test("PR4 integration: ha__integration_reload is gateless and builds POST .../reload", () => {
+  const t = getTool("ha__integration_reload");
+  const ok = t.inputSchema.safeParse({ entry_id: "01JC123" });
+  assert.ok(ok.success, "no decision_ref required");
+  const req = t.buildRequest({ entry_id: "01JC123" });
+  assert.equal(req.method, "POST");
+  assert.equal(req.path, "/api/v1/channels/ha/integrations/01JC123/reload");
+});
+
+test("PR4 integration: ha__integration_info builds GET, gateless", () => {
+  const t = getTool("ha__integration_info");
+  const ok = t.inputSchema.safeParse({ entry_id: "01JC123" });
+  assert.ok(ok.success);
+  const req = t.buildRequest({ entry_id: "01JC123" });
+  assert.equal(req.method, "GET");
+  assert.equal(req.path, "/api/v1/channels/ha/integrations/01JC123");
+});
+
+test("PR4 integration: configure description explains the multi-step pattern", () => {
+  const t = getTool("ha__integration_configure");
+  assert.ok(
+    /step\.type/i.test(t.description),
+    "configure description must explain step.type semantics",
+  );
+  assert.ok(
+    /snapshot|backup/i.test(t.description),
+    "configure description must mention snapshot/backup",
+  );
+});
+
+test("PR4 integration: discover description explains the multi-step pattern", () => {
+  const t = getTool("ha__integration_discover");
+  assert.ok(
+    /flow_id/i.test(t.description),
+    "discover description must mention flow_id",
+  );
+  assert.ok(
+    /no gate/i.test(t.description) || /inspection/i.test(t.description),
+    "discover description must mention no-gate semantics",
+  );
+});
+
+test("PR4 integration: every name starts with `ha__` and is unique", () => {
+  const names = HASS_INTEGRATION_TOOLS.map((t) => t.name);
+  assert.equal(new Set(names).size, names.length);
+  for (const n of names) assert.ok(n.startsWith("ha__"));
 });
