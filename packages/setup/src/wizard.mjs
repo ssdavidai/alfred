@@ -300,17 +300,12 @@ async function main() {
   );
   console.log(feat('SendGrid email', !!answers.SENDGRID_API_KEY));
   console.log(feat('Sure (finance)', answers.SURE_ENABLED === 'true'));
-  console.log(feat('Vexa transcripts', answers.VEXA_ENABLED === 'true'));
   console.log(
     `    Secrets           ${generated} generated, ${kept} kept`
   );
   console.log('');
   console.log(pc.bold('  Next step:'));
-  if (answers.VEXA_ENABLED === 'true') {
-    console.log(pc.cyan('    docker compose --profile vexa up -d'));
-  } else {
-    console.log(pc.cyan('    docker compose up -d'));
-  }
+  console.log(pc.cyan('    docker compose up -d'));
   console.log('');
 }
 

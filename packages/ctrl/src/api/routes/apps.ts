@@ -146,24 +146,9 @@ export function registerAppsRoutes(): void {
       }))(),
     );
 
-    // Vexa — meeting transcript dashboard (Steward Phase 4 — #840). Vexa
-    // itself runs as a separate compose project at /opt/alfred/vexa/; the
-    // ``vexa-dashboard`` service in that stack joins the alfred_default
-    // network so ctrl-api can reach it at http://vexa-dashboard:3000.
-    // Gate on VEXA_ENABLED=true (set in /opt/alfred/compose/.env by
-    // setupVexa) — this keeps the dock clean for tenants who haven't
-    // turned on the transcription stack yet.
-    if (process.env.VEXA_ENABLED === "true") {
-      checks.push(
-        (async (): Promise<InstalledApp> => ({
-          id: "vexa",
-          name: "Vexa",
-          url: `https://vexa.${domain}`,
-          icon: "/app-icons/vexa.svg",
-          status: await checkHealth("http://vexa-dashboard:3000/api/health"),
-        }))(),
-      );
-    }
+    // (The meeting-transcript dashboard tile was retired in #113 PR1
+    // — the upstream stack is gone. Recall.ai's replacement, when it
+    // ships in #113 PR2+, lives on /channels rather than /apps.)
 
     const apps = await Promise.all(checks);
     sendJson(res, 200, { apps });

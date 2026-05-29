@@ -130,10 +130,6 @@ AUTO_SECRETS=(
 	SURE_POSTGRES_PASSWORD
 	SURE_REDIS_PASSWORD
 	SURE_API_KEY
-	VEXA_POSTGRES_PASSWORD
-	VEXA_MINIO_PASSWORD
-	VEXA_ADMIN_API_TOKEN
-	VEXA_INTERNAL_API_SECRET
 	PAPERCLIP_BETTER_AUTH_SECRET
 	PAPERCLIP_HEARTBEAT_SECRET
 	# PAPERCLIP_API_KEY is NOT auto-generated — Paperclip's better-auth
@@ -234,7 +230,6 @@ fi
 
 bold ""
 green "Bootstrap complete. Next:  docker compose up -d"
-green "(Vexa is opt-in:           docker compose --profile vexa up -d)"
 green "(Tailscale is opt-in:      docker compose --profile tailscale up -d tailscale"
 green "                            — set TAILSCALE_ENABLED=true first; PR 3 will"
 green "                              wire the /connections card.)"

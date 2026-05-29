@@ -25,7 +25,7 @@
 # ambiguity between client routes and server endpoints.
 #
 # EXCEPT: a small set of PUBLIC ctrl-api webhook paths must be reachable
-# on the apex domain because third-party services (OMI, Plane, Vexa,
+# on the apex domain because third-party services (OMI, Plane,
 # Paperclip, arbitrary stream webhooks) compose their callback URLs from
 # TENANT_BASE_URL which is the apex (e.g. https://home.alfred.black).
 # Without this path-level handler, those requests would land on the SPA
@@ -60,6 +60,12 @@
 	# — same pattern as Paperclip's heartbeat (HMAC instead of bearer),
 	# routed through the same Caddy gate so HA can reach ctrl-api directly
 	# rather than bouncing through the SPA's nginx (which would 405).
+	#
+	# /api/v1/webhooks/vexa stays in the matcher even though the upstream
+	# Vexa stack was retired in #113 PR1 — ctrl-api keeps a 410 Gone stub
+	# so any in-flight Vexa retries terminate visibly here instead of
+	# 405-ing at the SPA's nginx. Drop this entry when the stub goes (the
+	# PR that lands Recall.ai — #113 PR2).
 	@public_webhooks {
 		path /api/v1/streams/omi/* /api/v1/plane/webhook /api/v1/webhooks/plane/steward /api/v1/webhooks/vexa /api/v1/webhooks/in/* /api/v1/channels/email/inbound /api/v1/channels/paperclip/* /api/v1/channels/ha/turn /api/v1/composio/webhook
 	}

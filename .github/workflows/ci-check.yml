@@ -119,16 +119,12 @@ jobs:
                      DJANGO_SECRET_KEY POSTGRES_PASSWORD REDIS_PASSWORD \
                      MINIO_ROOT_PASSWORD LIVE_SERVER_SECRET_KEY \
                      SURE_SECRET_KEY_BASE SURE_POSTGRES_PASSWORD \
-                     SURE_REDIS_PASSWORD VEXA_POSTGRES_PASSWORD \
-                     VEXA_MINIO_PASSWORD VEXA_ADMIN_API_TOKEN \
-                     VEXA_INTERNAL_API_SECRET; do
+                     SURE_REDIS_PASSWORD; do
               echo "${k}=cidummy0000000000000000000000000000"
             done
           } >> .env
       - name: docker compose config (default profile)
         run: docker compose config --quiet
-      - name: docker compose config (vexa profile)
-        run: docker compose --profile vexa config --quiet
       - name: docker compose config (tailscale profile — issue #109 PR 1)
         run: docker compose --profile tailscale config --quiet
       - name: tailscale OFF by default (no service unless profile passed)

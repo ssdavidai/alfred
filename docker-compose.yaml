@@ -13,13 +13,10 @@
 #
 # Profiles:
 #   * (default — no profile)  always-on services. `docker compose up -d`.
-#   * vexa                    the 9-container transcript stack.
-#                             `docker compose --profile vexa up -d`.
 #
 # Minimum VM spec: the default-profile `mem_limit` ceilings sum to ~37 GB, so
 # 32 GB is below the hard cap and OOM-kills a container under load. Floor is
 # 48 GB RAM (32 GB only survives a near-idle box); 48 GB recommended.
-# The `vexa` profile adds ~7 GB of limits → plan on 56-64 GB with it on.
 # Also: 4+ vCPU, 80+ GB disk.
 #
 # Host port bindings: only `caddy` (80/443). Every other service talks over
@@ -455,13 +452,13 @@ services:
       # ctrl-api restarts sibling containers (worker ops, chore runs).
       - /var/run/docker.sock:/var/run/docker.sock
       # The host compose dir, bind-mounted RW. ctrl-api modules
-      # (vexa.ts/models.ts/credentials.ts/admin.ts/logs.ts) read and write
+      # (models.ts/credentials.ts/admin.ts/logs.ts) read and write
       # ${COMPOSE_DIR}/.env and shell out to `docker compose -f
       # ${COMPOSE_DIR}/docker-compose.yaml`. COMPOSE_DIR defaulted to the
       # bare-VM path /srv/alfred-black, which does not exist in this
       # containerized single-VM topology, so every .env read/write threw
-      # ENOENT (the vexa-toggle 500, the empty model catalog). RW so the
-      # vexa flag + credential writes land in the real file the rest of the
+      # ENOENT (e.g. the empty model catalog). RW so credential and
+      # provider-key writes land in the real file the rest of the
       # stack reads. ${COMPOSE_DIR_HOST} defaults to /opt/alfred (the merged
       # single-VM layout); override in .env for a different host path.
       - ${COMPOSE_DIR_HOST:-/opt/alfred}:/srv/alfred-black
@@ -574,7 +571,7 @@ services:
       # GROQ_API_KEY). env_file: .env injects it too, but the raw provider
       # keys above are explicitly blanked here, so pin GROQ through cleanly
       # — without it every audio group is discarded as "empty transcription"
-      # and OMI capture is silently dead. Distinct from VEXA_TRANSCRIPTION_*.
+      # and OMI capture is silently dead.
       - GROQ_API_KEY=${GROQ_API_KEY:-}
       - ALFRED_LEARN_ENABLED=${ALFRED_LEARN_ENABLED:-true}
       - ALFRED_CTRL_URL=http://ctrl-api:3100
@@ -596,24 +593,10 @@ services:
       - COMPOSIO_CACHE_DIR=/tmp/composio
       - HOME=/tmp
       - WORKERS_OPENCLAW_CONFIG=/hermes-state/profiles/workers/config.yaml
-      # Vexa transcript intake — gated by VEXA_ENABLED. When false the
-      # meeting_capture + transcript_intake schedules are not registered.
-      - VEXA_ENABLED=${VEXA_ENABLED:-false}
-      - VEXA_API_URL=${VEXA_API_URL:-http://vexa-api-gateway:8000}
-      - VEXA_BOT_DISPLAY_NAME=${VEXA_BOT_DISPLAY_NAME:-Alfred}
-      # VEXA_GCAL_STREAM_ID is intentionally NOT defaulted here. The old
-      # default `composio-googlecalendar` short-circuited transcript.py's
-      # candidate list (_gcal_stream_candidates) to a single slug whose stream
-      # file never exists, so find_upcoming_meet_events returned [] forever and
-      # no meeting bot ever dispatched. Left unset, transcript.py tries its own
-      # ordered candidates, canonical
-      # `composio-googlecalendar-googlecalendar-events-list` first. An operator
-      # whose Composio slug genuinely differs can still override it via .env
-      # (env_file injects it). See transcript.py:_gcal_stream_candidates.
       # Owner identity. The code reads OWNER_EMAIL (pull.py, first_brief_email.py,
       # fleet_audit.py, init step 9, sure-bootstrap.rb); transcript.py still
       # reads ALFRED_OWNER_EMAIL. Set BOTH from the same .env OWNER_EMAIL so the
-      # cross-tenant ingest guard, first-brief sender allowlist, and Vexa
+      # cross-tenant ingest guard, first-brief sender allowlist, and meeting-bot
       # attendee match all see the principal's address. (C9: canonical=OWNER_EMAIL.)
       - OWNER_EMAIL=${OWNER_EMAIL:-}
       - ALFRED_OWNER_EMAIL=${OWNER_EMAIL:-}
@@ -1530,250 +1513,6 @@ services:
     restart: unless-stopped
     mem_limit: 128m
 
-  # ── Vexa — transcript bot stack (profile: vexa) ─────────────────────
-  # `docker compose --profile vexa up -d`. 9 services, ~3 GB resident.
-  # Folded inline here (the alfred-platform fleet ran Vexa as a separate
-  # compose project; a single-VM stack has no reason to).
-  vexa-redis:
-    image: redis:7.0-alpine
-    profiles: ["vexa"]
-    restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 3s
-      retries: 3
-    volumes:
-      - vexa_redis:/data
-    mem_limit: 512m
-    pids_limit: 256
-
-  vexa-postgres:
-    image: postgres:17-alpine
-    profiles: ["vexa"]
-    restart: unless-stopped
-    command: ["postgres", "-c", "idle_in_transaction_session_timeout=60000"]
-    environment:
-      - POSTGRES_DB=vexa
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=${VEXA_POSTGRES_PASSWORD}
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d vexa"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-    volumes:
-      - vexa_postgres:/var/lib/postgresql/data
-    mem_limit: 1g
-    pids_limit: 256
-
-  vexa-minio:
-    image: minio/minio:latest
-    profiles: ["vexa"]
-    restart: unless-stopped
-    command: ["server", "/data", "--console-address", ":9001"]
-    environment:
-      - MINIO_ROOT_USER=vexa-access-key
-      - MINIO_ROOT_PASSWORD=${VEXA_MINIO_PASSWORD}
-    volumes:
-      - vexa_minio:/data
-    mem_limit: 1g
-    pids_limit: 256
-
-  vexa-minio-init:
-    image: minio/mc:latest
-    profiles: ["vexa"]
-    restart: "no"
-    depends_on:
-      vexa-minio:
-        condition: service_started
-    entrypoint:
-      - /bin/sh
-      - -c
-      - |
-        sleep 5
-        mc alias set vexa http://vexa-minio:9000 vexa-access-key ${VEXA_MINIO_PASSWORD}
-        mc mb --ignore-existing vexa/vexa
-        exit 0
-    mem_limit: 128m
-    pids_limit: 128
-
-  vexa-admin-api:
-    image: vexaai/admin-api:0.10.6
-    profiles: ["vexa"]
-    restart: unless-stopped
-    init: true
-    environment:
-      - DB_HOST=vexa-postgres
-      - DB_PORT=5432
-      - DB_NAME=vexa
-      - DB_USER=postgres
-      - DB_PASSWORD=${VEXA_POSTGRES_PASSWORD}
-      - DB_SSL_MODE=disable
-      - ADMIN_API_TOKEN=${VEXA_ADMIN_API_TOKEN}
-      - INTERNAL_API_SECRET=${VEXA_INTERNAL_API_SECRET}
-      - LOG_LEVEL=INFO
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/')"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-    depends_on:
-      vexa-postgres:
-        condition: service_healthy
-    mem_limit: 512m
-    pids_limit: 256
-
-  vexa-runtime-api:
-    image: vexaai/runtime-api:0.10.6
-    profiles: ["vexa"]
-    restart: unless-stopped
-    init: true
-    # runtime-api spawns Vexa-bot containers as docker children — it needs
-    # the docker socket. Bot containers attach to the alfred-black network.
-    # The socket grants root-equivalent host control, so on this 3rd-party
-    # image at minimum forbid privilege escalation (no setuid/file-caps gain).
-    # We keep the RW socket mount (required to spawn bots) but do NOT cap_drop
-    # ALL — the upstream runtime-api's internal cap needs are unaudited and a
-    # blanket drop risks silently breaking bot spawning (FAILURE-MODES §Vexa).
-    security_opt:
-      - no-new-privileges:true
-    environment:
-      - DOCKER_NETWORK=alfred-black_default
-      - BROWSER_IMAGE=vexaai/vexa-bot:0.10.6
-      - REDIS_URL=redis://vexa-redis:6379
-      - MINIO_ENDPOINT=vexa-minio:9000
-      - MINIO_ACCESS_KEY=vexa-access-key
-      - MINIO_SECRET_KEY=${VEXA_MINIO_PASSWORD}
-      - MINIO_BUCKET=vexa
-      - DB_HOST=vexa-postgres
-      - DB_PORT=5432
-      - DB_NAME=vexa
-      - DB_USER=postgres
-      - DB_PASSWORD=${VEXA_POSTGRES_PASSWORD}
-      - DB_SSL_MODE=disable
-      - ALLOW_PRIVATE_CALLBACKS=1
-      - LOG_LEVEL=INFO
-      - TRANSCRIPTION_SERVICE_URL=${VEXA_TRANSCRIPTION_URL:-https://api.groq.com/openai/v1/audio/transcriptions}
-      - TRANSCRIPTION_SERVICE_TOKEN=${VEXA_TRANSCRIPTION_TOKEN:-}
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    depends_on:
-      vexa-redis:
-        condition: service_started
-      vexa-postgres:
-        condition: service_healthy
-    mem_limit: 1g
-    pids_limit: 512
-
-  vexa-meeting-api:
-    image: ssdavidai00/vexa-meeting-api:latest
-    profiles: ["vexa"]
-    restart: unless-stopped
-    init: true
-    environment:
-      - DB_HOST=vexa-postgres
-      - DB_PORT=5432
-      - DB_NAME=vexa
-      - DB_USER=postgres
-      - DB_PASSWORD=${VEXA_POSTGRES_PASSWORD}
-      - DB_SSL_MODE=disable
-      - REDIS_URL=redis://vexa-redis:6379/0
-      - REDIS_HOST=vexa-redis
-      - REDIS_PORT=6379
-      - ADMIN_TOKEN=${VEXA_ADMIN_API_TOKEN}
-      - INTERNAL_API_SECRET=${VEXA_INTERNAL_API_SECRET}
-      - RUNTIME_API_URL=http://vexa-runtime-api:8090
-      - MEETING_API_URL=http://vexa-meeting-api:8080
-      - BOT_IMAGE_NAME=vexaai/vexa-bot:0.10.6
-      - DOCKER_NETWORK=alfred-black_default
-      - STORAGE_BACKEND=minio
-      - MINIO_ENDPOINT=vexa-minio:9000
-      - MINIO_ACCESS_KEY=vexa-access-key
-      - MINIO_SECRET_KEY=${VEXA_MINIO_PASSWORD}
-      - MINIO_BUCKET=vexa
-      - MINIO_SECURE=false
-      - RECORDING_ENABLED=true
-      - CAPTURE_MODES=audio
-      - TRANSCRIPTION_SERVICE_URL=${VEXA_TRANSCRIPTION_URL:-https://api.groq.com/openai/v1/audio/transcriptions}
-      - TRANSCRIPTION_SERVICE_TOKEN=${VEXA_TRANSCRIPTION_TOKEN:-}
-      - LOG_LEVEL=INFO
-    volumes:
-      - vexa_recordings:/data/recordings
-    depends_on:
-      vexa-redis:
-        condition: service_started
-      vexa-postgres:
-        condition: service_healthy
-      vexa-runtime-api:
-        condition: service_started
-    mem_limit: 1g
-    pids_limit: 512
-
-  vexa-api-gateway:
-    image: vexaai/api-gateway:0.10.6
-    profiles: ["vexa"]
-    restart: unless-stopped
-    init: true
-    environment:
-      - ADMIN_API_URL=http://vexa-admin-api:8001
-      - MEETING_API_URL=http://vexa-meeting-api:8080
-      - TRANSCRIPTION_COLLECTOR_URL=http://vexa-meeting-api:8080
-      - REDIS_URL=redis://vexa-redis:6379/0
-      - INTERNAL_API_SECRET=${VEXA_INTERNAL_API_SECRET}
-      - RATE_LIMIT_RPM=600
-      - LOG_LEVEL=INFO
-      - CORS_ORIGINS=*
-      # Vexa expects MCP_URL even when MCP isn't running.
-      - MCP_URL=http://127.0.0.1:1
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/')"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-    depends_on:
-      vexa-admin-api:
-        condition: service_healthy
-      vexa-meeting-api:
-        condition: service_started
-      vexa-redis:
-        condition: service_started
-    mem_limit: 1g
-    pids_limit: 512
-
-  vexa-dashboard:
-    image: ssdavidai00/vexa-dashboard:latest
-    profiles: ["vexa"]
-    restart: unless-stopped
-    init: true
-    environment:
-      - VEXA_API_URL=http://vexa-api-gateway:8000
-      - VEXA_ADMIN_API_URL=http://vexa-admin-api:8001
-      - VEXA_ADMIN_API_KEY=${VEXA_ADMIN_API_TOKEN}
-      - VEXA_API_KEY=${VEXA_API_KEY:-}
-      - DEFAULT_BOT_NAME=${VEXA_BOT_DISPLAY_NAME:-Alfred}
-      - ALLOW_REGISTRATIONS=false
-      - AI_BASE_URL=http://hermes:18789/v1
-      - AI_MODEL=openai/hermes/main
-      - NEXT_PUBLIC_APP_URL=https://vexa.${DOMAIN}
-      - NEXT_PUBLIC_VEXA_WS_URL=https://vexa.${DOMAIN}
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 20s
-    depends_on:
-      vexa-api-gateway:
-        condition: service_started
-      vexa-admin-api:
-        condition: service_healthy
-    mem_limit: 512m
-    pids_limit: 256
-
 volumes:
   vault_data:
   # Store 5 (files) — principal-facing opaque blob volume. ctrl-api
@@ -1808,7 +1547,3 @@ volumes:
   # `docker compose pull/up/restart`. Issue #109 PR 1. See §3.5 of
   # docs/specs/issue-109-tailscale-via-ui.md.
   tailscale_data:
-  vexa_redis:
-  vexa_postgres:
-  vexa_minio:
-  vexa_recordings:

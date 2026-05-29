@@ -201,60 +201,6 @@ export const FIELDS = [
       '# account is staged for the ACME_EMAIL address. Set false only if you also\n' +
       '# remove the sure-* services from docker-compose.yaml.',
   },
-  {
-    key: 'VEXA_ENABLED',
-    block: 'optional',
-    label: 'Enable Vexa (meeting-transcription) stack',
-    type: 'confirm',
-    default: 'false',
-    help:
-      'Set true to run the Vexa transcript-bot stack. You must also start it\n' +
-      'with the profile: `docker compose --profile vexa up -d`.',
-    comment:
-      '# Set to true to run the Vexa transcript-bot stack. You must also start it\n' +
-      '# with the profile: `docker compose --profile vexa up -d`.',
-  },
-  {
-    key: 'ALFRED_OWNER_EMAIL',
-    block: 'optional',
-    label: "Principal's primary email (Vexa / email routing)",
-    type: 'input',
-    default: '',
-    help:
-      "The principal's primary email address — used by Vexa meeting intake\n" +
-      'and email-channel routing. Optional unless VEXA_ENABLED=true.',
-    comment:
-      "# The principal's primary email address — used by Vexa meeting intake and\n" +
-      '# email-channel routing. Optional unless VEXA_ENABLED=true.',
-    when: (a) => a.VEXA_ENABLED === 'true',
-    validate: (v) =>
-      v.trim() === '' || isEmail(v.trim()) || 'That does not look like an email address.',
-  },
-  {
-    key: 'VEXA_TRANSCRIPTION_URL',
-    block: 'optional',
-    label: 'Vexa transcription backend URL',
-    type: 'input',
-    default: 'https://api.groq.com/openai/v1/audio/transcriptions',
-    help:
-      'Vexa transcription backend (Groq Whisper by default). Only needed\n' +
-      'when VEXA_ENABLED=true.',
-    comment:
-      '# Vexa transcription backend (Groq Whisper by default). Only needed when\n' +
-      '# VEXA_ENABLED=true.',
-    when: (a) => a.VEXA_ENABLED === 'true',
-  },
-  {
-    key: 'VEXA_TRANSCRIPTION_TOKEN',
-    block: 'optional',
-    label: 'Vexa transcription backend token',
-    type: 'password',
-    default: '',
-    help: 'API token for the Vexa transcription backend.',
-    comment: null,
-    when: (a) => a.VEXA_ENABLED === 'true',
-  },
-
   // ── AUTO-GENERATED — managed by the wizard (was bootstrap.sh) ──────
   // randomBytes(32).toString('hex'); never overwrites an existing value.
   {
@@ -313,16 +259,6 @@ export const FIELDS = [
   },
   { key: 'SURE_POSTGRES_PASSWORD', block: 'generated', comment: null },
   { key: 'SURE_REDIS_PASSWORD', block: 'generated', comment: null },
-  {
-    key: 'VEXA_POSTGRES_PASSWORD',
-    block: 'generated',
-    comment:
-      '# Vexa — datastore credentials + internal API secrets (only used with the\n' +
-      '# `vexa` profile, but generated unconditionally so the profile just works).',
-  },
-  { key: 'VEXA_MINIO_PASSWORD', block: 'generated', comment: null },
-  { key: 'VEXA_ADMIN_API_TOKEN', block: 'generated', comment: null },
-  { key: 'VEXA_INTERNAL_API_SECRET', block: 'generated', comment: null },
 ];
 
 // Required keys the wizard hard-blocks on (mirrors bootstrap.sh REQUIRED[]).

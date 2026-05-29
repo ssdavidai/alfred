@@ -13,8 +13,7 @@
 //     { message, agentId, deliver, paperclip: { runId, paperclipAgentId, taskId } }
 //
 // The signed bytes are `<unix-ts>.<raw-body>` — same construction as Stripe
-// and Slack v1 (matches our existing Vexa webhook handler at
-// routes/webhooks/vexa.ts). We require:
+// and Slack v1. We require:
 //
 //   * |now - t| ≤ 300 seconds  (replay window — matches Paperclip's default
 //                              replayWindowSec)

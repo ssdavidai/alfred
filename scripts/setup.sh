@@ -73,14 +73,8 @@ if [[ -f "${REPO_ROOT}/.env" ]]; then
 	read -r -p "Bring the stack up now? [y/N] " REPLY
 	case "${REPLY}" in
 		[yY] | [yY][eE][sS])
-			# Use the vexa profile only if the wizard enabled it.
-			if grep -qE '^VEXA_ENABLED=true' "${REPO_ROOT}/.env" 2>/dev/null; then
-				bold "Starting the stack (with the vexa profile) ..."
-				( cd "${REPO_ROOT}" && docker compose --profile vexa up -d )
-			else
-				bold "Starting the stack ..."
-				( cd "${REPO_ROOT}" && docker compose up -d )
-			fi
+			bold "Starting the stack ..."
+			( cd "${REPO_ROOT}" && docker compose up -d )
 			green "Done. Check progress with:  docker compose ps  /  docker compose logs -f"
 			;;
 		*)

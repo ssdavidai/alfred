@@ -29,7 +29,6 @@ help:
 	@echo "  build-setup        build $(IMAGE_PREFIX)/alfred-setup"
 	@echo "  push-all           build + push every image multi-arch ($(PLATFORMS))"
 	@echo "  config             validate docker-compose.yaml"
-	@echo "  config-vexa        validate docker-compose.yaml with the vexa profile"
 	@echo ""
 	@echo "  Override: make TAG=v1 IMAGE_PREFIX=myrepo build-web"
 
@@ -92,7 +91,3 @@ push-all:
 .PHONY: config
 config:
 	docker compose config --quiet && echo "docker-compose.yaml: OK"
-
-.PHONY: config-vexa
-config-vexa:
-	docker compose --profile vexa config --quiet && echo "docker-compose.yaml (+vexa): OK"

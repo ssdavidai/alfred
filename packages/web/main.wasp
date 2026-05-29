@@ -654,17 +654,6 @@ action updateCredentials {
   entities: []
 }
 
-// Vexa meeting-bot auto-join toggle
-query getVexaAutoJoin {
-  fn: import { getVexaAutoJoin } from "@src/dashboard/operations",
-  entities: []
-}
-
-action setVexaAutoJoin {
-  fn: import { setVexaAutoJoin } from "@src/dashboard/operations",
-  entities: []
-}
-
 // Signal action mode — live / shadow toggle (Gap 3b, /study#settings)
 query getSignalActionMode {
   fn: import { getSignalActionMode } from "@src/dashboard/operations",

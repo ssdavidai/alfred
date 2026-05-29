@@ -99,7 +99,7 @@ describe("tailscale sidecar — compose-foundation lint (issue #109 PR 1)", () =
         assert.fail(
           `service ${name} unexpectedly has the 'tailscale' profile — ` +
             "every other service must be either default-profile or under " +
-            "an unrelated profile (vexa).",
+            "an unrelated profile.",
         );
       }
     }

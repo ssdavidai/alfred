@@ -72,7 +72,7 @@ cp .env.example .env
 
 # 2. Fill required vars in .env: DOMAIN, ACME_EMAIL, OWNER_NAME, OWNER_EMAIL,
 #    ANTHROPIC_API_KEY (or OPENROUTER_API_KEY), COMPOSIO_API_KEY.
-#    Optional: GOOGLE_CLIENT_*, SENDGRID_API_KEY, VEXA_ENABLED.
+#    Optional: GOOGLE_CLIENT_*, SENDGRID_API_KEY.
 
 # 3. Generate auto-secrets (AAS_API_KEY, COLUMN_ENCRYPTION_KEY, JWT_SECRET,
 #    HERMES_API_SERVER_KEY, plane/sure DB passwords, vaultwarden admin token,
@@ -85,13 +85,12 @@ cp .env.example .env
 
 # 5. Up
 docker compose up -d
-# Optional: `--profile vexa` to enable the 9-container transcript stack.
 
 # 6. First signup at https://${DOMAIN} becomes the owner; lands on /desk.
 ```
 
 **Minimum VM spec**: 48 GB RAM (32 GB will OOM under load), 4+ vCPU, 80+ GB
-disk. With Vexa: 56–64 GB.
+disk.
 
 ---
 
@@ -111,7 +110,7 @@ sub-routes; that vocab is dead.
 | **Decisions** | `/decisions` | Audit feed with HANDLED/HELD/ASKED filters |
 | **Chores** | `/chores`, `/chores/:slug` | The principal's recurring work |
 | **Connections** | `/connections` | Composio catalogue + sibling-surface launcher |
-| **Channels** | `/channels` | Email + phone + vexa + omi + Terminal cards |
+| **Channels** | `/channels` | Email + phone + omi + Terminal cards |
 | **Tools** | `/tools` | Gateway allowlist viewer |
 | **Claude** | `/claude` | MCP setup + Skill + secrets |
 | **Study** | `/study` | Unified back office (settings, credentials, API keys, audit, theme) |

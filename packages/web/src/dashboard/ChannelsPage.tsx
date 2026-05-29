@@ -1,7 +1,9 @@
 // ChannelsPage — live channels (#864).
 //
-// One card per door into Alfred. Web/email/phone/vexa/omi pull live
+// One card per door into Alfred. Web/email/phone/omi pull live
 // data from the existing Wasp ops; Slack/Telegram are "Soon" placeholders.
+// The meeting-bot card is a coming-soon placeholder pending Recall.ai
+// (#113 PR3a/PR3b — Vexa was retired in #113 PR1).
 // Sir #8 — also surfaces a "Terminal" card with SSH info + the
 // `docker exec ... hermes` command for direct shell access.
 import { useState, useCallback } from "react";
@@ -14,8 +16,6 @@ import {
   provisionPhone,
   addAuthorizedNumber,
   removeAuthorizedNumber,
-  getVexaAutoJoin,
-  setVexaAutoJoin,
   listSshKeys,
   addSshKey,
   revokeSshKey,
@@ -116,11 +116,6 @@ export default function ChannelsPage() {
     undefined,
     { retry: false },
   );
-  const { data: vexaData, refetch: refetchVexa } = useQuery(
-    getVexaAutoJoin,
-    undefined,
-    { retry: false },
-  );
   // (TerminalCard pulls its own data via listSshKeys — see below. Sir
   // 2026-05-26: getSshInfo is no longer the Terminal card's primary
   // source, but is kept as an exported query for any other consumers.)
@@ -133,7 +128,6 @@ export default function ChannelsPage() {
   const authorized: string[] = Array.isArray(phone.authorizedNumbers)
     ? phone.authorizedNumbers
     : [];
-  const vexaEnabled: boolean = Boolean((vexaData as any)?.enabled);
 
   // Email-form state (F57).
   const [emailKey, setEmailKey] = useState("");
@@ -143,7 +137,6 @@ export default function ChannelsPage() {
   // Phone-form state.
   const [newNumber, setNewNumber] = useState("");
   const [phoneBusy, setPhoneBusy] = useState(false);
-  const [vexaBusy, setVexaBusy] = useState(false);
 
   // Phone setup-form state (F58/C15 — BYO existing number only).
   const [setupOpen, setSetupOpen] = useState(false);
@@ -230,18 +223,6 @@ export default function ChannelsPage() {
       console.error("remove number failed", e);
     } finally {
       setPhoneBusy(false);
-    }
-  }
-
-  async function toggleVexa() {
-    setVexaBusy(true);
-    try {
-      await setVexaAutoJoin({ enabled: !vexaEnabled });
-      await refetchVexa();
-    } catch (e) {
-      console.error("vexa toggle failed", e);
-    } finally {
-      setVexaBusy(false);
     }
   }
 
@@ -360,25 +341,17 @@ export default function ChannelsPage() {
             <VoiceSection />
           </ChannelCard>
 
-          {/* Vexa */}
+          {/* Meeting bot — placeholder slot.
+              The self-hosted Vexa stack was retired in #113 PR1; Recall.ai
+              (hosted) lands the live card in #113 PR3a/PR3b. Until then we
+              render a coming-soon placeholder so the channel grid keeps its
+              shape and the principal sees the planned surface. */}
           <ChannelCard
             name="Meeting bot"
-            address={vexaEnabled ? "Auto-joining your meetings" : "Off"}
+            address="Coming soon (Recall.ai)"
             note="A second pair of ears for Zoom, Meet, Teams."
-            status={vexaEnabled ? "active" : "available"}
-          >
-            <button
-              onClick={toggleVexa}
-              disabled={vexaBusy}
-              className="btn-ghost mt-4"
-            >
-              {vexaBusy
-                ? "…"
-                : vexaEnabled
-                  ? "Stop auto-joining"
-                  : "Start auto-joining"}
-            </button>
-          </ChannelCard>
+            status="available"
+          />
 
           {/* Omi — Phase-6b live card (Lane III, 2026-05-25). Surfaces the
               4 OMI channel states (unconfigured / needs_groq_key /

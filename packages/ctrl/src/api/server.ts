@@ -235,6 +235,10 @@ export function createApiServer(): http.Server {
         pathname.startsWith("/api/v1/streams/omi/") ||
         pathname === "/api/v1/plane/webhook" ||
         pathname === "/api/v1/webhooks/plane/steward" ||
+        // Vexa webhook retired in #113 PR1; the 410 Gone stub still
+        // lives at /api/v1/webhooks/vexa so any retrying caller hears
+        // back. Kept public so unauthenticated retries see the 410, not
+        // a 401 (which they would interpret as a transient outage).
         pathname === "/api/v1/webhooks/vexa" ||
         pathname.startsWith("/api/v1/webhooks/in/") ||
         pathname === "/api/v1/channels/email/inbound" ||
@@ -285,7 +289,6 @@ export function createApiServer(): http.Server {
       const isRawBody =
         pathname === "/api/v1/plane/webhook" ||
         pathname === "/api/v1/webhooks/plane/steward" ||
-        pathname === "/api/v1/webhooks/vexa" ||
         // Composio's Standard-Webhooks scheme signs the raw body, so the
         // handler must see the exact bytes — see routes/composioWebhook.ts.
         pathname === "/api/v1/composio/webhook";
