@@ -62,7 +62,16 @@ services:
       retries: 3
       start_period: 10s
     mem_limit: 256m
-    pids_limit: 256
+    # Bumped 256 -> 1024 on 2026-05-29. Caddy's runtime is small but every
+    # operator `caddy validate` / `caddy reload` (e.g. ctrl-api's tailscale
+    # cert route, an interactive shell-out during incident response, or the
+    # deploy-compose.yml graceful-reload step) forks a fresh Go runtime —
+    # which spawns ~30-50 OS threads per invocation. On home.alfred.black
+    # the cap was hit live during HA wiring: `caddy reload` returned
+    # `runtime: failed to create new OS thread; errno=11` (EAGAIN) and
+    # every shell-out inside the container failed. 1024 is well clear of
+    # the steady-state ~80-100 threads + room for concurrent reloads.
+    pids_limit: 1024
 
   # ── web-db — Postgres for the Wasp web app (auth, ApiKey, OAuth) ────
   web-db:

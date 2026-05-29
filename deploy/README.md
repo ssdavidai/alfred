@@ -69,6 +69,30 @@ Default key path is `~/.ssh/alfred-black-verify`. The target validates the
 compose file locally before touching any tenant; if `docker compose config`
 fails, nothing ships.
 
+## Gotcha: Caddyfile edits + the bind-mount inode
+
+Editing `/opt/alfred/caddy/Caddyfile` on a running host with `sed -i` (or
+any editor that rewrites the file rather than truncating-and-writing in
+place) changes the host inode. The Caddy container is bind-mounting the
+old inode, so it keeps serving stale content even after `caddy reload`.
+
+Fix is one of:
+
+```sh
+docker restart alfred-black-caddy-1
+# or
+docker compose -p alfred-black up -d caddy
+```
+
+Both remount the path and pick up the new inode. The `deploy-compose.yml`
+workflow uses `scp -p` (which truncates rather than re-inodes), followed
+by `caddy reload`, so the CI path is unaffected — this only bites
+operators doing one-off edits on a tenant.
+
+Live evidence (home, 2026-05-29 HA wiring): host inode 257610, container
+inode 257899 after a `sed -i` patch; `caddy reload` returned success but
+the matcher still 405'd until the container was restarted.
+
 ## Why this directory exists
 
 PR #121 (2026-05-29) added the `tailscale` profile to `docker-compose.yaml`.

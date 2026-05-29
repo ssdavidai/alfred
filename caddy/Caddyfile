@@ -71,12 +71,21 @@ import /tailscale-snippets/*.caddy
 	# matcher was never updated and every Composio webhook was 405-ing
 	# at the SPA's nginx.
 	#
-	# /api/v1/channels/ha/turn is the Home Assistant conversation-agent
-	# inbound surface (#111 PR1). The handler validates a per-installation
-	# bearer against the shared channel_tokens table (channel='ha-conversation')
-	# — same pattern as Paperclip's heartbeat (HMAC instead of bearer),
-	# routed through the same Caddy gate so HA can reach ctrl-api directly
+	# /api/v1/channels/ha/* is the Home Assistant channel surface (#111).
+	# /turn is the conversation-agent inbound (PR1) — bearer-authed via
+	# the shared channel_tokens table (channel='ha-conversation'), same
+	# pattern as Paperclip's heartbeat (HMAC instead of bearer), routed
+	# through the same Caddy gate so HA can reach ctrl-api directly
 	# rather than bouncing through the SPA's nginx (which would 405).
+	#
+	# The wildcard (rather than `/turn` literal) is intentional: every
+	# other /api/v1/channels/ha/* route (status / registry / proposal /
+	# service / etc.) is operator-auth-gated by server.ts's
+	# `authenticate()` call, so routing them through ctrl-api is safe —
+	# unauthorised callers get a clean 401 from ctrl-api instead of a
+	# misleading 405 from the SPA's nginx. Discovered 2026-05-29 wiring
+	# HA conversation on home: the live Caddyfile only had the literal
+	# `/turn` entry and HA's preflight POST was 405-ing at the SPA.
 	#
 	# /api/v1/webhooks/vexa stays in the matcher even though the upstream
 	# Vexa stack was retired in #113 PR1 — ctrl-api keeps a 410 Gone stub
@@ -84,7 +93,7 @@ import /tailscale-snippets/*.caddy
 	# 405-ing at the SPA's nginx. Drop this entry when the stub goes (the
 	# PR that lands Recall.ai — #113 PR2).
 	@public_webhooks {
-		path /api/v1/streams/omi/* /api/v1/plane/webhook /api/v1/webhooks/plane/steward /api/v1/webhooks/vexa /api/v1/webhooks/recall /api/v1/webhooks/in/* /api/v1/channels/email/inbound /api/v1/channels/paperclip/* /api/v1/channels/ha/turn /api/v1/composio/webhook
+		path /api/v1/streams/omi/* /api/v1/plane/webhook /api/v1/webhooks/plane/steward /api/v1/webhooks/vexa /api/v1/webhooks/recall /api/v1/webhooks/in/* /api/v1/channels/email/inbound /api/v1/channels/paperclip/* /api/v1/channels/ha/* /api/v1/composio/webhook
 	}
 	handle @public_webhooks {
 		reverse_proxy ctrl-api:3100
