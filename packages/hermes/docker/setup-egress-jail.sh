@@ -147,7 +147,21 @@ except Exception:
 
 # --- 3. Install rules --------------------------------------------------------
 install_rules() {
-    # 3a. Loopback always allowed (Hermes internal IPC, the gateway's own
+    # 3a. Stateful fast-path — response packets to ANY already-established
+    # connection bypass the uid-owner catchall REJECT below. Without this
+    # the codex-builder Hermes gateway (running as uid 10001, listening
+    # on :18793) cannot send TCP SYN-ACKs back to sibling compose-network
+    # callers (e.g. paperclip → hermes:18793) — the inbound connect lands,
+    # the gateway's response packet is owned by uid 10001, and the catchall
+    # REJECT (3e) drops it before it leaves the netns. Caller sees a TCP
+    # handshake timeout. This is the standard stateful-firewall pattern:
+    # NEW connections still hit the per-host allowlist; only existing
+    # connections' responses get the express lane.
+    iptables -I OUTPUT 1 \
+        -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT \
+        -m comment --comment "${COMMENT_TAG}_FASTPATH"
+
+    # 3b. Loopback always allowed (Hermes internal IPC, the gateway's own
     # /v1 listener answering /health from inside the same container).
     iptables -A OUTPUT -m owner --uid-owner "${CODEX_UID}" \
         -d 127.0.0.0/8 -j ACCEPT \
