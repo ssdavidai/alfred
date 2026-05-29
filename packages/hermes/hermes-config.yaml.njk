@@ -380,9 +380,27 @@ platform_toolsets:
 # gain a new external reach.
 mcp_servers: {}
 {%- else %}
-# Six servers, identical on both profiles — migrated verbatim from the
-# OpenClaw `mcp.servers` block. One HTTP proxy + five stdio apps. Hermes
-# auto-namespaces every tool as mcp_<server>_<tool>.
+# Up to eight servers, profile-conditional:
+#   main, workers: 8  (the base 7 — alfred-ctrl + alfred + sure + plane +
+#                       vaultwarden + execute + paperclip — plus `files`)
+#   heavy:         7  (no `files` — heavy never touches the principal-facing
+#                       Store-5 surface; see the conditional block below.)
+#
+# Migrated verbatim from the OpenClaw `mcp.servers` block plus the
+# `paperclip` (2026-05-27) and `files` (2026-05-29) additions. One HTTP
+# proxy + N stdio apps. Hermes auto-namespaces every tool as
+# mcp_<server>_<tool>.
+#
+# `files` (PR 2 of issue #114): the principal's Store-5 blob surface
+# — list/stat/read/search/describe/usage/create/delete on local files
+# uploaded via the dashboard /files page. Wired on BOTH main and
+# workers: main needs it for the user-facing chat ("read that PDF Sir
+# uploaded"), workers needs it so the vault-curator / vault-janitor /
+# vault-distiller can correlate stored files with vault records (e.g.
+# attach a receipt PDF to a matter, or extract a slug from an uploaded
+# screenshot). NOT wired on `heavy` or `codex-builder` — heavy never
+# touches the principal-facing surface directly, and codex-builder is
+# the sealed-runtime builder profile with `mcp_servers: {}` by design.
 mcp_servers:
 
   # --- alfred-ctrl: HTTP proxy into this VM's ctrl-api ---------------------
@@ -521,6 +539,32 @@ mcp_servers:
       PAPERCLIP_AGENT_ID: "${PAPERCLIP_AGENT_ID}"
     timeout: 120
     connect_timeout: 60
+
+{%- if is_main or profile == "workers" %}
+
+  # --- files: Store-5 blob surface (PR 2 of issue #114) --------------------
+  # Nine tools (list / stat / read_text / read_base64 / search / delete /
+  # create / usage / describe) onto ctrl-api's /api/v1/files/* routes —
+  # the principal-facing local file store added in PR 1.
+  #
+  # Wired on main + workers only:
+  #   * main    — the user-facing chat needs to read files Sir asks about
+  #               ("read that PDF I uploaded last week").
+  #   * workers — vault-curator, vault-janitor, and vault-distiller need
+  #               to correlate stored files with vault records (attach a
+  #               receipt PDF to a matter, slug-extract from a screenshot).
+  # NOT wired on `heavy` (background reasoning never touches principal-
+  # facing surfaces directly) or `codex-builder` (sealed runtime; see the
+  # codex-builder branch at the top of the mcp_servers block).
+  files:
+    command: "node"
+    args: ["{{ mcp_stdio_dir }}/dist/bin/stdio-app.js", "files"]
+    env:
+      CTRL_API_URL: "{{ ctrl_api_url }}"
+      AAS_API_KEY: "${AAS_API_KEY}"
+    timeout: 120
+    connect_timeout: 60
+{%- endif %}
 {%- endif %}{# end mcp_servers else (codex-builder gets mcp_servers: {} above) #}
 
 {%- if is_main %}

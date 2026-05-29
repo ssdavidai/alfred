@@ -514,6 +514,123 @@ describe("/api/v1/files/* — PR 1", () => {
     });
   });
 
+  // ─── PR 2 additions: ?q= search + PATCH /* for principal_label ─────────────
+  //
+  // The MCP `files__search` tool funnels through GET /list?q=…; the MCP
+  // `files__describe` tool funnels through PATCH /*. Both are exercised
+  // through the same matchRoute + handleError shim as PR 1.
+
+  describe("GET /list?q= (PR 2)", () => {
+    it("filters by keyword across path, original_filename, and principal_label", async () => {
+      await uploadBlob(
+        "alpha.txt",
+        Buffer.from("a"),
+        "text/plain",
+        { original_filename: "alpha.txt" },
+      );
+      await uploadBlob(
+        "beta.txt",
+        Buffer.from("b"),
+        "text/plain",
+        {
+          original_filename: "beta.txt",
+          principal_label: "Q3 contract preview",
+        },
+      );
+      await uploadBlob(
+        "gamma.bin",
+        Buffer.from("g"),
+        "application/octet-stream",
+        { original_filename: "gamma.bin" },
+      );
+
+      // Hit on original_filename
+      let r = await invokeRoute("GET", "/api/v1/files/list", {
+        url: "/api/v1/files/list?q=alpha",
+      });
+      assert.equal(r.status, 200);
+      assert.equal(r.payload.total, 1);
+      assert.equal(r.payload.items[0].original_filename, "alpha.txt");
+
+      // Hit on principal_label
+      r = await invokeRoute("GET", "/api/v1/files/list", {
+        url: "/api/v1/files/list?q=contract",
+      });
+      assert.equal(r.payload.total, 1);
+      assert.equal(r.payload.items[0].principal_label, "Q3 contract preview");
+
+      // Case-insensitive
+      r = await invokeRoute("GET", "/api/v1/files/list", {
+        url: "/api/v1/files/list?q=CONTRACT",
+      });
+      assert.equal(r.payload.total, 1);
+
+      // No hit
+      r = await invokeRoute("GET", "/api/v1/files/list", {
+        url: "/api/v1/files/list?q=zzz-nothing",
+      });
+      assert.equal(r.payload.total, 0);
+    });
+  });
+
+  describe("PATCH /* — principal_label (PR 2)", () => {
+    it("sets principal_label on an existing row", async () => {
+      const up = await uploadBlob("notes.md", Buffer.from("n"), "text/markdown");
+      assert.equal(up.status, 201);
+      const patch = await invokeRoute(
+        "PATCH",
+        `/api/v1/files/${up.payload.path}`,
+        { body: { principal_label: "Sir's reading-list notes" } },
+      );
+      assert.equal(patch.status, 200);
+      assert.equal(
+        patch.payload.principal_label,
+        "Sir's reading-list notes",
+      );
+      // DB-side
+      const row = getStateDb()
+        .prepare(`SELECT principal_label FROM files WHERE id = ?`)
+        .get(up.payload.id) as { principal_label: string };
+      assert.equal(row.principal_label, "Sir's reading-list notes");
+    });
+
+    it("clearing principal_label with empty string nulls the column", async () => {
+      const up = await uploadBlob(
+        "notes.md",
+        Buffer.from("n"),
+        "text/markdown",
+        { principal_label: "old" },
+      );
+      const patch = await invokeRoute(
+        "PATCH",
+        `/api/v1/files/${up.payload.path}`,
+        { body: { principal_label: "" } },
+      );
+      assert.equal(patch.status, 200);
+      assert.equal(patch.payload.principal_label, null);
+    });
+
+    it("PATCH on a missing path returns 404", async () => {
+      const patch = await invokeRoute(
+        "PATCH",
+        "/api/v1/files/01HFAKEULIDFAKEULIDFAKEUL/nope.bin",
+        { body: { principal_label: "x" } },
+      );
+      assert.equal(patch.status, 404);
+    });
+
+    it("PATCH ignores unknown fields (forward-compatible)", async () => {
+      const up = await uploadBlob("u.txt", Buffer.from("u"), "text/plain");
+      const patch = await invokeRoute(
+        "PATCH",
+        `/api/v1/files/${up.payload.path}`,
+        { body: { future_field: "ignored", principal_label: "k" } },
+      );
+      assert.equal(patch.status, 200);
+      assert.equal(patch.payload.principal_label, "k");
+    });
+  });
+
   describe("GET /blob/*", () => {
     it("streams the bytes back with the right Content-Type", async () => {
       const content = Buffer.from("blob-content-here");

@@ -9,18 +9,18 @@
 // PR 1 surface only:
 //
 //   * POST   /api/v1/files/upload     multipart streaming → /files/<ULID>/<safe-orig-name>
-//   * GET    /api/v1/files/list       paginated list with metadata
+//   * GET    /api/v1/files/list       paginated list with metadata (+ ?q= keyword filter, PR 2)
 //   * GET    /api/v1/files/usage      total bytes + caps
 //   * GET    /api/v1/files/stat/*     metadata for one blob (path is the tail)
 //   * GET    /api/v1/files/blob/*     streamed bytes with Content-Type + Disposition
+//   * PATCH  /api/v1/files/*          partial-update for principal-owned fields (PR 2: principal_label)
 //   * DELETE /api/v1/files/*          soft-delete (set deleted_at + remove blob)
 //
 // What it is NOT (yet)
 // --------------------
-//   * MCP `files__*` tools           — PR 2 of issue #114
 //   * /files dashboard page          — PR 3
 //   * Content extraction pipeline    — PR 4
-//   * Voice-bridge allowlist entries — PR 6 (deferred to keep PR 1 small)
+//   * Voice-bridge allowlist entries — PR 5 of issue #114
 //
 // Architecture seams this PR respects
 // -----------------------------------
@@ -682,14 +682,22 @@ export function registerFilesRoutes(): void {
     });
   });
 
-  // GET /api/v1/files/list?prefix=&limit=&offset=
+  // GET /api/v1/files/list?prefix=&q=&limit=&offset=
   //
-  // Paginated, deleted_at-aware list. `prefix` is matched on the path
-  // column with `LIKE prefix||'%'` — clients can list under a ULID dir
-  // or filter by safe-name prefix, but PR 1 doesn't yet expose a
-  // virtual `parent_dir` (that's PR 3).
+  // Paginated, deleted_at-aware list. Three orthogonal filters, each
+  // optional and combined with AND:
+  //   * `prefix` — `path LIKE prefix||'%'` (under a ULID dir / by safe-name prefix)
+  //   * `q`      — keyword search across `path`, `original_filename`,
+  //                and `principal_label` (case-insensitive LIKE). PR 2
+  //                ships this as the principal-facing search surface for
+  //                the `files__search` MCP tool. Content indexing comes
+  //                in PR 4.
+  //   * `limit` / `offset` — pagination (limit default 100, max 1000)
+  //
+  // PR 1 doesn't yet expose a virtual `parent_dir` (that's PR 3).
   addRoute("GET", "/api/v1/files/list", async ({ res, query }) => {
     const prefix = (query.get("prefix") ?? "").trim();
+    const q = (query.get("q") ?? "").trim();
     const limitRaw = Number(query.get("limit") ?? "100");
     const offsetRaw = Number(query.get("offset") ?? "0");
     const limit =
@@ -699,48 +707,43 @@ export function registerFilesRoutes(): void {
     const offset =
       Number.isFinite(offsetRaw) && offsetRaw >= 0 ? Math.floor(offsetRaw) : 0;
 
-    const db = getStateDb();
-    let rows: Record<string, unknown>[];
-    let total: number;
+    // Build the WHERE clause dynamically — `deleted_at IS NULL` is always
+    // present; prefix and q each contribute an additional clause +
+    // bound parameter. SQLite's LIKE is case-sensitive by default for
+    // BLOBs and case-insensitive for TEXT; we go belt-and-braces by
+    // lower()'ing both sides for the `q` keyword scan so principal
+    // labels written in mixed case still match.
+    const clauses: string[] = ["deleted_at IS NULL"];
+    const args: unknown[] = [];
     if (prefix) {
-      const like = `${prefix}%`;
-      rows = db
-        .prepare(
-          `SELECT * FROM files
-            WHERE deleted_at IS NULL AND path LIKE ?
-            ORDER BY uploaded_at DESC
-            LIMIT ? OFFSET ?`,
-        )
-        .all(like, limit, offset) as Record<string, unknown>[];
-      total = Number(
-        (
-          db
-            .prepare(
-              `SELECT COUNT(*) AS c FROM files
-                WHERE deleted_at IS NULL AND path LIKE ?`,
-            )
-            .get(like) as { c: number }
-        ).c,
-      );
-    } else {
-      rows = db
-        .prepare(
-          `SELECT * FROM files
-            WHERE deleted_at IS NULL
-            ORDER BY uploaded_at DESC
-            LIMIT ? OFFSET ?`,
-        )
-        .all(limit, offset) as Record<string, unknown>[];
-      total = Number(
-        (
-          db
-            .prepare(
-              `SELECT COUNT(*) AS c FROM files WHERE deleted_at IS NULL`,
-            )
-            .get() as { c: number }
-        ).c,
-      );
+      clauses.push("path LIKE ?");
+      args.push(`${prefix}%`);
     }
+    if (q) {
+      const needle = `%${q.toLowerCase()}%`;
+      clauses.push(
+        "(lower(path) LIKE ? OR lower(COALESCE(original_filename, '')) LIKE ? OR lower(COALESCE(principal_label, '')) LIKE ?)",
+      );
+      args.push(needle, needle, needle);
+    }
+    const where = clauses.join(" AND ");
+
+    const db = getStateDb();
+    const rows = db
+      .prepare(
+        `SELECT * FROM files
+          WHERE ${where}
+          ORDER BY uploaded_at DESC
+          LIMIT ? OFFSET ?`,
+      )
+      .all(...args, limit, offset) as Record<string, unknown>[];
+    const total = Number(
+      (
+        db
+          .prepare(`SELECT COUNT(*) AS c FROM files WHERE ${where}`)
+          .get(...args) as { c: number }
+      ).c,
+    );
     sendJson(res, 200, {
       items: rows.map((r) => rowToJson(rowFromDb(r))),
       total,
@@ -826,6 +829,64 @@ export function registerFilesRoutes(): void {
       `UPDATE files SET last_accessed_at = ? WHERE id = ?`,
     ).run(Date.now(), row.id);
     streamBlobTo(res, abs);
+  });
+
+  // PATCH /api/v1/files/* — update principal-owned metadata.
+  //
+  // PR 2 of issue #114 added this so the `files__describe` MCP tool can
+  // set `principal_label` (the principal's free-text description of
+  // what's in a blob) without having to re-upload. Only the fields
+  // listed below are writable; anything else is silently ignored so a
+  // forward-compatible client that posts unknown keys still gets a 200.
+  //
+  // Writable fields (PR 2):
+  //   * principal_label  — string|null. Trimmed; empty string clears.
+  //
+  // Returns the full updated row. Soft-deleted rows are not patchable
+  // (404, mirroring stat / blob).
+  addRoute("PATCH", "/api/v1/files/*", async ({ res, params, body }) => {
+    const relPath = params.path ?? "";
+    if (!relPath) throw new ValidationError("path is required");
+    const db = getStateDb();
+    const raw = db
+      .prepare(
+        `SELECT * FROM files WHERE path = ? AND deleted_at IS NULL LIMIT 1`,
+      )
+      .get(relPath) as Record<string, unknown> | undefined;
+    if (!raw) throw new NotFoundError(`file not found: ${relPath}`);
+    const row = rowFromDb(raw);
+
+    const patch =
+      body && typeof body === "object" && !Array.isArray(body)
+        ? (body as Record<string, unknown>)
+        : {};
+
+    let nextLabel: string | null = row.principal_label;
+    let touched = false;
+    if (Object.prototype.hasOwnProperty.call(patch, "principal_label")) {
+      const v = patch.principal_label;
+      if (v === null || v === undefined) {
+        nextLabel = null;
+      } else if (typeof v === "string") {
+        const trimmed = v.trim();
+        nextLabel = trimmed === "" ? null : trimmed;
+      } else {
+        throw new ValidationError("principal_label must be a string or null");
+      }
+      touched = true;
+    }
+
+    if (touched) {
+      db.prepare(`UPDATE files SET principal_label = ? WHERE id = ?`).run(
+        nextLabel,
+        row.id,
+      );
+    }
+
+    const after = db
+      .prepare(`SELECT * FROM files WHERE id = ? LIMIT 1`)
+      .get(row.id) as Record<string, unknown>;
+    sendJson(res, 200, rowToJson(rowFromDb(after)));
   });
 
   // DELETE /api/v1/files/* — soft delete.
