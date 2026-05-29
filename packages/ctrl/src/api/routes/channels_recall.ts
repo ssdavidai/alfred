@@ -15,6 +15,7 @@
 // Surface:
 //
 //   POST /api/v1/channels/recall/validate-key            — paste+round-trip test
+//   POST /api/v1/channels/recall/api-key                  — persist a validated key (PR3a)
 //   GET  /api/v1/channels/recall/config                  — current dials
 //   PATCH /api/v1/channels/recall/config                 — update dials
 //   GET  /api/v1/channels/recall/usage                   — month-to-date rollup
@@ -31,16 +32,34 @@
 // recall_bot rows when it creates a bot; this file owns the row updates
 // driven by inbound webhooks.
 //
-// API-key persistence: validation only round-trips the key against
-// Recall — it does NOT persist. The /channels card POST handler (PR3a)
-// is responsible for writing RECALL_API_KEY into the host .env once
-// validation succeeds, mirroring the paperclip POST /api-key pattern.
-// PR3a + PR3b own the operator-facing key paste; PR2 stops at validate.
+// API-key persistence: PR3a (this commit) adds
+// POST /api/v1/channels/recall/api-key as the operator-only setter that
+// round-trips the key against Recall, then writes it to BOTH stores:
+//
+//   1. Vaultwarden (canonical) — via the existing vault-cli sidecar, as
+//      a Login item named "Recall API Key" with `region` in notes. This
+//      is the durable source of truth; vault-init re-reads it into the
+//      host .env on tenant boot.
+//   2. /opt/alfred/.env (immediate) — atomic write via tempfile + rename
+//      using credentials.ts's patchEnv() helper. Skips the wait for the
+//      next vault-init cycle so the new key is hot the moment ctrl-api
+//      restarts.
+//
+// Then the route triggers `docker compose restart ctrl-api alfred-learn`
+// in the background so the new key takes effect immediately. Mirrors
+// the Telegram channel persistence pattern (telegram.ts:548), with the
+// /opt/alfred/.env write borrowed from the OpenAI key flow
+// (credentials.ts:patchEnv) — except the .env write here is atomic (tmp
+// + rename) per Sir's PR brief.
 
 import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError, ApiError } from "../errors.js";
 import { getStateDb } from "../../db/state.js";
+import { dockerComposeCmd, COMPOSE_DIR } from "../helpers.js";
+import { requireOperatorBearer } from "../auth.js";
 import type { DatabaseSync } from "node:sqlite";
 
 // ── Recall API endpoint helpers ───────────────────────────────────────────
@@ -157,6 +176,10 @@ function rowToApiConfig(row: RecallConfigRow): Record<string, unknown> {
     // Fall back to the default — never reject a row on a corrupted JSON
     // field; the operator can re-PATCH to fix it.
   }
+  // Expose key_first6 + api_key_set so the /channels card can render
+  // the rotation row ("first 6 chars …") without ever round-tripping
+  // the full value. PR3a adds this; the field was previously absent.
+  const apiKey = process.env.RECALL_API_KEY?.trim() ?? "";
   return {
     region: row.region,
     bot_name: row.bot_name,
@@ -169,6 +192,8 @@ function rowToApiConfig(row: RecallConfigRow): Record<string, unknown> {
     wake_word: row.wake_word,
     cost_alert_thresholds: thresholds,
     updated_at: row.updated_at,
+    api_key_set: apiKey.length > 0,
+    api_key_first6: apiKey.length > 0 ? apiKey.slice(0, 6) : null,
   };
 }
 
@@ -378,6 +403,276 @@ async function validateRecallKey(
     ok: true,
     account: { region, bots_known: count },
   };
+}
+
+// ── api-key persistence helpers (PR3a) ────────────────────────────────────
+//
+// The persist path has four steps:
+//   1. round-trip-validate via validateRecallKey() above (NEVER trust a
+//      paste);
+//   2. upsert a "Recall API Key" Login item in Vaultwarden through the
+//      vault-cli sidecar (canonical store);
+//   3. atomically merge RECALL_API_KEY + RECALL_REGION into the compose
+//      .env at ${COMPOSE_DIR}/.env via tempfile + rename (so a crash
+//      mid-write leaves the old .env untouched);
+//   4. restart ctrl-api and alfred-learn via `docker compose restart` so
+//      the new env takes effect immediately. Background; do not block
+//      the response.
+//
+// Idempotence: if the *same* key value is already in the .env on disk
+// AND already on file in Vaultwarden, the route returns
+// `{ok, idempotent: true}` without writing or restarting anything.
+//
+// Concurrency: a process-local lock serialises the persistence path so
+// two concurrent calls cannot double-restart. A second concurrent
+// caller waits for the first to finish, then re-checks idempotence.
+
+const VAULT_CLI_URL = process.env.VAULT_CLI_URL || "http://vault-cli:8087";
+const RECALL_VAULT_ITEM_NAME = "Recall API Key";
+const RECALL_ENV_PATH = `${COMPOSE_DIR}/.env`;
+const RECALL_RESTART_SERVICES = ["ctrl-api", "alfred-learn"] as const;
+const RECALL_RESTART_ETA_SECONDS = 30;
+
+// In-process serialiser. Awaited by every persistence call so two
+// requests landing simultaneously cannot both validate-then-restart
+// (the second would no-op via idempotence once it sees the first
+// caller's write).
+let _persistLock: Promise<void> = Promise.resolve();
+
+async function withPersistLock<T>(fn: () => Promise<T>): Promise<T> {
+  const prev = _persistLock;
+  let release!: () => void;
+  _persistLock = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  try {
+    await prev;
+    return await fn();
+  } finally {
+    release();
+  }
+}
+
+// ── vault-cli sidecar helpers (mirrors telegram.ts:97-184) ───────────────
+
+interface BwEnvelope {
+  success?: boolean;
+  data?: unknown;
+  message?: string;
+}
+
+async function _bwFetch(
+  p: string,
+  init: RequestInit = {},
+): Promise<{ status: number; body: unknown }> {
+  const r = await fetch(`${VAULT_CLI_URL}${p}`, {
+    ...init,
+    headers: { "content-type": "application/json", ...(init.headers ?? {}) },
+    signal: AbortSignal.timeout(15_000),
+  });
+  const text = await r.text();
+  try {
+    return { status: r.status, body: JSON.parse(text) };
+  } catch {
+    return { status: r.status, body: text };
+  }
+}
+
+function _bwUnwrap(
+  body: unknown,
+): { ok: true; data: unknown } | { ok: false; message: string } {
+  if (typeof body !== "object" || body === null) {
+    return { ok: false, message: "vault-cli returned non-JSON body" };
+  }
+  const env = body as BwEnvelope;
+  if (env.success === false) {
+    return { ok: false, message: env.message ?? "vault-cli error" };
+  }
+  if (env.success === true && "data" in env) return { ok: true, data: env.data };
+  return { ok: true, data: body };
+}
+
+async function findRecallVaultItem(): Promise<
+  { id: string; password: string | null; notes: string | null } | null
+> {
+  const r = await _bwFetch(
+    `/list/object/items?search=${encodeURIComponent(RECALL_VAULT_ITEM_NAME)}`,
+  );
+  if (r.status >= 500) throw new Error(`vault-cli unreachable (HTTP ${r.status})`);
+  const u = _bwUnwrap(r.body);
+  if (!u.ok) throw new Error(u.message);
+  const data = u.data as Record<string, unknown> | unknown[];
+  const list = Array.isArray(data)
+    ? data
+    : Array.isArray((data as Record<string, unknown>).data)
+      ? ((data as Record<string, unknown>).data as unknown[])
+      : [];
+  for (const raw of list) {
+    if (typeof raw !== "object" || raw === null) continue;
+    const it = raw as Record<string, unknown>;
+    if (typeof it.name !== "string") continue;
+    if (it.name.toLowerCase() !== RECALL_VAULT_ITEM_NAME.toLowerCase()) continue;
+    const login =
+      typeof it.login === "object" && it.login !== null
+        ? (it.login as Record<string, unknown>)
+        : null;
+    const password = login && typeof login.password === "string" ? login.password : null;
+    const notes = typeof it.notes === "string" ? it.notes : null;
+    return { id: typeof it.id === "string" ? it.id : "", password, notes };
+  }
+  return null;
+}
+
+/** Upsert the Recall API Key item. Notes carries the region so vault-init
+ *  can re-derive RECALL_REGION on next boot without an extra item. */
+async function upsertRecallVaultItem(key: string, region: string): Promise<void> {
+  const existing = await findRecallVaultItem();
+  const notes =
+    `Recall.ai API key for the meeting-bot channel (#113). ` +
+    `Region: ${region}. Source of truth — vault-init reads this back ` +
+    `into RECALL_API_KEY and RECALL_REGION on tenant boot.`;
+  if (existing && existing.id) {
+    const cur = await _bwFetch(`/object/item/${existing.id}`);
+    const curU = _bwUnwrap(cur.body);
+    if (!curU.ok) throw new Error(curU.message);
+    const existingItem = (curU.data as Record<string, unknown>).data ?? curU.data;
+    const e = existingItem as Record<string, unknown>;
+    const existingLogin =
+      typeof e.login === "object" && e.login !== null
+        ? ({ ...(e.login as Record<string, unknown>) } as Record<string, unknown>)
+        : { username: null, password: null, uris: [] };
+    existingLogin.password = key;
+    const merged = {
+      ...e,
+      name: RECALL_VAULT_ITEM_NAME,
+      notes,
+      login: existingLogin,
+    };
+    const r = await _bwFetch(`/object/item/${existing.id}`, {
+      method: "PUT",
+      body: JSON.stringify(merged),
+    });
+    const u = _bwUnwrap(r.body);
+    if (!u.ok) throw new Error(u.message);
+    return;
+  }
+  const payload = {
+    type: 1,
+    name: RECALL_VAULT_ITEM_NAME,
+    notes,
+    folderId: null,
+    favorite: false,
+    reprompt: 0,
+    login: {
+      username: null,
+      password: key,
+      uris: [{ uri: "https://recall.ai/", match: null }],
+    },
+  };
+  const r = await _bwFetch("/object/item", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  const u = _bwUnwrap(r.body);
+  if (!u.ok) throw new Error(u.message);
+}
+
+/** Read the current .env into a {key: value} map. Missing file → {}. */
+function readEnvFile(envPath: string): Record<string, string> {
+  let content = "";
+  try {
+    content = fs.readFileSync(envPath, "utf-8");
+  } catch {
+    return {};
+  }
+  const env: Record<string, string> = {};
+  for (const line of content.split("\n")) {
+    const t = line.trim();
+    if (!t || t.startsWith("#")) continue;
+    const eq = t.indexOf("=");
+    if (eq < 0) continue;
+    env[t.slice(0, eq).trim()] = t.slice(eq + 1).trim();
+  }
+  return env;
+}
+
+/** Surgically update RECALL_API_KEY + RECALL_REGION in the compose .env,
+ *  preserving all comments / blank lines / ordering / unrelated keys.
+ *  Writes atomically: tmp file in the same directory + rename. On
+ *  success the .env.next file no longer exists; on a crashed write the
+ *  old .env is untouched and the orphan tmp is cleaned up by the next
+ *  successful write (we look for and unlink any prior tmp before
+ *  starting). */
+function atomicPatchEnv(
+  envPath: string,
+  updates: Record<string, string>,
+): void {
+  let lines: string[];
+  try {
+    lines = fs.readFileSync(envPath, "utf-8").split("\n");
+  } catch {
+    lines = [];
+  }
+  const remaining = new Map(Object.entries(updates));
+  const result = lines.map((line) => {
+    const t = line.trim();
+    if (!t || t.startsWith("#")) return line;
+    const eq = t.indexOf("=");
+    if (eq < 0) return line;
+    const k = t.slice(0, eq).trim();
+    if (!remaining.has(k)) return line;
+    const v = remaining.get(k)!;
+    remaining.delete(k);
+    return `${k}=${v}`;
+  });
+  for (const [k, v] of remaining) {
+    result.push(`${k}=${v}`);
+  }
+  const content = result.join("\n");
+  const final = content.endsWith("\n") ? content : content + "\n";
+
+  // Atomic write — tmp file in the SAME directory (rename across
+  // filesystems isn't atomic). Mode 0o600 so a stray reader can't shoulder
+  // the secret between the rename and the next docker compose restart.
+  const dir = path.dirname(envPath);
+  const tmp = path.join(dir, ".env.next");
+  // Clean up any orphan from a previous crashed write.
+  try {
+    fs.unlinkSync(tmp);
+  } catch {
+    /* swallow ENOENT */
+  }
+  fs.writeFileSync(tmp, final, { mode: 0o600 });
+  fs.renameSync(tmp, envPath);
+}
+
+/** Fire-and-forget restart of ctrl-api + alfred-learn. We do NOT await:
+ *  restarting ctrl-api will tear down the very HTTP connection we're
+ *  serving the response on, so blocking the response on the restart
+ *  guarantees the caller never sees a 200. Background it.
+ *
+ *  Best-effort logging. The /status route can read the live key from
+ *  process.env to confirm the restart landed. */
+function restartForRecallKey(): void {
+  // Sequential so we don't contend with health checks. alfred-learn
+  // first (no callers depend on it staying up), then ctrl-api (this
+  // terminates our own connection — by which point the response is
+  // already written).
+  (async () => {
+    for (const svc of RECALL_RESTART_SERVICES) {
+      try {
+        await dockerComposeCmd(["restart", svc]);
+      } catch (err) {
+        console.error(`[recall/api-key] restart of ${svc} failed:`, err);
+      }
+    }
+  })();
+}
+
+/** Mask an API key down to its first 6 chars + "…". Used in log lines
+ *  and the response envelope. We never echo the full value. */
+function keyFirst6(key: string): string {
+  return key.slice(0, 6);
 }
 
 // ── usage rollup ──────────────────────────────────────────────────────────
@@ -680,6 +975,13 @@ export const _recallInternals = {
   statusFromEvent,
   parseConfigPatch,
   classifyMeetingUrl,
+  // PR3a — persistence helpers, exported for the corresponding test.
+  atomicPatchEnv,
+  readEnvFile,
+  findRecallVaultItem,
+  upsertRecallVaultItem,
+  withPersistLock,
+  keyFirst6,
 };
 
 // ── Routes ────────────────────────────────────────────────────────────────
@@ -723,6 +1025,182 @@ export function registerChannelsRecallRoutes(): void {
       // to render. Tossing a non-2xx here would force the card to also
       // handle a generic error page on what's a normal "wrong key" path.
       sendJson(res, 200, outcome);
+    },
+  );
+
+  // POST /api/v1/channels/recall/api-key
+  //
+  // Operator-only setter (#113 PR3a). The /channels Recall card calls
+  // this AFTER /validate-key returns {ok:true}, with the same key. We:
+  //   1. round-trip-validate AGAIN against Recall (never trust a
+  //      "validate already happened" claim from a caller);
+  //   2. upsert "Recall API Key" in Vaultwarden via vault-cli;
+  //   3. atomically merge RECALL_API_KEY + RECALL_REGION into
+  //      ${COMPOSE_DIR}/.env via tempfile + rename;
+  //   4. background-restart ctrl-api + alfred-learn so the new env is
+  //      picked up immediately. (alfred-learn calls recall.ai through
+  //      ctrl-api, but RECALL_API_KEY can also leak into its own env in
+  //      future workflows, hence the explicit restart.)
+  //
+  // The response envelope NEVER carries the key. `key_first6` is the
+  // operator-visible fingerprint; everything else is a description of
+  // what was written. 502s during validation or vault write short-circuit
+  // BEFORE any .env mutation so a half-applied write is impossible.
+  //
+  // Idempotence: if the same key + region are already in the .env AND
+  // the vault item already holds the same password, we return
+  // `{ok:true, idempotent:true}` without restart. A re-paste of the
+  // same key from the card is therefore free.
+  //
+  // Concurrency: a process-local lock guarantees two parallel calls
+  // serialise. The second caller observes the first's write and
+  // idempotence-noops; no double restart.
+  addRoute(
+    "POST",
+    "/api/v1/channels/recall/api-key",
+    async ({ req, res, body }) => {
+      // Operator-only — voice-bridge / channel-token bearers get 403.
+      requireOperatorBearer(req);
+
+      const b = (body ?? {}) as { api_key?: unknown; region?: unknown };
+      if (typeof b.api_key !== "string" || b.api_key.trim().length === 0) {
+        throw new ValidationError("api_key (non-empty string) is required");
+      }
+      const key = b.api_key.trim();
+
+      // Region defaults to the configured value (the singleton row's
+      // region) when missing. Validated against the same allowlist as
+      // validate-key + PATCH /config.
+      let region: string;
+      if (b.region !== undefined) {
+        if (typeof b.region !== "string" || !VALID_REGIONS.includes(b.region)) {
+          throw new ValidationError(
+            `region must be one of: ${VALID_REGIONS.join(", ")}`,
+          );
+        }
+        region = b.region;
+      } else {
+        try {
+          const cfg = getOrSeedConfig(getStateDb());
+          region = cfg.region;
+        } catch {
+          region = "us-east-1";
+        }
+      }
+
+      const first6 = keyFirst6(key);
+
+      // Serialise the whole persist+restart sequence so a second
+      // concurrent caller can't double-restart.
+      const result = await withPersistLock(async () => {
+        // ── 1. Round-trip-validate against Recall ─────────────────────
+        const outcome = await validateRecallKey(key, region);
+        if (!outcome.ok) {
+          // Differentiate Recall's auth failure from a network blip. A
+          // 401 from Recall lands as `outcome.reason = "Recall rejected
+          // the API key"` — surface verbatim so the card renders Recall's
+          // own language. We map auth failures to 401 and everything
+          // else (timeouts / 502s / DNS / etc.) to 502. NEVER persist.
+          const reason = outcome.reason ?? "Recall rejected the API key";
+          const isAuth = /reject|invalid/i.test(reason);
+          throw new ApiError(
+            isAuth ? 401 : 502,
+            isAuth ? "RECALL_AUTH_FAILED" : "RECALL_UNREACHABLE",
+            reason,
+          );
+        }
+
+        // ── 2. Check idempotence — same key + region already on file? ─
+        const envOnDisk = readEnvFile(RECALL_ENV_PATH);
+        const sameEnvKey = envOnDisk.RECALL_API_KEY === key;
+        const sameEnvRegion = envOnDisk.RECALL_REGION === region;
+        let sameVault = false;
+        try {
+          const existing = await findRecallVaultItem();
+          sameVault = Boolean(
+            existing && existing.password === key,
+          );
+        } catch (err) {
+          // Vault read failure on the idempotence-check path is non-fatal
+          // — we just fall through to the write path, which has its own
+          // error handling.
+          console.warn(
+            `[recall/api-key] vault idempotence-check failed (key ${first6}…): ` +
+              (err instanceof Error ? err.message : String(err)),
+          );
+        }
+        if (sameEnvKey && sameEnvRegion && sameVault) {
+          return {
+            envelope: {
+              ok: true,
+              idempotent: true,
+              region,
+              key_first6: first6,
+              persisted_to: [] as string[],
+              restarted: [] as string[],
+              eta_seconds: 0,
+            },
+            shouldRestart: false,
+          };
+        }
+
+        // ── 3. Vaultwarden upsert (canonical) ────────────────────────
+        try {
+          await upsertRecallVaultItem(key, region);
+        } catch (err) {
+          // Hard fail — vault is the canonical store. We have NOT
+          // written to .env yet, so the system is still consistent.
+          throw new ApiError(
+            502,
+            "VAULT_WRITE_FAILED",
+            err instanceof Error ? err.message : String(err),
+          );
+        }
+
+        // ── 4. Atomic .env write (immediate) ─────────────────────────
+        try {
+          atomicPatchEnv(RECALL_ENV_PATH, {
+            RECALL_API_KEY: key,
+            RECALL_REGION: region,
+          });
+        } catch (err) {
+          throw new ApiError(
+            500,
+            "ENV_WRITE_FAILED",
+            err instanceof Error ? err.message : String(err),
+          );
+        }
+
+        // Update our own process.env so subsequent reads inside this
+        // ctrl-api invocation (until the restart lands) see the new key.
+        process.env.RECALL_API_KEY = key;
+        process.env.RECALL_REGION = region;
+
+        // Log with the prefix only — never the full value.
+        console.log(
+          `[recall/api-key] persisted key ${first6}… region=${region} ` +
+            `(vaultwarden + .env). Restarting ${RECALL_RESTART_SERVICES.join(", ")}.`,
+        );
+
+        return {
+          envelope: {
+            ok: true,
+            region,
+            key_first6: first6,
+            persisted_to: ["vaultwarden", ".env"],
+            restarted: [...RECALL_RESTART_SERVICES],
+            eta_seconds: RECALL_RESTART_ETA_SECONDS,
+          },
+          shouldRestart: true,
+        };
+      });
+
+      // Send the response BEFORE kicking the restart — restarting
+      // ctrl-api tears down this socket.
+      sendJson(res, 200, result.envelope);
+      if (result.shouldRestart) {
+        restartForRecallKey();
+      }
     },
   );
 

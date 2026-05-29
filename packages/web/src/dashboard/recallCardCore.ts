@@ -98,6 +98,12 @@ const TERMINAL_BOT_STATUSES: ReadonlySet<RecallBotStatus> = new Set([
 /**
  * GET /api/v1/channels/recall/config response (1:1 with rowToApiConfig).
  * All fields always present; updated_at is unix-ms.
+ *
+ * `api_key_set` + `api_key_first6` (PR3a) surface whether RECALL_API_KEY
+ * is on file in the live ctrl-api .env. NEVER carries the full key —
+ * `api_key_first6` is exactly six chars (or null when no key is set).
+ * Both fields are optional on the wire so a pre-PR3a ctrl-api still
+ * deserialises cleanly.
  */
 export interface RecallConfig {
   region: RecallRegion;
@@ -111,6 +117,8 @@ export interface RecallConfig {
   wake_word: string;
   cost_alert_thresholds: number[];
   updated_at: number;
+  api_key_set?: boolean;
+  api_key_first6?: string | null;
 }
 
 /** GET /api/v1/channels/recall/usage response. */
@@ -794,4 +802,164 @@ export function botStatusLabel(s: RecallBotStatus): string {
     case "fail":
       return "Failed";
   }
+}
+
+// ── API-key persistence state machine (#113 PR3a) ────────────────────────
+//
+// The /channels Recall card walks a paste through two server round-trips:
+//
+//   1. validate — POST /api/v1/channels/recall/validate-key
+//   2. persist  — POST /api/v1/channels/recall/api-key (only fires if
+//                 step 1 returned {ok:true})
+//
+// We model the panel as a tiny pure state machine here so the React
+// component stays declarative and the contract gets exercised by
+// recallCardCore.test.ts without a DOM. The phases mirror the strings
+// the React layer renders:
+//
+//   • idle           — user is typing
+//   • validating     — validate request in flight
+//   • saving         — persist request in flight (validate already
+//                       returned ok)
+//   • done           — persist returned ok (fresh write OR idempotent)
+//   • err_validate   — validate returned {ok:false} or threw; the
+//                       previous key (if any) is UNCHANGED on the
+//                       tenant
+//   • err_persist    — validate returned ok but persist threw; the
+//                       previous key (if any) is UNCHANGED on the
+//                       tenant (this is the "revert" contract)
+
+export type ApiKeyFlowPhase =
+  | "idle"
+  | "validating"
+  | "saving"
+  | "done"
+  | "err_validate"
+  | "err_persist";
+
+export interface ApiKeyFlowState {
+  phase: ApiKeyFlowPhase;
+  /** Verbatim error string from the latest failed step, if any. */
+  error: string | null;
+  /** First six chars of the latest persisted key, if any. Never the full
+   *  key. */
+  keyFirst6: string | null;
+  /** True when the latest persist call hit the idempotence branch (same
+   *  key was already on file). */
+  idempotent: boolean;
+}
+
+export const API_KEY_FLOW_IDLE: ApiKeyFlowState = {
+  phase: "idle",
+  error: null,
+  keyFirst6: null,
+  idempotent: false,
+};
+
+/** validate-key envelope as ctrl-api returns it on the
+ *  /validate-key route. */
+export interface ValidateKeyOutcomeWire {
+  ok?: boolean;
+  reason?: string;
+}
+
+/** api-key envelope as ctrl-api returns it on the /api-key route. */
+export interface PersistKeyOutcomeWire {
+  ok?: boolean;
+  idempotent?: boolean;
+  region?: string;
+  key_first6?: string;
+  persisted_to?: string[];
+  restarted?: string[];
+  eta_seconds?: number;
+  reason?: string;
+}
+
+/** Transition from `phase=idle` when the user clicks Submit — the
+ *  validate request enters flight. */
+export function apiKeyFlowStartValidate(): ApiKeyFlowState {
+  return { phase: "validating", error: null, keyFirst6: null, idempotent: false };
+}
+
+/** Apply the validate-key result. On {ok:true} we move to `saving`
+ *  immediately (the persist request fires); on anything else we land in
+ *  `err_validate` with the reason verbatim. The previous key remains
+ *  untouched on the tenant in both branches — the persist request
+ *  hasn't fired yet. */
+export function apiKeyFlowOnValidate(
+  prev: ApiKeyFlowState,
+  outcome: ValidateKeyOutcomeWire | null | undefined,
+  thrownMessage?: string,
+): ApiKeyFlowState {
+  if (typeof thrownMessage === "string") {
+    return {
+      phase: "err_validate",
+      error: thrownMessage,
+      keyFirst6: prev.keyFirst6,
+      idempotent: false,
+    };
+  }
+  if (!outcome || outcome.ok !== true) {
+    return {
+      phase: "err_validate",
+      error:
+        typeof outcome?.reason === "string" && outcome.reason
+          ? outcome.reason
+          : "Recall rejected the key.",
+      keyFirst6: prev.keyFirst6,
+      idempotent: false,
+    };
+  }
+  return {
+    phase: "saving",
+    error: null,
+    keyFirst6: prev.keyFirst6,
+    idempotent: false,
+  };
+}
+
+/** Apply the persist (api-key) result. On {ok:true} we land in `done`
+ *  with the new keyFirst6 and idempotent flag. On any failure we land
+ *  in `err_persist`. CRITICAL: the failure branch keeps `prev.keyFirst6`
+ *  unchanged — the tenant's previous key was not overwritten (ctrl-api
+ *  short-circuits BEFORE the .env write when the vault upsert fails). */
+export function apiKeyFlowOnPersist(
+  prev: ApiKeyFlowState,
+  outcome: PersistKeyOutcomeWire | null | undefined,
+  thrownMessage?: string,
+): ApiKeyFlowState {
+  if (typeof thrownMessage === "string") {
+    return {
+      phase: "err_persist",
+      error: thrownMessage,
+      keyFirst6: prev.keyFirst6,
+      idempotent: false,
+    };
+  }
+  if (!outcome || outcome.ok !== true) {
+    return {
+      phase: "err_persist",
+      error:
+        typeof outcome?.reason === "string" && outcome.reason
+          ? outcome.reason
+          : "ctrl-api refused to persist the key.",
+      keyFirst6: prev.keyFirst6,
+      idempotent: false,
+    };
+  }
+  return {
+    phase: "done",
+    error: null,
+    keyFirst6:
+      typeof outcome.key_first6 === "string"
+        ? outcome.key_first6
+        : prev.keyFirst6,
+    idempotent: outcome.idempotent === true,
+  };
+}
+
+/** Reset back to idle — used by the "Try a different key" / "Reset"
+ *  affordance. */
+export function apiKeyFlowReset(): ApiKeyFlowState {
+  return API_KEY_FLOW_IDLE;
 }

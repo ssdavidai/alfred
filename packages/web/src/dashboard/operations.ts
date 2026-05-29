@@ -775,14 +775,14 @@ export const updateRecallConfig = async (
 };
 
 /** Round-trip-validate a Recall API key against the Recall API. The key
- *  is NEVER logged here; the ctrl-api persists nothing on its side
- *  either (PR3a ships the persistent setter). The response is
- *  `{ ok, account? }` or `{ ok: false, reason }` — we pass it through
- *  verbatim so the card can render the reason. */
+ *  is NEVER logged here; the ctrl-api persists nothing on its side either
+ *  — that's setRecallApiKey's job. The response is `{ ok, account? }` or
+ *  `{ ok: false, reason }` — we pass it through verbatim so the card can
+ *  render the reason. */
 export const validateRecallApiKey = async (
   args: { api_key: string; region?: string },
   context: any,
-) => {
+): Promise<any> => {
   if (typeof args?.api_key !== "string" || args.api_key.trim().length === 0) {
     throw new HttpError(400, "api_key required");
   }
@@ -794,6 +794,48 @@ export const validateRecallApiKey = async (
   return proxyToTenant(instance, {
     method: "POST",
     path: "/api/v1/channels/recall/validate-key",
+    body,
+  });
+};
+
+/** Persist a validated Recall API key (#113 PR3a). Closes the gap PR #136
+ *  documented as "persistence pending": after the card receives an
+ *  {ok:true} from validateRecallApiKey, it immediately calls this action
+ *  with the same key. ctrl-api validates AGAIN against Recall (never
+ *  trust a "validate already happened" claim), then writes to BOTH
+ *  Vaultwarden (canonical, via the vault-cli sidecar) AND the compose
+ *  /.env (atomic, via tempfile + rename), then restarts ctrl-api +
+ *  alfred-learn so the new env takes effect.
+ *
+ *  The key never enters the SaaS layer's logs — we only log the action
+ *  call itself; the value rides the proxied body and the ctrl-api
+ *  response carries only `key_first6`.
+ *
+ *  Return shape on fresh writes:
+ *    { ok, region, key_first6, persisted_to: ['vaultwarden', '.env'],
+ *      restarted: ['ctrl-api', 'alfred-learn'], eta_seconds }
+ *  On a re-paste of the same key + region:
+ *    { ok: true, idempotent: true, region, key_first6, ... }
+ *
+ *  Annotation `Promise<any>` — the Wasp Payload trap. Operations whose
+ *  return type isn't a Prisma entity must be annotated as `Promise<any>`
+ *  so Wasp's TypeScript generator doesn't squeeze the shape into an
+ *  unrelated Payload type. */
+export const setRecallApiKey = async (
+  args: { api_key: string; region?: string },
+  context: any,
+): Promise<any> => {
+  if (typeof args?.api_key !== "string" || args.api_key.trim().length === 0) {
+    throw new HttpError(400, "api_key required");
+  }
+  const instance = await getUserInstance(context);
+  const body: Record<string, string> = { api_key: args.api_key.trim() };
+  if (typeof args.region === "string" && args.region.length > 0) {
+    body.region = args.region;
+  }
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/channels/recall/api-key",
     body,
   });
 };

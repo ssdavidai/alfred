@@ -982,6 +982,16 @@ action validateRecallApiKey {
   entities: []
 }
 
+// Lane III (#113 PR3a) — persist a validated Recall API key. The card
+// calls this immediately after validateRecallApiKey returns {ok:true},
+// with the same key. ctrl-api validates again, writes to Vaultwarden +
+// the compose .env atomically, then restarts ctrl-api + alfred-learn.
+// Never echoes the full key; response carries `key_first6` only.
+action setRecallApiKey {
+  fn: import { setRecallApiKey } from "@src/dashboard/operations",
+  entities: []
+}
+
 action testRecallWebhook {
   fn: import { testRecallWebhook } from "@src/dashboard/operations",
   entities: []

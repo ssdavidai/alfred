@@ -511,3 +511,162 @@ test("enum option lists carry the exact strings the route validator accepts", ()
   assert.equal(RECALL_WAKE_WORD_RANGE.max, 64);
   assert.equal(RECALL_COST_THRESHOLD_RANGE.max, 200);
 });
+
+// ── API-key persistence flow state machine (#113 PR3a) ───────────────────
+
+import {
+  API_KEY_FLOW_IDLE,
+  apiKeyFlowOnPersist,
+  apiKeyFlowOnValidate,
+  apiKeyFlowReset,
+  apiKeyFlowStartValidate,
+} from "./recallCardCore";
+
+test("API key flow — idle → validating on Submit", () => {
+  const next = apiKeyFlowStartValidate();
+  assert.equal(next.phase, "validating");
+  assert.equal(next.error, null);
+});
+
+test("API key flow — validate ok → saving (persist fires next)", () => {
+  const next = apiKeyFlowOnValidate(apiKeyFlowStartValidate(), {
+    ok: true,
+  });
+  assert.equal(next.phase, "saving");
+  assert.equal(next.error, null);
+});
+
+test("API key flow — validate {ok:false} → err_validate with reason verbatim", () => {
+  const next = apiKeyFlowOnValidate(apiKeyFlowStartValidate(), {
+    ok: false,
+    reason: "Recall rejected the API key",
+  });
+  assert.equal(next.phase, "err_validate");
+  assert.equal(next.error, "Recall rejected the API key");
+});
+
+test("API key flow — validate throws → err_validate with thrown msg", () => {
+  const next = apiKeyFlowOnValidate(
+    apiKeyFlowStartValidate(),
+    null,
+    "network blip",
+  );
+  assert.equal(next.phase, "err_validate");
+  assert.equal(next.error, "network blip");
+});
+
+test("API key flow — persist ok → done + keyFirst6 from wire", () => {
+  const after = apiKeyFlowOnPersist(
+    apiKeyFlowOnValidate(apiKeyFlowStartValidate(), { ok: true }),
+    {
+      ok: true,
+      key_first6: "rec_ab",
+      restarted: ["ctrl-api", "alfred-learn"],
+      persisted_to: ["vaultwarden", ".env"],
+      eta_seconds: 30,
+    },
+  );
+  assert.equal(after.phase, "done");
+  assert.equal(after.keyFirst6, "rec_ab");
+  assert.equal(after.idempotent, false);
+});
+
+test("API key flow — persist {ok,idempotent:true} → done + idempotent flag", () => {
+  const after = apiKeyFlowOnPersist(
+    apiKeyFlowOnValidate(apiKeyFlowStartValidate(), { ok: true }),
+    {
+      ok: true,
+      idempotent: true,
+      key_first6: "rec_ab",
+      persisted_to: [],
+      restarted: [],
+    },
+  );
+  assert.equal(after.phase, "done");
+  assert.equal(after.idempotent, true);
+});
+
+test("API key flow — persist throws → err_persist; prior keyFirst6 PRESERVED (revert contract)", () => {
+  // Seed `prev.keyFirst6` so we can verify the failure path keeps it.
+  const seeded = {
+    ...API_KEY_FLOW_IDLE,
+    phase: "saving" as const,
+    keyFirst6: "old_xx",
+  };
+  const after = apiKeyFlowOnPersist(seeded, null, "vault-cli down");
+  assert.equal(after.phase, "err_persist");
+  assert.equal(after.error, "vault-cli down");
+  // Critical: the previous keyFirst6 survives the failed persist —
+  // ctrl-api short-circuited before any .env write, so the tenant
+  // still has the OLD key.
+  assert.equal(after.keyFirst6, "old_xx");
+  assert.equal(after.idempotent, false);
+});
+
+test("API key flow — persist {ok:false} → err_persist with reason verbatim", () => {
+  const after = apiKeyFlowOnPersist(
+    {
+      ...API_KEY_FLOW_IDLE,
+      phase: "saving" as const,
+      keyFirst6: "old_xx",
+    },
+    { ok: false, reason: "Vault upsert failed" },
+  );
+  assert.equal(after.phase, "err_persist");
+  assert.equal(after.error, "Vault upsert failed");
+  assert.equal(after.keyFirst6, "old_xx");
+});
+
+test("API key flow — reset returns to idle", () => {
+  const errored = apiKeyFlowOnValidate(
+    apiKeyFlowStartValidate(),
+    { ok: false, reason: "nope" },
+  );
+  assert.equal(errored.phase, "err_validate");
+  const reset = apiKeyFlowReset();
+  assert.equal(reset.phase, "idle");
+  assert.equal(reset.error, null);
+});
+
+test("API key flow — full happy path: idle → validating → saving → done", () => {
+  // Simulates the React panel's full transition graph.
+  let state = API_KEY_FLOW_IDLE;
+  assert.equal(state.phase, "idle");
+  state = apiKeyFlowStartValidate();
+  assert.equal(state.phase, "validating");
+  state = apiKeyFlowOnValidate(state, { ok: true });
+  assert.equal(state.phase, "saving");
+  state = apiKeyFlowOnPersist(state, {
+    ok: true,
+    key_first6: "rec_xy",
+    persisted_to: ["vaultwarden", ".env"],
+    restarted: ["ctrl-api", "alfred-learn"],
+    eta_seconds: 30,
+  });
+  assert.equal(state.phase, "done");
+  assert.equal(state.keyFirst6, "rec_xy");
+  assert.equal(state.idempotent, false);
+});
+
+test("API key flow — RecallConfig type carries optional api_key_first6 surface", () => {
+  // Construct a config with the PR3a fields to make sure the type still
+  // accepts them. Compile-time more than runtime — but a sanity check.
+  const cfg: RecallConfig = {
+    region: "us-east-1",
+    bot_name: "Bot",
+    announces_on_join: true,
+    auto_join_policy: "principal_attendee",
+    calendar_source: "composio",
+    monthly_hours_cap: 60,
+    leave_after_minutes: 90,
+    respond_mode: "on_mention",
+    wake_word: "Alfred",
+    cost_alert_thresholds: [80, 100],
+    updated_at: 0,
+    api_key_set: true,
+    api_key_first6: "rec_ab",
+  };
+  const f = configToFormValues(cfg);
+  // The fields aren't part of the form values — just the wire type.
+  assert.equal(f.region, "us-east-1");
+});

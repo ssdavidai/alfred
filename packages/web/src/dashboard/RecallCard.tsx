@@ -8,20 +8,26 @@
 // Four subviews, driven by deriveRecallCardState's `status`:
 //
 //   • disabled    — no API key on file. Hero copy + API-key paste form
-//                   that round-trips via validateRecallApiKey (NO
-//                   persistence — that ships in PR3a). On a successful
-//                   round-trip we surface a "validated, persistence
-//                   pending" note and the principal can either tap
-//                   refresh or move on.
+//                   that two-steps: (1) validateRecallApiKey, (2) on
+//                   success, immediately setRecallApiKey to persist the
+//                   key into Vaultwarden + the compose .env and trigger
+//                   a ctrl-api + alfred-learn restart. The UI shows
+//                   "Validating…" then "Saving + restarting…" then
+//                   "Connected — bots will dispatch from here on."
+//                   (#113 PR3a, closing the gap PR #136 documented as
+//                   "persistence pending".)
 //   • configured  — dial form (region / bot name / auto-join / cadence
 //                   / cost cap / wake word / cost-alert thresholds),
 //                   month-to-date usage badge, recent-bots table, Test
-//                   Webhook CTA, webhook setup expander.
+//                   Webhook CTA, webhook setup expander, and a new
+//                   `key_first6 + [Rotate]` row that re-runs the
+//                   validate+persist two-step on a fresh key.
 //   • error       — verbatim error string + retry. The form is read-only.
 //
 // Secrets posture: the API key paste box is type="password", never logged,
-// never echoed in toast strings. The webhook secret is surfaced as first-6
-// only; the full secret stays in /opt/alfred/.env.
+// never echoed in toast strings. The configured surface renders
+// `api_key_first6` only — exactly six chars + "…" — and never the full
+// value. The webhook secret stays first-6 too.
 
 import { useEffect, useMemo, useState } from "react";
 import {
@@ -29,6 +35,7 @@ import {
   getRecallChannelStatus,
   updateRecallConfig,
   validateRecallApiKey,
+  setRecallApiKey,
   testRecallWebhook,
   terminateRecallBot,
 } from "wasp/client/operations";
@@ -173,64 +180,140 @@ export default function RecallCard() {
   );
 }
 
-// ─── disabled subview — API-key paste / validate ─────────────────────────
+// ─── disabled subview — API-key paste / validate + persist (#113 PR3a) ───
+
+/** The two-step state the disabled panel walks through. */
+type DisabledPanelPhase =
+  | "idle"
+  | "validating"
+  | "saving"
+  | "done"
+  | "err_validate"
+  | "err_persist";
 
 function RecallDisabledPanel({ onValidated }: { onValidated: () => void }) {
   const [apiKey, setApiKey] = useState("");
   const [region, setRegion] = useState<RecallRegion>(
     RECALL_DEFAULT_FORM.region,
   );
-  const [validating, setValidating] = useState(false);
+  const [phase, setPhase] = useState<DisabledPanelPhase>("idle");
   const [feedback, setFeedback] = useState<
     { kind: "ok" | "err"; text: string } | null
   >(null);
 
   const trimmed = apiKey.trim();
-  const canSubmit = trimmed.length > 0 && !validating;
+  const busy = phase === "validating" || phase === "saving";
+  const canSubmit = trimmed.length > 0 && !busy;
+
+  function reset() {
+    setApiKey("");
+    setPhase("idle");
+    setFeedback(null);
+  }
 
   async function submit(e?: React.FormEvent) {
     if (e) e.preventDefault();
     if (!canSubmit) return;
-    setValidating(true);
+
+    // ── step 1 — validate ────────────────────────────────────────────
+    setPhase("validating");
     setFeedback(null);
+    let validation: any;
     try {
-      const result: any = await validateRecallApiKey({
+      validation = await validateRecallApiKey({ api_key: trimmed, region });
+    } catch (err: any) {
+      setPhase("err_validate");
+      setFeedback({
+        kind: "err",
+        text:
+          err?.message ??
+          err?.data?.error ??
+          "Couldn't reach the validator. Try again, or check that ctrl-api is running.",
+      });
+      return;
+    }
+    if (!validation?.ok) {
+      // Recall rejected → show its message verbatim + offer a retry.
+      setPhase("err_validate");
+      setFeedback({
+        kind: "err",
+        text:
+          typeof validation?.reason === "string" && validation.reason
+            ? validation.reason
+            : "Recall rejected the key.",
+      });
+      return;
+    }
+
+    // ── step 2 — persist (sets vault + .env + restarts) ──────────────
+    setPhase("saving");
+    try {
+      const persisted: any = await setRecallApiKey({
         api_key: trimmed,
         region,
       });
-      if (result?.ok) {
-        // NEVER echo the key. Just confirm.
-        const knownBots =
-          typeof result?.account?.bots_known === "number"
-            ? ` (${result.account.bots_known} bots on file)`
-            : "";
+      if (!persisted?.ok) {
+        // 200 from the action but {ok:false} envelope — surface verbatim.
+        setPhase("err_persist");
         setFeedback({
-          kind: "ok",
+          kind: "err",
           text:
-            `Recall accepted the key${knownBots}. ` +
-            "Persistence ships in #113 PR3a — paste it into /opt/alfred/.env " +
-            "as RECALL_API_KEY for now, then reload this card.",
+            typeof persisted?.reason === "string" && persisted.reason
+              ? persisted.reason
+              : "ctrl-api refused to persist the key.",
         });
-        // Clear the local field — the value is in the user's clipboard
-        // already if they copied it from Recall, and there is no
-        // server-side persistence yet.
-        setApiKey("");
-        onValidated();
-      } else {
-        const reason =
-          typeof result?.reason === "string" && result.reason
-            ? result.reason
-            : "Recall rejected the key.";
-        setFeedback({ kind: "err", text: reason });
+        return;
       }
+      setPhase("done");
+      // We never echo the key — only the first6 fingerprint.
+      const first6 =
+        typeof persisted?.key_first6 === "string" ? persisted.key_first6 : null;
+      const restartedHint =
+        Array.isArray(persisted?.restarted) && persisted.restarted.length > 0
+          ? ` Restarting ${persisted.restarted.join(" + ")}.`
+          : "";
+      setFeedback({
+        kind: "ok",
+        text:
+          persisted?.idempotent === true
+            ? `Recall key already on file${first6 ? ` (${first6}…)` : ""}. Nothing to do.`
+            : `Connected — bots will dispatch from here on${first6 ? ` (${first6}…)` : ""}.${restartedHint}`,
+      });
+      // Clear the local field. The value is durable on the tenant.
+      setApiKey("");
+      // Give the restart a moment to land before the next refetch.
+      const eta =
+        typeof persisted?.eta_seconds === "number" && persisted.eta_seconds > 0
+          ? Math.min(persisted.eta_seconds, 30) * 1000
+          : 1500;
+      window.setTimeout(() => {
+        onValidated();
+      }, eta);
     } catch (err: any) {
-      const message =
-        err?.message ?? err?.data?.error ?? "Couldn't reach the validator.";
-      setFeedback({ kind: "err", text: message });
-    } finally {
-      setValidating(false);
+      // ctrl-api rejected the persist — but validate already succeeded,
+      // so revert to a state that lets the user retry just the persist
+      // step (or paste a different key).
+      setPhase("err_persist");
+      setFeedback({
+        kind: "err",
+        text:
+          err?.message ??
+          err?.data?.error ??
+          "Validated, but couldn't save. Try again — the previous key is unchanged.",
+      });
     }
   }
+
+  const submitLabel =
+    phase === "validating"
+      ? "Validating…"
+      : phase === "saving"
+        ? "Saving + restarting…"
+        : phase === "err_validate"
+          ? "Try a different key"
+          : phase === "err_persist"
+            ? "Retry"
+            : "Validate + save";
 
   return (
     <div className="mt-5 space-y-4">
@@ -266,6 +349,7 @@ function RecallDisabledPanel({ onValidated }: { onValidated: () => void }) {
             placeholder="Paste from recall.ai → Settings → API keys"
             autoComplete="off"
             spellCheck={false}
+            disabled={busy}
             className="w-full bg-transparent border border-rule px-2 py-1 font-mono text-[12px]"
           />
         </div>
@@ -280,6 +364,7 @@ function RecallDisabledPanel({ onValidated }: { onValidated: () => void }) {
           <select
             value={region}
             onChange={(e) => setRegion(e.target.value as RecallRegion)}
+            disabled={busy}
             className="bg-transparent border border-rule px-2 py-1 font-mono text-[12px]"
           >
             {RECALL_REGION_OPTIONS.map((r) => (
@@ -296,8 +381,13 @@ function RecallDisabledPanel({ onValidated }: { onValidated: () => void }) {
             disabled={!canSubmit}
             className="btn-ghost"
           >
-            {validating ? "Validating…" : "Validate key"}
+            {submitLabel}
           </button>
+          {(phase === "err_validate" || phase === "err_persist") && (
+            <button type="button" onClick={reset} className="btn-link">
+              Reset
+            </button>
+          )}
           <a
             href="https://www.recall.ai/dashboard"
             target="_blank"
@@ -496,12 +586,100 @@ function RecallConfiguredPanel({
     typeof status?.webhook_secret_first6 === "string"
       ? status.webhook_secret_first6
       : null;
+  // RECALL_API_KEY fingerprint (PR3a) — surfaced on the rotation row.
+  const keyFirst6 =
+    typeof status?.config?.api_key_first6 === "string"
+      ? status.config.api_key_first6
+      : null;
 
   function copyWebhook() {
     if (!webhookUrl) return;
     navigator.clipboard?.writeText(webhookUrl);
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
+  }
+
+  // ─── rotate state — re-paste a new key, runs the same validate+persist
+  //     two-step the disabled panel does. Lives in the configured panel
+  //     so the principal never has to disconnect to rotate.
+  const [rotateOpen, setRotateOpen] = useState(false);
+  const [rotateKey, setRotateKey] = useState("");
+  const [rotatePhase, setRotatePhase] = useState<
+    "idle" | "validating" | "saving" | "done" | "err"
+  >("idle");
+  const [rotateMsg, setRotateMsg] = useState<
+    { kind: "ok" | "err"; text: string } | null
+  >(null);
+  const rotateBusy = rotatePhase === "validating" || rotatePhase === "saving";
+
+  async function rotate(e?: React.FormEvent) {
+    if (e) e.preventDefault();
+    const trimmed = rotateKey.trim();
+    if (!trimmed || rotateBusy) return;
+    setRotatePhase("validating");
+    setRotateMsg(null);
+    try {
+      const v: any = await validateRecallApiKey({
+        api_key: trimmed,
+        region: form.region,
+      });
+      if (!v?.ok) {
+        setRotatePhase("err");
+        setRotateMsg({
+          kind: "err",
+          text:
+            typeof v?.reason === "string" && v.reason
+              ? v.reason
+              : "Recall rejected the new key.",
+        });
+        return;
+      }
+      setRotatePhase("saving");
+      const p: any = await setRecallApiKey({
+        api_key: trimmed,
+        region: form.region,
+      });
+      if (!p?.ok) {
+        setRotatePhase("err");
+        setRotateMsg({
+          kind: "err",
+          text:
+            typeof p?.reason === "string" && p.reason
+              ? p.reason
+              : "Validated, but couldn't save the new key.",
+        });
+        return;
+      }
+      setRotatePhase("done");
+      const first6 = typeof p?.key_first6 === "string" ? p.key_first6 : null;
+      setRotateMsg({
+        kind: "ok",
+        text:
+          p?.idempotent === true
+            ? `Same key — nothing to rotate (${first6 ?? "?"}…).`
+            : `Rotated to ${first6 ?? "new key"}…. Restarting.`,
+      });
+      setRotateKey("");
+      const eta =
+        typeof p?.eta_seconds === "number" && p.eta_seconds > 0
+          ? Math.min(p.eta_seconds, 30) * 1000
+          : 1500;
+      window.setTimeout(() => {
+        setRotateOpen(false);
+        setRotateMsg(null);
+        setRotatePhase("idle");
+        onSettled();
+      }, eta);
+    } catch (err: any) {
+      setRotatePhase("err");
+      setRotateMsg({
+        kind: "err",
+        text:
+          err?.message ??
+          err?.data?.error ??
+          "Couldn't reach the validator. Try again.",
+      });
+    }
   }
 
   return (
@@ -522,6 +700,94 @@ function RecallConfiguredPanel({
           >
             Cost alert · threshold reached
           </span>
+        )}
+      </div>
+
+      {/* API key row — never echoes the full value. (#113 PR3a) */}
+      <div className="border border-rule p-3 space-y-2">
+        <div className="flex flex-wrap items-baseline gap-3 justify-between">
+          <div className="flex items-baseline gap-3">
+            <div
+              className="font-mono text-[10px] uppercase tracking-[0.22em]"
+              style={{ color: "var(--marginalia)" }}
+            >
+              Recall API key
+            </div>
+            <code
+              className="font-mono text-[12px]"
+              style={{ color: "var(--ink)" }}
+            >
+              {keyFirst6 ? `${keyFirst6}…` : "—"}
+            </code>
+          </div>
+          {!rotateOpen && (
+            <button
+              type="button"
+              onClick={() => {
+                setRotateOpen(true);
+                setRotateMsg(null);
+                setRotatePhase("idle");
+              }}
+              disabled={rotateBusy}
+              className="btn-ghost"
+            >
+              Rotate
+            </button>
+          )}
+        </div>
+        {rotateOpen && (
+          <form onSubmit={rotate} className="space-y-2 pt-2">
+            <input
+              type="password"
+              value={rotateKey}
+              onChange={(e) => setRotateKey(e.target.value)}
+              placeholder="Paste a new Recall API key"
+              autoComplete="off"
+              spellCheck={false}
+              disabled={rotateBusy}
+              className="w-full bg-transparent border border-rule px-2 py-1 font-mono text-[12px]"
+            />
+            <div className="flex gap-3 items-baseline">
+              <button
+                type="submit"
+                disabled={rotateBusy || rotateKey.trim().length === 0}
+                className="btn-ghost"
+              >
+                {rotatePhase === "validating"
+                  ? "Validating…"
+                  : rotatePhase === "saving"
+                    ? "Saving + restarting…"
+                    : "Validate + save"}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setRotateOpen(false);
+                  setRotateKey("");
+                  setRotateMsg(null);
+                  setRotatePhase("idle");
+                }}
+                disabled={rotateBusy}
+                className="btn-link"
+              >
+                Cancel
+              </button>
+            </div>
+            {rotateMsg && (
+              <p
+                className="font-body italic text-[12px]"
+                style={{
+                  color:
+                    rotateMsg.kind === "ok"
+                      ? "var(--marginalia)"
+                      : "var(--brass)",
+                }}
+              >
+                {rotateMsg.kind === "ok" ? "✓ " : "✗ "}
+                {rotateMsg.text}
+              </p>
+            )}
+          </form>
         )}
       </div>
 
