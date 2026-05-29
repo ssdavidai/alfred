@@ -99,6 +99,7 @@ import {
   type TailscaleStatus,
   type TailscalePeersResponse,
 } from "./tailscaleCardCore";
+import RecallCard from "./RecallCard";
 
 // F57/C14 — the email card reads the live ctrl-api status, not a phantom
 // Instance row. `inbox_address` is only present once `configured`.
@@ -355,17 +356,14 @@ export default function ChannelsPage() {
             <VoiceSection />
           </ChannelCard>
 
-          {/* Meeting bot — placeholder slot.
-              The self-hosted Vexa stack was retired in #113 PR1; Recall.ai
-              (hosted) lands the live card in #113 PR3a/PR3b. Until then we
-              render a coming-soon placeholder so the channel grid keeps its
-              shape and the principal sees the planned surface. */}
-          <ChannelCard
-            name="Meeting bot"
-            address="Coming soon (Recall.ai)"
-            note="A second pair of ears for Zoom, Meet, Teams."
-            status="available"
-          />
+          {/* Meeting bot — Recall.ai live card (#113 PR3, 2026-05-29).
+              Replaces the retired Vexa stack (#113 PR1). Three subviews
+              (disabled / configured / error) driven by recallCardCore;
+              the React surface — dial form + active-bots table + webhook
+              expander + paste-validate flow — lives in RecallCard.tsx
+              so the substantial dial form stays out of this already
+              large page. */}
+          <RecallCard />
 
           {/* Omi — Phase-6b live card (Lane III, 2026-05-25). Surfaces the
               4 OMI channel states (unconfigured / needs_groq_key /

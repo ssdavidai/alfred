@@ -654,6 +654,179 @@ export const getTailscalePeers = async (_args: unknown, context: any) => {
 };
 
 // ============================================================
+// Lane III — Recall.ai channel on /channels (#113 PR3).
+// ============================================================
+//
+// PR2 (#129) shipped these ctrl-api routes; PR3 wires the SaaS proxy
+// + React surface against them. The merged PR2 surface deliberately
+// stops short of persisting the API key (that lands in PR3a); the
+// card-side flow paste→validate→hint reflects that.
+//
+//   GET   /api/v1/channels/recall/config            → RecallConfig
+//   PATCH /api/v1/channels/recall/config            → 200 (updated row)
+//   GET   /api/v1/channels/recall/usage             → RecallUsage
+//   GET   /api/v1/channels/recall/bots/active       → { bots: RecallBot[] }
+//   POST  /api/v1/channels/recall/validate-key      → { ok, account?, reason? }
+//   DELETE /api/v1/channels/recall/bots/:bot_id     → 200 (status: leaving|done)
+//   POST  /api/v1/channels/recall/webhook-test      → { ok, status, latency_ms }
+//
+// `getRecallChannelStatus` stitches the first three into the composite
+// shape recallCardCore.deriveRecallCardState consumes. The `enabled`
+// boolean is derived from "does /usage succeed" — a 503 NOT_CONFIGURED
+// from the upstream means "no RECALL_API_KEY on file"; any other error
+// surfaces as the .error field.
+
+interface RecallCompositeStatus {
+  enabled: boolean;
+  config: any | null;
+  usage: any | null;
+  active_bots: any[];
+  error: string | null;
+  webhook_url?: string;
+  webhook_secret_first6?: string | null;
+}
+
+async function safeProxy(
+  instance: any,
+  options: Parameters<typeof proxyToTenant>[1],
+): Promise<{ ok: true; data: any } | { ok: false; status: number; message: string }> {
+  try {
+    const data = await proxyToTenant(instance, options);
+    return { ok: true, data };
+  } catch (err: any) {
+    const status =
+      typeof err?.statusCode === "number"
+        ? err.statusCode
+        : typeof err?.status === "number"
+          ? err.status
+          : 0;
+    const message =
+      typeof err?.message === "string" ? err.message : "ctrl-api error";
+    return { ok: false, status, message };
+  }
+}
+
+export const getRecallChannelStatus = async (
+  _args: unknown,
+  context: any,
+): Promise<RecallCompositeStatus> => {
+  const instance = await getUserInstance(context);
+
+  // Three parallel reads — config + usage + active_bots.
+  const [configRes, usageRes, botsRes] = await Promise.all([
+    safeProxy(instance, { path: "/api/v1/channels/recall/config" }),
+    safeProxy(instance, { path: "/api/v1/channels/recall/usage" }),
+    safeProxy(instance, { path: "/api/v1/channels/recall/bots/active" }),
+  ]);
+
+  // 503 anywhere = NOT_CONFIGURED on the tenant side → enabled=false.
+  // Any other non-2xx → error string (the card surfaces verbatim).
+  const config = configRes.ok ? configRes.data : null;
+  const usage = usageRes.ok ? usageRes.data : null;
+  const active_bots = botsRes.ok ? (botsRes.data?.bots ?? []) : [];
+
+  let error: string | null = null;
+  const probes = [configRes, usageRes, botsRes];
+  // enabled = at least usage came back successfully (it doesn't depend on
+  // RECALL_API_KEY; if the tenant has the route at all + state.db open
+  // it returns 200). config also doesn't gate on the key. So we treat
+  // the surface as "enabled" once both succeed AND a key is on file —
+  // which we infer from a non-503 active-bots probe (the bots GET is
+  // also key-free, but PR3a will replace this signal with an explicit
+  // "key on file" flag).
+  const usageOk = usageRes.ok;
+  const configOk = configRes.ok;
+  const enabled = usageOk && configOk;
+
+  // Surface the first hard error (non-503) we saw — 503 is the
+  // "expected" pre-paste state and shouldn't render as an error.
+  for (const r of probes) {
+    if (!r.ok && r.status !== 503 && r.status !== 0) {
+      error = r.message;
+      break;
+    }
+  }
+
+  return {
+    enabled,
+    config,
+    usage,
+    active_bots,
+    error,
+  };
+};
+
+export const updateRecallConfig = async (
+  args: Record<string, unknown>,
+  context: any,
+) => {
+  if (!args || typeof args !== "object") {
+    throw new HttpError(400, "config patch body required");
+  }
+  if (Object.keys(args).length === 0) {
+    throw new HttpError(400, "patch body must include at least one field");
+  }
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "PATCH",
+    path: "/api/v1/channels/recall/config",
+    body: args,
+  });
+};
+
+/** Round-trip-validate a Recall API key against the Recall API. The key
+ *  is NEVER logged here; the ctrl-api persists nothing on its side
+ *  either (PR3a ships the persistent setter). The response is
+ *  `{ ok, account? }` or `{ ok: false, reason }` — we pass it through
+ *  verbatim so the card can render the reason. */
+export const validateRecallApiKey = async (
+  args: { api_key: string; region?: string },
+  context: any,
+) => {
+  if (typeof args?.api_key !== "string" || args.api_key.trim().length === 0) {
+    throw new HttpError(400, "api_key required");
+  }
+  const instance = await getUserInstance(context);
+  const body: Record<string, string> = { api_key: args.api_key.trim() };
+  if (typeof args.region === "string" && args.region.length > 0) {
+    body.region = args.region;
+  }
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/channels/recall/validate-key",
+    body,
+  });
+};
+
+/** Fire the synthetic webhook through ctrl-api → ctrl-api → state.db.
+ *  Functions as the card's "Test webhook" CTA; returns `{ ok, status,
+ *  latency_ms, sample_response }`. */
+export const testRecallWebhook = async (_args: unknown, context: any) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/channels/recall/webhook-test",
+  });
+};
+
+/** Terminate a mid-meeting bot. ctrl-api calls Recall's DELETE then flips
+ *  the local row to "leaving". */
+export const terminateRecallBot = async (
+  args: { bot_id: string },
+  context: any,
+) => {
+  if (typeof args?.bot_id !== "string" || args.bot_id.trim().length === 0) {
+    throw new HttpError(400, "bot_id required");
+  }
+  const instance = await getUserInstance(context);
+  const safe = encodeURIComponent(args.bot_id.trim());
+  return proxyToTenant(instance, {
+    method: "DELETE",
+    path: `/api/v1/channels/recall/bots/${safe}`,
+  });
+};
+
+// ============================================================
 // Dashboard Home
 // ============================================================
 

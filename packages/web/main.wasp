@@ -922,6 +922,37 @@ query getTailscalePeers {
   entities: []
 }
 
+// Lane III (Recall.ai, #113 PR3) — operator-facing /channels card. Five ops
+// against the ctrl-api routes shipped in PR2 (#129). The composite
+// getRecallChannelStatus stitches /config + /usage + /bots/active into the
+// shape recallCardCore.deriveRecallCardState consumes. The card never sees
+// the raw RECALL_API_KEY; the validate-key flow round-trips and never
+// persists (persistence ships in PR3a).
+query getRecallChannelStatus {
+  fn: import { getRecallChannelStatus } from "@src/dashboard/operations",
+  entities: []
+}
+
+action updateRecallConfig {
+  fn: import { updateRecallConfig } from "@src/dashboard/operations",
+  entities: []
+}
+
+action validateRecallApiKey {
+  fn: import { validateRecallApiKey } from "@src/dashboard/operations",
+  entities: []
+}
+
+action testRecallWebhook {
+  fn: import { testRecallWebhook } from "@src/dashboard/operations",
+  entities: []
+}
+
+action terminateRecallBot {
+  fn: import { terminateRecallBot } from "@src/dashboard/operations",
+  entities: []
+}
+
 query getAgentConfig {
   fn: import { getAgentConfig } from "@src/dashboard/operations",
   entities: []
