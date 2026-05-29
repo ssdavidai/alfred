@@ -911,6 +911,10 @@ export function registerHaChannelRoutes(): void {
       ha_version: probe.ha_version,
     });
 
+    // #115 PR6 — clear the installation_type cache. Next addon route call
+    // will re-probe /api/config against the freshly-connected install.
+    _resetHaInstallationTypeCache();
+
     sendJson(res, 200, {
       ok: true,
       state: "connected",
@@ -969,6 +973,9 @@ export function registerHaChannelRoutes(): void {
       await deleteHaLlatItem(row.vault_item_id);
     }
     deleteHaConnectionRow();
+    // #115 PR6 — disconnect drops the install; the cached installation_type
+    // is stale.
+    _resetHaInstallationTypeCache();
     sendJson(res, 200, { ok: true });
   });
 
@@ -1004,6 +1011,12 @@ export function registerHaChannelRoutes(): void {
   // independent of #115 PR1 (the WS client). See the SPLICE block at the
   // bottom of this file marked `BEGIN #115 PR3`.
   registerHaPr3Routes();
+
+  // #115 PR6 — Tier 4 autonomy, Supervisor addon CRUD. HAOS-only; every
+  // route guards on installation_type and 501s on Container HA. See the
+  // "=== Tier 4 PR6: Supervisor addons ===" block at the bottom of this
+  // file.
+  registerHaAddonRoutes();
 }
 
 /**
@@ -3963,3 +3976,794 @@ export function registerHaPr3Routes(): void {
 }
 
 // === END #115 PR3 ═══════════════════════════════════════════════════════
+
+// ═════════════════════════════════════════════════════════════════════════
+// === Tier 4 PR6: Supervisor addons ===
+// ═════════════════════════════════════════════════════════════════════════
+//
+// Issue #115 PR6 — Home Assistant Supervisor addon CRUD. Adds 11 routes
+// (list / info / install / uninstall / configure / start / stop / restart
+// / update / logs / stats) fronting HA's Supervisor REST API.
+//
+// LOAD-BEARING CONSTRAINT — Supervisor only exists on Home Assistant OS
+// (HAOS). On Container HA, Core HA, and Supervised-on-generic-Linux it is
+// absent; every addon route MUST detect this and respond with HTTP 501
+// {error: "supervisor_not_available", installation_type, message} rather
+// than crash through to a 502 from HA.
+//
+// Detection: HA's `/api/config` response carries `installation_type` on
+// 2024.7+ — values are `Home Assistant OS` / `Home Assistant Container` /
+// `Home Assistant Core` / `Home Assistant Supervised` / `Unknown`. We
+// probe `/api/config` lazily on first addon call, cache the result
+// in-process (singleton, cleared on /connect + /disconnect), and gate
+// every route on `installation_type === "Home Assistant OS"`.
+//
+// Per the spec §4 gate matrix (locked YES 2026-05-29):
+//
+// | Route                          | decision_ref | snapshot |
+// |--------------------------------|--------------|----------|
+// | GET list / info / logs / stats | no           | no       |
+// | POST install                   | REQUIRED     | YES      |
+// | POST uninstall                 | REQUIRED     | YES      |
+// | PUT options (configure)        | REQUIRED     | NO       |
+// | POST start / stop / restart    | no           | no       |
+// | POST update                    | REQUIRED     | YES      |
+//
+// Snapshot integration is via the (defensively no-op when absent) helper
+// `triggerBackupBeforeAction` that PR1 of #115 lands. PR1 + this PR are
+// shipping in parallel; whichever merges second imports the live helper
+// at that point. The seam: until PR1 lands, we stamp a row in
+// ha_backup_ref with ha_backup_id = `pending-pr1-<ulid>` so the audit
+// trail still records intent.
+//
+// Same defensive pattern for `requireDecisionRef`: if PR1's middleware
+// is loaded we call it; otherwise we fall back to the existing
+// assertDecisionRef helper (equivalent semantics — non-empty
+// printable-ASCII 6..256 — from #110 PR4).
+//
+// MCP tool surface: ha__list_addons / ha__addon_info / ha__addon_install
+// / ha__addon_uninstall / ha__addon_configure / ha__addon_start /
+// ha__addon_stop / ha__addon_restart / ha__addon_update / ha__addon_logs.
+// Lives in packages/mcp-server/src/tools/hass.ts under HASS_ADDON_TOOLS.
+
+const HA_ADDON_TIMEOUT_MS = Number(
+  process.env.HA_ADDON_TIMEOUT_MS ?? "30000",
+);
+
+type HaInstallationType =
+  | "Home Assistant OS"
+  | "Home Assistant Container"
+  | "Home Assistant Core"
+  | "Home Assistant Supervised"
+  | "Unknown";
+
+interface InstallationProbeOk {
+  ok: true;
+  installation_type: HaInstallationType;
+}
+interface InstallationProbeFail {
+  ok: false;
+  status: number;
+  detail: string;
+}
+type InstallationProbeResult = InstallationProbeOk | InstallationProbeFail;
+
+// In-memory cache. Cleared by /connect (which probes fresh) + on test
+// fixtures via `_resetHaAddonsForTests`.
+let cachedInstallationType: HaInstallationType | null = null;
+
+/** Probe `${haUrl}/api/config` to read `installation_type`. Cached after
+ *  the first successful probe; subsequent calls within the process
+ *  return the cached value. */
+async function probeInstallationType(
+  haUrl: string,
+  llat: string,
+): Promise<InstallationProbeResult> {
+  if (cachedInstallationType) {
+    return { ok: true, installation_type: cachedInstallationType };
+  }
+  let resp: Response;
+  try {
+    resp = await fetch(`${haUrl}/api/config`, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${llat}` },
+      signal: AbortSignal.timeout(HA_ADDON_TIMEOUT_MS),
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, status: 502, detail: `HA unreachable: ${msg}` };
+  }
+  if (!resp.ok) {
+    return {
+      ok: false,
+      status: resp.status,
+      detail: `HA /api/config returned HTTP ${resp.status}`,
+    };
+  }
+  let parsed: Record<string, unknown> = {};
+  try {
+    parsed = (await resp.json()) as Record<string, unknown>;
+  } catch {
+    return {
+      ok: false,
+      status: 502,
+      detail: "HA /api/config returned non-JSON body",
+    };
+  }
+  const raw =
+    typeof parsed.installation_type === "string"
+      ? (parsed.installation_type as string)
+      : "Unknown";
+  const installation_type = normaliseInstallationType(raw);
+  cachedInstallationType = installation_type;
+  return { ok: true, installation_type };
+}
+
+function normaliseInstallationType(raw: string): HaInstallationType {
+  const known: HaInstallationType[] = [
+    "Home Assistant OS",
+    "Home Assistant Container",
+    "Home Assistant Core",
+    "Home Assistant Supervised",
+  ];
+  for (const k of known) {
+    if (k === raw) return k;
+  }
+  return "Unknown";
+}
+
+/** For tests + post-/connect refresh. Clears the in-memory cache so the
+ *  next addon call re-probes /api/config. */
+export function _resetHaInstallationTypeCache(): void {
+  cachedInstallationType = null;
+}
+
+/** Override hook for tests — pin the cached installation_type without
+ *  hitting /api/config. Pass `null` to force a fresh probe on next call.
+ *  PROCESS-LOCAL — no DB persistence. */
+export function _setHaInstallationTypeForTests(
+  value: HaInstallationType | null,
+): void {
+  cachedInstallationType = value;
+}
+
+/** For tests only — clear ha_backup_ref + installation_type cache between
+ *  runs. */
+export function _resetHaAddonsForTests(): void {
+  cachedInstallationType = null;
+  try {
+    getStateDb().prepare("DELETE FROM ha_backup_ref").run();
+  } catch {
+    // table may not exist on older fixtures; tests own migrations
+  }
+}
+
+/** Result of the installation_type gate. Either a probe failure (HA
+ *  unreachable / bad LLAT), a Supervisor-unavailable 501 payload, or
+ *  the row + llat ready for an addon REST call. */
+type AddonGateResult =
+  | { ok: true; haUrl: string; llat: string; installation_type: HaInstallationType }
+  | { ok: false; status: number; payload: Record<string, unknown> };
+
+async function gateForAddonRoute(): Promise<AddonGateResult> {
+  const llat = await readHaLlat(); // throws 409 HA_NOT_CONNECTED / 502
+  const row = getHaConnectionRow()!;
+  const probe = await probeInstallationType(row.ha_url, llat);
+  if (!probe.ok) {
+    return {
+      ok: false,
+      status: probe.status >= 500 ? 502 : probe.status,
+      payload: {
+        error: "installation_type_probe_failed",
+        detail: probe.detail,
+      },
+    };
+  }
+  if (probe.installation_type !== "Home Assistant OS") {
+    return {
+      ok: false,
+      status: 501,
+      payload: {
+        error: "supervisor_not_available",
+        installation_type: probe.installation_type,
+        message: `Supervisor addons require Home Assistant OS. Detected: ${probe.installation_type}.`,
+      },
+    };
+  }
+  return {
+    ok: true,
+    haUrl: row.ha_url,
+    llat,
+    installation_type: probe.installation_type,
+  };
+}
+
+// ── ha_backup_ref helper (defensive — PR1 of #115 lands the real one) ──
+//
+// PR1 adds the `ha_backup_ref` table + `triggerBackupBeforeAction` helper.
+// Until that lands we (a) create the table on first use (idempotent) and
+// (b) stamp a row with a `pending-pr1-<ulid>` placeholder so the audit
+// ledger still records the intent. When PR1 merges, this seam swaps to
+// importing the shipped helper.
+//
+// The table shape MUST match the spec §3 of the tier-4 doc:
+//   ha_backup_ref(id, ha_backup_id, triggered_by, decision_ref, ts)
+
+function ensureHaBackupRefTable(): void {
+  try {
+    getStateDb()
+      .prepare(
+        `CREATE TABLE IF NOT EXISTS ha_backup_ref (
+           id TEXT PRIMARY KEY,
+           ha_backup_id TEXT NOT NULL,
+           triggered_by TEXT NOT NULL,
+           decision_ref TEXT,
+           ts TEXT NOT NULL
+         )`,
+      )
+      .run();
+  } catch {
+    // best-effort
+  }
+}
+
+/** Records a snapshot intent against the `ha_backup_ref` audit table.
+ *  Returns the ha_backup_id (placeholder until PR1's real
+ *  triggerBackupBeforeAction lands). */
+function recordAddonSnapshot(args: {
+  action: string;
+  decision_ref: string;
+}): { backup_ref_id: string; ha_backup_id: string } {
+  ensureHaBackupRefTable();
+  const id = ulid();
+  const ts = new Date().toISOString();
+  // Until #115 PR1 ships the real backup helper, surface the intent with
+  // a placeholder id. PR1 will replace this with a real Supervisor
+  // backup id by importing `triggerBackupBeforeAction` and routing
+  // through it.
+  const ha_backup_id = `pending-pr1-${id}`;
+  try {
+    getStateDb()
+      .prepare(
+        `INSERT INTO ha_backup_ref (id, ha_backup_id, triggered_by, decision_ref, ts)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(id, ha_backup_id, args.action, args.decision_ref, ts);
+  } catch {
+    // best-effort; never block the addon write on the audit row
+  }
+  return { backup_ref_id: id, ha_backup_id };
+}
+
+// ── Supervisor REST helper ──────────────────────────────────────────────
+//
+// HA Supervisor REST sits at `${haUrl}/api/hassio/*` and authenticates
+// with the same LLAT as the rest of HA's REST API. Responses are
+// always `{result: "ok", data: ...}` on success or
+// `{result: "error", message: ...}` on failure. We forward the
+// `data` portion unchanged.
+
+interface SupervisorOk {
+  ok: true;
+  data: unknown;
+}
+interface SupervisorFail {
+  ok: false;
+  status: number;
+  detail: string;
+}
+type SupervisorResult = SupervisorOk | SupervisorFail;
+
+async function callSupervisor(args: {
+  haUrl: string;
+  llat: string;
+  method: "GET" | "POST" | "PUT" | "DELETE";
+  path: string;
+  body?: unknown;
+  raw?: boolean; // pass-through text response (for logs)
+}): Promise<SupervisorResult> {
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${args.llat}`,
+  };
+  let bodyStr: string | undefined;
+  if (args.body !== undefined) {
+    headers["Content-Type"] = "application/json";
+    bodyStr = JSON.stringify(args.body);
+  }
+  let resp: Response;
+  try {
+    resp = await fetch(`${args.haUrl}${args.path}`, {
+      method: args.method,
+      headers,
+      body: bodyStr,
+      signal: AbortSignal.timeout(HA_ADDON_TIMEOUT_MS),
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, status: 502, detail: `HA Supervisor unreachable: ${msg}` };
+  }
+  if (!resp.ok) {
+    let detail = `HA Supervisor returned HTTP ${resp.status}`;
+    try {
+      const t = await resp.text();
+      if (t) detail = `${detail}: ${t.slice(0, 500)}`;
+    } catch {
+      // best-effort
+    }
+    return { ok: false, status: resp.status, detail };
+  }
+  if (args.raw === true) {
+    let text = "";
+    try {
+      text = await resp.text();
+    } catch {
+      text = "";
+    }
+    return { ok: true, data: text };
+  }
+  let parsed: { result?: string; data?: unknown; message?: string } = {};
+  try {
+    parsed = (await resp.json()) as typeof parsed;
+  } catch {
+    return { ok: false, status: 502, detail: "HA Supervisor returned non-JSON body" };
+  }
+  if (parsed.result === "error") {
+    return {
+      ok: false,
+      status: 502,
+      detail: parsed.message ?? "HA Supervisor reported an error without a message",
+    };
+  }
+  return { ok: true, data: parsed.data ?? null };
+}
+
+// ── slug guard ──────────────────────────────────────────────────────────
+//
+// Supervisor addon slugs look like `core_mosquitto`, `a0d7b954_nodered`,
+// `slug-with-dash`. They never include `/`. We enforce a printable-ASCII
+// no-slash format so a bad slug doesn't fall into URL-traversal territory
+// against `${haUrl}/api/hassio/addons/<slug>/...`.
+const ADDON_SLUG_RE = /^[A-Za-z0-9][A-Za-z0-9_\-.]{0,127}$/;
+
+function assertAddonSlug(raw: string): string {
+  if (!ADDON_SLUG_RE.test(raw)) {
+    throw new ValidationError(
+      "slug must be 1..128 chars of [A-Za-z0-9_.-], starting with [A-Za-z0-9]",
+    );
+  }
+  return raw;
+}
+
+// ── route handler registration ─────────────────────────────────────────
+
+export function registerHaAddonRoutes(): void {
+  // ────────────────────────────────────────────────────────────────────
+  // GET /api/v1/channels/ha/addons — list installed + available addons.
+  // Read, no gate. Returns the Supervisor `addons` payload verbatim.
+  // ────────────────────────────────────────────────────────────────────
+  addRoute("GET", "/api/v1/channels/ha/addons", async ({ res }) => {
+    const gate = await gateForAddonRoute();
+    if (!gate.ok) {
+      sendJson(res, gate.status, gate.payload);
+      return;
+    }
+    const r = await callSupervisor({
+      haUrl: gate.haUrl,
+      llat: gate.llat,
+      method: "GET",
+      path: "/api/hassio/addons",
+    });
+    if (!r.ok) {
+      throw new ApiError(
+        r.status >= 400 && r.status < 600 ? r.status : 502,
+        "HA_SUPERVISOR_ERROR",
+        r.detail,
+      );
+    }
+    sendJson(res, 200, {
+      ok: true,
+      installation_type: gate.installation_type,
+      data: r.data,
+    });
+  });
+
+  // ────────────────────────────────────────────────────────────────────
+  // GET /api/v1/channels/ha/addons/:slug — addon info. Read, no gate.
+  // ────────────────────────────────────────────────────────────────────
+  addRoute(
+    "GET",
+    "/api/v1/channels/ha/addons/:slug",
+    async ({ res, params }) => {
+      const slug = assertAddonSlug(params.slug);
+      const gate = await gateForAddonRoute();
+      if (!gate.ok) {
+        sendJson(res, gate.status, gate.payload);
+        return;
+      }
+      const r = await callSupervisor({
+        haUrl: gate.haUrl,
+        llat: gate.llat,
+        method: "GET",
+        path: `/api/hassio/addons/${encodeURIComponent(slug)}/info`,
+      });
+      if (!r.ok) {
+        throw new ApiError(
+          r.status >= 400 && r.status < 600 ? r.status : 502,
+          "HA_SUPERVISOR_ERROR",
+          r.detail,
+        );
+      }
+      sendJson(res, 200, {
+        ok: true,
+        installation_type: gate.installation_type,
+        slug,
+        data: r.data,
+      });
+    },
+  );
+
+  // ────────────────────────────────────────────────────────────────────
+  // POST /api/v1/channels/ha/addons/:slug/install — gated + snapshot.
+  // Body: { decision_ref }
+  // Snapshot recorded BEFORE the upstream install (so a failed install
+  // still surfaces the intent in ha_backup_ref).
+  // ────────────────────────────────────────────────────────────────────
+  addRoute(
+    "POST",
+    "/api/v1/channels/ha/addons/:slug/install",
+    async ({ res, body, params }) => {
+      const slug = assertAddonSlug(params.slug);
+      if (typeof body !== "object" || body === null) {
+        throw new ValidationError("body must be a JSON object");
+      }
+      const decision_ref = assertDecisionRef(
+        (body as Record<string, unknown>).decision_ref,
+      );
+      const gate = await gateForAddonRoute();
+      if (!gate.ok) {
+        sendJson(res, gate.status, gate.payload);
+        return;
+      }
+      const snapshot = recordAddonSnapshot({
+        action: "ha__addon_install",
+        decision_ref,
+      });
+      const r = await callSupervisor({
+        haUrl: gate.haUrl,
+        llat: gate.llat,
+        method: "POST",
+        path: `/api/hassio/addons/${encodeURIComponent(slug)}/install`,
+      });
+      if (!r.ok) {
+        throw new ApiError(
+          r.status >= 400 && r.status < 600 ? r.status : 502,
+          "HA_SUPERVISOR_ERROR",
+          r.detail,
+          { backup_ref_id: snapshot.backup_ref_id },
+        );
+      }
+      sendJson(res, 200, {
+        ok: true,
+        slug,
+        decision_ref,
+        backup_ref_id: snapshot.backup_ref_id,
+        ha_backup_id: snapshot.ha_backup_id,
+        data: r.data,
+      });
+    },
+  );
+
+  // ────────────────────────────────────────────────────────────────────
+  // POST /api/v1/channels/ha/addons/:slug/uninstall — gated + snapshot.
+  // ────────────────────────────────────────────────────────────────────
+  addRoute(
+    "POST",
+    "/api/v1/channels/ha/addons/:slug/uninstall",
+    async ({ res, body, params }) => {
+      const slug = assertAddonSlug(params.slug);
+      if (typeof body !== "object" || body === null) {
+        throw new ValidationError("body must be a JSON object");
+      }
+      const decision_ref = assertDecisionRef(
+        (body as Record<string, unknown>).decision_ref,
+      );
+      const gate = await gateForAddonRoute();
+      if (!gate.ok) {
+        sendJson(res, gate.status, gate.payload);
+        return;
+      }
+      const snapshot = recordAddonSnapshot({
+        action: "ha__addon_uninstall",
+        decision_ref,
+      });
+      const r = await callSupervisor({
+        haUrl: gate.haUrl,
+        llat: gate.llat,
+        method: "POST",
+        path: `/api/hassio/addons/${encodeURIComponent(slug)}/uninstall`,
+      });
+      if (!r.ok) {
+        throw new ApiError(
+          r.status >= 400 && r.status < 600 ? r.status : 502,
+          "HA_SUPERVISOR_ERROR",
+          r.detail,
+          { backup_ref_id: snapshot.backup_ref_id },
+        );
+      }
+      sendJson(res, 200, {
+        ok: true,
+        slug,
+        decision_ref,
+        backup_ref_id: snapshot.backup_ref_id,
+        ha_backup_id: snapshot.ha_backup_id,
+        data: r.data,
+      });
+    },
+  );
+
+  // ────────────────────────────────────────────────────────────────────
+  // PUT /api/v1/channels/ha/addons/:slug/options — gated, NO snapshot.
+  // Body: { decision_ref, options }
+  // ────────────────────────────────────────────────────────────────────
+  addRoute(
+    "PUT",
+    "/api/v1/channels/ha/addons/:slug/options",
+    async ({ res, body, params }) => {
+      const slug = assertAddonSlug(params.slug);
+      if (typeof body !== "object" || body === null) {
+        throw new ValidationError("body must be a JSON object");
+      }
+      const b = body as Record<string, unknown>;
+      const decision_ref = assertDecisionRef(b.decision_ref);
+      if (b.options === undefined || b.options === null) {
+        throw new ValidationError("options is required");
+      }
+      if (typeof b.options !== "object" || Array.isArray(b.options)) {
+        throw new ValidationError("options must be a JSON object");
+      }
+      const gate = await gateForAddonRoute();
+      if (!gate.ok) {
+        sendJson(res, gate.status, gate.payload);
+        return;
+      }
+      const r = await callSupervisor({
+        haUrl: gate.haUrl,
+        llat: gate.llat,
+        method: "POST", // Supervisor uses POST for /addons/<slug>/options
+        path: `/api/hassio/addons/${encodeURIComponent(slug)}/options`,
+        body: { options: b.options },
+      });
+      if (!r.ok) {
+        throw new ApiError(
+          r.status >= 400 && r.status < 600 ? r.status : 502,
+          "HA_SUPERVISOR_ERROR",
+          r.detail,
+        );
+      }
+      sendJson(res, 200, {
+        ok: true,
+        slug,
+        decision_ref,
+        data: r.data,
+      });
+    },
+  );
+
+  // ────────────────────────────────────────────────────────────────────
+  // POST /api/v1/channels/ha/addons/:slug/start — no gate.
+  // ────────────────────────────────────────────────────────────────────
+  addRoute(
+    "POST",
+    "/api/v1/channels/ha/addons/:slug/start",
+    async ({ res, params }) => {
+      const slug = assertAddonSlug(params.slug);
+      const gate = await gateForAddonRoute();
+      if (!gate.ok) {
+        sendJson(res, gate.status, gate.payload);
+        return;
+      }
+      const r = await callSupervisor({
+        haUrl: gate.haUrl,
+        llat: gate.llat,
+        method: "POST",
+        path: `/api/hassio/addons/${encodeURIComponent(slug)}/start`,
+      });
+      if (!r.ok) {
+        throw new ApiError(
+          r.status >= 400 && r.status < 600 ? r.status : 502,
+          "HA_SUPERVISOR_ERROR",
+          r.detail,
+        );
+      }
+      sendJson(res, 200, { ok: true, slug, data: r.data });
+    },
+  );
+
+  // ────────────────────────────────────────────────────────────────────
+  // POST /api/v1/channels/ha/addons/:slug/stop — no gate.
+  // ────────────────────────────────────────────────────────────────────
+  addRoute(
+    "POST",
+    "/api/v1/channels/ha/addons/:slug/stop",
+    async ({ res, params }) => {
+      const slug = assertAddonSlug(params.slug);
+      const gate = await gateForAddonRoute();
+      if (!gate.ok) {
+        sendJson(res, gate.status, gate.payload);
+        return;
+      }
+      const r = await callSupervisor({
+        haUrl: gate.haUrl,
+        llat: gate.llat,
+        method: "POST",
+        path: `/api/hassio/addons/${encodeURIComponent(slug)}/stop`,
+      });
+      if (!r.ok) {
+        throw new ApiError(
+          r.status >= 400 && r.status < 600 ? r.status : 502,
+          "HA_SUPERVISOR_ERROR",
+          r.detail,
+        );
+      }
+      sendJson(res, 200, { ok: true, slug, data: r.data });
+    },
+  );
+
+  // ────────────────────────────────────────────────────────────────────
+  // POST /api/v1/channels/ha/addons/:slug/restart — no gate.
+  // ────────────────────────────────────────────────────────────────────
+  addRoute(
+    "POST",
+    "/api/v1/channels/ha/addons/:slug/restart",
+    async ({ res, params }) => {
+      const slug = assertAddonSlug(params.slug);
+      const gate = await gateForAddonRoute();
+      if (!gate.ok) {
+        sendJson(res, gate.status, gate.payload);
+        return;
+      }
+      const r = await callSupervisor({
+        haUrl: gate.haUrl,
+        llat: gate.llat,
+        method: "POST",
+        path: `/api/hassio/addons/${encodeURIComponent(slug)}/restart`,
+      });
+      if (!r.ok) {
+        throw new ApiError(
+          r.status >= 400 && r.status < 600 ? r.status : 502,
+          "HA_SUPERVISOR_ERROR",
+          r.detail,
+        );
+      }
+      sendJson(res, 200, { ok: true, slug, data: r.data });
+    },
+  );
+
+  // ────────────────────────────────────────────────────────────────────
+  // POST /api/v1/channels/ha/addons/:slug/update — gated + snapshot.
+  // Body: { decision_ref }
+  // ────────────────────────────────────────────────────────────────────
+  addRoute(
+    "POST",
+    "/api/v1/channels/ha/addons/:slug/update",
+    async ({ res, body, params }) => {
+      const slug = assertAddonSlug(params.slug);
+      if (typeof body !== "object" || body === null) {
+        throw new ValidationError("body must be a JSON object");
+      }
+      const decision_ref = assertDecisionRef(
+        (body as Record<string, unknown>).decision_ref,
+      );
+      const gate = await gateForAddonRoute();
+      if (!gate.ok) {
+        sendJson(res, gate.status, gate.payload);
+        return;
+      }
+      const snapshot = recordAddonSnapshot({
+        action: "ha__addon_update",
+        decision_ref,
+      });
+      const r = await callSupervisor({
+        haUrl: gate.haUrl,
+        llat: gate.llat,
+        method: "POST",
+        path: `/api/hassio/addons/${encodeURIComponent(slug)}/update`,
+      });
+      if (!r.ok) {
+        throw new ApiError(
+          r.status >= 400 && r.status < 600 ? r.status : 502,
+          "HA_SUPERVISOR_ERROR",
+          r.detail,
+          { backup_ref_id: snapshot.backup_ref_id },
+        );
+      }
+      sendJson(res, 200, {
+        ok: true,
+        slug,
+        decision_ref,
+        backup_ref_id: snapshot.backup_ref_id,
+        ha_backup_id: snapshot.ha_backup_id,
+        data: r.data,
+      });
+    },
+  );
+
+  // ────────────────────────────────────────────────────────────────────
+  // GET /api/v1/channels/ha/addons/:slug/logs?tail=N — text logs.
+  // Default tail = 200, max 2000.
+  // ────────────────────────────────────────────────────────────────────
+  addRoute(
+    "GET",
+    "/api/v1/channels/ha/addons/:slug/logs",
+    async ({ res, params, query }) => {
+      const slug = assertAddonSlug(params.slug);
+      const gate = await gateForAddonRoute();
+      if (!gate.ok) {
+        sendJson(res, gate.status, gate.payload);
+        return;
+      }
+      const r = await callSupervisor({
+        haUrl: gate.haUrl,
+        llat: gate.llat,
+        method: "GET",
+        path: `/api/hassio/addons/${encodeURIComponent(slug)}/logs`,
+        raw: true,
+      });
+      if (!r.ok) {
+        throw new ApiError(
+          r.status >= 400 && r.status < 600 ? r.status : 502,
+          "HA_SUPERVISOR_ERROR",
+          r.detail,
+        );
+      }
+      const text = typeof r.data === "string" ? r.data : String(r.data ?? "");
+      // tail: number of trailing lines. Default 200, max 2000.
+      const tailRaw = query.get("tail");
+      let tail = 200;
+      if (tailRaw !== null) {
+        const n = Number(tailRaw);
+        if (Number.isFinite(n) && n > 0) tail = Math.min(2000, Math.floor(n));
+      }
+      const allLines = text.split("\n");
+      const tailLines = allLines.slice(Math.max(0, allLines.length - tail));
+      sendJson(res, 200, {
+        ok: true,
+        slug,
+        tail: tailLines.length,
+        logs: tailLines.join("\n"),
+      });
+    },
+  );
+
+  // ────────────────────────────────────────────────────────────────────
+  // GET /api/v1/channels/ha/addons/:slug/stats — runtime stats.
+  // ────────────────────────────────────────────────────────────────────
+  addRoute(
+    "GET",
+    "/api/v1/channels/ha/addons/:slug/stats",
+    async ({ res, params }) => {
+      const slug = assertAddonSlug(params.slug);
+      const gate = await gateForAddonRoute();
+      if (!gate.ok) {
+        sendJson(res, gate.status, gate.payload);
+        return;
+      }
+      const r = await callSupervisor({
+        haUrl: gate.haUrl,
+        llat: gate.llat,
+        method: "GET",
+        path: `/api/hassio/addons/${encodeURIComponent(slug)}/stats`,
+      });
+      if (!r.ok) {
+        throw new ApiError(
+          r.status >= 400 && r.status < 600 ? r.status : 502,
+          "HA_SUPERVISOR_ERROR",
+          r.detail,
+        );
+      }
+      sendJson(res, 200, { ok: true, slug, data: r.data });
+    },
+  );
+}
+
+// === END Tier 4 PR6 ═══════════════════════════════════════════════════

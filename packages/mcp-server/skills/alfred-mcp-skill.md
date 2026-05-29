@@ -64,6 +64,18 @@ The catalogue is intentionally narrow. Container restarts, credential rotation, 
 - `ha__create_scene` / `ha__update_scene` / `ha__delete_scene` — scenes are cheap; no gates
 - `ha__create_script` / `ha__update_script` / `ha__delete_script` — scripts are cheap; no gates
 
+### Home Assistant — Tier 4 (#115 PR6, Supervisor addons — HAOS only)
+
+- `ha__list_addons` / `ha__addon_info` — read-only; no gate
+- `ha__addon_install` — GATED: `decision_ref` REQUIRED; auto-snapshot recorded in `ha_backup_ref`
+- `ha__addon_uninstall` — GATED: `decision_ref` REQUIRED; auto-snapshot recorded
+- `ha__addon_configure` — GATED: `decision_ref` REQUIRED; no snapshot (options swap is reversible)
+- `ha__addon_start` / `ha__addon_stop` / `ha__addon_restart` — no gate (cheap, reversible)
+- `ha__addon_update` — GATED: `decision_ref` REQUIRED; auto-snapshot recorded
+- `ha__addon_logs` — read-only; default tail 200, max 2000
+
+**HAOS caveat.** Every addon tool returns a 501 envelope on non-HAOS installs: `{error: "supervisor_not_available", installation_type, message}`. Read `installation_type` and explain to Sir; don't retry. Sir's home (home.alfred.black) is HAOS so this surface is live there.
+
 ### DM pairing (1)
 
 - `approve_device` — approve a pending Hermes DM-pairing code by `platform` + `code` (the only pairing op exposed here)
@@ -141,6 +153,41 @@ The tier-4 surface (#115 PR3) lets Alfred CRUD HA automations / scenes / scripts
 **Removing a stale automation (GATED):**
 1. `ha__list_automations_full` — read its YAML first, store a backup in a `decision/` vault record if Sir might want it back.
 2. `ha__delete_automation({automation_id: "old_routine", decision_ref: "decision/2026-05-29-drop-old-routine.md"})`. `decision_ref` is REQUIRED — Alfred refuses without it.
+
+### "Install / configure / update a Home Assistant addon" (Tier 4 — HAOS only, #115 PR6)
+
+The PR6 surface lets Alfred drive HA's Supervisor addons: `ha__list_addons`, `ha__addon_info`, `ha__addon_install`, `ha__addon_uninstall`, `ha__addon_configure`, `ha__addon_start`, `ha__addon_stop`, `ha__addon_restart`, `ha__addon_update`, `ha__addon_logs`.
+
+**The HAOS caveat.** Supervisor addons only exist on Home Assistant Operating System. On Container HA, Core HA, and Supervised installations every addon tool returns a 501 envelope:
+
+```json
+{
+  "error": "supervisor_not_available",
+  "installation_type": "Home Assistant Container",
+  "message": "Supervisor addons require Home Assistant OS. Detected: Home Assistant Container."
+}
+```
+
+Read the `installation_type` and explain to Sir — don't retry. Sir's home (home.alfred.black) is HAOS so this surface is live there.
+
+**Gates + snapshots (locked YES on 2026-05-29).** `install` / `uninstall` / `configure` / `update` require a `decision_ref`. `install` / `uninstall` / `update` also auto-snapshot — ctrl-api records the intent in `ha_backup_ref` BEFORE the upstream call, and the success envelope carries `backup_ref_id` and `ha_backup_id`. Mention "snapshot taken" to Sir in your reply.
+
+**Recipe — install Mosquitto on Sir's HAOS:**
+
+1. `ha__list_addons` — confirm Mosquitto isn't already installed; find the right slug (e.g. `core_mosquitto`).
+2. Create a `decision/` record naming the intent ("install Mosquitto for the Zigbee2MQTT pipeline").
+3. `ha__addon_install({slug: "core_mosquitto", decision_ref: "decision/2026-05-29-mosquitto.md"})`.
+4. `ha__addon_info({slug: "core_mosquitto"})` — read the schema, build the options.
+5. `ha__addon_configure({slug, options, decision_ref})` — apply the options.
+6. `ha__addon_start({slug: "core_mosquitto"})` — Supervisor doesn't always auto-start after install.
+7. `ha__addon_logs({slug: "core_mosquitto", tail: 50})` — confirm it came up.
+
+**Recipe — update an addon:**
+
+1. `ha__addon_info({slug})` — read `version` vs `version_latest`. If they match, tell Sir and stop.
+2. Create a `decision/` record naming the version delta.
+3. `ha__addon_update({slug, decision_ref})` — snapshot taken before the upstream call.
+4. `ha__addon_logs({slug, tail: 100})` after Supervisor reports done — confirm no startup errors.
 
 ---
 

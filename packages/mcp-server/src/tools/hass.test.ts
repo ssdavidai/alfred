@@ -15,7 +15,12 @@
 
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { ALL_HASS_TOOLS, HASS_READ_TOOLS, HASS_DEFERRED_TOOLS } from "./hass.js";
+import {
+  ALL_HASS_TOOLS,
+  HASS_READ_TOOLS,
+  HASS_DEFERRED_TOOLS,
+  HASS_ADDON_TOOLS,
+} from "./hass.js";
 import { SUPPORTED_APPS, isAppId, getToolsForApp } from "./registry.js";
 
 function getTool(name: string) {
@@ -26,18 +31,20 @@ function getTool(name: string) {
 
 // ─── catalogue shape ────────────────────────────────────────────────────
 
-test("hass catalogue: exactly 26 tools (11 read + 5 PR4 writes + 10 PR3 CRUD)", () => {
+test("hass catalogue: exactly 36 tools (11 read + 15 write + 10 PR6 addon)", () => {
   assert.equal(HASS_READ_TOOLS.length, 11);
   // After #115 PR3 splice: PR4's 5 + PR3's 10 = 15 writes.
   assert.equal(HASS_DEFERRED_TOOLS.length, 15);
-  assert.equal(ALL_HASS_TOOLS.length, 26);
+  // PR6: 10 supervisor addon tools.
+  assert.equal(HASS_ADDON_TOOLS.length, 10);
+  assert.equal(ALL_HASS_TOOLS.length, 36);
 });
 
-test("registry: hass is a supported app and registers all 26 tools", () => {
+test("registry: hass is a supported app and registers all 36 tools", () => {
   assert.ok(isAppId("hass"));
   assert.ok((SUPPORTED_APPS as Set<string>).has("hass"));
   const tools = getToolsForApp("hass");
-  assert.equal(tools.length, 26);
+  assert.equal(tools.length, 36);
 });
 
 test("hass: every tool name is unique", () => {
@@ -791,7 +798,7 @@ test("#115 PR3: ha__delete_script DELETE without body", () => {
   assert.equal(req.body, undefined);
 });
 
-test("#115 PR3: catalogue order — reads first, then all writes (PR4 + PR3 CRUD)", () => {
+test("#115 PR3: catalogue order — reads first, then all writes (PR4 + PR3 CRUD), then PR6 addon", () => {
   // First 11 must be the 11 reads.
   for (let i = 0; i < 11; i++) {
     assert.ok(
@@ -799,8 +806,8 @@ test("#115 PR3: catalogue order — reads first, then all writes (PR4 + PR3 CRUD
       `slot ${i} (${ALL_HASS_TOOLS[i].name}) should be a read tool`,
     );
   }
-  // Slots 11..25 are writes. PR4's 5 + PR3's 10.
-  const writeNames = ALL_HASS_TOOLS.slice(11).map((t) => t.name);
+  // Slots 11..25 are writes (15). PR4's 5 + PR3's 10.
+  const writeNames = ALL_HASS_TOOLS.slice(11, 26).map((t) => t.name);
   for (const n of WRITE_TOOL_NAMES) {
     assert.ok(writeNames.includes(n), `${n} missing from write tail`);
   }
@@ -808,4 +815,299 @@ test("#115 PR3: catalogue order — reads first, then all writes (PR4 + PR3 CRUD
     assert.ok(writeNames.includes(n), `${n} missing from write tail`);
   }
   assert.equal(writeNames.length, 15);
+});
+
+// ─── #115 PR6 — Supervisor addon tools ─────────────────────────────────
+
+const ADDON_TOOL_NAMES = [
+  "ha__list_addons",
+  "ha__addon_info",
+  "ha__addon_install",
+  "ha__addon_uninstall",
+  "ha__addon_configure",
+  "ha__addon_start",
+  "ha__addon_stop",
+  "ha__addon_restart",
+  "ha__addon_update",
+  "ha__addon_logs",
+];
+
+test("PR6: every addon tool name is registered and unique", () => {
+  for (const name of ADDON_TOOL_NAMES) {
+    const t = HASS_ADDON_TOOLS.find((x) => x.name === name);
+    assert.ok(t, `${name} missing from HASS_ADDON_TOOLS`);
+  }
+  const names = HASS_ADDON_TOOLS.map((t) => t.name);
+  assert.equal(new Set(names).size, names.length);
+});
+
+test("PR6 ha__list_addons: empty input, GET /addons", () => {
+  const t = getTool("ha__list_addons");
+  assert.equal(t.inputSchema.safeParse({}).success, true);
+  const r = t.buildRequest({});
+  assert.equal(r.method, "GET");
+  assert.equal(r.path, "/api/v1/channels/ha/addons");
+});
+
+test("PR6 ha__addon_info: slug required + slug format-gated, GET /addons/:slug", () => {
+  const t = getTool("ha__addon_info");
+  assert.equal(t.inputSchema.safeParse({}).success, false);
+  assert.equal(
+    t.inputSchema.safeParse({ slug: "core_mosquitto" }).success,
+    true,
+  );
+  // slash rejected (URL-traversal guard).
+  assert.equal(
+    t.inputSchema.safeParse({ slug: "core/mosquitto" }).success,
+    false,
+  );
+  // leading-special rejected.
+  assert.equal(
+    t.inputSchema.safeParse({ slug: "_underscore" }).success,
+    false,
+  );
+  // URL-encoded slug in path.
+  const r = t.buildRequest({ slug: "core_mosquitto" });
+  assert.equal(r.method, "GET");
+  assert.equal(r.path, "/api/v1/channels/ha/addons/core_mosquitto");
+});
+
+test("PR6 ha__addon_install: requires decision_ref + slug; builds POST /install with body", () => {
+  const t = getTool("ha__addon_install");
+  // slug-only — fails.
+  assert.equal(
+    t.inputSchema.safeParse({ slug: "core_mosquitto" }).success,
+    false,
+    "decision_ref required for install",
+  );
+  // decision_ref-only — fails.
+  assert.equal(
+    t.inputSchema.safeParse({ decision_ref: "decision/x.md" }).success,
+    false,
+    "slug required for install",
+  );
+  // short decision_ref rejected.
+  assert.equal(
+    t.inputSchema.safeParse({
+      slug: "core_mosquitto",
+      decision_ref: "abc",
+    }).success,
+    false,
+  );
+  // happy path.
+  const ok = {
+    slug: "core_mosquitto",
+    decision_ref: "decision/2026-05-29-mosquitto.md",
+  };
+  assert.equal(t.inputSchema.safeParse(ok).success, true);
+  const r = t.buildRequest(ok);
+  assert.equal(r.method, "POST");
+  assert.equal(
+    r.path,
+    "/api/v1/channels/ha/addons/core_mosquitto/install",
+  );
+  assert.deepEqual(r.body, { decision_ref: ok.decision_ref });
+});
+
+test("PR6 ha__addon_uninstall: same gate shape as install; builds POST /uninstall", () => {
+  const t = getTool("ha__addon_uninstall");
+  // decision_ref required.
+  assert.equal(
+    t.inputSchema.safeParse({ slug: "core_mosquitto" }).success,
+    false,
+  );
+  const args = {
+    slug: "core_mosquitto",
+    decision_ref: "decision/2026-05-29-uninstall.md",
+  };
+  assert.equal(t.inputSchema.safeParse(args).success, true);
+  const r = t.buildRequest(args);
+  assert.equal(r.method, "POST");
+  assert.equal(
+    r.path,
+    "/api/v1/channels/ha/addons/core_mosquitto/uninstall",
+  );
+  assert.deepEqual(r.body, { decision_ref: args.decision_ref });
+});
+
+test("PR6 ha__addon_configure: requires decision_ref + options object; builds PUT /options", () => {
+  const t = getTool("ha__addon_configure");
+  // missing options — fails.
+  assert.equal(
+    t.inputSchema.safeParse({
+      slug: "core_mosquitto",
+      decision_ref: "decision/2026-05-29.md",
+    }).success,
+    false,
+  );
+  // happy path.
+  const args = {
+    slug: "core_mosquitto",
+    options: { logins: [{ username: "alfred", password: "x" }] },
+    decision_ref: "decision/2026-05-29-cfg.md",
+  };
+  assert.equal(t.inputSchema.safeParse(args).success, true);
+  const r = t.buildRequest(args);
+  assert.equal(r.method, "PUT");
+  assert.equal(
+    r.path,
+    "/api/v1/channels/ha/addons/core_mosquitto/options",
+  );
+  assert.deepEqual(r.body, {
+    options: args.options,
+    decision_ref: args.decision_ref,
+  });
+});
+
+test("PR6 ha__addon_start / stop / restart: slug-only, no gate, build POST", () => {
+  for (const verb of ["start", "stop", "restart"] as const) {
+    const t = getTool(`ha__addon_${verb}`);
+    assert.equal(t.inputSchema.safeParse({}).success, false);
+    assert.equal(
+      t.inputSchema.safeParse({ slug: "core_mosquitto" }).success,
+      true,
+    );
+    const r = t.buildRequest({ slug: "core_mosquitto" });
+    assert.equal(r.method, "POST");
+    assert.equal(
+      r.path,
+      `/api/v1/channels/ha/addons/core_mosquitto/${verb}`,
+    );
+    assert.equal((r.body as unknown) ?? null, null);
+  }
+});
+
+test("PR6 ha__addon_update: requires decision_ref; builds POST /update", () => {
+  const t = getTool("ha__addon_update");
+  // decision_ref required.
+  assert.equal(
+    t.inputSchema.safeParse({ slug: "core_mosquitto" }).success,
+    false,
+  );
+  const args = {
+    slug: "core_mosquitto",
+    decision_ref: "decision/2026-05-29-update.md",
+  };
+  assert.equal(t.inputSchema.safeParse(args).success, true);
+  const r = t.buildRequest(args);
+  assert.equal(r.method, "POST");
+  assert.equal(r.path, "/api/v1/channels/ha/addons/core_mosquitto/update");
+  assert.deepEqual(r.body, { decision_ref: args.decision_ref });
+});
+
+test("PR6 ha__addon_logs: slug + optional tail; tail bounded 1..2000", () => {
+  const t = getTool("ha__addon_logs");
+  // slug only — fine, no gate.
+  assert.equal(
+    t.inputSchema.safeParse({ slug: "core_mosquitto" }).success,
+    true,
+  );
+  assert.equal(
+    t.inputSchema.safeParse({ slug: "core_mosquitto", tail: 50 }).success,
+    true,
+  );
+  // tail out of bounds rejected.
+  assert.equal(
+    t.inputSchema.safeParse({ slug: "core_mosquitto", tail: 0 }).success,
+    false,
+  );
+  assert.equal(
+    t.inputSchema.safeParse({ slug: "core_mosquitto", tail: 5000 }).success,
+    false,
+  );
+  // no tail.
+  const empty = t.buildRequest({ slug: "core_mosquitto" });
+  assert.equal(empty.method, "GET");
+  assert.equal(
+    empty.path,
+    "/api/v1/channels/ha/addons/core_mosquitto/logs",
+  );
+  assert.equal(empty.query, undefined);
+  // with tail.
+  const tail = t.buildRequest({ slug: "core_mosquitto", tail: 50 });
+  assert.deepEqual(tail.query, { tail: "50" });
+});
+
+test("PR6 addon tool descriptions: every gated tool mentions decision_ref + snapshot semantics", () => {
+  const GATED = [
+    "ha__addon_install",
+    "ha__addon_uninstall",
+    "ha__addon_configure",
+    "ha__addon_update",
+  ];
+  const SNAPSHOTTED = [
+    "ha__addon_install",
+    "ha__addon_uninstall",
+    "ha__addon_update",
+  ];
+  for (const name of GATED) {
+    const t = getTool(name);
+    assert.ok(
+      t.description.toLowerCase().includes("decision_ref"),
+      `${name} description must mention decision_ref`,
+    );
+  }
+  for (const name of SNAPSHOTTED) {
+    const t = getTool(name);
+    assert.ok(
+      /snapshot|backup/i.test(t.description),
+      `${name} description must mention snapshot/backup`,
+    );
+  }
+});
+
+test("PR6 addon tool descriptions: every tool documents the HAOS-only constraint", () => {
+  for (const name of ADDON_TOOL_NAMES) {
+    const t = getTool(name);
+    assert.ok(
+      /HAOS-ONLY|Home Assistant OS|installation_type/i.test(t.description),
+      `${name} description must document the HAOS-only constraint`,
+    );
+  }
+});
+
+test("PR6 addon tool slug guard: rejects empty + slash on the 9 slug-bearing tools", () => {
+  // ha__list_addons has no slug input — skipped.
+  for (const name of ADDON_TOOL_NAMES) {
+    if (name === "ha__list_addons") continue;
+    const t = getTool(name);
+
+    // Empty slug.
+    const emptySlug =
+      name === "ha__addon_install" ||
+      name === "ha__addon_uninstall" ||
+      name === "ha__addon_update"
+        ? { slug: "", decision_ref: "decision/x-2026-05-29.md" }
+        : name === "ha__addon_configure"
+          ? {
+              slug: "",
+              options: {},
+              decision_ref: "decision/x-2026-05-29.md",
+            }
+          : { slug: "" };
+    assert.equal(
+      t.inputSchema.safeParse(emptySlug).success,
+      false,
+      `${name} must reject empty slug`,
+    );
+
+    // Slash in slug.
+    const withSlash =
+      name === "ha__addon_install" ||
+      name === "ha__addon_uninstall" ||
+      name === "ha__addon_update"
+        ? { slug: "a/b", decision_ref: "decision/x-2026-05-29.md" }
+        : name === "ha__addon_configure"
+          ? {
+              slug: "a/b",
+              options: {},
+              decision_ref: "decision/x-2026-05-29.md",
+            }
+          : { slug: "a/b" };
+    assert.equal(
+      t.inputSchema.safeParse(withSlash).success,
+      false,
+      `${name} must reject slug with '/'`,
+    );
+  }
 });

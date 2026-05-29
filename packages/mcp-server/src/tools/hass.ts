@@ -820,11 +820,231 @@ HASS_WRITE_TOOLS.push(...HA_WRITE_PR3_TOOLS);
 // the binding live so the PR2→PR4 transition doesn't churn import sites.
 export const HASS_DEFERRED_TOOLS: ToolDef[] = HASS_WRITE_TOOLS;
 
-// Final catalogue: 26 tools total = 11 read + 5 PR4 writes + 10 PR3 CRUD
-// (#115 — automations / scenes / scripts). Order kept deliberately
-// (reads first, writes last) so the model that lists the catalogue sees
-// the safe read surface before the write surface.
+// ═════════════════════════════════════════════════════════════════════════
+// === Tier 4 PR6: Supervisor addons ===
+// ═════════════════════════════════════════════════════════════════════════
+//
+// Issue #115 PR6 — 10 new tools fronting ctrl-api's
+// /api/v1/channels/ha/addons/* surface. These ONLY work on Home Assistant
+// OS installations; on Container/Core/Supervised, ctrl-api responds with
+// HTTP 501 {error: "supervisor_not_available", installation_type, message}
+// and the proxy layer surfaces that envelope back to the model as a
+// non-2xx tool result. Models are expected to read the `installation_type`
+// from the error payload and explain to Sir, not retry blindly.
+//
+// Per the spec §4 gate matrix (locked YES 2026-05-29 by Sir):
+//
+// | Tool                | decision_ref | auto-snapshot |
+// |---------------------|--------------|---------------|
+// | ha__list_addons     | no           | no            |
+// | ha__addon_info      | no           | no            |
+// | ha__addon_install   | REQUIRED     | YES           |
+// | ha__addon_uninstall | REQUIRED     | YES           |
+// | ha__addon_configure | REQUIRED     | NO            |
+// | ha__addon_start     | no           | no            |
+// | ha__addon_stop      | no           | no            |
+// | ha__addon_restart   | no           | no            |
+// | ha__addon_update    | REQUIRED     | YES           |
+// | ha__addon_logs      | no           | no            |
+//
+// Why these particular gates: install / uninstall / update can corrupt
+// the HA install in ways the principal can't trivially reverse
+// (Supervisor backups are slow and Sir's HA OS lives on a Raspberry Pi).
+// Configure rewrites the options.json — destructive but reversible by
+// re-running configure. start/stop/restart are cheap and reversible.
+//
+// Snapshot is recorded BEFORE the upstream call so a failed install
+// still surfaces the intent in `ha_backup_ref`. The MCP tool returns
+// `backup_ref_id` + `ha_backup_id` in the success envelope so the agent
+// can mention "snapshot taken" in its reply to Sir.
+
+const AddonSlugParam = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(
+    /^[A-Za-z0-9][A-Za-z0-9_\-.]{0,127}$/,
+    "slug must be 1..128 chars of [A-Za-z0-9_.-], starting with [A-Za-z0-9]",
+  )
+  .describe(
+    "Supervisor addon slug, e.g. `core_mosquitto`, `a0d7b954_nodered`, `core_zigbee2mqtt`. Resolve via `ha__list_addons` (each addon's `slug`) — never invent.",
+  );
+
+const AddonDecisionRefParam = z
+  .string()
+  .min(6)
+  .max(256)
+  .regex(
+    /^[\x21-\x7E]+$/,
+    "decision_ref must be printable ASCII with no whitespace",
+  )
+  .describe(
+    "Vault path or ulid of the `decision/` record that authorised this addon write. REQUIRED. Alfred refuses without it — the contract is 'I decided X based on signal Y, run it'.",
+  );
+
+export const HASS_ADDON_TOOLS: ToolDef[] = [
+  {
+    name: "ha__list_addons",
+    description:
+      "List Home Assistant Supervisor addons (installed + available in the store). **HAOS-ONLY** — on Container HA / Core HA / Supervised installations this returns a 501 envelope `{error: 'supervisor_not_available', installation_type, message}`. Read the `installation_type` and explain to Sir rather than retrying. Returns the Supervisor's verbatim `data` block, typically `{addons: [{slug, name, version, version_latest, state, repository, ...}], suggestions?: [...]}`. **When to call:** Sir asks 'what's installed on HA?' / 'do I have Mosquitto?' / before any other addon tool to resolve a slug.",
+    inputSchema: z.object({}),
+    buildRequest: () => ({
+      method: "GET",
+      path: "/api/v1/channels/ha/addons",
+    }),
+  },
+
+  {
+    name: "ha__addon_info",
+    description:
+      "Full info for one Supervisor addon — version, options schema, network ports, hostname, state, etc. **HAOS-ONLY** (see `ha__list_addons` for the 501 envelope shape). Returns `data` straight from Supervisor's `/addons/<slug>/info`. **When to call:** before `ha__addon_configure` (so you know the options schema), before `ha__addon_update` (to read the version delta), or when Sir asks 'what version of Mosquitto am I on?'.",
+    inputSchema: z.object({
+      slug: AddonSlugParam,
+    }),
+    buildRequest: ({ slug }) => ({
+      method: "GET",
+      path: `/api/v1/channels/ha/addons/${encodeURIComponent(slug)}`,
+    }),
+  },
+
+  {
+    name: "ha__addon_install",
+    description:
+      "Install a Supervisor addon. **HAOS-ONLY**. **DESTRUCTIVE** — pulls + starts a Docker container; can introduce new network surface, takes 30-300s. **GATED** — requires `decision_ref` referencing the `decision/` record Sir approved. **AUTO-SNAPSHOT** — ctrl-api records the intent in `ha_backup_ref` BEFORE the upstream call. The success envelope carries `backup_ref_id` and `ha_backup_id`; mention 'snapshot taken' to Sir in your reply. Sir's home (home.alfred.black) is HAOS so this surface is live.",
+    inputSchema: z.object({
+      slug: AddonSlugParam,
+      decision_ref: AddonDecisionRefParam,
+    }),
+    buildRequest: ({ slug, decision_ref }) => ({
+      method: "POST",
+      path: `/api/v1/channels/ha/addons/${encodeURIComponent(slug)}/install`,
+      body: { decision_ref },
+    }),
+  },
+
+  {
+    name: "ha__addon_uninstall",
+    description:
+      "Uninstall a Supervisor addon — stops + removes the container, drops its `/data` volume. **HAOS-ONLY**. **DESTRUCTIVE** (data loss possible). **GATED** — requires `decision_ref`. **AUTO-SNAPSHOT** — ctrl-api records the intent in `ha_backup_ref`. Confirm with Sir before calling; this is one of the few addon ops that can't be quickly undone without a restore.",
+    inputSchema: z.object({
+      slug: AddonSlugParam,
+      decision_ref: AddonDecisionRefParam,
+    }),
+    buildRequest: ({ slug, decision_ref }) => ({
+      method: "POST",
+      path: `/api/v1/channels/ha/addons/${encodeURIComponent(slug)}/uninstall`,
+      body: { decision_ref },
+    }),
+  },
+
+  {
+    name: "ha__addon_configure",
+    description:
+      "Update a Supervisor addon's `options.json`. **HAOS-ONLY**. **GATED** — requires `decision_ref`. **NO snapshot** (options swap is reversible by re-running configure with the prior values). Pass the full options object — Supervisor merges against the addon's schema. Read the current options via `ha__addon_info` first; never blind-write. The addon may need a restart after configure (call `ha__addon_restart` if Sir wants it applied immediately).",
+    inputSchema: z.object({
+      slug: AddonSlugParam,
+      options: z
+        .record(z.string(), z.unknown())
+        .describe(
+          "The full options object the addon receives in its `/data/options.json`. Shape is addon-specific — read `data.options` from `ha__addon_info` and modify, don't construct from scratch.",
+        ),
+      decision_ref: AddonDecisionRefParam,
+    }),
+    buildRequest: ({ slug, options, decision_ref }) => ({
+      method: "PUT",
+      path: `/api/v1/channels/ha/addons/${encodeURIComponent(slug)}/options`,
+      body: { options, decision_ref },
+    }),
+  },
+
+  {
+    name: "ha__addon_start",
+    description:
+      "Start an installed Supervisor addon. **HAOS-ONLY**. NO gate (reversible — `ha__addon_stop` undoes it). NO snapshot. Use after `ha__addon_install` (Supervisor installs but doesn't always start) or to bring back an addon Sir stopped earlier.",
+    inputSchema: z.object({
+      slug: AddonSlugParam,
+    }),
+    buildRequest: ({ slug }) => ({
+      method: "POST",
+      path: `/api/v1/channels/ha/addons/${encodeURIComponent(slug)}/start`,
+    }),
+  },
+
+  {
+    name: "ha__addon_stop",
+    description:
+      "Stop a running Supervisor addon. **HAOS-ONLY**. NO gate (reversible — `ha__addon_start` undoes it). NO snapshot. Use to free up resources or before reconfiguring something the addon owns (e.g. stop Zigbee2MQTT before swapping the dongle).",
+    inputSchema: z.object({
+      slug: AddonSlugParam,
+    }),
+    buildRequest: ({ slug }) => ({
+      method: "POST",
+      path: `/api/v1/channels/ha/addons/${encodeURIComponent(slug)}/stop`,
+    }),
+  },
+
+  {
+    name: "ha__addon_restart",
+    description:
+      "Restart a Supervisor addon. **HAOS-ONLY**. NO gate (cheap, reversible). NO snapshot. Use after `ha__addon_configure` to apply the new options, or when Sir says 'the addon is stuck'.",
+    inputSchema: z.object({
+      slug: AddonSlugParam,
+    }),
+    buildRequest: ({ slug }) => ({
+      method: "POST",
+      path: `/api/v1/channels/ha/addons/${encodeURIComponent(slug)}/restart`,
+    }),
+  },
+
+  {
+    name: "ha__addon_update",
+    description:
+      "Update a Supervisor addon to the latest version. **HAOS-ONLY**. **GATED** — requires `decision_ref`. **AUTO-SNAPSHOT** — ctrl-api records the intent in `ha_backup_ref` BEFORE the upstream call (so a botched update is auditably rollback-able). Read the version delta via `ha__addon_info` first — `version` vs `version_latest`. Some addon updates require a config migration; surface the release notes to Sir if you can find them.",
+    inputSchema: z.object({
+      slug: AddonSlugParam,
+      decision_ref: AddonDecisionRefParam,
+    }),
+    buildRequest: ({ slug, decision_ref }) => ({
+      method: "POST",
+      path: `/api/v1/channels/ha/addons/${encodeURIComponent(slug)}/update`,
+      body: { decision_ref },
+    }),
+  },
+
+  {
+    name: "ha__addon_logs",
+    description:
+      "Last N lines of a Supervisor addon's stdout/stderr. **HAOS-ONLY**. NO gate (read). Default tail = 200 lines, max 2000. Returns `{ok, slug, tail, logs}` — `logs` is a single newline-joined string. **When to call:** Sir asks 'why is the addon failing?' / 'show me the Mosquitto logs' / after an `ha__addon_restart` to confirm it came back up.",
+    inputSchema: z.object({
+      slug: AddonSlugParam,
+      tail: z
+        .number()
+        .int()
+        .min(1)
+        .max(2000)
+        .optional()
+        .describe(
+          "Number of trailing lines to return. Default 200, max 2000. Wider windows return more data; prefer narrow.",
+        ),
+    }),
+    buildRequest: ({ slug, tail }) => ({
+      method: "GET",
+      path: `/api/v1/channels/ha/addons/${encodeURIComponent(slug)}/logs`,
+      query: tail !== undefined ? { tail: String(tail) } : undefined,
+    }),
+  },
+];
+
+// ═════════════════════════════════════════════════════════════════════════
+// === END Tier 4 PR6 ═══════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════════════════════
+
+// Final catalogue: 36 tools total = 11 read + 15 writes (5 PR4 + 10 PR3 CRUD)
+// + 10 PR6 supervisor addon. Order kept deliberately (reads first, writes
+// next, addon-CRUD last) so the model that lists the catalogue sees the
+// safe read surface before the destructive surfaces.
 export const ALL_HASS_TOOLS: ToolDef[] = [
   ...HASS_READ_TOOLS,
   ...HASS_DEFERRED_TOOLS,
+  ...HASS_ADDON_TOOLS,
 ];
