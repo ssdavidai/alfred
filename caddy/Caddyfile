@@ -158,7 +158,9 @@ sms.{$DOMAIN} {
 	reverse_proxy hermes:8080
 }
 
-# Voice — Twilio Media Streams WebSocket endpoint for the voice-bridge.
+# Voice — Twilio Media Streams WebSocket endpoint + voice-bridge HTTP
+# control surface for Home Assistant's REST integration.
+#
 # Hermes has no native phone-call adapter (upstream issue #409), so
 # realtime audio bridges through a separate service that translates
 # Twilio mulaw <-> OpenAI gpt-realtime. The bridge's :9000 listener
@@ -166,6 +168,19 @@ sms.{$DOMAIN} {
 # console, set the number's "A CALL COMES IN" webhook to a TwiML <Stream>
 # pointing at `wss://voice.{$DOMAIN}/voice/<id>?sig=...`. Caddy auto-issues
 # the LE cert + handles the WS upgrade transparently.
+#
+# Issue #112 PR5 adds three HTTP endpoints on the same :9000 listener that
+# Home Assistant's REST integration can hit over TLS via this hostname:
+#
+#   GET /esphome/devices   — list HA installs paired with the bridge
+#   GET /wyoming/status    — Wyoming Protocol fallback readiness
+#   GET /health, /metrics  — pre-existing operator endpoints
+#
+# These are unauthenticated on voice-bridge itself (boundary lives at
+# ctrl-api, which is the only caller of /esphome/devices + /wyoming/status
+# in production). The voice subdomain stays DNS-only at Cloudflare
+# (orange cloud off) — see the comment above the apex block for the
+# WSS-upgrade rationale.
 voice.{$DOMAIN} {
 	encode zstd gzip
 	reverse_proxy voice-bridge:9000

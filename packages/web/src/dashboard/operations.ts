@@ -2880,12 +2880,12 @@ export const revokeChannelToken = async (
 };
 
 /** Read the list of ESPHome satellites the voice-bridge has seen on
- *  the local network. The listener landed in #112 PR1 but the
- *  ctrl-api status endpoint is queued for #112 PR4 — when the route
- *  isn't there yet, return `{ devices: [], unavailable: true }` so
- *  the card surfaces "ESPHome listener disabled" copy instead of an
- *  error toast. The card's job is to publish the catalogue + show
- *  what's there; absence is a normal state. */
+ *  the local network. The listener landed in #112 PR1; PR5 (this PR)
+ *  shipped the live ctrl-api route at /api/v1/channels/voice/esphome/
+ *  devices. The ctrl-api route now returns its own
+ *  `{enabled, listener_address, devices, unavailable?, error?}` shape
+ *  even when voice-bridge is unreachable — so the historical 404
+ *  fall-through is belt-and-braces only. */
 export const getEsphomeDevices = async (_args: unknown, context: any) => {
   const instance = await getUserInstance(context);
   try {
@@ -2898,6 +2898,54 @@ export const getEsphomeDevices = async (_args: unknown, context: any) => {
     }
     throw e;
   }
+};
+
+/** Run an outbound ESPHome Native API probe against a satellite IP that
+ *  the operator pastes in the /channels card. ctrl-api opens a TCP
+ *  connection from the tenant VM, walks the Hello → DeviceInfo →
+ *  ListEntities handshake, looks for a `voice_assistant:` entity, and
+ *  returns a structured diagnosis the card renders inline.
+ *
+ *  Body: { ip: string, hostname?: string, timeoutMs?: number }
+ *  Returns: { ok: boolean, info: { reachable, esphome_version,
+ *            mac_address, friendly_name, voice_assistant_present,
+ *            codec, recommendations: string[], error: string | null },
+ *            hostname: string | null }
+ *
+ *  Wired by #112 PR5. The operation is an action (it opens an outbound
+ *  TCP connection that costs O(timeoutMs) on the tenant) — Wasp
+ *  ergonomics prefer that for non-idempotent surfaces even when the
+ *  observable side-effect is "ran a probe". */
+export const testEsphomeDevice = async (
+  args: { ip: string; hostname?: string; timeoutMs?: number },
+  context: any,
+) => {
+  if (!args?.ip?.trim()) {
+    throw new HttpError(400, "ip is required");
+  }
+  const body: Record<string, unknown> = { ip: args.ip.trim() };
+  if (args.hostname && args.hostname.trim()) body.hostname = args.hostname.trim();
+  if (typeof args.timeoutMs === "number" && args.timeoutMs > 0) {
+    body.timeoutMs = args.timeoutMs;
+  }
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    path: "/api/v1/channels/voice/esphome/devices/test",
+    method: "POST",
+    body,
+  });
+};
+
+/** Read the Wyoming-fallback readiness status. Returns
+ *  `{enabled, port, bind, last_handshake_at, unavailable?, error?}`.
+ *  Used by the channels dashboard to render a tile distinguishing
+ *  "Wyoming on" from "Wyoming off (the default)" so the operator can
+ *  confirm WYOMING_ENABLED=1 actually took effect on the tenant VM. */
+export const getWyomingStatus = async (_args: unknown, context: any) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    path: "/api/v1/channels/voice/wyoming/status",
+  });
 };
 
 // ============================================================

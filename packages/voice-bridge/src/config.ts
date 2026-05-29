@@ -105,6 +105,21 @@ export const config = {
   // synthetic ESPHome device. Falls back to os.hostname() in computeIdentity.
   esphomeTenantSeed: optional("ESPHOME_TENANT_SEED", ""),
   esphomeFriendlyName: optional("ESPHOME_FRIENDLY_NAME", "Alfred"),
+
+  // ── Wyoming Protocol fallback (issue #112, PR5) ─────────────────────────
+  // HA's Wyoming integration speaks a different on-wire shape than the
+  // ESPHome Native API — JSONL events over a TCP socket on :10300. We
+  // implement the satellite-side surface so HA can route a full Assist
+  // pipeline through us without going via mDNS-discovered ESPHome.
+  //
+  // OFF by default (WYOMING_ENABLED=0) because the ESPHome Native API path
+  // is shorter end-to-end. Flip to "1" on tenants whose HA install can't
+  // reach :6053 over the LAN (HA-OS / HA-Cloud) but CAN reach a Wyoming
+  // server on the same tailnet. See packages/voice-bridge/docs/
+  // ha-pipeline-setup.md for the trade-off.
+  wyomingEnabled: optional("WYOMING_ENABLED", "0") === "1",
+  wyomingPort: Number(optional("WYOMING_PORT", "10300")),
+  wyomingBind: optional("WYOMING_BIND", "0.0.0.0"),
 } as const;
 
 export type Config = typeof config;

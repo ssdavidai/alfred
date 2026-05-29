@@ -28,9 +28,15 @@ import { config } from "./config.js";
 import { VoiceCall } from "./voice-call.js";
 import { handleTwimlInbound, TWIML_INBOUND_PATH } from "./twiml.js";
 import { connectAllMcp } from "./mcp-clients.js";
-import { computeIdentity, startEsphomeServer } from "./esphome-server.js";
+import {
+  computeIdentity,
+  startEsphomeServer,
+  type EsphomeServerHandle,
+  type KnownEsphomeDevice,
+} from "./esphome-server.js";
 import { announceEsphomeMdns } from "./esphome-mdns.js";
 import { EsphomeVoiceSession } from "./esphome-session.js";
+import { startWyomingServer, type WyomingServerHandle } from "./wyoming-server.js";
 
 export function verifySig(tenantId: string, sig: string | null | undefined): boolean {
   if (!sig) return false;
@@ -78,6 +84,24 @@ function renderMetrics(): string {
   );
 }
 
+// Boot-time handles captured by the ESPHome + Wyoming initialisers below.
+// The HTTP control routes (`/esphome/devices`, `/wyoming/status`) read
+// from these. Initially null — surface as `{enabled: false, ...}` to the
+// caller until the listeners come up.
+let esphomeHandle: EsphomeServerHandle | null = null;
+let wyomingHandle: WyomingServerHandle | null = null;
+
+/** Public shape returned by `GET /esphome/devices`. Kept in this file to
+ * keep ctrl-api proxying simple — both sides import this type later if
+ * needed; for now the wire shape is the contract. */
+export interface EsphomeDevicesPayload {
+  enabled: boolean;
+  /** "0.0.0.0:6053" — informational so the dashboard can render a hint
+   * when listener_address has been re-bound. */
+  listener_address: string | null;
+  devices: KnownEsphomeDevice[];
+}
+
 const httpServer = http.createServer((req, res) => {
   if (req.url === "/health") {
     res.writeHead(200, { "Content-Type": "application/json" });
@@ -87,6 +111,39 @@ const httpServer = http.createServer((req, res) => {
   if (req.url === "/metrics") {
     res.writeHead(200, { "Content-Type": "text/plain; version=0.0.4" });
     res.end(renderMetrics());
+    return;
+  }
+  // ── PR5 control surface ──────────────────────────────────────────────
+  // ctrl-api hits these over the internal docker network so the operator
+  // dashboard can render which HA installs have paired + whether the
+  // Wyoming fallback is hot. Both are GET-only — there is no remote write
+  // to the voice-bridge from here. Authentication is the docker network
+  // boundary; both ports stay bound to localhost / docker-bridge only.
+  if (req.url === "/esphome/devices") {
+    const payload: EsphomeDevicesPayload = esphomeHandle
+      ? {
+          enabled: true,
+          listener_address: `${config.esphomeApiBind}:${config.esphomeApiPort}`,
+          devices: esphomeHandle.getKnownDevices(),
+        }
+      : {
+          enabled: false,
+          listener_address: null,
+          devices: [],
+        };
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(payload));
+    return;
+  }
+  if (req.url === "/wyoming/status") {
+    const payload = {
+      enabled: !!wyomingHandle,
+      port: wyomingHandle ? config.wyomingPort : null,
+      bind: wyomingHandle ? config.wyomingBind : null,
+      last_handshake_at: wyomingHandle?.lastHandshakeAt() ?? null,
+    };
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(payload));
     return;
   }
   // Twilio "A CALL COMES IN" webhook — returns TwiML pointing at the
@@ -183,6 +240,7 @@ if (config.esphomeApiEnabled) {
     // env. See esphome-server.ts's import block for the long form.
     voiceSessionFactory: (opts) => new EsphomeVoiceSession(opts),
   });
+  esphomeHandle = handle;
   handle.ready
     .then(() =>
       announceEsphomeMdns({
@@ -193,6 +251,28 @@ if (config.esphomeApiEnabled) {
     .catch((err) => {
       console.error("[esphome] startup failed (continuing without HA leg):", err);
     });
+
+  // PR5 — Wyoming Protocol fallback. Same brain factory, different transport
+  // shape. Boots iff WYOMING_ENABLED=1; defaults off because most tenants
+  // use ESPHome Native and the extra listener is dead weight otherwise.
+  if (config.wyomingEnabled) {
+    const wyHandle = startWyomingServer({
+      port: config.wyomingPort,
+      bindHost: config.wyomingBind,
+      identity,
+      voiceSessionFactory: (opts) => new EsphomeVoiceSession(opts),
+    });
+    wyomingHandle = wyHandle;
+    wyHandle.ready.catch((err) => {
+      console.error(
+        "[wyoming] startup failed (continuing without Wyoming fallback):",
+        err,
+      );
+      wyomingHandle = null;
+    });
+  } else {
+    console.log("[wyoming] WYOMING_ENABLED!=1 — Wyoming fallback disabled");
+  }
 } else {
   console.log("[esphome] ESPHOME_API_ENABLED!=1 — HA voice leg disabled");
 }

@@ -252,6 +252,10 @@ export interface EsphomeServerOptions {
    * mock so they can assert the bridge bytes without standing up the full
    * OpenAI Realtime client. */
   voiceSessionFactory?: VoiceSessionFactory;
+  /** Optional device registry. Production wires the server-level singleton
+   * so the HTTP control surface can list known clients; tests omit and the
+   * connection still works (registry calls become no-ops). */
+  registry?: EsphomeDeviceRegistry;
 }
 
 /** Hooks the EsphomeConnection exposes to a voice-assistant session. */
@@ -296,6 +300,131 @@ interface SessionState {
   voiceAssistantSubscribed: boolean;
 }
 
+// ── Known-devices registry (PR5) ─────────────────────────────────────────────
+// PR5 surfaces "which HA installs / ESPHome integrations have paired with
+// this voice-bridge" to the /channels dashboard via ctrl-api. We track one
+// entry per inbound connection — keyed on remote IP + clientInfo (the
+// HelloRequest's `client_info` field, which HA sets to e.g.
+// "Home Assistant 2026.5.2") so the same HA install reconnecting after a
+// network blip dedupes onto one row rather than spawning a new ghost.
+//
+// Devices NEVER expire from the registry — last_seen_at is what the UI uses
+// to colour-code rows. The registry is process-local; restarting voice-bridge
+// re-discovers HA installs as they reconnect (HA's ESPHome integration
+// retries forever, so this is fine in practice).
+
+export interface KnownEsphomeDevice {
+  /** Stable id — `${ip}|${clientInfo}` or `${ip}` when client info is empty.
+   * Used by the dashboard as the React key. */
+  id: string;
+  /** Last-known remote IP. May be a docker-bridge IP when HA's running on
+   * the same VM via the tailscale sidecar route. */
+  ip: string;
+  /** HelloRequest.client_info — empty until the connection has handshaken. */
+  clientInfo: string;
+  /** Unix ms of the most recent inbound frame on this connection. */
+  lastSeenAt: number;
+  /** True iff a connection from this device is currently open. We flip
+   * back to false on socket close — older entries with a stale
+   * lastSeenAt + connected=false render as "Offline" in the UI. */
+  connected: boolean;
+  /** True iff the most recent connection completed the ConnectRequest
+   * handshake (i.e. survived auth). When `password` was unset this is
+   * always true on connect. */
+  authorized: boolean;
+  /** True iff HA has subscribed to voice-assistant events. The card uses
+   * this as a tri-state pill ("Paired" / "Listening" / "Idle"). */
+  voiceSubscribed: boolean;
+  /** Total inbound frames observed across the lifetime of this entry —
+   * useful for "is the satellite actually talking to us?" diagnostics. */
+  framesIn: number;
+  /** Total voice-assistant turns we've handled for this device. */
+  turnsHandled: number;
+}
+
+/**
+ * Process-local registry of paired ESPHome clients (= HA installs).
+ *
+ * The EsphomeServer creates one and passes it down to every EsphomeConnection;
+ * each connection notifies the registry on key lifecycle events (open,
+ * handshake, voice-subscribe, frame-in, close). The HTTP control surface in
+ * server.ts reads from it via getKnownDevices().
+ */
+export class EsphomeDeviceRegistry {
+  private byId = new Map<string, KnownEsphomeDevice>();
+
+  /** Called from EsphomeConnection on socket-open + after HelloRequest is
+   * parsed (so we have clientInfo). Returns the entry's id for subsequent
+   * mutations on this connection. */
+  observe(remote: { ip: string; clientInfo: string }): string {
+    const id = makeDeviceId(remote.ip, remote.clientInfo);
+    const now = Date.now();
+    const existing = this.byId.get(id);
+    if (existing) {
+      existing.lastSeenAt = now;
+      existing.connected = true;
+      // clientInfo upgrades from "" → known string when HelloRequest lands.
+      if (remote.clientInfo) existing.clientInfo = remote.clientInfo;
+      return id;
+    }
+    this.byId.set(id, {
+      id,
+      ip: remote.ip,
+      clientInfo: remote.clientInfo,
+      lastSeenAt: now,
+      connected: true,
+      authorized: false,
+      voiceSubscribed: false,
+      framesIn: 0,
+      turnsHandled: 0,
+    });
+    return id;
+  }
+
+  markAuthorized(id: string): void {
+    const e = this.byId.get(id);
+    if (e) e.authorized = true;
+  }
+
+  markVoiceSubscribed(id: string, subscribed: boolean): void {
+    const e = this.byId.get(id);
+    if (e) e.voiceSubscribed = subscribed;
+  }
+
+  tickFrame(id: string): void {
+    const e = this.byId.get(id);
+    if (!e) return;
+    e.framesIn += 1;
+    e.lastSeenAt = Date.now();
+  }
+
+  tickTurn(id: string): void {
+    const e = this.byId.get(id);
+    if (e) e.turnsHandled += 1;
+  }
+
+  markClosed(id: string): void {
+    const e = this.byId.get(id);
+    if (e) e.connected = false;
+  }
+
+  list(): KnownEsphomeDevice[] {
+    // Most-recently-seen first — that's the order the UI wants.
+    return [...this.byId.values()].sort((a, b) => b.lastSeenAt - a.lastSeenAt);
+  }
+
+  /** Test helper. Clears all observed devices. NOT part of the public
+   * runtime surface. */
+  _resetForTests(): void {
+    this.byId.clear();
+  }
+}
+
+function makeDeviceId(ip: string, clientInfo: string): string {
+  const c = clientInfo.trim();
+  return c.length > 0 ? `${ip}|${c}` : ip;
+}
+
 function defaultLog(msg: string, extra?: Record<string, unknown>): void {
   if (extra) console.log(`[esphome] ${msg}`, extra);
   else console.log(`[esphome] ${msg}`);
@@ -314,18 +443,30 @@ export class EsphomeConnection {
    * connection in PR2 — concurrent turns from one HA satellite are not a
    * thing the upstream pipeline emits. */
   private voiceSession: VoiceSessionHandle | null = null;
+  /** Registry id assigned on first HelloRequest. Null until then; we don't
+   * register the bare TCP accept because pre-Hello there's no clientInfo
+   * yet, and registering on accept would spawn duplicate rows for short-
+   * lived port scans. */
+  private deviceId: string | null = null;
+  /** Captured remote IP — `socket.remoteAddress` is nullable post-close. */
+  private readonly remoteIp: string;
 
   constructor(
     private readonly socket: net.Socket,
     private readonly opts: EsphomeServerOptions,
   ) {
-    const remote = socket.remoteAddress ?? "?";
+    this.remoteIp = socket.remoteAddress ?? "?";
     const log = opts.log ?? defaultLog;
-    log("connection accepted", { remote });
+    log("connection accepted", { remote: this.remoteIp });
     socket.on("data", (chunk) => this.onData(chunk));
-    socket.on("error", (err) => log("socket error", { remote, err: err.message }));
+    socket.on("error", (err) =>
+      log("socket error", { remote: this.remoteIp, err: err.message }),
+    );
     socket.on("close", () => {
-      log("connection closed", { remote });
+      log("connection closed", { remote: this.remoteIp });
+      if (this.deviceId && this.opts.registry) {
+        this.opts.registry.markClosed(this.deviceId);
+      }
       if (this.voiceSession) {
         try {
           this.voiceSession.close("connection-closed");
@@ -380,6 +521,14 @@ export class EsphomeConnection {
           clientMinor: fieldAsUint(fields, 3),
         });
         this.state.helloSeen = true;
+        // First handshake — register in the device registry so the /channels
+        // card sees this HA install.
+        if (this.opts.registry) {
+          this.deviceId = this.opts.registry.observe({
+            ip: this.remoteIp,
+            clientInfo,
+          });
+        }
         const resp = buildHelloResponse({
           // We advertise API 1.10 — matches what aioesphomeapi expects from
           // current HA Core. Anything newer would risk HA trying to use
@@ -402,6 +551,9 @@ export class EsphomeConnection {
         if (!invalid) {
           this.state.connected = true;
           this.state.authorized = true;
+          if (this.deviceId && this.opts.registry) {
+            this.opts.registry.markAuthorized(this.deviceId);
+          }
         }
         return;
       }
@@ -465,6 +617,9 @@ export class EsphomeConnection {
         const flags = fieldAsUint(fields, 2);
         log("SubscribeVoiceAssistantRequest", { subscribe, flags });
         this.state.voiceAssistantSubscribed = subscribe;
+        if (this.deviceId && this.opts.registry) {
+          this.opts.registry.markVoiceSubscribed(this.deviceId, subscribe);
+        }
         return;
       }
       case MessageType.VoiceAssistantRequest: {
@@ -490,6 +645,9 @@ export class EsphomeConnection {
             this.voiceSession = null;
           }
           return;
+        }
+        if (this.deviceId && this.opts.registry) {
+          this.opts.registry.tickTurn(this.deviceId);
         }
         if (this.voiceSession) {
           // Already running. Per the spec we never have two concurrent turns
@@ -559,6 +717,9 @@ export class EsphomeConnection {
         const dataField = fields[1];
         const data = Buffer.isBuffer(dataField) ? dataField : Buffer.alloc(0);
         const end = fieldAsBool(fields, 2);
+        if (this.deviceId && this.opts.registry) {
+          this.opts.registry.tickFrame(this.deviceId);
+        }
         this.voiceSession.onInboundAudio(data, end);
         return;
       }
@@ -628,6 +789,9 @@ export interface StartEsphomeServerOptions {
   /** Inject a different voice session factory — production omits and gets
    * the default OpenAI Realtime bridge; tests inject a mock. */
   voiceSessionFactory?: VoiceSessionFactory;
+  /** Optional registry. When omitted, startEsphomeServer creates one
+   * internally so handle.getKnownDevices() always returns something. */
+  registry?: EsphomeDeviceRegistry;
 }
 
 export interface EsphomeServerHandle {
@@ -637,10 +801,19 @@ export interface EsphomeServerHandle {
   /** Resolved port after bind — useful when port=0 in tests. */
   boundPort(): number;
   close(): Promise<void>;
+  /** Return the snapshot of known ESPHome client connections (HA installs)
+   * that have handshaken with this listener. PR5 — the HTTP control
+   * surface in server.ts surfaces this to ctrl-api. */
+  getKnownDevices(): KnownEsphomeDevice[];
+  /** Direct registry handle — production wires this into ctrl-api so the
+   * /test endpoint can observe outgoing-connection probes too. Tests use
+   * it to clear state between cases. */
+  registry: EsphomeDeviceRegistry;
 }
 
 export function startEsphomeServer(opts: StartEsphomeServerOptions): EsphomeServerHandle {
   const log = opts.log ?? defaultLog;
+  const registry = opts.registry ?? new EsphomeDeviceRegistry();
   const server = net.createServer((socket) => {
     socket.setNoDelay(true);
     new EsphomeConnection(socket, {
@@ -648,6 +821,7 @@ export function startEsphomeServer(opts: StartEsphomeServerOptions): EsphomeServ
       password: opts.password,
       log: opts.log,
       voiceSessionFactory: opts.voiceSessionFactory,
+      registry,
     });
   });
   server.on("error", (err) => log("server error", { err: err.message }));
@@ -673,6 +847,8 @@ export function startEsphomeServer(opts: StartEsphomeServerOptions): EsphomeServ
       new Promise<void>((resolve, reject) => {
         server.close((err) => (err ? reject(err) : resolve()));
       }),
+    getKnownDevices: () => registry.list(),
+    registry,
   };
 }
 

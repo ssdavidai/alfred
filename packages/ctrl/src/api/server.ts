@@ -55,6 +55,7 @@ import { registerTelegramRoutes } from "./routes/telegram.js";
 import { registerSlackRoutes } from "./routes/slack.js";
 import { registerSmsRoutes } from "./routes/sms.js";
 import { registerVoiceRoutes } from "./routes/voice.js";
+import { registerVoiceEsphomeRoutes } from "./routes/voice_esphome.js";
 import { registerOmiChannelRoutes } from "./routes/channels_omi.js";
 import { registerPaperclipChannelRoutes } from "./routes/channels_paperclip.js";
 import {
@@ -181,6 +182,12 @@ export function createApiServer(): http.Server {
   registerSlackRoutes();
   registerSmsRoutes();
   registerVoiceRoutes();
+  // /api/v1/channels/voice/esphome/* + /wyoming/status — #112 PR5. Live
+  // wiring of the ESPHome listener + Wyoming fallback for the dashboard's
+  // VoiceWakeWordsCard. Read routes proxy to voice-bridge over the docker
+  // network; POST /devices/test opens a real outbound ESPHome Native API
+  // probe against the satellite IP the operator pastes in.
+  registerVoiceEsphomeRoutes();
   registerOmiChannelRoutes();
   registerPaperclipChannelRoutes();
   // /api/v1/channels/recall/* + /api/v1/webhooks/recall — Recall.ai

@@ -22,7 +22,11 @@
 // the principal-facing payoff.
 
 import { useMemo, useState } from "react";
-import { useQuery, getEsphomeDevices } from "wasp/client/operations";
+import {
+  useQuery,
+  getEsphomeDevices,
+  testEsphomeDevice,
+} from "wasp/client/operations";
 import {
   WAKE_WORD_CATALOGUE,
   WAKE_WORD_UPSTREAM_URL,
@@ -31,6 +35,25 @@ import {
   formatEsphomeDeviceRow,
   type EsphomeDevice,
 } from "./voiceWakeWordsCardCore";
+
+/** Result shape returned by ctrl-api's POST /api/v1/channels/voice/
+ *  esphome/devices/test (PR5). Kept in sync with EsphomeProbeResult in
+ *  packages/ctrl/src/api/routes/voice_esphome.ts. */
+interface EsphomeProbeResultView {
+  ok: boolean;
+  info: {
+    reachable: boolean;
+    server_info: string;
+    esphome_version: string;
+    mac_address: string;
+    friendly_name: string;
+    voice_assistant_present: boolean;
+    codec: string;
+    recommendations: string[];
+    error: string | null;
+  };
+  hostname: string | null;
+}
 
 interface DevicesResponse {
   devices: EsphomeDevice[];
@@ -51,6 +74,36 @@ export function VoiceWakeWordsCard() {
 
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [manifestOpen, setManifestOpen] = useState(false);
+
+  // PR5 — operator-side probe state. One panel + one in-flight probe at
+  // a time, keyed by device row id ("hostname-ip"). We don't preserve
+  // results across reloads — the dashboard's not the place for a
+  // diagnosis history.
+  const [probeKey, setProbeKey] = useState<string | null>(null);
+  const [probeRunning, setProbeRunning] = useState(false);
+  const [probeResult, setProbeResult] =
+    useState<EsphomeProbeResultView | null>(null);
+  const [probeError, setProbeError] = useState<string | null>(null);
+
+  async function runProbe(device: EsphomeDevice): Promise<void> {
+    const key = `${device.hostname}-${device.ip}`;
+    setProbeKey(key);
+    setProbeRunning(true);
+    setProbeResult(null);
+    setProbeError(null);
+    try {
+      const result = (await testEsphomeDevice({
+        ip: device.ip,
+        hostname: device.hostname,
+      })) as EsphomeProbeResultView;
+      setProbeResult(result);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setProbeError(msg);
+    } finally {
+      setProbeRunning(false);
+    }
+  }
 
   const manifest = useMemo(
     () => selectedWakeWordsToManifest([...selected]),
@@ -144,16 +197,16 @@ export function VoiceWakeWordsCard() {
                 <th className="font-normal pb-2">Model</th>
                 <th className="font-normal pb-2">Wake word</th>
                 <th className="font-normal pb-2">Status</th>
+                <th className="font-normal pb-2" aria-label="Test"></th>
               </tr>
             </thead>
             <tbody>
               {devices.map((d) => {
                 const r = formatEsphomeDeviceRow(d);
+                const key = `${d.hostname}-${d.ip}`;
+                const isProbing = probeRunning && probeKey === key;
                 return (
-                  <tr
-                    key={`${d.hostname}-${d.ip}`}
-                    className="border-t border-rule"
-                  >
+                  <tr key={key} className="border-t border-rule">
                     <td className="py-2" style={{ color: "var(--ink)" }}>
                       {r.shortHost}
                     </td>
@@ -196,11 +249,116 @@ export function VoiceWakeWordsCard() {
                         </div>
                       )}
                     </td>
+                    <td className="py-2 text-right">
+                      <button
+                        onClick={() => runProbe(d)}
+                        disabled={probeRunning}
+                        className="btn-ghost"
+                        style={{ fontSize: "10px" }}
+                      >
+                        {isProbing ? "Probing…" : "Test"}
+                      </button>
+                    </td>
                   </tr>
                 );
               })}
             </tbody>
           </table>
+        )}
+
+        {/* PR5 — Probe-result side panel. Renders below the table so
+            the dashboard's vertical flow stays predictable. */}
+        {probeKey && (probeResult || probeError || probeRunning) && (
+          <div
+            className="mt-3 border border-rule p-3 space-y-2"
+            style={{ borderColor: "var(--brass)" }}
+          >
+            <div className="flex items-baseline justify-between">
+              <span
+                className="font-mono text-[10px] uppercase tracking-[0.22em]"
+                style={{ color: "var(--brass)" }}
+              >
+                Probe — {probeKey}
+              </span>
+              <button
+                onClick={() => {
+                  setProbeKey(null);
+                  setProbeResult(null);
+                  setProbeError(null);
+                }}
+                className="btn-ghost"
+                style={{ fontSize: "10px" }}
+              >
+                Close
+              </button>
+            </div>
+            {probeRunning && (
+              <p
+                className="font-body italic text-[12px]"
+                style={{ color: "var(--marginalia)" }}
+              >
+                Opening ESPHome Native API on :6053…
+              </p>
+            )}
+            {probeError && (
+              <p
+                className="font-body italic text-[12px]"
+                style={{ color: "var(--brass)" }}
+              >
+                Probe failed — {probeError}
+              </p>
+            )}
+            {probeResult && (
+              <div className="space-y-1">
+                <p
+                  className="font-body text-[12px]"
+                  style={{
+                    color: probeResult.ok ? "var(--ink)" : "var(--brass)",
+                  }}
+                >
+                  {probeResult.ok
+                    ? `OK — ESPHome ${probeResult.info.esphome_version} on ${probeResult.info.friendly_name || probeResult.hostname || "the satellite"}`
+                    : probeResult.info.error
+                      ? `Failed — ${probeResult.info.error}`
+                      : "Reachable but missing voice_assistant entity"}
+                </p>
+                <ul
+                  className="font-mono text-[10px] space-y-1"
+                  style={{ color: "var(--marginalia)" }}
+                >
+                  <li>reachable: {String(probeResult.info.reachable)}</li>
+                  {probeResult.info.mac_address && (
+                    <li>mac: {probeResult.info.mac_address}</li>
+                  )}
+                  {probeResult.info.codec && (
+                    <li>codec: {probeResult.info.codec}</li>
+                  )}
+                  <li>
+                    voice_assistant:{" "}
+                    {String(probeResult.info.voice_assistant_present)}
+                  </li>
+                </ul>
+                {probeResult.info.recommendations.length > 0 && (
+                  <div className="pt-1">
+                    <div
+                      className="font-mono text-[10px] uppercase tracking-[0.22em] pb-1"
+                      style={{ color: "var(--brass)" }}
+                    >
+                      Recommendations
+                    </div>
+                    <ul
+                      className="font-body italic text-[11px] space-y-1 list-disc list-inside"
+                      style={{ color: "var(--ink)" }}
+                    >
+                      {probeResult.info.recommendations.map((r, i) => (
+                        <li key={i}>{r}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         )}
       </div>
 

@@ -253,3 +253,110 @@ Failure to reach `:6053` from HA surfaces as
 `Failed to connect to esphome:6053 → connection refused` in HA's ESPHome
 integration logs — that's the topology test. Re-read the
 "Reachability" table above and confirm your topology is correct.
+
+### Operator-side smoke test (issue #112 PR5)
+
+From your laptop, while on the tailnet, you can probe a satellite IP
+without leaving the shell:
+
+```bash
+# Probe a specific satellite — opens an ESPHome Native API connection,
+# runs Hello → DeviceInfo → ListEntities, looks for `voice_assistant:`,
+# reports back with recommendations.
+curl -s -X POST \
+     -H "Authorization: Bearer $AAS_API_KEY" \
+     -H "Content-Type: application/json" \
+     -d '{"ip":"192.168.1.50","hostname":"voice-pe-living-room.local"}' \
+     https://home.alfred.black/api/v1/channels/voice/esphome/devices/test \
+| jq .
+
+# Output shape:
+# {
+#   "ok": true,
+#   "info": {
+#     "reachable": true,
+#     "esphome_version": "2024.10.3",
+#     "voice_assistant_present": true,
+#     "codec": "pcm16 mono @ 16 kHz (assumed from voice_assistant)",
+#     "recommendations": []
+#   },
+#   "hostname": "voice-pe-living-room.local"
+# }
+
+# List HA installs that have paired with voice-bridge so far:
+curl -s -H "Authorization: Bearer $AAS_API_KEY" \
+     https://home.alfred.black/api/v1/channels/voice/esphome/devices | jq .
+
+# Wyoming-fallback readiness — `enabled: true` iff WYOMING_ENABLED=1
+# was set when voice-bridge last booted:
+curl -s -H "Authorization: Bearer $AAS_API_KEY" \
+     https://home.alfred.black/api/v1/channels/voice/wyoming/status | jq .
+```
+
+The same routes power the `/channels` dashboard's **Voice satellites**
+card — the `[Test]` button next to each detected device calls the same
+probe and renders the recommendations inline.
+
+There's also a CLI helper for the bare ESPHome Native API probe (skips
+ctrl-api entirely — useful when you're SSH'd into the VM and don't have
+`$AAS_API_KEY` handy):
+
+```bash
+packages/voice-bridge/scripts/smoke-esphome-device.sh --ip 192.168.1.50
+```
+
+---
+
+## Alternative — the Wyoming Protocol route
+
+The default path above uses the **ESPHome Native API** (`:6053`). Issue
+#112 PR5 adds a parallel **Wyoming Protocol** listener on `:10300` that
+HA's `wyoming` integration calls into. The voice-bridge supports both —
+they terminate at the same brain — so the operator picks whichever
+matches their HA install.
+
+When to pick which:
+
+| Path | Pros | Cons |
+| --- | --- | --- |
+| **ESPHome Native API** (default) | Shorter audio path (~30 ms latency saving), wake word stays on-device for free, no extra HA-side config. | Requires HA to reach `:6053` over the LAN OR the tailnet. HA-OS / HA-Cloud installs that can't reach :6053 hit a wall. |
+| **Wyoming Protocol** (`:10300`, opt-in) | Works wherever HA's `wyoming` integration works — including HA-Cloud / HA-OS where the ESPHome Native API path is closed. Speaks the same JSONL grammar as Whisper / Piper, so HA treats us like any other satellite worker. | One extra serialisation round-trip per turn; HA owns the wake/STT/intent/TTS pipeline so the wake word + STT happen HA-side first. |
+
+Enable on a tenant:
+
+```bash
+# /opt/alfred/.env
+WYOMING_ENABLED=1
+```
+
+Then restart `voice-bridge`:
+
+```bash
+docker compose --profile voice restart voice-bridge
+```
+
+In HA: `Settings → Add-ons / Integrations → Wyoming Protocol → Add`.
+Use the same hostname you'd point ESPHome at (typically the tailnet name
+or `voice.<your-domain>` if you've set up the Caddy reverse-proxy). HA
+will probe the listener with a Wyoming `describe` event; our reply
+advertises a `satellite` service at 16 kHz pcm16 mono on both mic and
+sound directions. HA wires us as the satellite + the conversation agent
+in one step.
+
+The wake-word selection card on `/channels` still applies — the
+microWakeWord entries run on-device (whether you came in via ESPHome
+Native or via Wyoming through a Pi running `wyoming-satellite`); the
+openWakeWord entries run on the voice-bridge regardless of transport.
+
+### Wake-word handling differences
+
+- **ESPHome Native path**: wake stays on the ESP32-S3, voice-bridge
+  receives a `VoiceAssistantRequest(start=true, wake_word_phrase=...)`
+  with the phrase already detected. We don't run wake detection at all.
+- **Wyoming path**: HA's Assist pipeline runs wake detection first
+  (either via its `openwakeword` add-on or per-satellite firmware), then
+  forwards post-wake audio to us as a `audio-start` → `audio-chunk*` →
+  `audio-stop` stream. We never see the wake word itself.
+
+Either way the principal's experience is identical — say the wake word,
+ask a question, get a Received-Pronunciation butler reply.

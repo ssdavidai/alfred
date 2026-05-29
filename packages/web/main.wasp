@@ -1032,6 +1032,23 @@ query getEsphomeDevices {
   entities: []
 }
 
+// #112 PR5 — operator-side probe of a satellite IP. Opens an outbound
+// ESPHome Native API connection from the tenant VM, runs Hello →
+// DeviceInfo → ListEntities, looks for a voice_assistant entity,
+// reports back with structured recommendations the card renders inline.
+action testEsphomeDevice {
+  fn: import { testEsphomeDevice } from "@src/dashboard/operations",
+  entities: []
+}
+
+// #112 PR5 — Wyoming-fallback readiness. Returns enabled / port /
+// last_handshake_at — the card renders a tile distinguishing
+// "Wyoming on" from "Wyoming off (the default)".
+query getWyomingStatus {
+  fn: import { getWyomingStatus } from "@src/dashboard/operations",
+  entities: []
+}
+
 // Lane I (Home Assistant, #110 PR3 — 2026-05-29) — operator deep-integrates
 // HA on /channels. Four ops backed by ctrl-api /api/v1/channels/ha/*
 // (PR1 #133 backfill landed the routes). State derivation lives in
