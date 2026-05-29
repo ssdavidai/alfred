@@ -57,6 +57,10 @@ import { registerSmsRoutes } from "./routes/sms.js";
 import { registerVoiceRoutes } from "./routes/voice.js";
 import { registerOmiChannelRoutes } from "./routes/channels_omi.js";
 import { registerPaperclipChannelRoutes } from "./routes/channels_paperclip.js";
+import {
+  registerChannelsRecallRoutes,
+  registerRecallWebhookRoute,
+} from "./routes/channels_recall.js";
 import { registerHaChannelRoutes } from "./routes/channels_ha.js";
 import { registerChannelTokenRoutes } from "./routes/channel_tokens.js";
 import { registerComposioWebhookRoutes } from "./routes/composioWebhook.js";
@@ -177,6 +181,12 @@ export function createApiServer(): http.Server {
   registerVoiceRoutes();
   registerOmiChannelRoutes();
   registerPaperclipChannelRoutes();
+  // /api/v1/channels/recall/* + /api/v1/webhooks/recall — Recall.ai
+  // meeting-bot channel (#113 PR2). Card-driven config + inbound
+  // Svix-signed webhook. The card UI lands in PR3a/3b; the alfred-learn
+  // dispatcher in PR4; the voice/webpage path in PR5/6.
+  registerChannelsRecallRoutes();
+  registerRecallWebhookRoute();
   // /api/v1/channels/ha/* — Home Assistant conversation agent (#111). PR1
   // ships the non-streaming /turn route; #110 PR1 extends with discovery
   // routes; PR3+ extends with tool partitioning + streaming.
@@ -257,7 +267,13 @@ export function createApiServer(): http.Server {
         // `x-composio-signature`). Composio cannot send a Bearer header so
         // the global auth gate must not pre-empt the HMAC check. See
         // routes/composioWebhook.ts for the full auth model.
-        pathname === "/api/v1/composio/webhook";
+        pathname === "/api/v1/composio/webhook" ||
+        // Recall.ai webhook (#113 PR2). Svix-signed
+        // (svix-id / svix-timestamp / svix-signature over the raw body
+        // keyed on RECALL_WEBHOOK_SECRET). Same posture as the Composio
+        // entry above — the HMAC validator lives in
+        // routes/channels_recall.ts and needs the exact bytes.
+        pathname === "/api/v1/webhooks/recall";
       if (!isPublic) {
         // Pass method+pathname so the scoped-token path can check the
         // route allowlist (see auth.ts VOICE_BRIDGE_ALLOWLIST). The master
@@ -291,7 +307,10 @@ export function createApiServer(): http.Server {
         pathname === "/api/v1/webhooks/plane/steward" ||
         // Composio's Standard-Webhooks scheme signs the raw body, so the
         // handler must see the exact bytes — see routes/composioWebhook.ts.
-        pathname === "/api/v1/composio/webhook";
+        pathname === "/api/v1/composio/webhook" ||
+        // Recall.ai's Svix-signed webhook also needs the raw bytes for
+        // HMAC verification (see routes/channels_recall.ts).
+        pathname === "/api/v1/webhooks/recall";
       const query = new URLSearchParams(qIdx >= 0 ? url.slice(qIdx + 1) : "");
 
       const matched = matchRoute(method, pathname);

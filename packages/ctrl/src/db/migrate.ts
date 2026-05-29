@@ -20,6 +20,7 @@ import m0003 from "./migrations/0003_tailscale_connection.sql";
 import m0004 from "./migrations/0004_channel_tokens.sql";
 import m0005 from "./migrations/0005_ha_channel.sql";
 import m0006 from "./migrations/0006_files_table.sql";
+import m0007 from "./migrations/0007_recall.sql";
 
 interface Migration {
   version: number;
@@ -35,6 +36,7 @@ const MIGRATIONS: Migration[] = [
   { version: 4, name: "channel_tokens",       sql: m0004 },
   { version: 5, name: "ha_channel",           sql: m0005 },
   { version: 6, name: "files_table",          sql: m0006 },
+  { version: 7, name: "recall",               sql: m0007 },
 ];
 
 /**
