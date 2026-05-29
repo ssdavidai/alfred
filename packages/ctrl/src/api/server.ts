@@ -67,6 +67,7 @@ import { registerComposioWebhookRoutes } from "./routes/composioWebhook.js";
 import { registerAlfredJournalRoutes } from "./routes/alfredJournal.js";
 import { registerAlfredDeliverRoutes } from "./routes/alfredDeliver.js";
 import { registerFilesRoutes } from "./routes/files.js";
+import { registerChannelsTailscaleRoutes } from "./routes/channels_tailscale.js";
 
 export interface RouteParams {
   [key: string]: string;
@@ -207,6 +208,11 @@ export function createApiServer(): http.Server {
   // PR 3 the dashboard, PR 4 content extraction. See
   // docs/specs/issue-114-local-file-storage.md.
   registerFilesRoutes();
+  // /api/v1/channels/tailscale/* — the six lifecycle routes that drive
+  // the off-by-default tailscale sidecar shipped in PR 1 of issue #109.
+  // PR 3 wires the /connections web card; PR 4 the Caddy + Serve story.
+  // See docs/specs/issue-109-tailscale-via-ui.md.
+  registerChannelsTailscaleRoutes();
 
   const server = http.createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const start = Date.now();

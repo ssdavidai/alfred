@@ -116,6 +116,12 @@ const VOICE_BRIDGE_ALLOWLIST: ReadonlySet<string> = new Set([
   "GET:/api/v1/learning/instincts",
   "GET:/api/v1/learning/reflections",
   "GET:/api/v1/learning/sessions",
+  // Tailscale channel — Sir asks "is Tailscale on right now?" via voice.
+  // Read-only surface (status + peer list); connect/disconnect intentionally
+  // omitted (writes go through MCP per the voice-bridge contract). Added
+  // by issue #109 PR 2 alongside the routes themselves.
+  "GET:/api/v1/channels/tailscale/status",
+  "GET:/api/v1/channels/tailscale/peers",
 ]);
 
 /**
