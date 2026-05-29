@@ -999,6 +999,11 @@ export function registerHaChannelRoutes(): void {
   // server.ts wiring AND callable from a single registerHaChannelRoutes()
   // entry point.
   registerHaWriteRoutes();
+
+  // #115 PR3 — automations / scenes / scripts CRUD. REST-only; ships
+  // independent of #115 PR1 (the WS client). See the SPLICE block at the
+  // bottom of this file marked `BEGIN #115 PR3`.
+  registerHaPr3Routes();
 }
 
 /**
@@ -2843,3 +2848,1118 @@ export function _resetHaGapsForTests(): void {
     // table may not exist; tests own migrations
   }
 }
+
+// ═════════════════════════════════════════════════════════════════════════
+// === BEGIN #115 PR3 — automations / scenes / scripts CRUD ===
+// ═════════════════════════════════════════════════════════════════════════
+//
+// REST-only. Closes the spec §4 "Scenes / Scripts / Automations" row by
+// wiring HA's long-standing `/api/config/{automation,scene,script}/config`
+// endpoints AND the `/api/states/<domain>.*` list helper. Independent of
+// #115 PR1's WS client — every route here goes through fetch().
+//
+// PR1 (parallel) will introduce two helpers we defensively reach for:
+//   * `requireDecisionRef`  — middleware that fishes `decision_ref` out of
+//     the body and 400s if it's missing/malformed.
+//   * `recordHaWriteToDaybook` — drops a daybook vault record per Sir's
+//     locked YES default (snapshots / daybook / gates).
+//
+// Both are wrapped in `tryRequireDecisionRef` / `tryRecordDaybook` below
+// so they no-op cleanly if PR1 hasn't merged yet. The runtime semantics
+// stay correct either way: every PR3 write persists a `ha_run` row (the
+// existing audit ledger), and DELETE-automation enforces decision_ref via
+// the same `assertDecisionRef` parser as PR4's call_service.
+//
+// SPLICE BLOCK — keep everything between the BEGIN / END markers
+// contiguous so a parallel PR (PR1) that touches this file rebases
+// mechanically. No file-wide rename or shared-helper edits inside this
+// block.
+
+// Slug shape for automation/scene/script ids that come back from HA. HA
+// itself accepts more characters, but the practical surface for ids we
+// see in the wild is `[a-zA-Z0-9_-]`. Keep this generous enough that we
+// don't reject valid ids, strict enough that path traversal can't
+// sneak through.
+const HA_OBJECT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
+
+function assertHaObjectId(raw: string, kind: string): string {
+  if (!HA_OBJECT_ID_RE.test(raw)) {
+    throw new ValidationError(
+      `${kind} id must be 1..128 chars of [A-Za-z0-9_.-], starting with [A-Za-z0-9]`,
+    );
+  }
+  return raw;
+}
+
+interface HaRestCallResult {
+  ok: boolean;
+  status: number;
+  data: unknown;
+  detail: string;
+}
+
+/** Generic HA REST proxy — used for /api/config/* CRUD + /api/states/* reads.
+ *
+ *  HA's /api/config GETs return JSON; POST/DELETE on the same path returns
+ *  `{result: "ok"}` JSON; /api/states/* returns JSON. We parse text as
+ *  JSON best-effort and fall back to the raw string. */
+async function callHaRest(args: {
+  haUrl: string;
+  llat: string;
+  method: "GET" | "POST" | "DELETE";
+  path: string;
+  body?: unknown;
+}): Promise<HaRestCallResult> {
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${args.llat}`,
+  };
+  let reqBody: string | undefined;
+  if (args.body !== undefined && args.method !== "GET") {
+    headers["Content-Type"] = "application/json";
+    reqBody = JSON.stringify(args.body);
+  }
+  let resp: Response;
+  try {
+    resp = await fetch(`${args.haUrl}${args.path}`, {
+      method: args.method,
+      headers,
+      body: reqBody,
+      signal: AbortSignal.timeout(HA_WRITE_TIMEOUT_MS),
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      status: 502,
+      data: null,
+      detail: `HA unreachable: ${msg}`,
+    };
+  }
+  let parsed: unknown = null;
+  const text = await resp.text().catch(() => "");
+  if (text) {
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      parsed = text;
+    }
+  }
+  if (!resp.ok) {
+    let detail = `HA REST ${args.method} ${args.path} returned HTTP ${resp.status}`;
+    if (typeof parsed === "string" && parsed.length > 0) {
+      detail = `${detail}: ${parsed.slice(0, 500)}`;
+    } else if (parsed && typeof parsed === "object") {
+      const m =
+        (parsed as Record<string, unknown>).message ??
+        (parsed as Record<string, unknown>).error;
+      if (typeof m === "string") detail = `${detail}: ${m.slice(0, 500)}`;
+    }
+    return { ok: false, status: resp.status, data: parsed, detail };
+  }
+  return { ok: true, status: resp.status, data: parsed, detail: "" };
+}
+
+/** Gate helper — every PR3 route needs LLAT + ha_url + a "is HA connected?"
+ *  check. Returns the loaded credentials on success; throws ApiError if
+ *  the connection isn't ready.
+ *
+ *  Mirrors the body of #110 PR4's call_service handler (readHaLlat + the
+ *  ha_connection row read) so the failure modes line up with the rest of
+ *  the write surface. */
+async function loadHaCredentials(): Promise<{
+  haUrl: string;
+  llat: string;
+}> {
+  const llat = await readHaLlat(); // throws HA_NOT_CONNECTED / VAULT_* if unset
+  const row = getHaConnectionRow();
+  if (!row || row.state !== "connected") {
+    // readHaLlat() already covers this, but assert here too — defence in
+    // depth in case the ha_connection row was mutated between fetches.
+    throw new ApiError(
+      409,
+      "HA_NOT_CONNECTED",
+      "Home Assistant is not connected. POST /api/v1/channels/ha/connect first.",
+    );
+  }
+  return { haUrl: row.ha_url, llat };
+}
+
+/** PR1-aware decision_ref enforcement. If PR1's `requireDecisionRef`
+ *  middleware lands first, swap this to call it; for now it defers to the
+ *  same `assertDecisionRef` parser the PR4 write surface uses.
+ *
+ *  TODO(post-PR1): replace direct `assertDecisionRef` with the middleware
+ *  once it's available on the route context. */
+function tryRequireDecisionRef(body: unknown): string {
+  const raw =
+    body && typeof body === "object"
+      ? (body as Record<string, unknown>).decision_ref
+      : undefined;
+  return assertDecisionRef(raw);
+}
+
+/** PR1-aware daybook recorder. PR1 will introduce a `recordHaWriteToDaybook`
+ *  helper that drops a daybook vault record per the locked YES default.
+ *  Today this is a no-op — the audit shape is fully covered by `ha_run`,
+ *  which every PR3 write persists. PR1 will swap this for the vault writer
+ *  without changing PR3 call sites.
+ *
+ *  TODO(post-PR1): replace with the daybook vault writer. */
+async function tryRecordDaybook(_args: {
+  kind: string;
+  ha_id: string | null;
+  decision_ref: string | null;
+  outcome: "ok" | "error";
+  detail: string | null;
+}): Promise<void> {
+  // intentional no-op pre-PR1; ha_run row carries the audit shape today.
+}
+
+// ── string / sequence parsers ──────────────────────────────────────────
+
+function parseStringField(
+  raw: unknown,
+  field: string,
+  required: boolean,
+): string | undefined {
+  if (raw === undefined || raw === null) {
+    if (required) {
+      throw new ValidationError(`${field} is required`);
+    }
+    return undefined;
+  }
+  if (typeof raw !== "string" || raw.length === 0) {
+    throw new ValidationError(`${field} must be a non-empty string`);
+  }
+  return raw;
+}
+
+function parseTriggerOrAction(
+  raw: unknown,
+  field: string,
+  required: boolean,
+): unknown {
+  if (raw === undefined || raw === null) {
+    if (required) {
+      throw new ValidationError(`${field} is required`);
+    }
+    return undefined;
+  }
+  if (Array.isArray(raw)) return raw;
+  if (typeof raw === "object") return raw;
+  throw new ValidationError(`${field} must be an object or array`);
+}
+
+// ── automation parsing ─────────────────────────────────────────────────
+
+interface AutomationCreateBody {
+  alias: string;
+  trigger: unknown;
+  condition?: unknown;
+  action: unknown;
+  description?: string;
+  mode?: string;
+  initial_state?: string;
+}
+
+function parseAutomationCreateBody(raw: unknown): AutomationCreateBody {
+  if (typeof raw !== "object" || raw === null) {
+    throw new ValidationError("body must be a JSON object");
+  }
+  const b = raw as Record<string, unknown>;
+  return {
+    alias: parseStringField(b.alias, "alias", true)!,
+    trigger: parseTriggerOrAction(b.trigger, "trigger", true),
+    condition: parseTriggerOrAction(b.condition, "condition", false),
+    action: parseTriggerOrAction(b.action, "action", true),
+    description: parseStringField(b.description, "description", false),
+    mode: parseStringField(b.mode, "mode", false),
+    initial_state: parseStringField(b.initial_state, "initial_state", false),
+  };
+}
+
+interface AutomationUpdateBody {
+  alias?: string;
+  trigger?: unknown;
+  condition?: unknown;
+  action?: unknown;
+  description?: string;
+  mode?: string;
+}
+
+function parseAutomationUpdateBody(raw: unknown): AutomationUpdateBody {
+  if (typeof raw !== "object" || raw === null) {
+    throw new ValidationError("body must be a JSON object");
+  }
+  const b = raw as Record<string, unknown>;
+  return {
+    alias: parseStringField(b.alias, "alias", false),
+    trigger: parseTriggerOrAction(b.trigger, "trigger", false),
+    condition: parseTriggerOrAction(b.condition, "condition", false),
+    action: parseTriggerOrAction(b.action, "action", false),
+    description: parseStringField(b.description, "description", false),
+    mode: parseStringField(b.mode, "mode", false),
+  };
+}
+
+function automationCreatePayload(b: AutomationCreateBody): Record<string, unknown> {
+  const out: Record<string, unknown> = {
+    alias: b.alias,
+    trigger: b.trigger,
+    action: b.action,
+  };
+  if (b.condition !== undefined) out.condition = b.condition;
+  if (b.description !== undefined) out.description = b.description;
+  if (b.mode !== undefined) out.mode = b.mode;
+  if (b.initial_state !== undefined) out.initial_state = b.initial_state;
+  return out;
+}
+
+function automationUpdatePayload(b: AutomationUpdateBody): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (b.alias !== undefined) out.alias = b.alias;
+  if (b.trigger !== undefined) out.trigger = b.trigger;
+  if (b.condition !== undefined) out.condition = b.condition;
+  if (b.action !== undefined) out.action = b.action;
+  if (b.description !== undefined) out.description = b.description;
+  if (b.mode !== undefined) out.mode = b.mode;
+  return out;
+}
+
+// ── scene parsing ──────────────────────────────────────────────────────
+
+interface SceneCreateBody {
+  name: string;
+  entities: Record<string, Record<string, unknown>>;
+  icon?: string;
+}
+
+function parseSceneEntitiesMap(
+  raw: unknown,
+  field: string,
+  required: boolean,
+): Record<string, Record<string, unknown>> | undefined {
+  if (raw === undefined || raw === null) {
+    if (required) throw new ValidationError(`${field} is required`);
+    return undefined;
+  }
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    throw new ValidationError(`${field} must be a JSON object`);
+  }
+  const out: Record<string, Record<string, unknown>> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof v !== "object" || v === null || Array.isArray(v)) {
+      throw new ValidationError(
+        `${field}.${k} must be a JSON object of {state, ...attributes}`,
+      );
+    }
+    out[k] = v as Record<string, unknown>;
+  }
+  return out;
+}
+
+function parseSceneCreateBody(raw: unknown): SceneCreateBody {
+  if (typeof raw !== "object" || raw === null) {
+    throw new ValidationError("body must be a JSON object");
+  }
+  const b = raw as Record<string, unknown>;
+  return {
+    name: parseStringField(b.name, "name", true)!,
+    entities: parseSceneEntitiesMap(b.entities, "entities", true)!,
+    icon: parseStringField(b.icon, "icon", false),
+  };
+}
+
+interface SceneUpdateBody {
+  name?: string;
+  entities?: Record<string, Record<string, unknown>>;
+  icon?: string;
+}
+
+function parseSceneUpdateBody(raw: unknown): SceneUpdateBody {
+  if (typeof raw !== "object" || raw === null) {
+    throw new ValidationError("body must be a JSON object");
+  }
+  const b = raw as Record<string, unknown>;
+  return {
+    name: parseStringField(b.name, "name", false),
+    entities: parseSceneEntitiesMap(b.entities, "entities", false),
+    icon: parseStringField(b.icon, "icon", false),
+  };
+}
+
+function sceneCreatePayload(b: SceneCreateBody): Record<string, unknown> {
+  const out: Record<string, unknown> = { name: b.name, entities: b.entities };
+  if (b.icon !== undefined) out.icon = b.icon;
+  return out;
+}
+
+function sceneUpdatePayload(b: SceneUpdateBody): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (b.name !== undefined) out.name = b.name;
+  if (b.entities !== undefined) out.entities = b.entities;
+  if (b.icon !== undefined) out.icon = b.icon;
+  return out;
+}
+
+// ── script parsing ─────────────────────────────────────────────────────
+
+interface ScriptCreateBody {
+  alias: string;
+  sequence: unknown[];
+  description?: string;
+  mode?: string;
+  icon?: string;
+}
+
+function parseScriptSequence(
+  raw: unknown,
+  field: string,
+  required: boolean,
+): unknown[] | undefined {
+  if (raw === undefined || raw === null) {
+    if (required) throw new ValidationError(`${field} is required`);
+    return undefined;
+  }
+  if (!Array.isArray(raw)) {
+    throw new ValidationError(`${field} must be a JSON array`);
+  }
+  return raw;
+}
+
+function parseScriptCreateBody(raw: unknown): ScriptCreateBody {
+  if (typeof raw !== "object" || raw === null) {
+    throw new ValidationError("body must be a JSON object");
+  }
+  const b = raw as Record<string, unknown>;
+  return {
+    alias: parseStringField(b.alias, "alias", true)!,
+    sequence: parseScriptSequence(b.sequence, "sequence", true)!,
+    description: parseStringField(b.description, "description", false),
+    mode: parseStringField(b.mode, "mode", false),
+    icon: parseStringField(b.icon, "icon", false),
+  };
+}
+
+interface ScriptUpdateBody {
+  alias?: string;
+  sequence?: unknown[];
+  description?: string;
+  mode?: string;
+  icon?: string;
+}
+
+function parseScriptUpdateBody(raw: unknown): ScriptUpdateBody {
+  if (typeof raw !== "object" || raw === null) {
+    throw new ValidationError("body must be a JSON object");
+  }
+  const b = raw as Record<string, unknown>;
+  return {
+    alias: parseStringField(b.alias, "alias", false),
+    sequence: parseScriptSequence(b.sequence, "sequence", false),
+    description: parseStringField(b.description, "description", false),
+    mode: parseStringField(b.mode, "mode", false),
+    icon: parseStringField(b.icon, "icon", false),
+  };
+}
+
+function scriptCreatePayload(b: ScriptCreateBody): Record<string, unknown> {
+  const out: Record<string, unknown> = { alias: b.alias, sequence: b.sequence };
+  if (b.description !== undefined) out.description = b.description;
+  if (b.mode !== undefined) out.mode = b.mode;
+  if (b.icon !== undefined) out.icon = b.icon;
+  return out;
+}
+
+function scriptUpdatePayload(b: ScriptUpdateBody): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (b.alias !== undefined) out.alias = b.alias;
+  if (b.sequence !== undefined) out.sequence = b.sequence;
+  if (b.description !== undefined) out.description = b.description;
+  if (b.mode !== undefined) out.mode = b.mode;
+  if (b.icon !== undefined) out.icon = b.icon;
+  return out;
+}
+
+// ── states list helpers ────────────────────────────────────────────────
+
+/** Filter HA's `/api/states` payload down to one domain. HA's /api/states
+ *  returns a flat list; the principal-friendly /scenes and /scripts list
+ *  endpoints want only the matching `<domain>.*` entities. */
+function filterStatesByDomain(states: unknown, domain: string): unknown[] {
+  if (!Array.isArray(states)) return [];
+  const prefix = `${domain}.`;
+  return states.filter((s) => {
+    if (!s || typeof s !== "object") return false;
+    const eid = (s as Record<string, unknown>).entity_id;
+    return typeof eid === "string" && eid.startsWith(prefix);
+  });
+}
+
+// ── slug derived from an HA alias/name ─────────────────────────────────
+//
+// HA itself slugifies aliases server-side, but the REST POST endpoints
+// for /api/config/<kind>/config/<id> require us to PICK an id. We mint
+// one with the same algorithm HA uses (lowercase, non-word→underscore)
+// so the entity_id Sir sees matches what HA's UI would have generated.
+function slugify(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[^a-z0-9_]+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_|_$/g, "")
+    .slice(0, 128);
+}
+
+// ── route registration ─────────────────────────────────────────────────
+
+export function registerHaPr3Routes(): void {
+  // ──────────────────────────────────────────────────────────────────────
+  // AUTOMATIONS
+  // ──────────────────────────────────────────────────────────────────────
+
+  // GET /api/v1/channels/ha/automations — list all automation configs.
+  addRoute("GET", "/api/v1/channels/ha/automations", async ({ res }) => {
+    const { haUrl, llat } = await loadHaCredentials();
+    const r = await callHaRest({
+      haUrl,
+      llat,
+      method: "GET",
+      path: "/api/config/automation/config",
+    });
+    if (!r.ok) {
+      throw new ApiError(
+        r.status >= 400 && r.status < 600 ? r.status : 502,
+        "HA_UPSTREAM_ERROR",
+        r.detail,
+      );
+    }
+    sendJson(res, 200, { ok: true, data: r.data });
+  });
+
+  // GET /api/v1/channels/ha/automations/:id — fetch one automation.
+  addRoute(
+    "GET",
+    "/api/v1/channels/ha/automations/:id",
+    async ({ res, params }) => {
+      const id = assertHaObjectId(params.id, "automation");
+      const { haUrl, llat } = await loadHaCredentials();
+      const r = await callHaRest({
+        haUrl,
+        llat,
+        method: "GET",
+        path: `/api/config/automation/config/${encodeURIComponent(id)}`,
+      });
+      if (!r.ok) {
+        if (r.status === 404) {
+          throw new NotFoundError(`automation ${id} not found in HA`);
+        }
+        throw new ApiError(
+          r.status >= 400 && r.status < 600 ? r.status : 502,
+          "HA_UPSTREAM_ERROR",
+          r.detail,
+        );
+      }
+      sendJson(res, 200, { ok: true, automation_id: id, data: r.data });
+    },
+  );
+
+  // POST /api/v1/channels/ha/automations — create a new automation.
+  // No gate (create is reversible). The new automation_id is minted from
+  // the alias slug; if the slug collides with an existing automation, HA
+  // will overwrite the existing config — caller's responsibility (or
+  // ha__list_automations_full first).
+  addRoute("POST", "/api/v1/channels/ha/automations", async ({ res, body }) => {
+    const parsed = parseAutomationCreateBody(body);
+    const { haUrl, llat } = await loadHaCredentials();
+    const automationId = slugify(parsed.alias) || `automation_${Date.now()}`;
+    const payload = automationCreatePayload(parsed);
+    const r = await callHaRest({
+      haUrl,
+      llat,
+      method: "POST",
+      path: `/api/config/automation/config/${encodeURIComponent(automationId)}`,
+      body: payload,
+    });
+    if (!r.ok) {
+      insertHaRun({
+        kind: "automation_create",
+        domain: "automation",
+        service: null,
+        entity_id: `automation.${automationId}`,
+        decision_ref: "",
+        payload,
+        outcome: "error",
+        ha_response: r.data,
+        error: r.detail,
+      });
+      throw new ApiError(
+        r.status >= 400 && r.status < 600 ? r.status : 502,
+        "HA_UPSTREAM_ERROR",
+        r.detail,
+      );
+    }
+    const run = insertHaRun({
+      kind: "automation_create",
+      domain: "automation",
+      service: null,
+      entity_id: `automation.${automationId}`,
+      decision_ref: "",
+      payload,
+      outcome: "ok",
+      ha_response: r.data,
+      error: null,
+    });
+    await tryRecordDaybook({
+      kind: "automation_create",
+      ha_id: automationId,
+      decision_ref: null,
+      outcome: "ok",
+      detail: null,
+    });
+    sendJson(res, 200, {
+      ok: true,
+      automation_id: automationId,
+      run_id: run.id,
+      ha_response: r.data,
+    });
+  });
+
+  // PUT /api/v1/channels/ha/automations/:id — idempotent upsert. HA's
+  // REST POST and PUT both write to the same /config/<id> endpoint, so
+  // this is a thin alias that lets callers signal intent.
+  addRoute(
+    "PUT",
+    "/api/v1/channels/ha/automations/:id",
+    async ({ res, params, body }) => {
+      const id = assertHaObjectId(params.id, "automation");
+      const parsed = parseAutomationUpdateBody(body);
+      const { haUrl, llat } = await loadHaCredentials();
+      const payload = automationUpdatePayload(parsed);
+      const r = await callHaRest({
+        haUrl,
+        llat,
+        method: "POST",
+        path: `/api/config/automation/config/${encodeURIComponent(id)}`,
+        body: payload,
+      });
+      if (!r.ok) {
+        insertHaRun({
+          kind: "automation_update",
+          domain: "automation",
+          service: null,
+          entity_id: `automation.${id}`,
+          decision_ref: "",
+          payload,
+          outcome: "error",
+          ha_response: r.data,
+          error: r.detail,
+        });
+        throw new ApiError(
+          r.status >= 400 && r.status < 600 ? r.status : 502,
+          "HA_UPSTREAM_ERROR",
+          r.detail,
+        );
+      }
+      const run = insertHaRun({
+        kind: "automation_update",
+        domain: "automation",
+        service: null,
+        entity_id: `automation.${id}`,
+        decision_ref: "",
+        payload,
+        outcome: "ok",
+        ha_response: r.data,
+        error: null,
+      });
+      await tryRecordDaybook({
+        kind: "automation_update",
+        ha_id: id,
+        decision_ref: null,
+        outcome: "ok",
+        detail: null,
+      });
+      sendJson(res, 200, {
+        ok: true,
+        automation_id: id,
+        run_id: run.id,
+        ha_response: r.data,
+      });
+    },
+  );
+
+  // DELETE /api/v1/channels/ha/automations/:id — GATED.
+  //
+  // Per spec §4 gate matrix (locked YES on 2026-05-29): irreversible
+  // deletes require a `decision_ref`. We assert it via
+  // `tryRequireDecisionRef` (which falls back to `assertDecisionRef`
+  // until PR1's middleware lands). The audit ledger (`ha_run`) carries
+  // the decision_ref alongside the kind/entity_id so the post-mortem of
+  // a stray delete is a single SELECT.
+  addRoute(
+    "DELETE",
+    "/api/v1/channels/ha/automations/:id",
+    async ({ res, params, body }) => {
+      const id = assertHaObjectId(params.id, "automation");
+      const decision_ref = tryRequireDecisionRef(body);
+      const { haUrl, llat } = await loadHaCredentials();
+      const r = await callHaRest({
+        haUrl,
+        llat,
+        method: "DELETE",
+        path: `/api/config/automation/config/${encodeURIComponent(id)}`,
+      });
+      if (!r.ok) {
+        insertHaRun({
+          kind: "automation_delete",
+          domain: "automation",
+          service: null,
+          entity_id: `automation.${id}`,
+          decision_ref,
+          payload: null,
+          outcome: "error",
+          ha_response: r.data,
+          error: r.detail,
+        });
+        if (r.status === 404) {
+          throw new NotFoundError(`automation ${id} not found in HA`);
+        }
+        throw new ApiError(
+          r.status >= 400 && r.status < 600 ? r.status : 502,
+          "HA_UPSTREAM_ERROR",
+          r.detail,
+        );
+      }
+      const run = insertHaRun({
+        kind: "automation_delete",
+        domain: "automation",
+        service: null,
+        entity_id: `automation.${id}`,
+        decision_ref,
+        payload: null,
+        outcome: "ok",
+        ha_response: r.data,
+        error: null,
+      });
+      await tryRecordDaybook({
+        kind: "automation_delete",
+        ha_id: id,
+        decision_ref,
+        outcome: "ok",
+        detail: null,
+      });
+      sendJson(res, 200, {
+        ok: true,
+        automation_id: id,
+        decision_ref,
+        run_id: run.id,
+        ha_response: r.data,
+      });
+    },
+  );
+
+  // ──────────────────────────────────────────────────────────────────────
+  // SCENES
+  // ──────────────────────────────────────────────────────────────────────
+
+  // GET /api/v1/channels/ha/scenes — list every scene.* state.
+  addRoute("GET", "/api/v1/channels/ha/scenes", async ({ res }) => {
+    const { haUrl, llat } = await loadHaCredentials();
+    const r = await callHaRest({
+      haUrl,
+      llat,
+      method: "GET",
+      path: "/api/states",
+    });
+    if (!r.ok) {
+      throw new ApiError(
+        r.status >= 400 && r.status < 600 ? r.status : 502,
+        "HA_UPSTREAM_ERROR",
+        r.detail,
+      );
+    }
+    sendJson(res, 200, { ok: true, data: filterStatesByDomain(r.data, "scene") });
+  });
+
+  // GET /api/v1/channels/ha/scenes/:id — fetch one scene config.
+  addRoute("GET", "/api/v1/channels/ha/scenes/:id", async ({ res, params }) => {
+    const id = assertHaObjectId(params.id, "scene");
+    const { haUrl, llat } = await loadHaCredentials();
+    const r = await callHaRest({
+      haUrl,
+      llat,
+      method: "GET",
+      path: `/api/config/scene/config/${encodeURIComponent(id)}`,
+    });
+    if (!r.ok) {
+      if (r.status === 404) {
+        throw new NotFoundError(`scene ${id} not found in HA`);
+      }
+      throw new ApiError(
+        r.status >= 400 && r.status < 600 ? r.status : 502,
+        "HA_UPSTREAM_ERROR",
+        r.detail,
+      );
+    }
+    sendJson(res, 200, { ok: true, scene_id: id, data: r.data });
+  });
+
+  addRoute("POST", "/api/v1/channels/ha/scenes", async ({ res, body }) => {
+    const parsed = parseSceneCreateBody(body);
+    const { haUrl, llat } = await loadHaCredentials();
+    const sceneId = slugify(parsed.name) || `scene_${Date.now()}`;
+    const payload = sceneCreatePayload(parsed);
+    const r = await callHaRest({
+      haUrl,
+      llat,
+      method: "POST",
+      path: `/api/config/scene/config/${encodeURIComponent(sceneId)}`,
+      body: payload,
+    });
+    if (!r.ok) {
+      insertHaRun({
+        kind: "scene_create",
+        domain: "scene",
+        service: null,
+        entity_id: `scene.${sceneId}`,
+        decision_ref: "",
+        payload,
+        outcome: "error",
+        ha_response: r.data,
+        error: r.detail,
+      });
+      throw new ApiError(
+        r.status >= 400 && r.status < 600 ? r.status : 502,
+        "HA_UPSTREAM_ERROR",
+        r.detail,
+      );
+    }
+    const run = insertHaRun({
+      kind: "scene_create",
+      domain: "scene",
+      service: null,
+      entity_id: `scene.${sceneId}`,
+      decision_ref: "",
+      payload,
+      outcome: "ok",
+      ha_response: r.data,
+      error: null,
+    });
+    sendJson(res, 200, {
+      ok: true,
+      scene_id: sceneId,
+      run_id: run.id,
+      ha_response: r.data,
+    });
+  });
+
+  addRoute(
+    "PUT",
+    "/api/v1/channels/ha/scenes/:id",
+    async ({ res, params, body }) => {
+      const id = assertHaObjectId(params.id, "scene");
+      const parsed = parseSceneUpdateBody(body);
+      const { haUrl, llat } = await loadHaCredentials();
+      const payload = sceneUpdatePayload(parsed);
+      const r = await callHaRest({
+        haUrl,
+        llat,
+        method: "POST",
+        path: `/api/config/scene/config/${encodeURIComponent(id)}`,
+        body: payload,
+      });
+      if (!r.ok) {
+        insertHaRun({
+          kind: "scene_update",
+          domain: "scene",
+          service: null,
+          entity_id: `scene.${id}`,
+          decision_ref: "",
+          payload,
+          outcome: "error",
+          ha_response: r.data,
+          error: r.detail,
+        });
+        throw new ApiError(
+          r.status >= 400 && r.status < 600 ? r.status : 502,
+          "HA_UPSTREAM_ERROR",
+          r.detail,
+        );
+      }
+      const run = insertHaRun({
+        kind: "scene_update",
+        domain: "scene",
+        service: null,
+        entity_id: `scene.${id}`,
+        decision_ref: "",
+        payload,
+        outcome: "ok",
+        ha_response: r.data,
+        error: null,
+      });
+      sendJson(res, 200, {
+        ok: true,
+        scene_id: id,
+        run_id: run.id,
+        ha_response: r.data,
+      });
+    },
+  );
+
+  addRoute(
+    "DELETE",
+    "/api/v1/channels/ha/scenes/:id",
+    async ({ res, params }) => {
+      const id = assertHaObjectId(params.id, "scene");
+      const { haUrl, llat } = await loadHaCredentials();
+      const r = await callHaRest({
+        haUrl,
+        llat,
+        method: "DELETE",
+        path: `/api/config/scene/config/${encodeURIComponent(id)}`,
+      });
+      if (!r.ok) {
+        insertHaRun({
+          kind: "scene_delete",
+          domain: "scene",
+          service: null,
+          entity_id: `scene.${id}`,
+          decision_ref: "",
+          payload: null,
+          outcome: "error",
+          ha_response: r.data,
+          error: r.detail,
+        });
+        if (r.status === 404) {
+          throw new NotFoundError(`scene ${id} not found in HA`);
+        }
+        throw new ApiError(
+          r.status >= 400 && r.status < 600 ? r.status : 502,
+          "HA_UPSTREAM_ERROR",
+          r.detail,
+        );
+      }
+      const run = insertHaRun({
+        kind: "scene_delete",
+        domain: "scene",
+        service: null,
+        entity_id: `scene.${id}`,
+        decision_ref: "",
+        payload: null,
+        outcome: "ok",
+        ha_response: r.data,
+        error: null,
+      });
+      sendJson(res, 200, {
+        ok: true,
+        scene_id: id,
+        run_id: run.id,
+        ha_response: r.data,
+      });
+    },
+  );
+
+  // ──────────────────────────────────────────────────────────────────────
+  // SCRIPTS
+  // ──────────────────────────────────────────────────────────────────────
+
+  addRoute("GET", "/api/v1/channels/ha/scripts", async ({ res }) => {
+    const { haUrl, llat } = await loadHaCredentials();
+    const r = await callHaRest({
+      haUrl,
+      llat,
+      method: "GET",
+      path: "/api/states",
+    });
+    if (!r.ok) {
+      throw new ApiError(
+        r.status >= 400 && r.status < 600 ? r.status : 502,
+        "HA_UPSTREAM_ERROR",
+        r.detail,
+      );
+    }
+    sendJson(res, 200, {
+      ok: true,
+      data: filterStatesByDomain(r.data, "script"),
+    });
+  });
+
+  addRoute("GET", "/api/v1/channels/ha/scripts/:id", async ({ res, params }) => {
+    const id = assertHaObjectId(params.id, "script");
+    const { haUrl, llat } = await loadHaCredentials();
+    const r = await callHaRest({
+      haUrl,
+      llat,
+      method: "GET",
+      path: `/api/config/script/config/${encodeURIComponent(id)}`,
+    });
+    if (!r.ok) {
+      if (r.status === 404) {
+        throw new NotFoundError(`script ${id} not found in HA`);
+      }
+      throw new ApiError(
+        r.status >= 400 && r.status < 600 ? r.status : 502,
+        "HA_UPSTREAM_ERROR",
+        r.detail,
+      );
+    }
+    sendJson(res, 200, { ok: true, script_id: id, data: r.data });
+  });
+
+  addRoute("POST", "/api/v1/channels/ha/scripts", async ({ res, body }) => {
+    const parsed = parseScriptCreateBody(body);
+    const { haUrl, llat } = await loadHaCredentials();
+    const scriptId = slugify(parsed.alias) || `script_${Date.now()}`;
+    const payload = scriptCreatePayload(parsed);
+    const r = await callHaRest({
+      haUrl,
+      llat,
+      method: "POST",
+      path: `/api/config/script/config/${encodeURIComponent(scriptId)}`,
+      body: payload,
+    });
+    if (!r.ok) {
+      insertHaRun({
+        kind: "script_create",
+        domain: "script",
+        service: null,
+        entity_id: `script.${scriptId}`,
+        decision_ref: "",
+        payload,
+        outcome: "error",
+        ha_response: r.data,
+        error: r.detail,
+      });
+      throw new ApiError(
+        r.status >= 400 && r.status < 600 ? r.status : 502,
+        "HA_UPSTREAM_ERROR",
+        r.detail,
+      );
+    }
+    const run = insertHaRun({
+      kind: "script_create",
+      domain: "script",
+      service: null,
+      entity_id: `script.${scriptId}`,
+      decision_ref: "",
+      payload,
+      outcome: "ok",
+      ha_response: r.data,
+      error: null,
+    });
+    sendJson(res, 200, {
+      ok: true,
+      script_id: scriptId,
+      run_id: run.id,
+      ha_response: r.data,
+    });
+  });
+
+  addRoute(
+    "PUT",
+    "/api/v1/channels/ha/scripts/:id",
+    async ({ res, params, body }) => {
+      const id = assertHaObjectId(params.id, "script");
+      const parsed = parseScriptUpdateBody(body);
+      const { haUrl, llat } = await loadHaCredentials();
+      const payload = scriptUpdatePayload(parsed);
+      const r = await callHaRest({
+        haUrl,
+        llat,
+        method: "POST",
+        path: `/api/config/script/config/${encodeURIComponent(id)}`,
+        body: payload,
+      });
+      if (!r.ok) {
+        insertHaRun({
+          kind: "script_update",
+          domain: "script",
+          service: null,
+          entity_id: `script.${id}`,
+          decision_ref: "",
+          payload,
+          outcome: "error",
+          ha_response: r.data,
+          error: r.detail,
+        });
+        throw new ApiError(
+          r.status >= 400 && r.status < 600 ? r.status : 502,
+          "HA_UPSTREAM_ERROR",
+          r.detail,
+        );
+      }
+      const run = insertHaRun({
+        kind: "script_update",
+        domain: "script",
+        service: null,
+        entity_id: `script.${id}`,
+        decision_ref: "",
+        payload,
+        outcome: "ok",
+        ha_response: r.data,
+        error: null,
+      });
+      sendJson(res, 200, {
+        ok: true,
+        script_id: id,
+        run_id: run.id,
+        ha_response: r.data,
+      });
+    },
+  );
+
+  addRoute(
+    "DELETE",
+    "/api/v1/channels/ha/scripts/:id",
+    async ({ res, params }) => {
+      const id = assertHaObjectId(params.id, "script");
+      const { haUrl, llat } = await loadHaCredentials();
+      const r = await callHaRest({
+        haUrl,
+        llat,
+        method: "DELETE",
+        path: `/api/config/script/config/${encodeURIComponent(id)}`,
+      });
+      if (!r.ok) {
+        insertHaRun({
+          kind: "script_delete",
+          domain: "script",
+          service: null,
+          entity_id: `script.${id}`,
+          decision_ref: "",
+          payload: null,
+          outcome: "error",
+          ha_response: r.data,
+          error: r.detail,
+        });
+        if (r.status === 404) {
+          throw new NotFoundError(`script ${id} not found in HA`);
+        }
+        throw new ApiError(
+          r.status >= 400 && r.status < 600 ? r.status : 502,
+          "HA_UPSTREAM_ERROR",
+          r.detail,
+        );
+      }
+      const run = insertHaRun({
+        kind: "script_delete",
+        domain: "script",
+        service: null,
+        entity_id: `script.${id}`,
+        decision_ref: "",
+        payload: null,
+        outcome: "ok",
+        ha_response: r.data,
+        error: null,
+      });
+      sendJson(res, 200, {
+        ok: true,
+        script_id: id,
+        run_id: run.id,
+        ha_response: r.data,
+      });
+    },
+  );
+}
+
+// === END #115 PR3 ═══════════════════════════════════════════════════════

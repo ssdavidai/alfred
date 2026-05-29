@@ -55,6 +55,15 @@ The catalogue is intentionally narrow. Container restarts, credential rotation, 
 
 - `notify_principal` — send Sir a message on his preferred channel (Telegram, Slack, …)
 
+### Home Assistant — Tier 4 (#115 PR3, automations / scenes / scripts CRUD)
+
+- `ha__list_automations_full` — pull the full automation configs (trigger / condition / action), not the slim registry index
+- `ha__create_automation` — new automation; no gate (Sir can disable in HA UI)
+- `ha__update_automation` — replace existing automation; no gate
+- `ha__delete_automation` — GATED: `decision_ref` required (irreversible without backup)
+- `ha__create_scene` / `ha__update_scene` / `ha__delete_scene` — scenes are cheap; no gates
+- `ha__create_script` / `ha__update_script` / `ha__delete_script` — scripts are cheap; no gates
+
 ### DM pairing (1)
 
 - `approve_device` — approve a pending Hermes DM-pairing code by `platform` + `code` (the only pairing op exposed here)
@@ -113,6 +122,25 @@ The common task queue on the learn package is `alfred-learn`. If Sir doesn't kno
 ### "Approve my Telegram / Slack pairing"
 
 `approve_device({platform: "telegram", code: "<8-char code from Sir's pairing screen>"})`. Hermes hands an unknown messaging account a one-hour pairing code; this approves it so the conversation can reach Alfred. This is the ONLY pairing operation exposed — revoke / clear-pending are not, by design.
+
+### "Author a bedtime scene" / "Set up a sunrise automation"
+
+The tier-4 surface (#115 PR3) lets Alfred CRUD HA automations / scenes / scripts directly — no Sir-side clicking through HA's UI. Two example flows:
+
+**Bedtime scene from a Desk observation:**
+1. `ha__list_areas` — confirm the bedroom area_id.
+2. `ha__list_entities({area: "bedroom"})` — read the bedroom lights / climate entities.
+3. `ha__create_scene({name: "Bedtime", entities: {"light.bedroom_main": {state: "on", brightness_pct: 15}, "light.living_room_lamp": {state: "off"}, "climate.bedroom": {temperature: 19}}, icon: "mdi:weather-night"})`.
+4. Confirm to Sir: "Scene created — `scene.bedtime`. Triggering it dims the bedroom to 15%, turns off the lamp, sets the thermostat to 19°."
+
+**Sunrise automation from an observation Sir approved:**
+1. `ha__list_automations_full` — make sure there isn't already a sunrise automation (don't double-up).
+2. `ha__create_automation({alias: "Lights off at sunrise", trigger: {platform: "sun", event: "sunrise"}, action: {service: "light.turn_off", target: {area_id: "living_room"}}, description: "Created by Alfred — observation 2026-05-29 a.m."})`.
+3. The automation is created in the OFF state by default — confirm with Sir before flipping `initial_state: "on"`.
+
+**Removing a stale automation (GATED):**
+1. `ha__list_automations_full` — read its YAML first, store a backup in a `decision/` vault record if Sir might want it back.
+2. `ha__delete_automation({automation_id: "old_routine", decision_ref: "decision/2026-05-29-drop-old-routine.md"})`. `decision_ref` is REQUIRED — Alfred refuses without it.
 
 ---
 

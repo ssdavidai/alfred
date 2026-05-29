@@ -460,14 +460,370 @@ export const HASS_WRITE_TOOLS: ToolDef[] = [
   },
 ];
 
+// ─── BEGIN #115 PR3 — automations / scenes / scripts CRUD ───────────────
+//
+// 10 new write tools, fronting the REST CRUD that ctrl-api exposes at
+// /api/v1/channels/ha/{automations,scenes,scripts}. The HA REST API for
+// these three surfaces is mature (long-standing /api/config/* endpoints),
+// so unlike the registry CRUD (#115 PR2) these don't need the WS client.
+//
+// Per spec §4 gate matrix — locked YES on 2026-05-29:
+//   * automation_create / automation_update : NO gate (reversible — Sir
+//     can disable in HA UI)
+//   * automation_delete                     : decision_ref REQUIRED
+//   * scene_*                               : NO gate (cheap)
+//   * script_*                              : NO gate (cheap)
+//
+// Snapshots + daybook entries — the ctrl-api side records every write in
+// `ha_run` (today's audit ledger). The richer "daybook vault record" half
+// of the locked YES default arrives in #115 PR1 (WS + daybook helper); we
+// gate-fail-open here and stamp ha_run for now (see ctrl-api comments).
+//
+// Loop guard — automations/scenes/scripts CRUD doesn't loop back through
+// state_changed events (the writes mutate config, they don't trigger
+// entity state). The existing per-entity guard in #110 PR4 still applies
+// transitively (`scene.activate` via call_service / etc.). PR3 CRUD
+// itself bypasses the entity-state guard because the entity it touches is
+// the automation/scene/script config object, not a stateful entity.
+
+const HaAutomationTriggerSchema = z
+  .union([z.record(z.string(), z.unknown()), z.array(z.unknown())])
+  .describe(
+    "HA trigger block(s). Either a single trigger object `{platform: 'time', at: '06:30'}` or an array of triggers. See https://www.home-assistant.io/docs/automation/trigger/ for the supported platforms.",
+  );
+
+const HaAutomationActionSchema = z
+  .union([z.record(z.string(), z.unknown()), z.array(z.unknown())])
+  .describe(
+    "HA action block(s). Either a single action `{service: 'light.turn_on', target: {...}}` or an array of actions. See https://www.home-assistant.io/docs/automation/action/.",
+  );
+
+const HaAutomationConditionSchema = z
+  .union([z.record(z.string(), z.unknown()), z.array(z.unknown())])
+  .describe(
+    "Optional HA condition block(s). Either a single condition or an array — automation only fires when all conditions evaluate true. See https://www.home-assistant.io/docs/automation/condition/.",
+  );
+
+const HA_WRITE_PR3_TOOLS: ToolDef[] = [
+  // ── automations ────────────────────────────────────────────────────────
+
+  {
+    name: "ha__list_automations_full",
+    description:
+      "List every HA automation with its FULL config — alias / trigger / condition / action / mode — NOT the slim registry index `ha__list_automations` returns. Resolves via `GET /api/v1/channels/ha/automations` → REST `GET /api/config/automation/config`. **When to call:** before `ha__update_automation` (to read current trigger/action before patching), before proposing a NEW automation that might overlap an existing one (so you can edit instead of double-up), or when Sir asks 'show me the morning routine — what does it actually do?'. Cheap, idempotent. Returns `[{id, alias, description, mode, trigger, condition, action}, ...]`.",
+    inputSchema: z.object({}),
+    buildRequest: () => ({
+      method: "GET",
+      path: "/api/v1/channels/ha/automations",
+    }),
+  },
+
+  {
+    name: "ha__create_automation",
+    description:
+      "Create a brand-new HA automation. Resolves to `POST /api/v1/channels/ha/automations` → HA REST `POST /api/config/automation/config/<new_id>`. **No approval gate** — create is reversible (Sir disables it in HA UI in 5 seconds). The new automation is created in the OFF state by default unless you explicitly include `initial_state: 'on'` in the body. **Always `ha__list_automations_full` FIRST** so you don't author a third 'morning routine' on top of two existing ones. Example payload: `{alias: 'Lights off when sunny', trigger: {platform: 'sun', event: 'sunrise'}, action: {service: 'light.turn_off', target: {area_id: 'living_room'}}}`. Returns `{ok, automation_id, ha_response}`.",
+    inputSchema: z.object({
+      alias: z
+        .string()
+        .min(1)
+        .describe(
+          "Human-readable name for the automation (shown in HA UI + spoken by Alfred). Must be unique-ish — HA itself doesn't enforce uniqueness, but two automations with the same alias confuse principals.",
+        ),
+      trigger: HaAutomationTriggerSchema,
+      condition: HaAutomationConditionSchema.optional(),
+      action: HaAutomationActionSchema,
+      description: z
+        .string()
+        .optional()
+        .describe(
+          "Optional longer description shown in HA's automation editor. Use this to record WHY Alfred created this automation (which signal / decision / observation).",
+        ),
+      mode: z
+        .enum(["single", "restart", "queued", "parallel"])
+        .optional()
+        .describe(
+          "How HA handles re-trigger while already running. `single` (default) drops re-triggers, `restart` cancels + reruns, `queued` queues them up, `parallel` runs concurrently.",
+        ),
+      initial_state: z
+        .enum(["on", "off"])
+        .optional()
+        .describe(
+          "Optional initial state. Default `off` — the principal turns it on in HA's UI after reviewing. Set `on` only when Alfred is confident the automation is safe to fire immediately.",
+        ),
+    }),
+    buildRequest: ({
+      alias,
+      trigger,
+      condition,
+      action,
+      description,
+      mode,
+      initial_state,
+    }) => ({
+      method: "POST",
+      path: "/api/v1/channels/ha/automations",
+      body: {
+        alias,
+        trigger,
+        ...(condition !== undefined ? { condition } : {}),
+        action,
+        ...(description !== undefined ? { description } : {}),
+        ...(mode !== undefined ? { mode } : {}),
+        ...(initial_state !== undefined ? { initial_state } : {}),
+      },
+    }),
+  },
+
+  {
+    name: "ha__update_automation",
+    description:
+      "Update an existing HA automation by id. Resolves to `PUT /api/v1/channels/ha/automations/:id` (the underlying HA endpoint is idempotent — POST and PUT both upsert at the same URL). **No approval gate** (reversible). **Always `ha__list_automations_full` FIRST** to read the current config — HA's REST does a full-replace, not a patch. Only the fields you pass land; any unset field is wiped. Build the new body from the old one + your edits, don't ship a partial. Example: `{automation_id: 'lights_off_sunrise', alias: 'Lights off at sunrise', trigger: {platform: 'sun', event: 'sunrise'}, action: {service: 'light.turn_off', target: {area_id: 'living_room'}}}`. Returns `{ok, automation_id, ha_response}`.",
+    inputSchema: z.object({
+      automation_id: z
+        .string()
+        .min(1)
+        .describe(
+          "The id portion of the entity_id (e.g. `lights_off_sunrise` for entity `automation.lights_off_sunrise`). Read this from `ha__list_automations_full` — NEVER invent.",
+        ),
+      alias: z.string().optional(),
+      trigger: HaAutomationTriggerSchema.optional(),
+      condition: HaAutomationConditionSchema.optional(),
+      action: HaAutomationActionSchema.optional(),
+      description: z.string().optional(),
+      mode: z.enum(["single", "restart", "queued", "parallel"]).optional(),
+    }),
+    buildRequest: ({
+      automation_id,
+      alias,
+      trigger,
+      condition,
+      action,
+      description,
+      mode,
+    }) => ({
+      method: "PUT",
+      path: `/api/v1/channels/ha/automations/${encodeURIComponent(automation_id)}`,
+      body: {
+        ...(alias !== undefined ? { alias } : {}),
+        ...(trigger !== undefined ? { trigger } : {}),
+        ...(condition !== undefined ? { condition } : {}),
+        ...(action !== undefined ? { action } : {}),
+        ...(description !== undefined ? { description } : {}),
+        ...(mode !== undefined ? { mode } : {}),
+      },
+    }),
+  },
+
+  {
+    name: "ha__delete_automation",
+    description:
+      "Delete an HA automation. Resolves to `DELETE /api/v1/channels/ha/automations/:id` → HA REST `DELETE /api/config/automation/config/<id>`. **GATED:** `decision_ref` REQUIRED — deletion is irreversible without a backup (no undo button in HA UI). The agent's contract is 'I decided to remove this automation based on signal/observation X, run it'. ctrl-api persists a `ha_run` ledger row with the decision_ref + a daybook entry (per #115 default 3) BEFORE the upstream DELETE so the audit trail survives. If Sir might want this back later, `ha__list_automations_full` first and store the YAML in a `decision/` vault record before calling this.",
+    inputSchema: z.object({
+      automation_id: z
+        .string()
+        .min(1)
+        .describe(
+          "Automation id to delete. Read from `ha__list_automations_full`. NEVER invent.",
+        ),
+      decision_ref: z
+        .string()
+        .min(6)
+        .max(256)
+        .regex(
+          /^[\x21-\x7E]+$/,
+          "decision_ref must be printable ASCII with no whitespace",
+        )
+        .describe(
+          "Vault path or ulid of the `decision/` record that authorised the delete. REQUIRED — Alfred refuses without it.",
+        ),
+    }),
+    buildRequest: ({ automation_id, decision_ref }) => ({
+      method: "DELETE",
+      path: `/api/v1/channels/ha/automations/${encodeURIComponent(automation_id)}`,
+      body: { decision_ref },
+    }),
+  },
+
+  // ── scenes ─────────────────────────────────────────────────────────────
+
+  {
+    name: "ha__create_scene",
+    description:
+      "Create an HA scene — a snapshot of entity states the principal can re-enter with one tap or voice command. Resolves to `POST /api/v1/channels/ha/scenes`. **No approval gate** (cheap, reversible). Example for a bedtime scene: `{name: 'Bedtime', entities: {'light.bedroom_main': {state: 'on', brightness_pct: 15}, 'light.living_room_lamp': {state: 'off'}, 'climate.bedroom': {temperature: 19}}}`. The keys of `entities` are entity_ids; the values are `{state: 'on'|'off', ...attributes}` blocks HA replays on `scene.turn_on`. Returns `{ok, scene_id, ha_response}`.",
+    inputSchema: z.object({
+      name: z
+        .string()
+        .min(1)
+        .describe(
+          "Human-readable scene name. Becomes the entity friendly name; the scene_id is derived as a slug of this.",
+        ),
+      entities: z
+        .record(z.string(), z.record(z.string(), z.unknown()))
+        .describe(
+          "Map of entity_id → state object. Each state object must include `state` (e.g. 'on', 'off', '22.5') plus any attributes (brightness, color, temperature, …) the entity supports. Build from `ha__get_state` reads if you want to capture a 'current' snapshot.",
+        ),
+      icon: z
+        .string()
+        .optional()
+        .describe(
+          "Optional MDI icon name (e.g. `mdi:weather-night` for bedtime). Shown in HA dashboards.",
+        ),
+    }),
+    buildRequest: ({ name, entities, icon }) => ({
+      method: "POST",
+      path: "/api/v1/channels/ha/scenes",
+      body: {
+        name,
+        entities,
+        ...(icon !== undefined ? { icon } : {}),
+      },
+    }),
+  },
+
+  {
+    name: "ha__update_scene",
+    description:
+      "Update an existing HA scene. Resolves to `PUT /api/v1/channels/ha/scenes/:id`. **No approval gate** (cheap). HA's REST does a full-replace — fetch the current scene via `GET /api/v1/channels/ha/scenes/:id` (or `ha__get_state` on the scene entity), merge your edits, ship the whole config. Returns `{ok, scene_id, ha_response}`.",
+    inputSchema: z.object({
+      scene_id: z
+        .string()
+        .min(1)
+        .describe(
+          "The id portion of the entity_id (e.g. `bedtime` for `scene.bedtime`). NEVER invent.",
+        ),
+      name: z.string().optional(),
+      entities: z
+        .record(z.string(), z.record(z.string(), z.unknown()))
+        .optional()
+        .describe(
+          "Replacement entity state map. See ha__create_scene for shape.",
+        ),
+      icon: z.string().optional(),
+    }),
+    buildRequest: ({ scene_id, name, entities, icon }) => ({
+      method: "PUT",
+      path: `/api/v1/channels/ha/scenes/${encodeURIComponent(scene_id)}`,
+      body: {
+        ...(name !== undefined ? { name } : {}),
+        ...(entities !== undefined ? { entities } : {}),
+        ...(icon !== undefined ? { icon } : {}),
+      },
+    }),
+  },
+
+  {
+    name: "ha__delete_scene",
+    description:
+      "Delete an HA scene. Resolves to `DELETE /api/v1/channels/ha/scenes/:id`. **No approval gate** — scenes are cheap to recreate from a saved snapshot. Returns `{ok, scene_id, ha_response}`.",
+    inputSchema: z.object({
+      scene_id: z
+        .string()
+        .min(1)
+        .describe("Scene id to delete. NEVER invent."),
+    }),
+    buildRequest: ({ scene_id }) => ({
+      method: "DELETE",
+      path: `/api/v1/channels/ha/scenes/${encodeURIComponent(scene_id)}`,
+    }),
+  },
+
+  // ── scripts ────────────────────────────────────────────────────────────
+
+  {
+    name: "ha__create_script",
+    description:
+      "Create an HA script — a reusable, parameterised action sequence. Narrower than an automation (no trigger), broader than a scene (executes a sequence rather than a state snapshot). Resolves to `POST /api/v1/channels/ha/scripts`. **No approval gate** (cheap, reversible). Example: `{alias: 'Goodnight', sequence: [{service: 'scene.turn_on', target: {entity_id: 'scene.bedtime'}}, {delay: '00:05:00'}, {service: 'lock.lock', target: {entity_id: 'lock.front_door'}}]}`. Returns `{ok, script_id, ha_response}`.",
+    inputSchema: z.object({
+      alias: z
+        .string()
+        .min(1)
+        .describe(
+          "Human-readable script name. Becomes the entity friendly name; script_id is derived as a slug.",
+        ),
+      sequence: z
+        .array(z.unknown())
+        .describe(
+          "Array of HA action steps the script runs sequentially. See https://www.home-assistant.io/docs/scripts/.",
+        ),
+      description: z.string().optional(),
+      mode: z.enum(["single", "restart", "queued", "parallel"]).optional(),
+      icon: z.string().optional(),
+    }),
+    buildRequest: ({ alias, sequence, description, mode, icon }) => ({
+      method: "POST",
+      path: "/api/v1/channels/ha/scripts",
+      body: {
+        alias,
+        sequence,
+        ...(description !== undefined ? { description } : {}),
+        ...(mode !== undefined ? { mode } : {}),
+        ...(icon !== undefined ? { icon } : {}),
+      },
+    }),
+  },
+
+  {
+    name: "ha__update_script",
+    description:
+      "Update an existing HA script. Resolves to `PUT /api/v1/channels/ha/scripts/:id`. **No approval gate** (cheap). HA's REST does a full-replace — read current config first, merge your edits, ship the whole config. Returns `{ok, script_id, ha_response}`.",
+    inputSchema: z.object({
+      script_id: z
+        .string()
+        .min(1)
+        .describe(
+          "The id portion of the entity_id (e.g. `goodnight` for `script.goodnight`). NEVER invent.",
+        ),
+      alias: z.string().optional(),
+      sequence: z.array(z.unknown()).optional(),
+      description: z.string().optional(),
+      mode: z.enum(["single", "restart", "queued", "parallel"]).optional(),
+      icon: z.string().optional(),
+    }),
+    buildRequest: ({ script_id, alias, sequence, description, mode, icon }) => ({
+      method: "PUT",
+      path: `/api/v1/channels/ha/scripts/${encodeURIComponent(script_id)}`,
+      body: {
+        ...(alias !== undefined ? { alias } : {}),
+        ...(sequence !== undefined ? { sequence } : {}),
+        ...(description !== undefined ? { description } : {}),
+        ...(mode !== undefined ? { mode } : {}),
+        ...(icon !== undefined ? { icon } : {}),
+      },
+    }),
+  },
+
+  {
+    name: "ha__delete_script",
+    description:
+      "Delete an HA script. Resolves to `DELETE /api/v1/channels/ha/scripts/:id`. **No approval gate** — scripts are cheap to recreate. Returns `{ok, script_id, ha_response}`.",
+    inputSchema: z.object({
+      script_id: z
+        .string()
+        .min(1)
+        .describe("Script id to delete. NEVER invent."),
+    }),
+    buildRequest: ({ script_id }) => ({
+      method: "DELETE",
+      path: `/api/v1/channels/ha/scripts/${encodeURIComponent(script_id)}`,
+    }),
+  },
+];
+
+// Splice the PR3 tools onto HASS_WRITE_TOOLS so downstream importers
+// (registry.ts, alias HASS_DEFERRED_TOOLS) pick them up without a churn.
+HASS_WRITE_TOOLS.push(...HA_WRITE_PR3_TOOLS);
+
+// ─── END #115 PR3 ──────────────────────────────────────────────────────
+
 // Back-compat alias — PR2 exported these stubs under `HASS_DEFERRED_TOOLS`,
 // and downstream callers (registry.ts, tests) referenced that name. Keep
 // the binding live so the PR2→PR4 transition doesn't churn import sites.
 export const HASS_DEFERRED_TOOLS: ToolDef[] = HASS_WRITE_TOOLS;
 
-// Final catalogue: 16 tools total = 11 read + 5 PR3 placeholders. Order
-// kept deliberately (reads first, deferred last) so the model that lists
-// the catalogue sees the safe read surface before the placeholders.
+// Final catalogue: 26 tools total = 11 read + 5 PR4 writes + 10 PR3 CRUD
+// (#115 — automations / scenes / scripts). Order kept deliberately
+// (reads first, writes last) so the model that lists the catalogue sees
+// the safe read surface before the write surface.
 export const ALL_HASS_TOOLS: ToolDef[] = [
   ...HASS_READ_TOOLS,
   ...HASS_DEFERRED_TOOLS,

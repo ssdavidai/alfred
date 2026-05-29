@@ -26,17 +26,18 @@ function getTool(name: string) {
 
 // ─── catalogue shape ────────────────────────────────────────────────────
 
-test("hass catalogue: exactly 16 tools (11 read + 5 PR3 placeholders)", () => {
+test("hass catalogue: exactly 26 tools (11 read + 5 PR4 writes + 10 PR3 CRUD)", () => {
   assert.equal(HASS_READ_TOOLS.length, 11);
-  assert.equal(HASS_DEFERRED_TOOLS.length, 5);
-  assert.equal(ALL_HASS_TOOLS.length, 16);
+  // After #115 PR3 splice: PR4's 5 + PR3's 10 = 15 writes.
+  assert.equal(HASS_DEFERRED_TOOLS.length, 15);
+  assert.equal(ALL_HASS_TOOLS.length, 26);
 });
 
-test("registry: hass is a supported app and registers all 16 tools", () => {
+test("registry: hass is a supported app and registers all 26 tools", () => {
   assert.ok(isAppId("hass"));
   assert.ok((SUPPORTED_APPS as Set<string>).has("hass"));
   const tools = getToolsForApp("hass");
-  assert.equal(tools.length, 16);
+  assert.equal(tools.length, 26);
 });
 
 test("hass: every tool name is unique", () => {
@@ -530,4 +531,281 @@ test("ha__list_entities buildRequest shape mocks cleanly against a fake fetch", 
   // helpers.ts/toolResult takes.
   const text = JSON.stringify(mockResponse, null, 2);
   assert.ok(text.includes("light.kitchen_main"));
+});
+
+// ─── #115 PR3 — automations / scenes / scripts CRUD ─────────────────────
+//
+// 15 tests covering tool registration + schema validation +
+// buildRequest shape for the 10 new CRUD tools. Hits the contract that
+// `packages/ctrl/src/api/routes/channels_ha.ts` implements at
+// `/api/v1/channels/ha/{automations,scenes,scripts}`.
+
+const PR3_TOOL_NAMES = [
+  "ha__list_automations_full",
+  "ha__create_automation",
+  "ha__update_automation",
+  "ha__delete_automation",
+  "ha__create_scene",
+  "ha__update_scene",
+  "ha__delete_scene",
+  "ha__create_script",
+  "ha__update_script",
+  "ha__delete_script",
+];
+
+test("#115 PR3: all 10 CRUD tool names exist + begin with ha__", () => {
+  for (const name of PR3_TOOL_NAMES) {
+    const t = ALL_HASS_TOOLS.find((x) => x.name === name);
+    assert.ok(t, `${name} missing from ALL_HASS_TOOLS`);
+    assert.ok(name.startsWith("ha__"));
+  }
+});
+
+test("#115 PR3: ha__list_automations_full → GET /automations", () => {
+  const t = getTool("ha__list_automations_full");
+  assert.equal(t.inputSchema.safeParse({}).success, true);
+  const req = t.buildRequest({});
+  assert.equal(req.method, "GET");
+  assert.equal(req.path, "/api/v1/channels/ha/automations");
+});
+
+test("#115 PR3: ha__create_automation accepts {alias, trigger, action} minimal", () => {
+  const t = getTool("ha__create_automation");
+  assert.equal(t.inputSchema.safeParse({}).success, false);
+  assert.equal(
+    t.inputSchema.safeParse({
+      alias: "Lights off sunrise",
+      trigger: { platform: "sun", event: "sunrise" },
+      action: { service: "light.turn_off", target: { area_id: "living_room" } },
+    }).success,
+    true,
+  );
+});
+
+test("#115 PR3: ha__create_automation builds POST /automations with full body", () => {
+  const t = getTool("ha__create_automation");
+  const req = t.buildRequest({
+    alias: "Lights off sunrise",
+    trigger: { platform: "sun", event: "sunrise" },
+    condition: { condition: "state", entity_id: "sun.sun", state: "above_horizon" },
+    action: { service: "light.turn_off", target: { area_id: "living_room" } },
+    description: "Created by Alfred 2026-05-29",
+    mode: "single",
+    initial_state: "off",
+  });
+  assert.equal(req.method, "POST");
+  assert.equal(req.path, "/api/v1/channels/ha/automations");
+  assert.deepEqual(req.body, {
+    alias: "Lights off sunrise",
+    trigger: { platform: "sun", event: "sunrise" },
+    condition: { condition: "state", entity_id: "sun.sun", state: "above_horizon" },
+    action: { service: "light.turn_off", target: { area_id: "living_room" } },
+    description: "Created by Alfred 2026-05-29",
+    mode: "single",
+    initial_state: "off",
+  });
+});
+
+test("#115 PR3: ha__update_automation requires automation_id, builds PUT", () => {
+  const t = getTool("ha__update_automation");
+  assert.equal(t.inputSchema.safeParse({}).success, false);
+  assert.equal(t.inputSchema.safeParse({ alias: "x" }).success, false);
+  assert.equal(
+    t.inputSchema.safeParse({
+      automation_id: "lights_off_sunrise",
+      alias: "Lights off at sunrise",
+    }).success,
+    true,
+  );
+  const req = t.buildRequest({
+    automation_id: "lights_off_sunrise",
+    alias: "Lights off at sunrise",
+    action: { service: "light.turn_off", target: { area_id: "living_room" } },
+  });
+  assert.equal(req.method, "PUT");
+  assert.equal(req.path, "/api/v1/channels/ha/automations/lights_off_sunrise");
+  assert.deepEqual(req.body, {
+    alias: "Lights off at sunrise",
+    action: { service: "light.turn_off", target: { area_id: "living_room" } },
+  });
+});
+
+test("#115 PR3: ha__delete_automation requires decision_ref (gated)", () => {
+  const t = getTool("ha__delete_automation");
+  // automation_id alone — fails (decision_ref REQUIRED for irreversible delete).
+  assert.equal(
+    t.inputSchema.safeParse({ automation_id: "lights_off_sunrise" }).success,
+    false,
+  );
+  // Valid.
+  assert.equal(
+    t.inputSchema.safeParse({
+      automation_id: "lights_off_sunrise",
+      decision_ref: "decision/2026-05-29-drop-sunrise.md",
+    }).success,
+    true,
+  );
+});
+
+test("#115 PR3: ha__delete_automation rejects whitespace / too-short decision_ref", () => {
+  const t = getTool("ha__delete_automation");
+  assert.equal(
+    t.inputSchema.safeParse({
+      automation_id: "x",
+      decision_ref: "abc def",
+    }).success,
+    false,
+  );
+  assert.equal(
+    t.inputSchema.safeParse({
+      automation_id: "x",
+      decision_ref: "abc",
+    }).success,
+    false,
+    "min 6 chars",
+  );
+});
+
+test("#115 PR3: ha__delete_automation DELETE shape carries decision_ref in body", () => {
+  const t = getTool("ha__delete_automation");
+  const req = t.buildRequest({
+    automation_id: "lights_off_sunrise",
+    decision_ref: "decision/2026-05-29-drop-sunrise.md",
+  });
+  assert.equal(req.method, "DELETE");
+  assert.equal(req.path, "/api/v1/channels/ha/automations/lights_off_sunrise");
+  assert.deepEqual(req.body, {
+    decision_ref: "decision/2026-05-29-drop-sunrise.md",
+  });
+});
+
+test("#115 PR3: ha__create_scene accepts {name, entities}, builds POST", () => {
+  const t = getTool("ha__create_scene");
+  assert.equal(t.inputSchema.safeParse({}).success, false);
+  assert.equal(t.inputSchema.safeParse({ name: "Bedtime" }).success, false);
+  assert.equal(
+    t.inputSchema.safeParse({
+      name: "Bedtime",
+      entities: {
+        "light.bedroom_main": { state: "on", brightness_pct: 15 },
+        "light.living_room_lamp": { state: "off" },
+      },
+    }).success,
+    true,
+  );
+  const req = t.buildRequest({
+    name: "Bedtime",
+    entities: {
+      "light.bedroom_main": { state: "on", brightness_pct: 15 },
+    },
+    icon: "mdi:weather-night",
+  });
+  assert.equal(req.method, "POST");
+  assert.equal(req.path, "/api/v1/channels/ha/scenes");
+  assert.deepEqual(req.body, {
+    name: "Bedtime",
+    entities: { "light.bedroom_main": { state: "on", brightness_pct: 15 } },
+    icon: "mdi:weather-night",
+  });
+});
+
+test("#115 PR3: ha__update_scene requires scene_id, builds PUT", () => {
+  const t = getTool("ha__update_scene");
+  assert.equal(t.inputSchema.safeParse({}).success, false);
+  assert.equal(t.inputSchema.safeParse({ name: "x" }).success, false);
+  assert.equal(t.inputSchema.safeParse({ scene_id: "bedtime" }).success, true);
+  const req = t.buildRequest({
+    scene_id: "bedtime",
+    entities: { "light.bedroom_main": { state: "off" } },
+  });
+  assert.equal(req.method, "PUT");
+  assert.equal(req.path, "/api/v1/channels/ha/scenes/bedtime");
+  assert.deepEqual(req.body, {
+    entities: { "light.bedroom_main": { state: "off" } },
+  });
+});
+
+test("#115 PR3: ha__delete_scene requires scene_id, DELETE without body", () => {
+  const t = getTool("ha__delete_scene");
+  assert.equal(t.inputSchema.safeParse({}).success, false);
+  assert.equal(t.inputSchema.safeParse({ scene_id: "bedtime" }).success, true);
+  const req = t.buildRequest({ scene_id: "bedtime" });
+  assert.equal(req.method, "DELETE");
+  assert.equal(req.path, "/api/v1/channels/ha/scenes/bedtime");
+  assert.equal(req.body, undefined);
+});
+
+test("#115 PR3: ha__create_script accepts {alias, sequence}, builds POST", () => {
+  const t = getTool("ha__create_script");
+  assert.equal(t.inputSchema.safeParse({}).success, false);
+  assert.equal(t.inputSchema.safeParse({ alias: "Goodnight" }).success, false);
+  assert.equal(
+    t.inputSchema.safeParse({
+      alias: "Goodnight",
+      sequence: [
+        { service: "scene.turn_on", target: { entity_id: "scene.bedtime" } },
+        { delay: "00:05:00" },
+      ],
+    }).success,
+    true,
+  );
+  const req = t.buildRequest({
+    alias: "Goodnight",
+    sequence: [
+      { service: "scene.turn_on", target: { entity_id: "scene.bedtime" } },
+    ],
+    mode: "single",
+  });
+  assert.equal(req.method, "POST");
+  assert.equal(req.path, "/api/v1/channels/ha/scripts");
+  assert.deepEqual(req.body, {
+    alias: "Goodnight",
+    sequence: [
+      { service: "scene.turn_on", target: { entity_id: "scene.bedtime" } },
+    ],
+    mode: "single",
+  });
+});
+
+test("#115 PR3: ha__update_script requires script_id, builds PUT", () => {
+  const t = getTool("ha__update_script");
+  assert.equal(t.inputSchema.safeParse({}).success, false);
+  assert.equal(t.inputSchema.safeParse({ alias: "x" }).success, false);
+  assert.equal(t.inputSchema.safeParse({ script_id: "goodnight" }).success, true);
+  const req = t.buildRequest({
+    script_id: "goodnight",
+    sequence: [{ delay: "00:01:00" }],
+  });
+  assert.equal(req.method, "PUT");
+  assert.equal(req.path, "/api/v1/channels/ha/scripts/goodnight");
+  assert.deepEqual(req.body, { sequence: [{ delay: "00:01:00" }] });
+});
+
+test("#115 PR3: ha__delete_script DELETE without body", () => {
+  const t = getTool("ha__delete_script");
+  assert.equal(t.inputSchema.safeParse({}).success, false);
+  assert.equal(t.inputSchema.safeParse({ script_id: "goodnight" }).success, true);
+  const req = t.buildRequest({ script_id: "goodnight" });
+  assert.equal(req.method, "DELETE");
+  assert.equal(req.path, "/api/v1/channels/ha/scripts/goodnight");
+  assert.equal(req.body, undefined);
+});
+
+test("#115 PR3: catalogue order — reads first, then all writes (PR4 + PR3 CRUD)", () => {
+  // First 11 must be the 11 reads.
+  for (let i = 0; i < 11; i++) {
+    assert.ok(
+      READ_TOOL_NAMES.includes(ALL_HASS_TOOLS[i].name),
+      `slot ${i} (${ALL_HASS_TOOLS[i].name}) should be a read tool`,
+    );
+  }
+  // Slots 11..25 are writes. PR4's 5 + PR3's 10.
+  const writeNames = ALL_HASS_TOOLS.slice(11).map((t) => t.name);
+  for (const n of WRITE_TOOL_NAMES) {
+    assert.ok(writeNames.includes(n), `${n} missing from write tail`);
+  }
+  for (const n of PR3_TOOL_NAMES) {
+    assert.ok(writeNames.includes(n), `${n} missing from write tail`);
+  }
+  assert.equal(writeNames.length, 15);
 });
