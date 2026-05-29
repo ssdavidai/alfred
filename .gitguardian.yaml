@@ -13,3 +13,10 @@ secret:
     # `llat_TEST_0000…000` that matches HA's long-lived access token
     # shape but is never real. See #110 PR1 backfill.
     - "packages/ctrl/tests/channels_ha_pr1.test.ts"
+    # channels_ha.ts builds the Vaultwarden API payload that stores the
+    # principal's LLAT. The Vaultwarden item shape uses `password:` as a
+    # field name (Bitwarden API contract), assigned the in-memory LLAT
+    # value. GitGuardian's "Generic Password" detector flags any
+    # `password:` assignment; this file is the Vault writer and is
+    # audited by hand. No literal secret ever appears here.
+    - "packages/ctrl/src/api/routes/channels_ha.ts"
