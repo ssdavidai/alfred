@@ -1,23 +1,31 @@
 // /api/v1/channels/ha/* — Home Assistant channel routes.
 //
 // Issue #111 spec: docs/specs/issue-111-ha-conversation-agent.md.
+// Issue #110 spec: docs/specs/issue-110-ha-deep-integration.md.
 //
-// This PR (#111 PR1) ships ONLY the `/turn` route — the non-streaming
-// inbound handler that translates one HA conversation turn into one
-// Hermes-main `/v1/responses` call and returns HA's expected envelope.
+// Two lanes share this file. The split:
 //
-// PRs #110 and later extend this file with the rest of the HA surface
-// (token mint affordance on top of channel-tokens, /rooms upload, /health
-// probe, /status card data). The "coordinate with #110 PR1" note in the
-// PR description spells it out: whichever lane lands first creates the
-// file minimally and the other ADDS to it. This file is the minimal
-// shape.
+//   #111 (conversation agent) → POST /turn
+//   #110 (deep integration)   → POST /connect, GET /status, DELETE /disconnect,
+//                                GET /registry, GET /state/:entity_id,
+//                                GET /automations, GET /snapshots
 //
-// PR3 (#111 PR3, tool partitioning) will extend this file to forward
-// HA-side tool calls in the response; for PR1 we return text only.
-// PR4 (#111 PR4, curated MCP catalog) will inject the curator. PR5
-// (voice-context primer + ha_room enrichment) will pre-fetch the primer.
-// All of those are seams marked here for future PRs but NOT shipped.
+// PR1 of each lane is the only thing in this file today. Later PRs extend:
+//   * #111 PR3 — tool partitioning in /turn
+//   * #110 PR2 — ha__* MCP tools (live in mcp-server, NOT here)
+//   * #110 PR3 — HaWatcherWorkflow + the loop-guard suppressor (in alfred-learn)
+//   * #110 PR5 — registry population by HaBootstrapWorkflow (writes ha_registry;
+//                this file's /registry read is empty until then)
+//   * #110 PR6 — proposal/approve, proposal/reject, automation CRUD,
+//                discovery, snapshot routes (writes — these stay OFF the
+//                voice-bridge allowlist, see auth.ts)
+//
+// What lives where now (PR1 freeze):
+//   * The 7 ha_* tables and idx_ha_run_entity_recent partial index ship in
+//     packages/ctrl/src/db/migrations/0005_ha_channel.sql.
+//   * The voice-bridge allowlist additions (4 spec §7 Q13 read routes) ship
+//     in packages/ctrl/src/api/auth.ts alongside the route registrations
+//     here.
 
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError, ApiError } from "../errors.js";
@@ -319,6 +327,443 @@ function journalOut(
   }
 }
 
+// ── HA reachability probe (#110 PR1) ─────────────────────────────────────
+//
+// `connect` runs two GETs against the principal's HA install:
+//   1. GET ${ha_url}/api/  — auth gate. 401 here means the LLAT is wrong
+//      and we MUST NOT persist anything (no Vaultwarden write, no
+//      ha_connection row). Any other non-2xx is an UPSTREAM_ERROR.
+//   2. GET ${ha_url}/api/config — best-effort version pull. A 5xx here
+//      does NOT block the connect (HA is reachable, the LLAT is good,
+//      we just don't get a version string). ha_version stays null.
+//
+// Timeouts: HA_PROBE_TIMEOUT_MS (default 5s). Override surface for the
+// PR3 watcher to set its own ceiling.
+
+const HA_PROBE_TIMEOUT_MS = Number(
+  process.env.HA_PROBE_TIMEOUT_MS ?? "5000",
+);
+
+interface HaProbeOk {
+  ok: true;
+  ha_version: string | null;
+}
+interface HaProbeAuthFailure {
+  ok: false;
+  code: "AUTH_FAILED";
+  detail: string;
+}
+interface HaProbeUpstreamFailure {
+  ok: false;
+  code: "UPSTREAM_ERROR";
+  detail: string;
+}
+type HaProbeResult = HaProbeOk | HaProbeAuthFailure | HaProbeUpstreamFailure;
+
+async function probeHa(haUrl: string, llat: string): Promise<HaProbeResult> {
+  const headers = { Authorization: `Bearer ${llat}` };
+
+  // (1) Auth gate.
+  let authResp: Response;
+  try {
+    authResp = await fetch(`${haUrl}/api/`, {
+      method: "GET",
+      headers,
+      signal: AbortSignal.timeout(HA_PROBE_TIMEOUT_MS),
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, code: "UPSTREAM_ERROR", detail: `HA unreachable: ${msg}` };
+  }
+  if (authResp.status === 401 || authResp.status === 403) {
+    return {
+      ok: false,
+      code: "AUTH_FAILED",
+      detail: `HA rejected the LLAT (HTTP ${authResp.status})`,
+    };
+  }
+  if (!authResp.ok) {
+    return {
+      ok: false,
+      code: "UPSTREAM_ERROR",
+      detail: `HA /api/ returned HTTP ${authResp.status}`,
+    };
+  }
+
+  // (2) Version pull — best effort.
+  let version: string | null = null;
+  try {
+    const cfg = await fetch(`${haUrl}/api/config`, {
+      method: "GET",
+      headers,
+      signal: AbortSignal.timeout(HA_PROBE_TIMEOUT_MS),
+    });
+    if (cfg.ok) {
+      const cfgJson = (await cfg.json()) as Record<string, unknown>;
+      if (typeof cfgJson?.version === "string") version = cfgJson.version;
+    }
+  } catch {
+    // Best-effort — ha_version stays null. The connect still succeeds.
+  }
+  return { ok: true, ha_version: version };
+}
+
+// ── ha_url validation (#110 PR1) ─────────────────────────────────────────
+//
+// The connect handler MUST reject malformed ha_url shapes BEFORE the probe
+// fires (test 3 asserts haCalls.length === 0 after four bad calls). The
+// validation:
+//
+//   * must parse as a URL
+//   * scheme must be http: or https: (no file://, no ws://)
+//   * must have a non-empty host
+//
+// Anything else throws ValidationError → 400 VALIDATION_ERROR.
+
+function assertValidHaUrl(raw: unknown): string {
+  if (typeof raw !== "string" || raw.length === 0) {
+    throw new ValidationError("ha_url must be a non-empty string");
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new ValidationError("ha_url is not a valid URL");
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new ValidationError(
+      `ha_url must use http: or https: (got ${parsed.protocol})`,
+    );
+  }
+  if (!parsed.host) {
+    throw new ValidationError("ha_url must include a host");
+  }
+  // Normalise: strip trailing slash so we can append /api/ cleanly.
+  return raw.replace(/\/+$/, "");
+}
+
+// ── Vaultwarden helpers (#110 PR1) ───────────────────────────────────────
+//
+// The LLAT lives in Vaultwarden, NEVER in state.db (spec §5.5 +
+// docs/STORAGE-ARCHITECTURE.md). The state.db only carries the vault item
+// id, so a SELECT * FROM ha_connection serialised to JSON never leaks the
+// secret (test 1 asserts this; test 5 asserts /status doesn't leak it).
+//
+// We work against the vault-cli sidecar (bw serve), same pattern as
+// routes/channels_tailscale.ts:writeAuthKeyToVault — except this lane needs
+// folder semantics (the spec puts the item under "Home Assistant"), so the
+// helper ensures the folder exists first.
+
+const VAULT_CLI_URL = process.env.VAULT_CLI_URL ?? "http://vault-cli:8087";
+const HA_VAULTWARDEN_FOLDER = process.env.HA_VAULTWARDEN_FOLDER ?? "Home Assistant";
+const HA_LLAT_ITEM = process.env.HA_LLAT_ITEM ?? "LLAT";
+const VAULT_TIMEOUT_MS = 10_000;
+
+/** GET /list/object/folders, return id of folder named `name` (create if absent). */
+async function ensureVaultFolder(name: string): Promise<string> {
+  const list = await fetch(`${VAULT_CLI_URL}/list/object/folders`, {
+    signal: AbortSignal.timeout(VAULT_TIMEOUT_MS),
+  });
+  if (!list.ok) {
+    throw new ApiError(
+      502,
+      "VAULT_UNREACHABLE",
+      `vault-cli /list/object/folders returned HTTP ${list.status}`,
+    );
+  }
+  const listJson = (await list.json()) as {
+    data?: { data?: Array<{ id?: string; name?: string }> };
+  };
+  const existing = (listJson?.data?.data ?? []).find((f) => f.name === name);
+  if (existing?.id) return existing.id;
+
+  const create = await fetch(`${VAULT_CLI_URL}/object/folder`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+    signal: AbortSignal.timeout(VAULT_TIMEOUT_MS),
+  });
+  if (!create.ok) {
+    throw new ApiError(
+      502,
+      "VAULT_UNREACHABLE",
+      `vault-cli POST /object/folder returned HTTP ${create.status}`,
+    );
+  }
+  const createJson = (await create.json()) as {
+    data?: { data?: { id?: string } };
+  };
+  const id = createJson?.data?.data?.id;
+  if (!id) {
+    throw new ApiError(
+      502,
+      "VAULT_UNREACHABLE",
+      "vault-cli POST /object/folder returned no id",
+    );
+  }
+  return id;
+}
+
+/** Upsert the LLAT item in `folderId`, returning the vault item id. */
+async function upsertHaLlatItem(
+  folderId: string,
+  llat: string,
+): Promise<string> {
+  // Search for the item by name AND folderId — we don't want to collide
+  // with a same-named item in a different folder.
+  const search = await fetch(
+    `${VAULT_CLI_URL}/list/object/items?search=${encodeURIComponent(HA_LLAT_ITEM)}`,
+    { signal: AbortSignal.timeout(VAULT_TIMEOUT_MS) },
+  );
+  if (!search.ok) {
+    throw new ApiError(
+      502,
+      "VAULT_UNREACHABLE",
+      `vault-cli /list/object/items returned HTTP ${search.status}`,
+    );
+  }
+  const searchJson = (await search.json()) as {
+    data?: {
+      data?: Array<{ id?: string; name?: string; folderId?: string | null }>;
+    };
+  };
+  const existing = (searchJson?.data?.data ?? []).find(
+    (it) => it.name === HA_LLAT_ITEM && (it.folderId ?? null) === folderId,
+  );
+
+  if (existing?.id) {
+    // PUT update — fetch the full item, patch login.password, write back.
+    const cur = await fetch(`${VAULT_CLI_URL}/object/item/${existing.id}`, {
+      signal: AbortSignal.timeout(VAULT_TIMEOUT_MS),
+    });
+    if (!cur.ok) {
+      throw new ApiError(
+        502,
+        "VAULT_UNREACHABLE",
+        `vault-cli GET /object/item/${existing.id} returned HTTP ${cur.status}`,
+      );
+    }
+    const curJson = (await cur.json()) as {
+      data?: { data?: Record<string, unknown> };
+    };
+    const item = (curJson?.data?.data ?? {}) as Record<string, unknown>;
+    const login =
+      ((item.login as Record<string, unknown>) ?? {}) as Record<string, unknown>;
+    login.password = llat;
+    item.login = login;
+    item.folderId = folderId;
+    item.name = HA_LLAT_ITEM;
+    const put = await fetch(`${VAULT_CLI_URL}/object/item/${existing.id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(item),
+      signal: AbortSignal.timeout(VAULT_TIMEOUT_MS),
+    });
+    if (!put.ok) {
+      throw new ApiError(
+        502,
+        "VAULT_UNREACHABLE",
+        `vault-cli PUT /object/item/${existing.id} returned HTTP ${put.status}`,
+      );
+    }
+    return existing.id;
+  }
+
+  // Create — fresh login item under the HA folder.
+  const create = await fetch(`${VAULT_CLI_URL}/object/item`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      type: 1,
+      name: HA_LLAT_ITEM,
+      folderId,
+      favorite: false,
+      reprompt: 0,
+      notes: "Home Assistant long-lived access token for the Alfred channel.",
+      login: {
+        username: null,
+        password: llat,
+        uris: [],
+      },
+    }),
+    signal: AbortSignal.timeout(VAULT_TIMEOUT_MS),
+  });
+  if (!create.ok) {
+    throw new ApiError(
+      502,
+      "VAULT_UNREACHABLE",
+      `vault-cli POST /object/item returned HTTP ${create.status}`,
+    );
+  }
+  const createJson = (await create.json()) as {
+    data?: { data?: { id?: string } };
+  };
+  const id = createJson?.data?.data?.id;
+  if (!id) {
+    throw new ApiError(
+      502,
+      "VAULT_UNREACHABLE",
+      "vault-cli POST /object/item returned no id",
+    );
+  }
+  return id;
+}
+
+/** Best-effort delete of the LLAT vault item on disconnect. */
+async function deleteHaLlatItem(itemId: string): Promise<void> {
+  try {
+    await fetch(`${VAULT_CLI_URL}/object/item/${itemId}`, {
+      method: "DELETE",
+      signal: AbortSignal.timeout(VAULT_TIMEOUT_MS),
+    });
+  } catch {
+    // Best-effort — disconnect is the principal's "I want this gone" signal,
+    // and we've already cleared the state.db row by the time this fires. A
+    // vault-cli outage here leaves a dangling Vaultwarden item the
+    // principal can clean up by hand, which is preferable to refusing to
+    // disconnect.
+  }
+}
+
+// ── ha_connection row helpers (#110 PR1) ─────────────────────────────────
+
+interface HaConnectionRow {
+  id: number;
+  ha_url: string;
+  label: string;
+  vault_item_id: string;
+  ha_version: string | null;
+  state: string;
+  last_test_at: string | null;
+  last_test_ok: number;
+  last_test_error: string | null;
+  last_discovery_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+function getHaConnectionRow(): HaConnectionRow | undefined {
+  const db = getStateDb();
+  return db
+    .prepare("SELECT * FROM ha_connection WHERE id = 1")
+    .get() as HaConnectionRow | undefined;
+}
+
+function upsertHaConnectionRow(args: {
+  ha_url: string;
+  label: string;
+  vault_item_id: string;
+  ha_version: string | null;
+}): void {
+  const db = getStateDb();
+  const now = new Date().toISOString();
+  // INSERT OR REPLACE on the singleton — connect always recreates the row
+  // so a re-connect after a state-flip starts fresh.
+  db.prepare(
+    `INSERT OR REPLACE INTO ha_connection (
+       id, ha_url, label, vault_item_id, ha_version,
+       state, last_test_at, last_test_ok, last_test_error,
+       last_discovery_at, created_at, updated_at
+     ) VALUES (1, ?, ?, ?, ?, 'connected', ?, 1, NULL, NULL,
+              COALESCE((SELECT created_at FROM ha_connection WHERE id = 1), ?),
+              ?)`,
+  ).run(
+    args.ha_url,
+    args.label,
+    args.vault_item_id,
+    args.ha_version,
+    now,
+    now,
+    now,
+  );
+}
+
+function deleteHaConnectionRow(): void {
+  getStateDb().prepare("DELETE FROM ha_connection WHERE id = 1").run();
+}
+
+// ── Connect body ──────────────────────────────────────────────────────────
+
+interface ConnectBody {
+  ha_url: string;
+  llat: string;
+  label: string;
+}
+
+function parseHaConnectBody(raw: unknown): ConnectBody {
+  if (typeof raw !== "object" || raw === null) {
+    throw new ValidationError("body must be a JSON object");
+  }
+  const b = raw as Record<string, unknown>;
+  const ha_url = assertValidHaUrl(b.ha_url);
+  if (typeof b.llat !== "string" || b.llat.length === 0) {
+    throw new ValidationError("llat must be a non-empty string");
+  }
+  let label = "Home Assistant";
+  if (b.label !== undefined && b.label !== null) {
+    if (typeof b.label !== "string") {
+      throw new ValidationError("label must be a string when present");
+    }
+    if (b.label.trim().length > 0) {
+      label = b.label.trim();
+    }
+  }
+  return { ha_url, llat: b.llat, label };
+}
+
+// ── Registry shape (#110 PR1) ────────────────────────────────────────────
+//
+// PR5 (HaBootstrapWorkflow Phase A) populates ha_registry; PR1 ships the
+// empty read so the dashboard and PR2 MCP tools have a stable shape.
+
+interface RegistryView {
+  entities: unknown[];
+  areas: unknown[];
+  devices: unknown[];
+  automations: unknown[];
+  scenes: unknown[];
+  helpers: unknown[];
+}
+
+function readRegistry(): RegistryView {
+  const db = getStateDb();
+  const buckets: RegistryView = {
+    entities: [],
+    areas: [],
+    devices: [],
+    automations: [],
+    scenes: [],
+    helpers: [],
+  };
+  let rows: Array<{ kind: string; payload_json: string }> = [];
+  try {
+    rows = db
+      .prepare("SELECT kind, payload_json FROM ha_registry")
+      .all() as Array<{ kind: string; payload_json: string }>;
+  } catch {
+    // ha_registry may not be present in an older test sandbox; treat as empty.
+    return buckets;
+  }
+  const dest: Record<string, unknown[]> = {
+    entity: buckets.entities,
+    area: buckets.areas,
+    device: buckets.devices,
+    automation: buckets.automations,
+    scene: buckets.scenes,
+    helper: buckets.helpers,
+  };
+  for (const r of rows) {
+    const target = dest[r.kind];
+    if (!target) continue;
+    try {
+      target.push(JSON.parse(r.payload_json));
+    } catch {
+      // Skip malformed rows — PR5 owns the write side.
+    }
+  }
+  return buckets;
+}
+
 // ── Routes ────────────────────────────────────────────────────────────────
 
 export function registerHaChannelRoutes(): void {
@@ -412,4 +857,128 @@ export function registerHaChannelRoutes(): void {
       },
     });
   });
+
+  // ──────────────────────────────────────────────────────────────────────
+  // POST /api/v1/channels/ha/connect — #110 PR1
+  //
+  // Body: { ha_url: string, llat: string, label?: string }
+  //
+  // Order of operations is load-bearing:
+  //   1. Validate body shape (no probe on bad URL — test 3).
+  //   2. Probe HA (`/api/` for auth, `/api/config` for version).
+  //   3. ONLY on probe success, ensure the Vaultwarden folder + upsert the
+  //      LLAT item (test 2 asserts no vault write on 401).
+  //   4. Persist the ha_connection row.
+  //
+  // Errors:
+  //   400 VALIDATION_ERROR — bad body
+  //   401 AUTH_FAILED      — HA rejected the LLAT
+  //   502 UPSTREAM_ERROR   — HA reachable but not 2xx, or vault-cli down
+  // ──────────────────────────────────────────────────────────────────────
+  addRoute("POST", "/api/v1/channels/ha/connect", async ({ res, body }) => {
+    const parsed = parseHaConnectBody(body);
+
+    // (1) Probe HA. AUTH_FAILED short-circuits before we touch anything.
+    const probe = await probeHa(parsed.ha_url, parsed.llat);
+    if (!probe.ok) {
+      if (probe.code === "AUTH_FAILED") {
+        throw new ApiError(401, "AUTH_FAILED", probe.detail);
+      }
+      throw new ApiError(502, "UPSTREAM_ERROR", probe.detail);
+    }
+
+    // (2) Vaultwarden — folder, then item upsert. The LLAT lives ONLY here.
+    const folderId = await ensureVaultFolder(HA_VAULTWARDEN_FOLDER);
+    const vaultItemId = await upsertHaLlatItem(folderId, parsed.llat);
+
+    // (3) ha_connection row.
+    upsertHaConnectionRow({
+      ha_url: parsed.ha_url,
+      label: parsed.label,
+      vault_item_id: vaultItemId,
+      ha_version: probe.ha_version,
+    });
+
+    sendJson(res, 200, {
+      ok: true,
+      state: "connected",
+      ha_url: parsed.ha_url,
+      ha_version: probe.ha_version,
+    });
+  });
+
+  // ──────────────────────────────────────────────────────────────────────
+  // GET /api/v1/channels/ha/status — #110 PR1
+  //
+  // Fail-soft snapshot of ha_connection. Returns:
+  //
+  //   { connected, state, ha_url, ha_version, last_test_ok, last_test_at,
+  //     error }
+  //
+  // When no row exists: state='unconfigured', everything else null/false.
+  // The LLAT is NEVER in the payload — only the row columns, which by
+  // schema (0005_ha_channel.sql) only carry vault_item_id.
+  // ──────────────────────────────────────────────────────────────────────
+  addRoute("GET", "/api/v1/channels/ha/status", async ({ res }) => {
+    const row = getHaConnectionRow();
+    if (!row) {
+      sendJson(res, 200, {
+        connected: false,
+        state: "unconfigured",
+        ha_url: null,
+        ha_version: null,
+        last_test_ok: false,
+        last_test_at: null,
+        error: null,
+      });
+      return;
+    }
+    sendJson(res, 200, {
+      connected: row.state === "connected",
+      state: row.state,
+      ha_url: row.ha_url,
+      ha_version: row.ha_version ?? null,
+      label: row.label,
+      last_test_ok: Number(row.last_test_ok) === 1,
+      last_test_at: row.last_test_at ?? null,
+      error: row.last_test_error ?? null,
+    });
+  });
+
+  // ──────────────────────────────────────────────────────────────────────
+  // DELETE /api/v1/channels/ha/disconnect — #110 PR1
+  //
+  // Clears the Vaultwarden item AND the state.db row. Idempotent — if no
+  // row exists we still return 200 ok so a double-click is harmless.
+  // ──────────────────────────────────────────────────────────────────────
+  addRoute("DELETE", "/api/v1/channels/ha/disconnect", async ({ res }) => {
+    const row = getHaConnectionRow();
+    if (row?.vault_item_id) {
+      await deleteHaLlatItem(row.vault_item_id);
+    }
+    deleteHaConnectionRow();
+    sendJson(res, 200, { ok: true });
+  });
+
+  // ──────────────────────────────────────────────────────────────────────
+  // GET /api/v1/channels/ha/registry — #110 PR1
+  //
+  // The 6 ha_registry buckets — entities / areas / devices / automations /
+  // scenes / helpers. PR1 ships the empty read; PR5
+  // (HaBootstrapWorkflow Phase A) populates it.
+  // ──────────────────────────────────────────────────────────────────────
+  addRoute("GET", "/api/v1/channels/ha/registry", async ({ res }) => {
+    sendJson(res, 200, readRegistry());
+  });
 }
+
+/**
+ * Alias for the route registration used by the #110 PR1 spec + tests.
+ *
+ * Both lanes share this file and the two names ended up living together
+ * during the Wave B sequencing. `registerHaChannelRoutes` is the older
+ * name (kept for the server.ts wiring it already has); the #110 PR1 test
+ * file imports `registerChannelsHaRoutes`. They register the same set
+ * of routes.
+ */
+export const registerChannelsHaRoutes = registerHaChannelRoutes;

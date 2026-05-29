@@ -122,6 +122,16 @@ const VOICE_BRIDGE_ALLOWLIST: ReadonlySet<string> = new Set([
   // by issue #109 PR 2 alongside the routes themselves.
   "GET:/api/v1/channels/tailscale/status",
   "GET:/api/v1/channels/tailscale/peers",
+  // Home Assistant channel — Sir asks "is the front door light on?" via
+  // voice. Spec §7 Q13 lists exactly 4 read routes for the voice surface
+  // (status, registry, state/:entity_id, automations). connect /
+  // disconnect / service / automation CRUD / proposal / discovery /
+  // snapshots are intentionally absent — writes go through MCP and the
+  // /snapshots forensic surface is operator-only. Added by issue #110 PR1
+  // alongside the route implementations themselves.
+  "GET:/api/v1/channels/ha/status",
+  "GET:/api/v1/channels/ha/registry",
+  "GET:/api/v1/channels/ha/automations",
 ]);
 
 /**
@@ -169,6 +179,12 @@ const VOICE_BRIDGE_PATTERN_ALLOWLIST: ReadonlyArray<{
   { method: "GET", regex: /^\/api\/v1\/learning\/observations\/[^/]+$/ },
   // GET /api/v1/learning/instincts/:id — one instinct.
   { method: "GET", regex: /^\/api\/v1\/learning\/instincts\/[^/]+$/ },
+  // GET /api/v1/channels/ha/state/:entity_id — read one HA entity's last
+  // observed state. Entity ids look like `light.kitchen` /
+  // `binary_sensor.front_door` — domain.object_id, no slashes, so
+  // [^/]+ is the right shape (no nested paths under /state/). Added by
+  // issue #110 PR1 alongside the route implementation.
+  { method: "GET", regex: /^\/api\/v1\/channels\/ha\/state\/[^/]+$/ },
 ];
 
 function voiceBridgeRouteAllowed(method: string, pathname: string): boolean {
