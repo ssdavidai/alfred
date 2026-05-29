@@ -896,6 +896,32 @@ action sendOmiTest {
   entities: []
 }
 
+// Lane III (Tailscale, #109 PR3 — 2026-05-29) — operator opt-in card on
+// /channels. Four ops backed by ctrl-api /api/v1/channels/tailscale/*
+// (PR2 #127 landed the routes). The sidecar lives under
+// `profiles: ["tailscale"]` in docker-compose — off by default. State
+// derivation lives in tailscaleCardCore.ts. PR4 (cert + serve) lands the
+// LE-cert passthrough + Caddy/Funnel ingress.
+query getTailscaleStatus {
+  fn: import { getTailscaleStatus } from "@src/dashboard/operations",
+  entities: []
+}
+
+action connectTailscale {
+  fn: import { connectTailscale } from "@src/dashboard/operations",
+  entities: []
+}
+
+action disconnectTailscale {
+  fn: import { disconnectTailscale } from "@src/dashboard/operations",
+  entities: []
+}
+
+query getTailscalePeers {
+  fn: import { getTailscalePeers } from "@src/dashboard/operations",
+  entities: []
+}
+
 query getAgentConfig {
   fn: import { getAgentConfig } from "@src/dashboard/operations",
   entities: []

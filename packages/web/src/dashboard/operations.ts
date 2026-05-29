@@ -574,6 +574,86 @@ export const sendOmiTest = async (_args: unknown, context: any) => {
 };
 
 // ============================================================
+// Tailscale channel (#109 PR3) — operator opt-in to a Tailscale sidecar.
+// Backed by ctrl-api /api/v1/channels/tailscale/* (PR2 #127 landed the
+// routes). Three Wasp ops:
+//   getTailscaleStatus  → { state, tailnet_ip, tailnet_hostname, auth_url,
+//                           authkey_used_at, last_status_probe_at,
+//                           last_error, reason }
+//   connectTailscale    → POST { authkey?: string }
+//                          - authkey present → Path A (paste an auth key)
+//                          - authkey absent  → Path C (device-auth URL,
+//                                              returned in `auth_url`)
+//                          Returns: { ok, state, path: "A" | "C",
+//                                     auth_url?: string }
+//                          The action NEVER echoes the authkey back to
+//                          the client — the security rule.
+//   disconnectTailscale → POST {} → { ok, state: "disabled", warnings }
+//   getTailscalePeers   → { peers: TailscalePeer[], reason?: string }
+//
+// PR4 (cert + serve) will add the cert/serve actions; the ctrl-api
+// returns 501 for those today.
+// ============================================================
+
+export const getTailscaleStatus = async (_args: unknown, context: any) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    path: "/api/v1/channels/tailscale/status",
+  });
+};
+
+/**
+ * Connect the tenant to the operator's tailnet.
+ *
+ * Body: { authkey?: string }
+ *
+ *   • authkey present (non-empty) → ctrl-api takes Path A: writes the
+ *     key into Vaultwarden + /srv/alfred-black/.env, then brings the
+ *     tailscale sidecar up. The action ONLY surfaces the next ctrl-api
+ *     state — the key itself is never echoed back to the client.
+ *
+ *   • authkey absent / empty → ctrl-api takes Path C: brings the sidecar
+ *     up with TAILSCALE_ENABLED=true but no auth key, and `tailscaled`
+ *     mints a device-auth URL the operator opens in a new tab. The URL
+ *     is included in the response so the React layer can render it.
+ *
+ * SECURITY: only the first 6 chars of the authkey may EVER appear in any
+ * error message surfaced to the client. The action trims the key, then
+ * passes it through to ctrl-api — it is never logged here. ctrl-api
+ * errors (e.g. 502 DOCKER_COMPOSE_FAILED) bubble through with their
+ * `error.message`, which does not contain the key.
+ */
+export const connectTailscale = async (
+  args: { authkey?: string },
+  context: any,
+) => {
+  const instance = await getUserInstance(context);
+  const raw = typeof args?.authkey === "string" ? args.authkey.trim() : "";
+  // Path C body is {} (no key); Path A includes the trimmed key.
+  const body = raw.length > 0 ? { authkey: raw } : {};
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/channels/tailscale/connect",
+    body,
+  });
+};
+
+export const disconnectTailscale = async (_args: unknown, context: any) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/channels/tailscale/disconnect",
+  });
+};
+
+export const getTailscalePeers = async (_args: unknown, context: any) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    path: "/api/v1/channels/tailscale/peers",
+  });
+};
+
+// ============================================================
 // Dashboard Home
 // ============================================================
 

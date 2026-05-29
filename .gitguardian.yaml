@@ -6,3 +6,6 @@ secret:
     # Test fixtures contain synthetic auth-key shaped strings that match the
     # Tailscale `tskey-auth-…` pattern. They are clearly marked FIXTUREONLY.
     - "packages/ctrl/tests/channels_tailscale.test.ts"
+    # /channels Tailscale card derivation tests — same FIXTUREONLY rule.
+    # #109 PR3 (2026-05-29).
+    - "packages/web/src/dashboard/tailscaleCardCore.test.ts"

@@ -6,7 +6,7 @@
 // (#113 PR3a/PR3b — Vexa was retired in #113 PR1).
 // Sir #8 — also surfaces a "Terminal" card with SSH info + the
 // `docker exec ... hermes` command for direct shell access.
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { Link } from "react-router-dom";
 import {
   useQuery,
@@ -43,6 +43,10 @@ import {
   getPaperclipChannelStatus,
   sendPaperclipTest,
   setPaperclipApiKey,
+  getTailscaleStatus,
+  getTailscalePeers,
+  connectTailscale,
+  disconnectTailscale,
   updateCredentials,
 } from "wasp/client/operations";
 import { Frame } from "../client/components/ab/Frame";
@@ -85,6 +89,16 @@ import {
   truncateTaskId as truncatePaperclipTaskId,
   type PaperclipStatus,
 } from "./paperclipCardCore";
+import {
+  deriveTailscaleCardState,
+  deriveConnectMode,
+  derivePeerCount,
+  isProbablyValidAuthKey,
+  normalisePeer,
+  redactAuthKey,
+  type TailscaleStatus,
+  type TailscalePeersResponse,
+} from "./tailscaleCardCore";
 
 // F57/C14 — the email card reads the live ctrl-api status, not a phantom
 // Instance row. `inbox_address` is only present once `configured`.
@@ -372,6 +386,13 @@ export default function ChannelsPage() {
               TelegramCard. The four visual states + workspace info come
               from slackCardCore. */}
           <SlackCard />
+
+          {/* Tailscale — #109 PR3 (2026-05-29): operator opt-in to a
+              Tailscale sidecar. The compose profile is off by default;
+              connecting from the UI brings it up. Four UI modes
+              (disabled / connecting / connected / error) come from
+              tailscaleCardCore. Cert + Serve land in PR4. */}
+          <TailscaleCard />
 
           {/* Telegram — Lane III: live card backed by ctrl-api. The four
               visual states (unconfigured / configured_starting /
@@ -3430,3 +3451,485 @@ function PaperclipApiKeyPanel({
     </div>
   );
 }
+
+// ---------------------------------------------------------------------------
+// Tailscale card — #109 PR3 (2026-05-29).
+//
+// The compose profile `["tailscale"]` is OFF by default. Connecting from
+// the UI is the operator's opt-in. Four UI modes (derived from the
+// 5-value ctrl-api state via tailscaleCardCore):
+//
+//   • disabled      — two CTAs: primary "Connect via auth key" reveals a
+//                      type="password" paste box; secondary "Use device
+//                      auth URL" POSTs {} and surfaces the auth_url the
+//                      ctrl-api returns. Tooltip explains the sidecar is
+//                      off until first connect.
+//   • connecting    — spinner + (Path C only) the device-auth URL the
+//                      user opens in a new tab + a Copy URL button.
+//                      Polls /status every 5s.
+//   • connected     — hostname, IP, last probe, peer count + a "View
+//                      peers" expander that loads /peers on demand.
+//                      Disconnect button.
+//   • error         — last_error + reason verbatim, retry CTA, the
+//                      Disconnect button is still available.
+//
+// SECURITY: the paste-authkey input is type="password" and the key is
+// trimmed-then-passed-then-forgotten. Error toasts NEVER include the
+// full key — only the first 6 chars via `redactAuthKey`. No log line in
+// this file stringifies a `tskey-…` value.
+// ---------------------------------------------------------------------------
+
+export function TailscaleCard() {
+  const { data: statusData, refetch } = useQuery(
+    getTailscaleStatus,
+    undefined,
+    { retry: false },
+  );
+  const status = (statusData as TailscaleStatus | undefined) ?? null;
+  const card = deriveTailscaleCardState({ status });
+
+  // Path-A paste-form state (kept local; never persisted).
+  const [authKey, setAuthKey] = useState("");
+  const [pasteOpen, setPasteOpen] = useState(false);
+  const [connectBusy, setConnectBusy] = useState(false);
+  const [connectErr, setConnectErr] = useState<string | null>(null);
+
+  // Disconnect state.
+  const [discBusy, setDiscBusy] = useState(false);
+
+  // "Copy URL" toast for the device-auth URL block.
+  const [copied, setCopied] = useState(false);
+
+  // "View peers" expander state — peers are only fetched on demand.
+  const [peersOpen, setPeersOpen] = useState(false);
+  const { data: peersData, refetch: refetchPeers } = useQuery(
+    getTailscalePeers,
+    undefined,
+    // We don't auto-fetch peers — the expander triggers the first load
+    // via refetch(). Once loaded, react-query caches; closing/reopening
+    // hits the cache instead of re-fetching.
+    { retry: false, enabled: false },
+  );
+  const peers = (peersData as TailscalePeersResponse | undefined) ?? null;
+  const peerCount = derivePeerCount(peers);
+
+  // Poll /status every 5s while in a connecting state.
+  useEffect(() => {
+    if (!card.shouldPoll) return;
+    const handle = setInterval(() => {
+      refetch();
+    }, 5_000);
+    return () => clearInterval(handle);
+  }, [card.shouldPoll, refetch]);
+
+  const trimmed = authKey.trim();
+  const keyValid = isProbablyValidAuthKey(trimmed);
+  const keyHint =
+    trimmed.length > 0 && !keyValid
+      ? "Auth keys look like tskey-auth-… with 8+ characters."
+      : null;
+  const connectMode = deriveConnectMode({ authkey: authKey });
+
+  async function connectWithAuthKey() {
+    if (!keyValid) return;
+    setConnectBusy(true);
+    setConnectErr(null);
+    try {
+      await connectTailscale({ authkey: trimmed });
+      // SECURITY: clear the input immediately so the key stops living in
+      // React state. The server response, by contract, does NOT echo the
+      // key back.
+      setAuthKey("");
+      setPasteOpen(false);
+      refetch();
+    } catch (e: any) {
+      // SECURITY: only the first 6 chars of the key may surface. We
+      // never put the full key into the error string.
+      const prefix = redactAuthKey(trimmed);
+      const base =
+        e?.message ?? e?.data?.error ?? "Tailscale refused the auth key.";
+      setConnectErr(prefix ? `${base} (key ${prefix})` : base);
+    } finally {
+      setConnectBusy(false);
+    }
+  }
+
+  async function connectViaDeviceAuth() {
+    setConnectBusy(true);
+    setConnectErr(null);
+    try {
+      // Empty body → Path C. ctrl-api will surface the auth_url on the
+      // next /status poll.
+      await connectTailscale({});
+      refetch();
+    } catch (e: any) {
+      setConnectErr(
+        e?.message ?? e?.data?.error ?? "Couldn't start Tailscale.",
+      );
+    } finally {
+      setConnectBusy(false);
+    }
+  }
+
+  async function disconnect() {
+    if (discBusy) return;
+    if (
+      typeof window !== "undefined" &&
+      !window.confirm(
+        "Disconnect this tenant from your tailnet? The Tailscale " +
+          "sidecar will stop and the device will be logged out.",
+      )
+    ) {
+      return;
+    }
+    setDiscBusy(true);
+    try {
+      await disconnectTailscale({});
+      setPeersOpen(false);
+      refetch();
+    } catch (e) {
+      console.error("tailscale disconnect failed", e);
+    } finally {
+      setDiscBusy(false);
+    }
+  }
+
+  function copyAuthUrl() {
+    if (card.authUrl) {
+      navigator.clipboard?.writeText(card.authUrl);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    }
+  }
+
+  function togglePeers() {
+    const next = !peersOpen;
+    setPeersOpen(next);
+    if (next) {
+      // First open (or re-open) triggers a fresh fetch — peers are cheap
+      // and the operator usually wants the latest view.
+      refetchPeers();
+    }
+  }
+
+  const address =
+    card.state === "connected"
+      ? status?.tailnet_hostname || status?.tailnet_ip || "Connected"
+      : card.state === "starting" || card.state === "authenticating"
+        ? "Bringing the sidecar up…"
+        : card.state === "error"
+          ? "Needs attention"
+          : "Sidecar is off — opt in below";
+
+  return (
+    <ChannelCard
+      name="Tailscale"
+      address={address}
+      note="Join your tailnet — reach this tenant from any device you trust."
+      status={card.pill}
+    >
+      {/* DISABLED — two CTAs. The primary reveals a password-style paste
+          box for Path A (auth key); the secondary POSTs {} for Path C
+          (device-auth URL). Tooltip is the description copy. */}
+      {card.mode === "disabled" && (
+        <div className="mt-5 space-y-4">
+          <p
+            className="font-body italic text-[13px]"
+            style={{ color: "var(--marginalia)" }}
+            title="The Tailscale sidecar is off by default. The first connect brings it up."
+          >
+            {card.description}
+          </p>
+
+          {!pasteOpen && (
+            <div className="flex flex-wrap gap-3 items-baseline">
+              <button
+                onClick={() => setPasteOpen(true)}
+                className="btn-ghost"
+                disabled={connectBusy}
+              >
+                {card.connectChoice.primaryLabel}
+              </button>
+              <button
+                onClick={connectViaDeviceAuth}
+                disabled={connectBusy}
+                className="btn-link"
+              >
+                {connectBusy ? "…" : card.connectChoice.secondaryLabel}
+              </button>
+            </div>
+          )}
+
+          {pasteOpen && (
+            <div className="space-y-2">
+              <div
+                className="font-mono text-[10px] uppercase tracking-[0.22em]"
+                style={{ color: "var(--marginalia)" }}
+              >
+                Tailscale auth key
+              </div>
+              <div className="flex gap-2 items-baseline">
+                {/* SECURITY: type="password" — never reveal-able in this
+                    card. The key is trimmed, sent, and immediately cleared
+                    from React state on success. */}
+                <input
+                  type="password"
+                  value={authKey}
+                  onChange={(e) => setAuthKey(e.target.value)}
+                  placeholder="tskey-auth-…"
+                  autoComplete="off"
+                  spellCheck={false}
+                  className="flex-1 bg-transparent border border-rule px-2 py-1 font-mono text-[12px]"
+                />
+                <button
+                  onClick={connectWithAuthKey}
+                  disabled={connectBusy || connectMode !== "authkey" || !keyValid}
+                  className="btn-ghost"
+                >
+                  {connectBusy ? "…" : "Connect"}
+                </button>
+                <button
+                  onClick={() => {
+                    setPasteOpen(false);
+                    setAuthKey("");
+                    setConnectErr(null);
+                  }}
+                  className="btn-link"
+                  disabled={connectBusy}
+                >
+                  Cancel
+                </button>
+              </div>
+              {keyHint && (
+                <p
+                  className="font-body italic text-[12px]"
+                  style={{ color: "var(--marginalia)" }}
+                >
+                  {keyHint}
+                </p>
+              )}
+              <p
+                className="font-body italic text-[12px]"
+                style={{ color: "var(--marginalia)" }}
+              >
+                Get an auth key from{" "}
+                <a
+                  href="https://login.tailscale.com/admin/settings/keys"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="underline"
+                >
+                  login.tailscale.com/admin/settings/keys
+                </a>
+                . Stored in Vaultwarden; never echoed back here.
+              </p>
+            </div>
+          )}
+
+          {connectErr && (
+            <p
+              className="font-body italic text-[13px]"
+              style={{ color: "var(--brass)" }}
+            >
+              {connectErr}
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* CONNECTING — Path A: just spinner copy. Path C: spinner + the
+          device-auth URL the operator opens in a new tab + Copy URL. */}
+      {card.mode === "connecting" && (
+        <div className="mt-5 space-y-3">
+          <p
+            className="font-body italic text-[13px]"
+            style={{ color: "var(--marginalia)" }}
+          >
+            {card.description}
+          </p>
+
+          {card.showAuthUrl && card.authUrl && (
+            <div className="space-y-2">
+              <div
+                className="font-mono text-[10px] uppercase tracking-[0.22em]"
+                style={{ color: "var(--marginalia)" }}
+              >
+                Device-auth URL
+              </div>
+              <div className="flex items-center gap-2">
+                <a
+                  href={card.authUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="flex-1 font-mono text-[11px] border border-rule p-2 truncate underline"
+                  style={{ color: "var(--ink)" }}
+                >
+                  {card.authUrl}
+                </a>
+                <button onClick={copyAuthUrl} className="btn-ghost">
+                  {copied ? "Copied" : "Copy URL"}
+                </button>
+              </div>
+            </div>
+          )}
+
+          <div className="flex items-baseline gap-3 pt-1">
+            <span
+              className="font-mono text-[11px]"
+              style={{ color: "var(--marginalia)" }}
+            >
+              Polling status every 5s…
+            </span>
+            {card.showDisconnect && (
+              <button
+                onClick={disconnect}
+                disabled={discBusy}
+                className="btn-link"
+              >
+                Cancel
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* CONNECTED — hostname, IP, last probe, peer count + a "View
+          peers" expander that lazy-loads /peers on first open. */}
+      {card.mode === "connected" && (
+        <div className="mt-5 space-y-4">
+          <p
+            className="font-body italic text-[13px]"
+            style={{ color: "var(--marginalia)" }}
+          >
+            {card.description}
+          </p>
+
+          <div className="space-y-1 font-mono text-[12px]">
+            {status?.tailnet_hostname && (
+              <div className="flex gap-2">
+                <span style={{ color: "var(--marginalia)" }}>hostname</span>
+                <span style={{ color: "var(--ink)" }}>
+                  {status.tailnet_hostname}
+                </span>
+              </div>
+            )}
+            {status?.tailnet_ip && (
+              <div className="flex gap-2">
+                <span style={{ color: "var(--marginalia)" }}>tailnet ip</span>
+                <span style={{ color: "var(--ink)" }}>
+                  {status.tailnet_ip}
+                </span>
+              </div>
+            )}
+            <div className="flex gap-2">
+              <span style={{ color: "var(--marginalia)" }}>peers</span>
+              <span style={{ color: "var(--ink)" }}>
+                {peersOpen ? peerCount : peers ? peerCount : "—"}
+              </span>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap gap-3 items-baseline">
+            <button onClick={togglePeers} className="btn-link">
+              {peersOpen ? "Hide peers" : "View peers"}
+            </button>
+            <button
+              onClick={disconnect}
+              disabled={discBusy}
+              className="btn-ghost"
+            >
+              {discBusy ? "…" : "Disconnect"}
+            </button>
+          </div>
+
+          {peersOpen && (
+            <div className="border-t border-rule pt-3 space-y-1">
+              {peerCount === 0 ? (
+                <p
+                  className="font-body italic text-[12px]"
+                  style={{ color: "var(--marginalia)" }}
+                >
+                  {peers?.reason
+                    ? peers.reason
+                    : "No peers visible to this tenant yet."}
+                </p>
+              ) : (
+                peers!.peers.map((p) => {
+                  const np = normalisePeer(p);
+                  return (
+                    <div
+                      key={np.id ?? np.displayName}
+                      className="flex items-baseline gap-3 font-mono text-[11px]"
+                    >
+                      <span
+                        style={{
+                          color: np.online ? "var(--ink)" : "var(--marginalia)",
+                        }}
+                      >
+                        {np.online ? "●" : "○"}
+                      </span>
+                      <span style={{ color: "var(--ink)" }}>
+                        {np.displayName}
+                      </span>
+                      {np.tailscale_ips[0] && (
+                        <span style={{ color: "var(--marginalia)" }}>
+                          {np.tailscale_ips[0]}
+                        </span>
+                      )}
+                      {np.os && (
+                        <span style={{ color: "var(--marginalia)" }}>
+                          {np.os}
+                        </span>
+                      )}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ERROR — verbatim last_error/reason + retry CTA. */}
+      {card.mode === "error" && (
+        <div className="mt-5 space-y-3">
+          <p
+            className="font-body italic text-[13px]"
+            style={{ color: "var(--brass)" }}
+          >
+            {card.description}
+          </p>
+          {card.errorMessage && card.errorMessage !== card.description && (
+            <p
+              className="font-mono text-[11px]"
+              style={{ color: "var(--marginalia)" }}
+            >
+              {card.errorMessage}
+            </p>
+          )}
+          <div className="flex flex-wrap gap-3 items-baseline">
+            {card.showRetry && (
+              <button
+                onClick={() => refetch()}
+                className="btn-ghost"
+                disabled={connectBusy}
+              >
+                Try again
+              </button>
+            )}
+            {card.showDisconnect && (
+              <button
+                onClick={disconnect}
+                disabled={discBusy}
+                className="btn-link"
+              >
+                {discBusy ? "…" : "Disconnect"}
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+    </ChannelCard>
+  );
+}
+
