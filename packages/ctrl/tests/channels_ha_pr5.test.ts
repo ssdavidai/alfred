@@ -95,7 +95,8 @@ globalThis.fetch = (async (input: any, init?: any) => {
       name: body.name,
     };
     vaultFolders.push(f);
-    return makeJsonResponse({ success: true, data: { data: f } });
+    // Single-object endpoint — vault-cli (`bw serve`) returns single-wrapped.
+    return makeJsonResponse({ success: true, data: f });
   }
   // vault-cli items
   if (url.includes("/list/object/items")) {
@@ -112,7 +113,8 @@ globalThis.fetch = (async (input: any, init?: any) => {
     const id = objMatch[1];
     const item = vaultStore.find((i) => i.id === id);
     if (!item) return makeJsonResponse({ success: false, message: "not found" }, 404);
-    return makeJsonResponse({ success: true, data: { data: item } });
+    // Single-object endpoint — vault-cli (`bw serve`) returns single-wrapped.
+    return makeJsonResponse({ success: true, data: item });
   }
   if (url.endsWith("/object/item") && method === "POST") {
     const body = JSON.parse(String(init?.body ?? "{}"));
@@ -130,7 +132,8 @@ globalThis.fetch = (async (input: any, init?: any) => {
       },
     };
     vaultStore.push(item);
-    return makeJsonResponse({ success: true, data: { data: item } });
+    // Single-object endpoint — vault-cli (`bw serve`) returns single-wrapped.
+    return makeJsonResponse({ success: true, data: item });
   }
   if (objMatch && method === "PUT") {
     const id = objMatch[1];
@@ -143,7 +146,8 @@ globalThis.fetch = (async (input: any, init?: any) => {
       folderId: body.folderId ?? vaultStore[idx].folderId,
       login: { ...vaultStore[idx].login, ...(body.login ?? {}) },
     };
-    return makeJsonResponse({ success: true, data: { data: vaultStore[idx] } });
+    // Single-object endpoint — vault-cli (`bw serve`) returns single-wrapped.
+    return makeJsonResponse({ success: true, data: vaultStore[idx] });
   }
   if (objMatch && method === "DELETE") {
     const id = objMatch[1];

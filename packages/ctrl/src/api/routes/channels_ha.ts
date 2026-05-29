@@ -493,10 +493,13 @@ async function ensureVaultFolder(name: string): Promise<string> {
       `vault-cli POST /object/folder returned HTTP ${create.status}`,
     );
   }
+  // vault-cli (`bw serve`) returns single-wrapped `{success,data:{id,...}}`
+  // for single-object create/get/put endpoints, NOT double-wrapped — only
+  // LIST endpoints are `{data:{data:[…]}}`. Live-verified 2026-05-29 on home.
   const createJson = (await create.json()) as {
-    data?: { data?: { id?: string } };
+    data?: { id?: string };
   };
-  const id = createJson?.data?.data?.id;
+  const id = createJson?.data?.id;
   if (!id) {
     throw new ApiError(
       502,
@@ -546,10 +549,13 @@ async function upsertHaLlatItem(
         `vault-cli GET /object/item/${existing.id} returned HTTP ${cur.status}`,
       );
     }
+    // vault-cli (`bw serve`) returns single-wrapped `{success,data:{id,...}}`
+    // for single-object create/get/put endpoints, NOT double-wrapped — only
+    // LIST endpoints are `{data:{data:[…]}}`. Live-verified 2026-05-29 on home.
     const curJson = (await cur.json()) as {
-      data?: { data?: Record<string, unknown> };
+      data?: Record<string, unknown>;
     };
-    const item = (curJson?.data?.data ?? {}) as Record<string, unknown>;
+    const item = (curJson?.data ?? {}) as Record<string, unknown>;
     const login =
       ((item.login as Record<string, unknown>) ?? {}) as Record<string, unknown>;
     login.password = llat;
@@ -598,10 +604,13 @@ async function upsertHaLlatItem(
       `vault-cli POST /object/item returned HTTP ${create.status}`,
     );
   }
+  // vault-cli (`bw serve`) returns single-wrapped `{success,data:{id,...}}`
+  // for single-object create/get/put endpoints, NOT double-wrapped — only
+  // LIST endpoints are `{data:{data:[…]}}`. Live-verified 2026-05-29 on home.
   const createJson = (await create.json()) as {
-    data?: { data?: { id?: string } };
+    data?: { id?: string };
   };
-  const id = createJson?.data?.data?.id;
+  const id = createJson?.data?.id;
   if (!id) {
     throw new ApiError(
       502,
@@ -1099,10 +1108,13 @@ async function readHaLlat(): Promise<string> {
       `vault-cli GET /object/item/${row.vault_item_id} returned HTTP ${r.status}`,
     );
   }
+  // vault-cli (`bw serve`) returns single-wrapped `{success,data:{id,...}}`
+  // for single-object create/get/put endpoints, NOT double-wrapped — only
+  // LIST endpoints are `{data:{data:[…]}}`. Live-verified 2026-05-29 on home.
   const j = (await r.json()) as {
-    data?: { data?: { login?: { password?: string } } };
+    data?: { login?: { password?: string } };
   };
-  const pw = j?.data?.data?.login?.password;
+  const pw = j?.data?.login?.password;
   if (typeof pw !== "string" || pw.length === 0) {
     throw new ApiError(
       502,
