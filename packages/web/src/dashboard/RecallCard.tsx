@@ -1348,28 +1348,144 @@ function RecallConfiguredPanel({
                 style={{ color: "var(--ink)" }}
               >
                 <li>
-                  <code>bot.status_change</code> — lifecycle transitions
-                  (joining → in-meeting → leaving → done).
+                  <code>bot.joining_call</code> — bot acknowledged and
+                  connecting.
                 </li>
                 <li>
-                  <code>bot.done</code> — bot left the meeting cleanly.
+                  <code>bot.in_waiting_room</code> — host hasn&rsquo;t
+                  admitted the bot; surface it so Sir can nudge.
                 </li>
                 <li>
-                  <code>bot.fatal</code> — bot failed to join or crashed
-                  mid-call.
+                  <code>bot.in_call_recording</code> — bot is in the
+                  meeting and actively recording.
                 </li>
                 <li>
-                  <code>bot.recording_done</code> — recording artefact is
-                  ready; ctrl-api persists the transcript URL onto the
-                  bot row.
+                  <code>bot.in_call_not_recording</code> — bot is in the
+                  meeting but not recording (permissions or paused).
+                </li>
+                <li>
+                  <code>bot.call_ended</code> — bot left the call;
+                  real-time stream is over.
+                </li>
+                <li>
+                  <code>bot.done</code> — bot fully shut down; recording
+                  uploaded.
+                </li>
+                <li>
+                  <code>bot.fatal</code> — bot failed to join;{" "}
+                  <code>data.sub_code</code> carries the reason.
+                </li>
+                <li>
+                  <code>bot.recording_permission_denied</code> — host
+                  refused recording; Alfred can explain why.
+                </li>
+                <li>
+                  <code>recording.done</code> — recording artefact is
+                  ready for download.
+                </li>
+                <li>
+                  <code>recording.failed</code> — recording artefact
+                  generation failed.
+                </li>
+                <li>
+                  <code>transcript.done</code> — load-bearing:
+                  alfred-learn fetches this to write meeting notes.
+                </li>
+                <li>
+                  <code>transcript.failed</code> — transcript generation
+                  failed.
+                </li>
+              </ul>
+            </div>
+
+            <div className="space-y-2">
+              <div
+                className="font-mono text-[10px] uppercase tracking-[0.22em]"
+                style={{ color: "var(--marginalia)" }}
+              >
+                Add later (when PR #154 in-meeting voice lands)
+              </div>
+              <ul
+                className="font-mono text-[12px] list-disc ml-5 space-y-1"
+                style={{ color: "var(--ink)" }}
+              >
+                <li>
+                  <code>realtime_endpoint.running</code> — realtime WS
+                  up; voice-bridge opens its Realtime session.
+                </li>
+                <li>
+                  <code>realtime_endpoint.done</code> — realtime stream
+                  closed; voice-bridge tears down.
+                </li>
+                <li>
+                  <code>realtime_endpoint.failed</code> — realtime
+                  stream failed; fall back to recording-only.
+                </li>
+              </ul>
+            </div>
+
+            <div className="space-y-2">
+              <div
+                className="font-mono text-[10px] uppercase tracking-[0.22em]"
+                style={{ color: "var(--marginalia)" }}
+              >
+                Optional — richer meeting summaries
+              </div>
+              <ul
+                className="font-mono text-[12px] list-disc ml-5 space-y-1"
+                style={{ color: "var(--ink)" }}
+              >
+                <li>
+                  <code>meeting_metadata.done</code> — attendee list
+                  ready.
+                </li>
+                <li>
+                  <code>participant_events.done</code> — who joined
+                  when and left when.
+                </li>
+              </ul>
+            </div>
+
+            <div className="space-y-2">
+              <div
+                className="font-mono text-[10px] uppercase tracking-[0.22em]"
+                style={{ color: "var(--marginalia)" }}
+              >
+                Don&rsquo;t subscribe to these
+              </div>
+              <ul
+                className="font-mono text-[12px] list-disc ml-5 space-y-1"
+                style={{ color: "var(--ink)" }}
+              >
+                <li>
+                  <code>calendar.*</code> — Alfred uses Composio for
+                  calendar (see the Calendar card on{" "}
+                  <code>/channels</code>), not Recall Calendar V2.
+                </li>
+                <li>
+                  <code>slack.*</code> — no Recall+Slack integration on
+                  this tenant.
+                </li>
+                <li>
+                  <code>sdk_upload.*</code> — Recall SDK isn&rsquo;t
+                  embedded anywhere.
+                </li>
+                <li>
+                  <code>video_*.*</code> /{" "}
+                  <code>audio_*.*</code> — alfred-learn doesn&rsquo;t
+                  consume raw artefacts today.
+                </li>
+                <li>
+                  <code>bot.breakout_room_*</code> — ignored by the
+                  current ctrl-api handler.
                 </li>
               </ul>
               <p
                 className="font-body italic text-[12px]"
                 style={{ color: "var(--marginalia)" }}
               >
-                <code>bot.transcription.message</code> is deferred — only
-                subscribe to it once in-meeting voice (PR #154) ships.
+                Subscribing to these would just fill the webhook log
+                with deliveries ctrl-api drops on the floor.
               </p>
             </div>
 
