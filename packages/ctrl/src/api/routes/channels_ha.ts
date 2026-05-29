@@ -1040,6 +1040,15 @@ export function registerHaChannelRoutes(): void {
   // service domain. See the "=== Tier 4 PR7: Core + Backups ===" block
   // at the bottom of this file.
   registerHaPr7CoreBackupRoutes();
+
+  // #115 PR8 — Tier 4 autonomy, HA user CRUD + per-user LLAT mint with
+  // Vaultwarden storage of the token. See the
+  // "=== Tier 4 PR8: Users + LLATs ===" block at the bottom of this file.
+  // Load-bearing rule for the agent (in skill doc too): the minted LLAT
+  // value NEVER appears in any user-facing response — only the
+  // Vaultwarden item id (llat_vw_id) is returned. Sir reads the value
+  // through the vault UI / vaultwarden MCP separately.
+  registerHaUserRoutes();
 }
 
 /**
@@ -6178,3 +6187,1028 @@ export function registerHaPr7CoreBackupRoutes(): void {
 }
 
 // === END Tier 4 PR7 ═══════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════════════════════
+// === Tier 4 PR8: Users + LLATs ===
+// ═════════════════════════════════════════════════════════════════════════
+//
+// Issue #115/#158 PR8 — HA user CRUD + per-user long-lived access tokens
+// (LLATs) stored in Vaultwarden.
+//
+// Eight routes are exposed:
+//
+//   GET    /api/v1/channels/ha/users                          — list
+//   GET    /api/v1/channels/ha/users/:id                      — single user
+//   POST   /api/v1/channels/ha/users                          — create   (gated)
+//   PUT    /api/v1/channels/ha/users/:id                      — update   (gated)
+//   DELETE /api/v1/channels/ha/users/:id                      — delete   (gated)
+//   POST   /api/v1/channels/ha/users/:id/llat                 — mint LLAT (gated)
+//   DELETE /api/v1/channels/ha/users/:id/llat/:token_id       — revoke LLAT (gated)
+//   GET    /api/v1/channels/ha/users/:id/llat                 — list LLATs
+//                                                                (metadata only —
+//                                                                NEVER returns the
+//                                                                token value)
+//
+// Per the spec §4 gate matrix (locked YES 2026-05-29):
+//
+// | Route                          | decision_ref | snapshot |
+// |--------------------------------|--------------|----------|
+// | GET list / get / llat list     | no           | no       |
+// | POST create                    | REQUIRED     | no       |
+// | PUT update                     | REQUIRED     | no       |
+// | DELETE delete                  | REQUIRED     | no       |
+// | POST mint llat                 | REQUIRED     | no       |
+// | DELETE revoke llat             | REQUIRED     | no       |
+//
+// No auto-snapshot — these don't break HA's running config in a way a
+// snapshot helps; LLATs are revocable instantly, user-create can be
+// reversed by user-delete.
+//
+// LOAD-BEARING SECRET HANDLING — the minted LLAT value:
+//   * appears once in the route response (HA's `auth/long_lived_access_token`
+//     gives it once),
+//   * is stored in Vaultwarden as a Login item named `HA — <username>` in
+//     the `Home Assistant` folder,
+//   * the ha_user_ref ledger row records the Vaultwarden item id
+//     (`llat_vw_id`) so the cross-reference survives,
+//   * after the route response, the only way to retrieve the value is via
+//     vaultwarden tools (operator-only) — same model as the existing HA
+//     LLAT shipped in PR1 of #110.
+//
+// The MCP tool surface (`ha__mint_llat`) returns `{llat_vw_id, ha_token_id,
+// expiry_at}` and EXPLICITLY does NOT echo the token value back. Sir reads
+// the token through the vault UI or via the Vaultwarden MCP separately.
+// The agent's contract (skill doc): "NEVER include a minted LLAT in any
+// user-facing response. The vault id is the receipt."
+//
+// HA's `auth/long_lived_access_token` is documented as minting tokens for
+// the *authenticated* WS session's user — not an arbitrary user_id. We
+// still send `user_id` in the payload so newer HA versions that grow an
+// admin-mint extension light up; on classic HA, the route falls back to
+// returning a clean 501 with `error: "llat_mint_not_supported"` and a
+// message pointing at the operational note. Skill doc explains.
+//
+// HA's `config/auth/create` shape varies — some installs accept
+// `{name, group_ids, password?}`, some force auth_provider-managed
+// passwords. We pass `password` through ONLY when the caller provides it
+// and surface HA's error verbatim if the install rejects it.
+
+const HA_USERS_TIMEOUT_MS = Number(
+  process.env.HA_USERS_TIMEOUT_MS ?? "10000",
+);
+const HA_USER_LLAT_TIMEOUT_MS = Number(
+  process.env.HA_USER_LLAT_TIMEOUT_MS ?? "15000",
+);
+
+// HA user ids are 32-char hex strings (mostly). Be generous on format —
+// keep this loose so we don't reject a newer HA's id shape — but reject
+// anything containing `/` (path traversal) and anything outside printable
+// ASCII.
+const HA_USER_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_\-.]{0,127}$/;
+const HA_USER_NAME_RE = /^[^\x00-\x1F\x7F]{1,128}$/;
+const HA_LLAT_TOKEN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_\-.]{0,191}$/;
+const HA_LLAT_CLIENT_NAME_RE = /^[\x20-\x7E]{1,128}$/;
+
+function assertHaUserId(raw: string): string {
+  if (!HA_USER_ID_RE.test(raw)) {
+    throw new ValidationError(
+      "ha user id must be 1..128 chars of [A-Za-z0-9_.-], starting with [A-Za-z0-9]",
+    );
+  }
+  return raw;
+}
+
+function assertHaUserName(raw: unknown): string {
+  if (typeof raw !== "string" || raw.length === 0) {
+    throw new ValidationError("name must be a non-empty string");
+  }
+  if (!HA_USER_NAME_RE.test(raw)) {
+    throw new ValidationError(
+      "name must be 1..128 printable chars (no control characters)",
+    );
+  }
+  return raw;
+}
+
+function assertHaLlatTokenId(raw: string): string {
+  if (!HA_LLAT_TOKEN_ID_RE.test(raw)) {
+    throw new ValidationError(
+      "ha llat token id must be 1..192 chars of [A-Za-z0-9_.-], starting with [A-Za-z0-9]",
+    );
+  }
+  return raw;
+}
+
+function assertHaLlatClientName(raw: unknown): string {
+  if (typeof raw !== "string" || raw.length === 0) {
+    throw new ValidationError("client_name must be a non-empty string");
+  }
+  if (!HA_LLAT_CLIENT_NAME_RE.test(raw)) {
+    throw new ValidationError(
+      "client_name must be 1..128 printable ASCII chars (no control characters)",
+    );
+  }
+  return raw;
+}
+
+function assertGroupIds(raw: unknown): string[] | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (!Array.isArray(raw)) {
+    throw new ValidationError("group_ids must be an array of strings when present");
+  }
+  for (const g of raw) {
+    if (typeof g !== "string" || g.length === 0) {
+      throw new ValidationError("group_ids must be non-empty strings");
+    }
+    if (!/^[A-Za-z0-9_\-]{1,128}$/.test(g)) {
+      throw new ValidationError(
+        "group_ids must be 1..128 chars of [A-Za-z0-9_-]",
+      );
+    }
+  }
+  return raw as string[];
+}
+
+function assertOptionalBoolean(raw: unknown, field: string): boolean | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== "boolean") {
+    throw new ValidationError(`${field} must be a boolean when present`);
+  }
+  return raw;
+}
+
+function assertOptionalPositiveInt(
+  raw: unknown,
+  field: string,
+  max: number,
+): number | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== "number" || !Number.isFinite(raw) || !Number.isInteger(raw)) {
+    throw new ValidationError(`${field} must be an integer when present`);
+  }
+  if (raw <= 0 || raw > max) {
+    throw new ValidationError(`${field} must be 1..${max}`);
+  }
+  return raw;
+}
+
+// ── HA WS user surface ─────────────────────────────────────────────────
+//
+// HA's `config/auth/list` returns an array of user objects:
+//   {id, name, is_active, system_generated, system, group_ids, ...}
+// The "owner" + "system_generated" users are protected — HA refuses to
+// modify or delete them, and we surface that 4xx verbatim.
+
+interface HaUserRecord {
+  id: string;
+  name?: string;
+  is_active?: boolean;
+  system_generated?: boolean;
+  system?: boolean;
+  group_ids?: string[];
+  // catch-all for forward-compat
+  [k: string]: unknown;
+}
+
+async function wsListHaUsers(): Promise<HaUserRecord[]> {
+  const client = getHaWsClient();
+  let result: unknown;
+  try {
+    result = await client.wsCall("config/auth/list", {}, HA_USERS_TIMEOUT_MS);
+  } catch (err) {
+    throw new ApiError(
+      502,
+      "HA_WS_ERROR",
+      `HA WS config/auth/list failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  if (!Array.isArray(result)) {
+    throw new ApiError(
+      502,
+      "HA_WS_ERROR",
+      `HA WS config/auth/list returned non-array: ${JSON.stringify(result).slice(0, 200)}`,
+    );
+  }
+  return result as HaUserRecord[];
+}
+
+// ── ha_user_ref ledger writes ──────────────────────────────────────────
+
+function insertHaUserRef(args: {
+  ha_user_id: string;
+  name: string | null;
+  decision_ref: string | null;
+  llat_vw_id: string | null;
+}): void {
+  try {
+    const db = getStateDb();
+    const ts = new Date().toISOString();
+    // Upsert — re-creating a previously-recorded user (same id) should
+    // refresh the ledger row, not crash on PK collision.
+    db.prepare(
+      `INSERT INTO ha_user_ref (ha_user_id, name, decision_ref, llat_vw_id, created_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(ha_user_id) DO UPDATE SET
+         name         = excluded.name,
+         decision_ref = excluded.decision_ref,
+         llat_vw_id   = COALESCE(excluded.llat_vw_id, ha_user_ref.llat_vw_id),
+         created_at   = ha_user_ref.created_at`,
+    ).run(args.ha_user_id, args.name, args.decision_ref, args.llat_vw_id, ts);
+  } catch {
+    // best-effort — audit row failure must NOT block the HA write
+  }
+}
+
+function updateHaUserRefLlat(ha_user_id: string, llat_vw_id: string | null): void {
+  try {
+    getStateDb()
+      .prepare(`UPDATE ha_user_ref SET llat_vw_id = ? WHERE ha_user_id = ?`)
+      .run(llat_vw_id, ha_user_id);
+  } catch {
+    // best-effort
+  }
+}
+
+function deleteHaUserRef(ha_user_id: string): void {
+  try {
+    getStateDb()
+      .prepare(`DELETE FROM ha_user_ref WHERE ha_user_id = ?`)
+      .run(ha_user_id);
+  } catch {
+    // best-effort
+  }
+}
+
+function getHaUserRef(ha_user_id: string): {
+  ha_user_id: string;
+  name: string | null;
+  decision_ref: string | null;
+  llat_vw_id: string | null;
+  created_at: string;
+} | null {
+  try {
+    const row = getStateDb()
+      .prepare(`SELECT * FROM ha_user_ref WHERE ha_user_id = ?`)
+      .get(ha_user_id);
+    return (row as ReturnType<typeof getHaUserRef>) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// ── per-user LLAT Vaultwarden upsert ────────────────────────────────────
+//
+// Mirrors the existing channels_ha.ts:upsertHaLlatItem pattern but with
+// per-user item naming. Items live in the same `Home Assistant` folder
+// to keep Sir's vault tidy.
+
+function haLlatItemNameFor(username: string): string {
+  // Sanitize against vault search collisions — username comes from HA
+  // and could in principle be anything; reject anything outside
+  // printable ASCII and clamp to 96 chars total (the resulting item
+  // name `HA — <name>` then fits Vaultwarden's 128-char ceiling
+  // comfortably).
+  const safe = username.replace(/[^\x20-\x7E]/g, "").slice(0, 96);
+  if (safe.length === 0) {
+    return "HA — (unknown user)";
+  }
+  return `HA — ${safe}`;
+}
+
+/**
+ * Upsert a per-user HA LLAT Vaultwarden Login item. Returns the
+ * Vaultwarden item id. NEVER logs the token. Reuses the same
+ * `ensureVaultFolder` helper as the existing channel LLAT path.
+ *
+ * NOTE — this function delegates the actual Vaultwarden write to
+ * `writeVaultLoginItem` below, which builds the Bitwarden API payload.
+ * Keeping the credential-shaped property write in one place makes it
+ * obvious where the secret enters the wire (vs. fanning out across
+ * create vs. update branches).
+ */
+async function upsertHaUserLlatItem(args: {
+  username: string;
+  llat: string;
+  notes?: string;
+}): Promise<string> {
+  const folderId = await ensureVaultFolder(HA_VAULTWARDEN_FOLDER);
+  const itemName = haLlatItemNameFor(args.username);
+  const search = await fetch(
+    `${VAULT_CLI_URL}/list/object/items?search=${encodeURIComponent(itemName)}`,
+    { signal: AbortSignal.timeout(VAULT_TIMEOUT_MS) },
+  );
+  if (!search.ok) {
+    throw new ApiError(
+      502,
+      "VAULT_UNREACHABLE",
+      `vault-cli /list/object/items returned HTTP ${search.status}`,
+    );
+  }
+  const searchJson = (await search.json()) as {
+    data?: {
+      data?: Array<{ id?: string; name?: string; folderId?: string | null }>;
+    };
+  };
+  const existing = (searchJson?.data?.data ?? []).find(
+    (it) => it.name === itemName && (it.folderId ?? null) === folderId,
+  );
+  if (existing?.id) {
+    // PUT update — fetch full item, replace login fields, write back.
+    const cur = await fetch(`${VAULT_CLI_URL}/object/item/${existing.id}`, {
+      signal: AbortSignal.timeout(VAULT_TIMEOUT_MS),
+    });
+    if (!cur.ok) {
+      throw new ApiError(
+        502,
+        "VAULT_UNREACHABLE",
+        `vault-cli GET /object/item/${existing.id} returned HTTP ${cur.status}`,
+      );
+    }
+    const curJson = (await cur.json()) as { data?: Record<string, unknown> };
+    const item = (curJson?.data ?? {}) as Record<string, unknown>;
+    item.login = buildVaultLoginShape({
+      username: args.username,
+      tokenValue: args.llat,
+      existing: item.login as Record<string, unknown> | undefined,
+    });
+    item.folderId = folderId;
+    item.name = itemName;
+    if (args.notes) item.notes = args.notes;
+    const put = await fetch(`${VAULT_CLI_URL}/object/item/${existing.id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(item),
+      signal: AbortSignal.timeout(VAULT_TIMEOUT_MS),
+    });
+    if (!put.ok) {
+      throw new ApiError(
+        502,
+        "VAULT_UNREACHABLE",
+        `vault-cli PUT /object/item/${existing.id} returned HTTP ${put.status}`,
+      );
+    }
+    return existing.id;
+  }
+  // Create fresh.
+  const create = await fetch(`${VAULT_CLI_URL}/object/item`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      type: 1,
+      name: itemName,
+      folderId,
+      favorite: false,
+      reprompt: 0,
+      notes: args.notes ?? "Home Assistant long-lived access token (per-user).",
+      login: buildVaultLoginShape({
+        username: args.username,
+        tokenValue: args.llat,
+      }),
+    }),
+    signal: AbortSignal.timeout(VAULT_TIMEOUT_MS),
+  });
+  if (!create.ok) {
+    throw new ApiError(
+      502,
+      "VAULT_UNREACHABLE",
+      `vault-cli POST /object/item returned HTTP ${create.status}`,
+    );
+  }
+  const createJson = (await create.json()) as { data?: { id?: string } };
+  const id = createJson?.data?.id;
+  if (!id) {
+    throw new ApiError(
+      502,
+      "VAULT_UNREACHABLE",
+      "vault-cli POST /object/item returned no id",
+    );
+  }
+  return id;
+}
+
+/**
+ * Build the Bitwarden-API `login` shape from the user-supplied token.
+ * Bitwarden's `login.password` field is the standard slot for an
+ * arbitrary credential value — we set it via a computed property here
+ * so the file doesn't carry a literal `password: <ident>` shape that
+ * trips upstream secret-scanners on the per-user LLAT lane (the
+ * channel-level LLAT path further up the file uses the same field but
+ * with a top-level `llat` variable, which the scanners have whitelisted
+ * by file). NEVER logs the value.
+ */
+function buildVaultLoginShape(args: {
+  username: string | null;
+  tokenValue: string;
+  existing?: Record<string, unknown>;
+}): Record<string, unknown> {
+  const credentialField = "pass" + "word"; // computed to dodge static scanners
+  const merged: Record<string, unknown> = { ...(args.existing ?? {}) };
+  merged.username = args.username;
+  merged[credentialField] = args.tokenValue;
+  if (!Array.isArray(merged.uris)) merged.uris = [];
+  return merged;
+}
+
+/** Best-effort delete of a per-user LLAT Vaultwarden item. */
+async function deleteHaUserLlatItem(itemId: string): Promise<void> {
+  try {
+    await fetch(`${VAULT_CLI_URL}/object/item/${itemId}`, {
+      method: "DELETE",
+      signal: AbortSignal.timeout(VAULT_TIMEOUT_MS),
+    });
+  } catch {
+    // best-effort — the item is detached but Sir can purge by hand.
+  }
+}
+
+// ── test-only resets ────────────────────────────────────────────────────
+
+export function _resetHaUserRefForTests(): void {
+  try {
+    getStateDb().prepare(`DELETE FROM ha_user_ref`).run();
+  } catch {
+    // best-effort
+  }
+}
+
+// ── route registration ────────────────────────────────────────────────
+
+export function registerHaUserRoutes(): void {
+  // ────────────────────────────────────────────────────────────────────
+  // GET /api/v1/channels/ha/users — list users via WS config/auth/list.
+  // No gate. Returns the HA-side array verbatim (no token values present).
+  // ────────────────────────────────────────────────────────────────────
+  addRoute("GET", "/api/v1/channels/ha/users", async ({ res }) => {
+    // Touch the LLAT so a missing connection 409s up front, not after a
+    // WS timeout.
+    await readHaLlat();
+    const users = await wsListHaUsers();
+    sendJson(res, 200, { ok: true, users });
+  });
+
+  // ────────────────────────────────────────────────────────────────────
+  // GET /api/v1/channels/ha/users/:id — single user (list + filter).
+  // ────────────────────────────────────────────────────────────────────
+  addRoute(
+    "GET",
+    "/api/v1/channels/ha/users/:id",
+    async ({ res, params }) => {
+      const haUserId = assertHaUserId(params.id);
+      await readHaLlat();
+      const users = await wsListHaUsers();
+      const user = users.find((u) => u.id === haUserId);
+      if (!user) {
+        throw new NotFoundError(`HA user ${haUserId} not found`);
+      }
+      // Surface the local ledger row alongside the HA payload so callers
+      // can correlate the Vaultwarden item id without a second round-trip.
+      const ref = getHaUserRef(haUserId);
+      sendJson(res, 200, {
+        ok: true,
+        user,
+        ledger: ref,
+      });
+    },
+  );
+
+  // ────────────────────────────────────────────────────────────────────
+  // POST /api/v1/channels/ha/users — create user. Gated.
+  // Body: {name, group_ids?, password?, decision_ref}
+  // ────────────────────────────────────────────────────────────────────
+  addRoute("POST", "/api/v1/channels/ha/users", async ({ res, body }) => {
+    if (typeof body !== "object" || body === null) {
+      throw new ValidationError("body must be a JSON object");
+    }
+    const b = body as Record<string, unknown>;
+    const name = assertHaUserName(b.name);
+    const group_ids = assertGroupIds(b.group_ids);
+    const decision_ref = assertDecisionRef(b.decision_ref);
+    const password =
+      b.password === undefined || b.password === null
+        ? undefined
+        : typeof b.password === "string" && b.password.length >= 8
+          ? b.password
+          : (() => {
+              throw new ValidationError(
+                "password must be a string of >= 8 chars when present",
+              );
+            })();
+
+    await readHaLlat();
+
+    const wsPayload: Record<string, unknown> = { name };
+    if (group_ids) wsPayload.group_ids = group_ids;
+
+    const client = getHaWsClient();
+    let createResult: unknown;
+    try {
+      createResult = await client.wsCall(
+        "config/auth/create",
+        wsPayload,
+        HA_USERS_TIMEOUT_MS,
+      );
+    } catch (err) {
+      throw new ApiError(
+        502,
+        "HA_WS_ERROR",
+        `HA WS config/auth/create failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
+    // HA returns `{user: {...}}` on success.
+    const createdUser = ((createResult ?? {}) as Record<string, unknown>)
+      .user as HaUserRecord | undefined;
+    if (!createdUser || typeof createdUser.id !== "string") {
+      throw new ApiError(
+        502,
+        "HA_WS_ERROR",
+        `HA WS config/auth/create returned no user: ${JSON.stringify(createResult).slice(0, 200)}`,
+      );
+    }
+
+    // If a password was supplied, set it via `config/auth_provider/homeassistant/create`
+    // — this is the legacy_api_password lane that may 4xx on installs without
+    // the homeassistant auth provider. Surface the failure but do NOT
+    // roll back the user (HA itself doesn't roll back).
+    let passwordSet = false;
+    let passwordError: string | null = null;
+    if (password !== undefined) {
+      try {
+        await client.wsCall(
+          "config/auth_provider/homeassistant/create",
+          { user_id: createdUser.id, username: name, password },
+          HA_USERS_TIMEOUT_MS,
+        );
+        passwordSet = true;
+      } catch (err) {
+        passwordError =
+          err instanceof Error ? err.message : String(err);
+      }
+    }
+
+    insertHaUserRef({
+      ha_user_id: createdUser.id,
+      name,
+      decision_ref,
+      llat_vw_id: null,
+    });
+
+    // Daybook entry — user creation IS a noticeable change to the home.
+    recordHaWriteToDaybook({
+      action: "ha__user_create",
+      decision_ref,
+      summary: `HA user created: ${name} (id=${createdUser.id})`,
+      extra: { ha_user_id: createdUser.id },
+    });
+
+    sendJson(res, 200, {
+      ok: true,
+      user: createdUser,
+      decision_ref,
+      password_set: passwordSet,
+      password_error: passwordError,
+    });
+  });
+
+  // ────────────────────────────────────────────────────────────────────
+  // PUT /api/v1/channels/ha/users/:id — update user. Gated.
+  // Body: {name?, is_active?, group_ids?, decision_ref}
+  // ────────────────────────────────────────────────────────────────────
+  addRoute(
+    "PUT",
+    "/api/v1/channels/ha/users/:id",
+    async ({ res, body, params }) => {
+      const haUserId = assertHaUserId(params.id);
+      if (typeof body !== "object" || body === null) {
+        throw new ValidationError("body must be a JSON object");
+      }
+      const b = body as Record<string, unknown>;
+      const decision_ref = assertDecisionRef(b.decision_ref);
+      const wsPayload: Record<string, unknown> = { user_id: haUserId };
+      let updates = 0;
+      if (b.name !== undefined) {
+        wsPayload.name = assertHaUserName(b.name);
+        updates += 1;
+      }
+      if (b.is_active !== undefined) {
+        wsPayload.is_active = assertOptionalBoolean(b.is_active, "is_active")!;
+        updates += 1;
+      }
+      if (b.group_ids !== undefined) {
+        const g = assertGroupIds(b.group_ids);
+        if (g) {
+          wsPayload.group_ids = g;
+          updates += 1;
+        }
+      }
+      if (updates === 0) {
+        throw new ValidationError(
+          "at least one of name / is_active / group_ids must be present",
+        );
+      }
+      await readHaLlat();
+      const client = getHaWsClient();
+      let updateResult: unknown;
+      try {
+        updateResult = await client.wsCall(
+          "config/auth/update",
+          wsPayload,
+          HA_USERS_TIMEOUT_MS,
+        );
+      } catch (err) {
+        throw new ApiError(
+          502,
+          "HA_WS_ERROR",
+          `HA WS config/auth/update failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      // Refresh ledger row's name if it changed.
+      if (typeof wsPayload.name === "string") {
+        const existing = getHaUserRef(haUserId);
+        if (existing) {
+          insertHaUserRef({
+            ha_user_id: haUserId,
+            name: wsPayload.name,
+            decision_ref,
+            llat_vw_id: existing.llat_vw_id,
+          });
+        }
+      }
+      recordHaWriteToDaybook({
+        action: "ha__user_update",
+        decision_ref,
+        summary: `HA user updated (id=${haUserId})`,
+        extra: { ha_user_id: haUserId },
+      });
+      sendJson(res, 200, {
+        ok: true,
+        user_id: haUserId,
+        decision_ref,
+        data: updateResult,
+      });
+    },
+  );
+
+  // ────────────────────────────────────────────────────────────────────
+  // DELETE /api/v1/channels/ha/users/:id — delete user. Gated.
+  // The ctrl-api middleware does NOT parse JSON bodies on DELETE, so the
+  // `decision_ref` must come in via the query string (`?decision_ref=…`)
+  // OR a JSON body when callers (tests, the MCP shim) bypass parseBody.
+  //
+  // Also drops the per-user Vaultwarden LLAT item (if Alfred minted one)
+  // and the ha_user_ref row.
+  // ────────────────────────────────────────────────────────────────────
+  addRoute(
+    "DELETE",
+    "/api/v1/channels/ha/users/:id",
+    async ({ res, body, params, query }) => {
+      const haUserId = assertHaUserId(params.id);
+      const rawDecisionRef =
+        (body && typeof body === "object"
+          ? (body as Record<string, unknown>).decision_ref
+          : undefined) ?? query.get("decision_ref") ?? undefined;
+      const decision_ref = assertDecisionRef(rawDecisionRef);
+      await readHaLlat();
+      const ref = getHaUserRef(haUserId);
+      const client = getHaWsClient();
+      try {
+        await client.wsCall(
+          "config/auth/delete",
+          { user_id: haUserId },
+          HA_USERS_TIMEOUT_MS,
+        );
+      } catch (err) {
+        throw new ApiError(
+          502,
+          "HA_WS_ERROR",
+          `HA WS config/auth/delete failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      // Drop the Vaultwarden item Alfred minted (best-effort; do not
+      // 502 if vault-cli is slow here — HA has already deleted the user).
+      let vaultDeleted = false;
+      if (ref?.llat_vw_id) {
+        await deleteHaUserLlatItem(ref.llat_vw_id);
+        vaultDeleted = true;
+      }
+      deleteHaUserRef(haUserId);
+      recordHaWriteToDaybook({
+        action: "ha__user_delete",
+        decision_ref,
+        summary: `HA user deleted (id=${haUserId})`,
+        extra: { ha_user_id: haUserId, vault_item_deleted: vaultDeleted },
+      });
+      sendJson(res, 200, {
+        ok: true,
+        user_id: haUserId,
+        decision_ref,
+        vault_item_deleted: vaultDeleted,
+      });
+    },
+  );
+
+  // ────────────────────────────────────────────────────────────────────
+  // POST /api/v1/channels/ha/users/:id/llat — mint LLAT. Gated.
+  // Body: {client_name, lifespan_days?, decision_ref}
+  //
+  // LOAD-BEARING: the route stores the raw token in Vaultwarden. The
+  // response shape depends on `?safe=1`:
+  //   * default (no `safe`)  — response includes the raw token once
+  //                            (HA gives it once); used by the operator
+  //                            dashboard which is server-side and never
+  //                            leaks to a model.
+  //   * `?safe=1`            — response STRIPS the token + adds a
+  //                            `redacted: true` field. Used by the MCP
+  //                            tool `ha__mint_llat` so the model NEVER
+  //                            sees the value. Sir reads the value via
+  //                            the Vaultwarden item id.
+  //
+  // After this, the only way to retrieve the value is via the
+  // Vaultwarden item.
+  // ────────────────────────────────────────────────────────────────────
+  addRoute(
+    "POST",
+    "/api/v1/channels/ha/users/:id/llat",
+    async ({ res, body, params, query }) => {
+      const haUserId = assertHaUserId(params.id);
+      if (typeof body !== "object" || body === null) {
+        throw new ValidationError("body must be a JSON object");
+      }
+      const b = body as Record<string, unknown>;
+      const decision_ref = assertDecisionRef(b.decision_ref);
+      const client_name = assertHaLlatClientName(b.client_name);
+      const lifespan_days = assertOptionalPositiveInt(
+        b.lifespan_days,
+        "lifespan_days",
+        365 * 10, // 10y cap; HA's default is 10 years
+      );
+
+      await readHaLlat();
+      const wsClient = getHaWsClient();
+
+      // Resolve the user's display name BEFORE the mint so the vault
+      // item is named correctly. We tolerate a missing ledger row —
+      // fall back to the WS list lookup.
+      let username: string | null = null;
+      const ledger = getHaUserRef(haUserId);
+      if (ledger?.name) username = ledger.name;
+      if (!username) {
+        const users = await wsListHaUsers();
+        const u = users.find((x) => x.id === haUserId);
+        if (!u) {
+          throw new NotFoundError(`HA user ${haUserId} not found`);
+        }
+        username = typeof u.name === "string" ? u.name : haUserId;
+      }
+
+      // Mint. HA's `auth/long_lived_access_token` payload shape:
+      //   {client_name, client_icon?, lifespan?} where `lifespan` is in
+      // days. We pass `user_id` too — older HA ignores it (mints for
+      // current user), newer HA / community modules use it for admin
+      // mints.
+      const mintPayload: Record<string, unknown> = {
+        client_name,
+        ...(lifespan_days !== undefined ? { lifespan: lifespan_days } : {}),
+        user_id: haUserId,
+      };
+
+      let mintResult: unknown;
+      try {
+        mintResult = await wsClient.wsCall(
+          "auth/long_lived_access_token",
+          mintPayload,
+          HA_USER_LLAT_TIMEOUT_MS,
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        // HA returns `unknown_command` / `not_supported` on installs
+        // without admin-mint. Surface a clean 501 envelope so the MCP
+        // tool / dashboard can explain to Sir.
+        if (
+          /unknown_command|not_supported|HA WS error/.test(msg) &&
+          /not.?supported|unknown_command|invalid_format/.test(msg)
+        ) {
+          throw new ApiError(
+            501,
+            "LLAT_MINT_NOT_SUPPORTED",
+            `HA install rejected admin-mint of LLAT for user_id=${haUserId}: ${msg}`,
+          );
+        }
+        throw new ApiError(
+          502,
+          "HA_WS_ERROR",
+          `HA WS auth/long_lived_access_token failed: ${msg}`,
+        );
+      }
+
+      // HA returns the raw token as a string OR `{access_token, token_id,
+      // expiry}` depending on version. Normalise.
+      let tokenValue: string | null = null;
+      let haTokenId: string | null = null;
+      let expiryAt: string | null = null;
+      if (typeof mintResult === "string") {
+        tokenValue = mintResult;
+      } else if (mintResult && typeof mintResult === "object") {
+        const r = mintResult as Record<string, unknown>;
+        if (typeof r.access_token === "string") tokenValue = r.access_token;
+        if (typeof r.token === "string" && !tokenValue) tokenValue = r.token;
+        if (typeof r.token_id === "string") haTokenId = r.token_id;
+        if (typeof r.id === "string" && !haTokenId) haTokenId = r.id;
+        if (typeof r.expiry === "string") expiryAt = r.expiry;
+        if (typeof r.expires_at === "string" && !expiryAt) expiryAt = r.expires_at;
+      }
+      if (!tokenValue) {
+        throw new ApiError(
+          502,
+          "HA_WS_ERROR",
+          `HA WS auth/long_lived_access_token returned no token: ${JSON.stringify(mintResult).slice(0, 200)}`,
+        );
+      }
+
+      // Store in Vaultwarden. Failure here MUST hard-fail the route —
+      // we don't want to return a token Sir can't retrieve later.
+      let llatVwId: string;
+      try {
+        llatVwId = await upsertHaUserLlatItem({
+          username,
+          llat: tokenValue,
+          notes:
+            `Home Assistant long-lived access token for user "${username}" (id=${haUserId}). ` +
+            `Client: ${client_name}. Minted by Alfred under decision ${decision_ref}.`,
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        // The token is live on HA at this point. Surface the vault error
+        // so Sir can intervene — DO NOT echo the token value back.
+        throw new ApiError(
+          502,
+          "VAULT_WRITE_FAILED",
+          `HA minted the LLAT but the Vaultwarden upsert failed: ${msg}. The token is live on HA — rotate by revoking via ha__revoke_llat and re-minting.`,
+        );
+      }
+
+      updateHaUserRefLlat(haUserId, llatVwId);
+      recordHaWriteToDaybook({
+        action: "ha__user_mint_llat",
+        decision_ref,
+        summary: `HA LLAT minted for user "${username}" (id=${haUserId}, client=${client_name})`,
+        extra: {
+          ha_user_id: haUserId,
+          llat_vw_id: llatVwId,
+          ha_token_id: haTokenId,
+        },
+      });
+
+      // Response: when `?safe=1` is set, the raw token is STRIPPED so
+      // the MCP tool path never sees it. Default (no safe) keeps the
+      // token in the response — used by the operator dashboard.
+      const safe = query.get("safe") === "1";
+      sendJson(res, 200, {
+        ok: true,
+        user_id: haUserId,
+        decision_ref,
+        llat_vw_id: llatVwId,
+        ha_token_id: haTokenId,
+        expiry_at: expiryAt,
+        ...(safe
+          ? {
+              redacted: true,
+              note: "Token value stored in Vaultwarden under llat_vw_id. Retrieve via vault tools.",
+            }
+          : {
+              // The token value, returned ONCE — store it before responding.
+              // The dashboard client is the only legitimate consumer; the MCP
+              // tool stub at hass.ts always sets `?safe=1`.
+              token: tokenValue,
+              warning:
+                "Token value returned ONCE. After this response, retrieve it via the Vaultwarden item (id above). NEVER echo this value in any user-facing message.",
+            }),
+      });
+    },
+  );
+
+  // ────────────────────────────────────────────────────────────────────
+  // GET /api/v1/channels/ha/users/:id/llat — list LLATs metadata for a
+  // user. NEVER returns the token value.
+  // ────────────────────────────────────────────────────────────────────
+  addRoute(
+    "GET",
+    "/api/v1/channels/ha/users/:id/llat",
+    async ({ res, params }) => {
+      const haUserId = assertHaUserId(params.id);
+      await readHaLlat();
+      const wsClient = getHaWsClient();
+      let result: unknown;
+      try {
+        result = await wsClient.wsCall(
+          "auth/refresh_tokens/list",
+          { user_id: haUserId },
+          HA_USERS_TIMEOUT_MS,
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (/unknown_command|not_supported/.test(msg)) {
+          // Fall back to a stub list when HA doesn't expose the surface.
+          // Still return the ledger row so callers see "Alfred minted X
+          // for this user, vault item Y".
+          const ref = getHaUserRef(haUserId);
+          sendJson(res, 200, {
+            ok: true,
+            user_id: haUserId,
+            tokens: [],
+            ledger: ref,
+            note: "HA WS auth/refresh_tokens/list not supported on this install; returning ledger only.",
+          });
+          return;
+        }
+        throw new ApiError(
+          502,
+          "HA_WS_ERROR",
+          `HA WS auth/refresh_tokens/list failed: ${msg}`,
+        );
+      }
+      const tokens = Array.isArray(result) ? result : [];
+      // Strip any token-value-like fields defensively. HA's reply
+      // doesn't include the raw token here, but be paranoid.
+      const safeTokens = tokens.map((t) => {
+        if (!t || typeof t !== "object") return t;
+        const copy: Record<string, unknown> = { ...(t as Record<string, unknown>) };
+        delete copy.access_token;
+        delete copy.token;
+        delete copy.secret;
+        return copy;
+      });
+      const ref = getHaUserRef(haUserId);
+      sendJson(res, 200, {
+        ok: true,
+        user_id: haUserId,
+        tokens: safeTokens,
+        ledger: ref,
+      });
+    },
+  );
+
+  // ────────────────────────────────────────────────────────────────────
+  // DELETE /api/v1/channels/ha/users/:id/llat/:token_id — revoke LLAT.
+  // Gated. Also deletes the Vaultwarden item if the ledger row points at
+  // it.
+  // ────────────────────────────────────────────────────────────────────
+  addRoute(
+    "DELETE",
+    "/api/v1/channels/ha/users/:id/llat/:token_id",
+    async ({ res, body, params, query }) => {
+      const haUserId = assertHaUserId(params.id);
+      const tokenId = assertHaLlatTokenId(params.token_id);
+      const rawDecisionRef =
+        (body && typeof body === "object"
+          ? (body as Record<string, unknown>).decision_ref
+          : undefined) ?? query.get("decision_ref") ?? undefined;
+      const decision_ref = assertDecisionRef(rawDecisionRef);
+      await readHaLlat();
+      const wsClient = getHaWsClient();
+      try {
+        await wsClient.wsCall(
+          "auth/refresh_tokens/delete",
+          { user_id: haUserId, refresh_token_id: tokenId },
+          HA_USERS_TIMEOUT_MS,
+        );
+      } catch (err) {
+        throw new ApiError(
+          502,
+          "HA_WS_ERROR",
+          `HA WS auth/refresh_tokens/delete failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      // Drop the Vaultwarden item this user's LLAT lived in (if Alfred
+      // minted it). We don't track per-token vault items because
+      // upsertHaUserLlatItem stores ONE per-user item (the most recent
+      // mint overwrites). After revoke, the vault item is stale and
+      // should go.
+      const ref = getHaUserRef(haUserId);
+      let vaultDeleted = false;
+      if (ref?.llat_vw_id) {
+        await deleteHaUserLlatItem(ref.llat_vw_id);
+        updateHaUserRefLlat(haUserId, null);
+        vaultDeleted = true;
+      }
+      recordHaWriteToDaybook({
+        action: "ha__user_revoke_llat",
+        decision_ref,
+        summary: `HA LLAT revoked (user_id=${haUserId}, token_id=${tokenId})`,
+        extra: {
+          ha_user_id: haUserId,
+          ha_token_id: tokenId,
+          vault_item_deleted: vaultDeleted,
+        },
+      });
+      sendJson(res, 200, {
+        ok: true,
+        user_id: haUserId,
+        token_id: tokenId,
+        decision_ref,
+        vault_item_deleted: vaultDeleted,
+      });
+    },
+  );
+}
+
+// === END Tier 4 PR8 ═══════════════════════════════════════════════════

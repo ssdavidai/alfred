@@ -1570,15 +1570,296 @@ export const HASS_INTEGRATION_TOOLS: ToolDef[] = [
 // === END Tier 4 PR4 ═══════════════════════════════════════════════════
 // ═════════════════════════════════════════════════════════════════════════
 
-// Final catalogue: 53 tools total = 11 read + 15 writes (5 PR4 + 10 PR3 CRUD)
-// + 10 PR6 supervisor addon + 10 PR7 core+backups + 7 PR4 integration.
-// Order kept deliberately (reads first, writes next, addon-CRUD next,
-// core+backups next, integrations last) so the model that lists the
-// catalogue sees the safe read surface before the destructive surfaces.
+// ═════════════════════════════════════════════════════════════════════════
+// === Tier 4 PR8: Users + LLATs ===
+// ═════════════════════════════════════════════════════════════════════════
+//
+// Issue #115/#158 PR8 — 8 new tools fronting ctrl-api's HA user CRUD +
+// per-user LLAT mint/revoke surface. The spec named 7; we added
+// `ha__list_user_llats` for token visibility (lets the model verify a
+// token id BEFORE revoke instead of guessing).
+//
+// LOAD-BEARING SECRET HANDLING:
+//
+//   * ha__mint_llat — calls the underlying route with `?safe=1`, which
+//     instructs ctrl-api to STRIP the minted token from the response.
+//     The model receives `{ok, user_id, decision_ref, llat_vw_id,
+//     ha_token_id, expiry_at, redacted: true, note}` and NEVER the raw
+//     token value. Sir reads the value through the Vaultwarden item
+//     (id surfaced as `llat_vw_id`).
+//
+//   * ha__list_user_llats — defensively strips any access_token /
+//     token / secret fields from the response (HA's WS reply doesn't
+//     include them, but the guard stays).
+//
+//   * The skill doc (alfred-mcp-skill.md) has an explicit rule for the
+//     LLM: "NEVER include a minted LLAT in any user-facing response.
+//     The vault id is the receipt — Sir reads the value via the vault
+//     UI."
+//
+// Per the spec §4 gate matrix (locked YES 2026-05-29 by Sir):
+//
+// | Tool                | decision_ref | auto-snapshot |
+// |---------------------|--------------|---------------|
+// | ha__list_users      | no           | no            |
+// | ha__user_info       | no           | no            |
+// | ha__create_user     | REQUIRED     | no            |
+// | ha__update_user     | REQUIRED     | no            |
+// | ha__delete_user     | REQUIRED     | no            |
+// | ha__list_user_llats | no           | no            |
+// | ha__mint_llat       | REQUIRED     | no            |
+// | ha__revoke_llat     | REQUIRED     | no            |
+//
+// No auto-snapshot for any user verb — LLATs are revocable instantly
+// (ha__revoke_llat drops both the HA-side token and the Vaultwarden
+// item), and user-create can be reversed by user-delete. Snapshots are
+// reserved for verbs that can break HA's running config.
+
+const HaUserIdParam = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(
+    /^[A-Za-z0-9][A-Za-z0-9_\-.]{0,127}$/,
+    "user_id must be 1..128 chars of [A-Za-z0-9_.-], starting with [A-Za-z0-9]",
+  )
+  .describe(
+    "HA-side user id. Resolve via `ha__list_users` (each user's `id` field) — never invent.",
+  );
+
+const HaUserNameParam = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(
+    /^[^\x00-\x1F\x7F]+$/,
+    "name must contain no control characters",
+  )
+  .describe(
+    "Display name for the HA user. Visible to anyone who logs into HA. 1..128 chars.",
+  );
+
+const HaGroupIdsParam = z
+  .array(
+    z
+      .string()
+      .min(1)
+      .max(128)
+      .regex(/^[A-Za-z0-9_\-]+$/, "group_ids must be [A-Za-z0-9_-]"),
+  )
+  .min(1)
+  .describe(
+    "Group ids for the user. Common values: `system-users` (regular), `system-admin` (full admin), `system-read-only` (read-only). Pass exactly one for most users.",
+  );
+
+const HaUserDecisionRefParam = z
+  .string()
+  .min(6)
+  .max(256)
+  .regex(
+    /^[\x21-\x7E]+$/,
+    "decision_ref must be printable ASCII with no whitespace",
+  )
+  .describe(
+    "Vault path or ulid of the `decision/` record that authorised this user write. REQUIRED. Alfred refuses without it — the contract is 'I decided X based on signal Y, run it'.",
+  );
+
+const HaLlatClientNameParam = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[\x20-\x7E]+$/, "client_name must be printable ASCII")
+  .describe(
+    "Free-form label that HA stores alongside the token (e.g. `alfred-voice-bridge`, `alfred-mcp-cratchit`). Visible in HA's Settings → People → <user> → Long-lived access tokens.",
+  );
+
+export const HASS_USER_TOOLS: ToolDef[] = [
+  {
+    name: "ha__list_users",
+    description:
+      "List all Home Assistant users (`config/auth/list` over the WS client). Returns `{ok, users: [{id, name, is_active, system_generated, system, group_ids, ...}]}`. NEVER contains tokens. **When to call:** Sir asks 'who has HA access?', before creating a new user (to dedupe), before minting a token (to resolve the user id from a name). The `system_generated`/`system` users (owner, supervisor, etc.) are protected — don't try to update or delete them.",
+    inputSchema: z.object({}),
+    buildRequest: () => ({
+      method: "GET",
+      path: "/api/v1/channels/ha/users",
+    }),
+  },
+
+  {
+    name: "ha__user_info",
+    description:
+      "Fetch one HA user by id. Returns `{ok, user, ledger}` where `ledger` is the local `ha_user_ref` row for users Alfred provisioned (carries `llat_vw_id` — the Vaultwarden item id holding any token Alfred minted for this user). 404 if the user doesn't exist on HA. **When to call:** Sir asks 'does user X exist?', before `ha__update_user`/`ha__delete_user`, before `ha__mint_llat` so you have the display name and can warn Sir if the user is `system_generated`.",
+    inputSchema: z.object({
+      user_id: HaUserIdParam,
+    }),
+    buildRequest: ({ user_id }) => ({
+      method: "GET",
+      path: `/api/v1/channels/ha/users/${encodeURIComponent(user_id)}`,
+    }),
+  },
+
+  {
+    name: "ha__create_user",
+    description:
+      "Create a new HA user via `config/auth/create`. **GATED** — requires `decision_ref`. Body: `{name, group_ids?, password?, decision_ref}`. Password is optional and may not be accepted on installs without the homeassistant auth_provider — surface `password_set` from the response. Writes a row to `ha_user_ref` keyed on the new HA user id; recorded in the daybook under `## HA writes`. After create, mint a token via `ha__mint_llat` so the user can actually log in via the API.",
+    inputSchema: z.object({
+      name: HaUserNameParam,
+      group_ids: HaGroupIdsParam.optional(),
+      password: z
+        .string()
+        .min(8)
+        .max(128)
+        .optional()
+        .describe(
+          "Initial password for the user. Optional. Some HA installs reject this (auth_provider-managed); the response carries `password_set: bool` so you can react.",
+        ),
+      decision_ref: HaUserDecisionRefParam,
+    }),
+    buildRequest: ({ name, group_ids, password, decision_ref }) => ({
+      method: "POST",
+      path: "/api/v1/channels/ha/users",
+      body: {
+        name,
+        ...(group_ids ? { group_ids } : {}),
+        ...(password ? { password } : {}),
+        decision_ref,
+      },
+    }),
+  },
+
+  {
+    name: "ha__update_user",
+    description:
+      "Update an existing HA user via `config/auth/update`. **GATED** — requires `decision_ref`. At least one of `name`, `is_active`, `group_ids` must be present. Refreshes the local `ha_user_ref` row's name when changed. Recorded in the daybook. **Common moves:** demote (`group_ids: ['system-read-only']`), deactivate (`is_active: false` — preferred over `ha__delete_user` for a reversible action), or rename.",
+    inputSchema: z.object({
+      user_id: HaUserIdParam,
+      name: HaUserNameParam.optional(),
+      is_active: z
+        .boolean()
+        .optional()
+        .describe(
+          "Disable the user without deleting (reversible). Sets HA's `is_active` flag.",
+        ),
+      group_ids: HaGroupIdsParam.optional(),
+      decision_ref: HaUserDecisionRefParam,
+    }),
+    buildRequest: ({ user_id, name, is_active, group_ids, decision_ref }) => ({
+      method: "PUT",
+      path: `/api/v1/channels/ha/users/${encodeURIComponent(user_id)}`,
+      body: {
+        ...(name !== undefined ? { name } : {}),
+        ...(is_active !== undefined ? { is_active } : {}),
+        ...(group_ids !== undefined ? { group_ids } : {}),
+        decision_ref,
+      },
+    }),
+  },
+
+  {
+    name: "ha__delete_user",
+    description:
+      "Delete an HA user via `config/auth/delete`. **GATED** — requires `decision_ref`. **DESTRUCTIVE** but no auto-snapshot (HA does not roll user-delete into its backup format; revoke via `ha__update_user` with `is_active: false` if reversibility matters). Also drops the Vaultwarden item Alfred minted for this user (if any) and removes the `ha_user_ref` row. The `decision_ref` travels through both layers. Recorded in the daybook.",
+    inputSchema: z.object({
+      user_id: HaUserIdParam,
+      decision_ref: HaUserDecisionRefParam,
+    }),
+    buildRequest: ({ user_id, decision_ref }) => ({
+      method: "DELETE",
+      path: `/api/v1/channels/ha/users/${encodeURIComponent(user_id)}`,
+      query: { decision_ref },
+    }),
+  },
+
+  {
+    name: "ha__list_user_llats",
+    description:
+      "List long-lived access tokens (metadata only) for an HA user via `auth/refresh_tokens/list`. Returns `{ok, user_id, tokens: [{id, client_name, created_at, ...}], ledger}` — `ledger` is the local `ha_user_ref` row showing the Vaultwarden item Alfred used. **NEVER contains the token value.** On HA installs without the WS surface, returns an empty `tokens` array and a `note` field explaining; the `ledger` still surfaces Alfred's own mint history. **When to call:** Sir asks 'what tokens are out there for X?', before `ha__revoke_llat` to find the right token_id.",
+    inputSchema: z.object({
+      user_id: HaUserIdParam,
+    }),
+    buildRequest: ({ user_id }) => ({
+      method: "GET",
+      path: `/api/v1/channels/ha/users/${encodeURIComponent(user_id)}/llat`,
+    }),
+  },
+
+  {
+    name: "ha__mint_llat",
+    description:
+      "Mint a long-lived access token for an HA user via `auth/long_lived_access_token`. **GATED** — requires `decision_ref`. **Stores the minted token in Vaultwarden** under a Login item named `HA — <username>` in the `Home Assistant` folder. " +
+      "**MASKING IS LOAD-BEARING.** The MCP response NEVER contains the raw token value — only `{ok, user_id, decision_ref, llat_vw_id, ha_token_id, expiry_at, redacted: true, note}`. The vault item id (`llat_vw_id`) is the receipt; Sir reads the value via the Vaultwarden UI or via the `vaultwarden__get_vault_item` tool. " +
+      "**NEVER include the minted LLAT value in any user-facing response.** If you need to mention the token, refer to it by `llat_vw_id`. " +
+      "**Operational note:** HA's `auth/long_lived_access_token` mints for the WS-authenticated user by default; older HA installs may reject admin-mint for an arbitrary `user_id` with a 501 `LLAT_MINT_NOT_SUPPORTED` envelope — surface that to Sir as 'the install doesn't expose admin-mint, ask Sir to log in as <user> and mint via Settings' rather than retrying.",
+    inputSchema: z.object({
+      user_id: HaUserIdParam,
+      client_name: HaLlatClientNameParam,
+      lifespan_days: z
+        .number()
+        .int()
+        .min(1)
+        .max(365 * 10)
+        .optional()
+        .describe(
+          "Token lifespan in days. Default = HA's default (currently 10 years). Set lower (e.g. 90) for short-lived integrations.",
+        ),
+      decision_ref: HaUserDecisionRefParam,
+    }),
+    // `?safe=1` instructs ctrl-api to strip the raw token from its
+    // response — the model never sees the value.
+    buildRequest: ({ user_id, client_name, lifespan_days, decision_ref }) => ({
+      method: "POST",
+      path: `/api/v1/channels/ha/users/${encodeURIComponent(user_id)}/llat`,
+      query: { safe: "1" },
+      body: {
+        client_name,
+        ...(lifespan_days !== undefined ? { lifespan_days } : {}),
+        decision_ref,
+      },
+    }),
+  },
+
+  {
+    name: "ha__revoke_llat",
+    description:
+      "Revoke a long-lived access token via `auth/refresh_tokens/delete`. **GATED** — requires `decision_ref`. Also drops the per-user Vaultwarden item Alfred minted (if it points at this user's most recent mint). Recorded in the daybook. **When to call:** Sir says 'rotate the kid's token', the token leaked, or an integration was removed. After revoke, mint a fresh token via `ha__mint_llat` if Sir wants continued access.",
+    inputSchema: z.object({
+      user_id: HaUserIdParam,
+      ha_token_id: z
+        .string()
+        .min(1)
+        .max(192)
+        .regex(
+          /^[A-Za-z0-9][A-Za-z0-9_\-.]+$/,
+          "ha_token_id must be 1..192 chars of [A-Za-z0-9_.-]",
+        )
+        .describe(
+          "HA refresh-token id (from `ha__list_user_llats` — the `id` field of each token). NEVER invent.",
+        ),
+      decision_ref: HaUserDecisionRefParam,
+    }),
+    buildRequest: ({ user_id, ha_token_id, decision_ref }) => ({
+      method: "DELETE",
+      path: `/api/v1/channels/ha/users/${encodeURIComponent(user_id)}/llat/${encodeURIComponent(ha_token_id)}`,
+      query: { decision_ref },
+    }),
+  },
+];
+
+// ═════════════════════════════════════════════════════════════════════════
+// === END Tier 4 PR8 ═══════════════════════════════════════════════════
+
+
+// Final catalogue: 61 tools total = 11 read + 15 writes (5 PR4 + 10 PR3 CRUD)
+// + 10 PR6 supervisor addon + 10 PR7 core+backups + 7 PR4 integration
+// + 8 PR8 user + LLAT. Order kept deliberately (reads first, writes next,
+// addon-CRUD next, core+backups next, integrations next, users+LLATs last)
+// so the model that lists the catalogue sees the safe read surface before
+// the destructive surfaces.
 export const ALL_HASS_TOOLS: ToolDef[] = [
   ...HASS_READ_TOOLS,
   ...HASS_DEFERRED_TOOLS,
   ...HASS_ADDON_TOOLS,
   ...HASS_PR7_TOOLS,
   ...HASS_INTEGRATION_TOOLS,
+  ...HASS_USER_TOOLS,
 ];

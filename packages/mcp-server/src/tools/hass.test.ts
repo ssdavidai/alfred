@@ -22,6 +22,7 @@ import {
   HASS_ADDON_TOOLS,
   HASS_PR7_TOOLS,
   HASS_INTEGRATION_TOOLS,
+  HASS_USER_TOOLS,
 } from "./hass.js";
 import { SUPPORTED_APPS, isAppId, getToolsForApp } from "./registry.js";
 
@@ -33,7 +34,7 @@ function getTool(name: string) {
 
 // ─── catalogue shape ────────────────────────────────────────────────────
 
-test("hass catalogue: exactly 53 tools (11 read + 15 write + 10 PR6 addon + 10 PR7 core+backup + 7 PR4 integration)", () => {
+test("hass catalogue: exactly 61 tools (11 read + 15 write + 10 PR6 addon + 10 PR7 core+backup + 7 PR4 integration + 8 PR8 user)", () => {
   assert.equal(HASS_READ_TOOLS.length, 11);
   // After #115 PR3 splice: PR4's 5 + PR3's 10 = 15 writes.
   assert.equal(HASS_DEFERRED_TOOLS.length, 15);
@@ -43,14 +44,17 @@ test("hass catalogue: exactly 53 tools (11 read + 15 write + 10 PR6 addon + 10 P
   assert.equal(HASS_PR7_TOOLS.length, 10);
   // PR4 (issue #115): 7 integration tools.
   assert.equal(HASS_INTEGRATION_TOOLS.length, 7);
-  assert.equal(ALL_HASS_TOOLS.length, 53);
+  // PR8: 8 user + LLAT tools (spec named 7; we added ha__list_user_llats
+  // for token visibility before revoke).
+  assert.equal(HASS_USER_TOOLS.length, 8);
+  assert.equal(ALL_HASS_TOOLS.length, 61);
 });
 
-test("registry: hass is a supported app and registers all 53 tools", () => {
+test("registry: hass is a supported app and registers all 61 tools", () => {
   assert.ok(isAppId("hass"));
   assert.ok((SUPPORTED_APPS as Set<string>).has("hass"));
   const tools = getToolsForApp("hass");
-  assert.equal(tools.length, 53);
+  assert.equal(tools.length, 61);
 });
 
 test("hass: every tool name is unique", () => {
@@ -1545,4 +1549,259 @@ test("PR4 integration: every name starts with `ha__` and is unique", () => {
   const names = HASS_INTEGRATION_TOOLS.map((t) => t.name);
   assert.equal(new Set(names).size, names.length);
   for (const n of names) assert.ok(n.startsWith("ha__"));
+});
+// ═════════════════════════════════════════════════════════════════════════
+// #115 PR8 — HA users + per-user LLATs
+// ═════════════════════════════════════════════════════════════════════════
+
+const USER_TOOL_NAMES = [
+  "ha__list_users",
+  "ha__user_info",
+  "ha__create_user",
+  "ha__update_user",
+  "ha__delete_user",
+  "ha__list_user_llats",
+  "ha__mint_llat",
+  "ha__revoke_llat",
+];
+
+for (const name of USER_TOOL_NAMES) {
+  test(`PR8 user tool exists: ${name}`, () => {
+    const t = HASS_USER_TOOLS.find((x) => x.name === name);
+    assert.ok(t, `${name} missing from HASS_USER_TOOLS`);
+  });
+}
+
+test("PR8: ha__list_users → GET /users", () => {
+  const t = getTool("ha__list_users");
+  const r = t.inputSchema.safeParse({});
+  assert.equal(r.success, true);
+  const req = t.buildRequest({});
+  assert.equal(req.method, "GET");
+  assert.equal(req.path, "/api/v1/channels/ha/users");
+});
+
+test("PR8: ha__user_info → GET /users/:id; rejects empty id", () => {
+  const t = getTool("ha__user_info");
+  assert.equal(t.inputSchema.safeParse({ user_id: "abc123" }).success, true);
+  assert.equal(t.inputSchema.safeParse({ user_id: "" }).success, false);
+  assert.equal(t.inputSchema.safeParse({}).success, false);
+  const req = t.buildRequest({ user_id: "u_abc" });
+  assert.equal(req.method, "GET");
+  assert.equal(req.path, "/api/v1/channels/ha/users/u_abc");
+});
+
+test("PR8: ha__create_user requires name + decision_ref", () => {
+  const t = getTool("ha__create_user");
+  // Missing decision_ref
+  assert.equal(t.inputSchema.safeParse({ name: "Kid" }).success, false);
+  // Bad decision_ref shape
+  assert.equal(
+    t.inputSchema.safeParse({ name: "Kid", decision_ref: "x" }).success,
+    false,
+  );
+  // Bad name (control char)
+  assert.equal(
+    t.inputSchema.safeParse({
+      name: "K\x01id",
+      decision_ref: "decision/2026-05-29-kid.md",
+    }).success,
+    false,
+  );
+  // OK
+  const ok = t.inputSchema.safeParse({
+    name: "Kid",
+    group_ids: ["system-read-only"],
+    decision_ref: "decision/2026-05-29-kid.md",
+  });
+  assert.equal(ok.success, true);
+  const req = t.buildRequest(ok.data);
+  assert.equal(req.method, "POST");
+  assert.equal(req.path, "/api/v1/channels/ha/users");
+  assert.deepEqual(req.body, {
+    name: "Kid",
+    group_ids: ["system-read-only"],
+    decision_ref: "decision/2026-05-29-kid.md",
+  });
+});
+
+test("PR8: ha__update_user accepts is_active flip without name", () => {
+  const t = getTool("ha__update_user");
+  const ok = t.inputSchema.safeParse({
+    user_id: "u_abc",
+    is_active: false,
+    decision_ref: "decision/2026-05-29-deactivate.md",
+  });
+  assert.equal(ok.success, true);
+  const req = t.buildRequest(ok.data);
+  assert.equal(req.method, "PUT");
+  assert.equal(req.path, "/api/v1/channels/ha/users/u_abc");
+  assert.deepEqual(req.body, {
+    is_active: false,
+    decision_ref: "decision/2026-05-29-deactivate.md",
+  });
+});
+
+test("PR8: ha__delete_user → DELETE with decision_ref in query", () => {
+  const t = getTool("ha__delete_user");
+  assert.equal(
+    t.inputSchema.safeParse({ user_id: "u_abc" }).success,
+    false,
+    "must require decision_ref",
+  );
+  const ok = t.inputSchema.safeParse({
+    user_id: "u_abc",
+    decision_ref: "decision/2026-05-29-drop.md",
+  });
+  assert.equal(ok.success, true);
+  const req = t.buildRequest(ok.data);
+  assert.equal(req.method, "DELETE");
+  assert.equal(req.path, "/api/v1/channels/ha/users/u_abc");
+  assert.deepEqual(req.query, { decision_ref: "decision/2026-05-29-drop.md" });
+});
+
+test("PR8: ha__mint_llat sends ?safe=1 — token NEVER returned to the model", () => {
+  const t = getTool("ha__mint_llat");
+  // Description must carry the load-bearing rule.
+  assert.match(
+    t.description,
+    /NEVER include.+minted LLAT|MASKING IS LOAD-BEARING/i,
+    "ha__mint_llat description must spell out the masking rule",
+  );
+  const ok = t.inputSchema.safeParse({
+    user_id: "u_abc",
+    client_name: "alfred-mcp",
+    decision_ref: "decision/2026-05-29-mint.md",
+  });
+  assert.equal(ok.success, true);
+  const req = t.buildRequest(ok.data);
+  assert.equal(req.method, "POST");
+  assert.equal(req.path, "/api/v1/channels/ha/users/u_abc/llat");
+  // `?safe=1` MUST be set — this is the kill switch that stops the raw
+  // token from being included in the route response.
+  assert.equal(req.query?.safe, "1");
+  assert.deepEqual(req.body, {
+    client_name: "alfred-mcp",
+    decision_ref: "decision/2026-05-29-mint.md",
+  });
+});
+
+test("PR8: ha__mint_llat lifespan_days bounds", () => {
+  const t = getTool("ha__mint_llat");
+  // Zero / negative rejected.
+  assert.equal(
+    t.inputSchema.safeParse({
+      user_id: "u_abc",
+      client_name: "x",
+      lifespan_days: 0,
+      decision_ref: "decision/2026-05-29-mint.md",
+    }).success,
+    false,
+  );
+  assert.equal(
+    t.inputSchema.safeParse({
+      user_id: "u_abc",
+      client_name: "x",
+      lifespan_days: -1,
+      decision_ref: "decision/2026-05-29-mint.md",
+    }).success,
+    false,
+  );
+  // 10y boundary.
+  assert.equal(
+    t.inputSchema.safeParse({
+      user_id: "u_abc",
+      client_name: "x",
+      lifespan_days: 365 * 10,
+      decision_ref: "decision/2026-05-29-mint.md",
+    }).success,
+    true,
+  );
+  // 1d ok.
+  assert.equal(
+    t.inputSchema.safeParse({
+      user_id: "u_abc",
+      client_name: "x",
+      lifespan_days: 1,
+      decision_ref: "decision/2026-05-29-mint.md",
+    }).success,
+    true,
+  );
+});
+
+test("PR8: ha__list_user_llats → GET /users/:id/llat (no decision_ref)", () => {
+  const t = getTool("ha__list_user_llats");
+  const ok = t.inputSchema.safeParse({ user_id: "u_abc" });
+  assert.equal(ok.success, true);
+  const req = t.buildRequest(ok.data);
+  assert.equal(req.method, "GET");
+  assert.equal(req.path, "/api/v1/channels/ha/users/u_abc/llat");
+});
+
+test("PR8: ha__revoke_llat → DELETE /users/:id/llat/:token_id", () => {
+  const t = getTool("ha__revoke_llat");
+  assert.equal(
+    t.inputSchema.safeParse({
+      user_id: "u_abc",
+      ha_token_id: "tok_xyz",
+    }).success,
+    false,
+    "must require decision_ref",
+  );
+  const ok = t.inputSchema.safeParse({
+    user_id: "u_abc",
+    ha_token_id: "tok_xyz",
+    decision_ref: "decision/2026-05-29-revoke.md",
+  });
+  assert.equal(ok.success, true);
+  const req = t.buildRequest(ok.data);
+  assert.equal(req.method, "DELETE");
+  assert.equal(req.path, "/api/v1/channels/ha/users/u_abc/llat/tok_xyz");
+  assert.deepEqual(req.query, { decision_ref: "decision/2026-05-29-revoke.md" });
+});
+
+test("PR8: every user tool name begins with ha__ and is unique", () => {
+  const names = HASS_USER_TOOLS.map((t) => t.name);
+  assert.equal(new Set(names).size, names.length);
+  for (const n of names) assert.ok(n.startsWith("ha__"));
+});
+
+test("PR8: destructive verbs require decision_ref by schema", () => {
+  const destructive = [
+    "ha__create_user",
+    "ha__update_user",
+    "ha__delete_user",
+    "ha__mint_llat",
+    "ha__revoke_llat",
+  ];
+  for (const name of destructive) {
+    const t = getTool(name);
+    // None of these schemas allow decision_ref absent.
+    const sample: Record<string, unknown> =
+      name === "ha__create_user"
+        ? { name: "X" }
+        : name === "ha__update_user"
+          ? { user_id: "u_abc", name: "X" }
+          : name === "ha__delete_user"
+            ? { user_id: "u_abc" }
+            : name === "ha__mint_llat"
+              ? { user_id: "u_abc", client_name: "x" }
+              : { user_id: "u_abc", ha_token_id: "t" };
+    assert.equal(
+      t.inputSchema.safeParse(sample).success,
+      false,
+      `${name} must require decision_ref`,
+    );
+  }
+});
+
+test("PR8: ha__mint_llat response shape MUST be redacted (the model never sees token values)", () => {
+  // This test pins the documentation-side contract — the description
+  // tells the LLM "NEVER include a minted LLAT in any user-facing
+  // response". The runtime guarantee lives at the ctrl-api layer
+  // (`?safe=1` strips the token), tested separately in
+  // tests/channels_ha_users.test.ts.
+  const t = getTool("ha__mint_llat");
+  assert.match(t.description, /NEVER include|llat_vw_id|vault id is the receipt/i);
+  assert.match(t.description, /MASKING IS LOAD-BEARING|redacted: true/i);
 });

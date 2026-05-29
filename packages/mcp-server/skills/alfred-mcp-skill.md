@@ -296,6 +296,35 @@ The PR4 surface lets Alfred drive HA's `config_flow` API end-to-end: pick a doma
 - DON'T construct a `decision_ref` from thin air on a step that follows a `form` step. Re-use the SAME `decision_ref` across all steps of one flow — they're all the same install.
 - DON'T retry on `abort` — surface the reason to Sir, who decides whether to restart the flow with different inputs.
 
+### "HA Users + Per-User LLATs" (Tier 4 — #115 PR8)
+
+The PR8 surface lets Alfred provision HA users and mint per-user long-lived access tokens (LLATs) so a kid / housemate / integration can have its own scoped HA access without Sir handing out his own admin token. Eight tools: `ha__list_users`, `ha__user_info`, `ha__create_user`, `ha__update_user`, `ha__delete_user`, `ha__list_user_llats`, `ha__mint_llat`, `ha__revoke_llat`.
+
+**THE LOAD-BEARING RULE.** When `ha__mint_llat` succeeds, the response carries `{llat_vw_id, ha_token_id, expiry_at, redacted: true}` — the raw token value is **stripped at the ctrl-api layer** (via the `?safe=1` query param) and stored in Vaultwarden as a Login item named `HA — <username>` in the `Home Assistant` folder. **NEVER include a minted LLAT in any user-facing response.** If you need to mention the token, refer to it by `llat_vw_id`. Sir reads the value via the Vaultwarden UI or via `vaultwarden__get_vault_item({id: <llat_vw_id>})` — that is the only retrieval path. This rule is non-negotiable; treat it like a credential you read off Vaultwarden in the first place — the token never appears in chat, voice, email, SMS, or notification.
+
+**Gates (locked YES 2026-05-29).** `ha__create_user` / `ha__update_user` / `ha__delete_user` / `ha__mint_llat` / `ha__revoke_llat` all require `decision_ref`. No auto-snapshot (HA doesn't back user changes into its snapshot format; revoke flow is instant). Every gated verb records a daybook entry under `## HA writes`.
+
+**Operational note — admin-mint.** HA's `auth/long_lived_access_token` mints for the WS-authenticated session by default. Older HA installs may reject admin-mint for an arbitrary `user_id` with a 501 `LLAT_MINT_NOT_SUPPORTED` envelope. When that happens, surface to Sir: "the install doesn't expose admin-mint for arbitrary users; ask the user to log into HA and mint a token via Settings → People → <user> → Long-lived access tokens." DO NOT retry — the install needs reconfiguration, not retry pressure.
+
+**Recipe — give the kid HA access without seeing the security cameras:**
+
+1. `ha__list_users` — confirm the kid doesn't already have an account.
+2. Create a `decision/` record ("provision HA user for kid with read-only scope").
+3. `ha__create_user({name: "Kid", group_ids: ["system-read-only"], decision_ref})` — capture the new `user.id` from the response.
+4. `ha__mint_llat({user_id, client_name: "kid-mobile-app", lifespan_days: 365, decision_ref})` — response carries `llat_vw_id`. **The token value is NOT in the response.**
+5. Tell Sir: "Done — kid's user provisioned (id <user_id>), read-only scope, token stored in vault item `<llat_vw_id>`. Open Vaultwarden to read the value when you're ready to set up the kid's phone." NEVER paste the token.
+
+**Recipe — rotate a leaked token:**
+
+1. `ha__list_user_llats({user_id})` — find the leaked token's `id` (`ha_token_id`).
+2. Create a `decision/` record naming the rotation.
+3. `ha__revoke_llat({user_id, ha_token_id, decision_ref})` — drops the token AND deletes the Vaultwarden item.
+4. `ha__mint_llat({user_id, client_name, decision_ref})` — fresh token, fresh `llat_vw_id`. Tell Sir which vault item id to read.
+
+**Recipe — deactivate a user without losing their config:**
+
+Prefer `ha__update_user({user_id, is_active: false, decision_ref})` over `ha__delete_user`. The user's automations, dashboards, and history stay intact; flipping `is_active: true` later restores access. `ha__delete_user` is for accounts Sir actually wants gone.
+
 ---
 
 ## Pre-requisites and chaining
@@ -356,7 +385,7 @@ Sir reversed the decision before the verb fires.
   - `ha__addon_install` / `ha__addon_uninstall` / `ha__addon_configure`
   - `ha__core_restart` / `ha__core_update`
   - `ha__backup_restore` / `ha__backup_delete`
-  - `ha__user_create` / `ha__user_delete` / `ha__user_mint_llat`
+  - `ha__create_user` / `ha__update_user` / `ha__delete_user` / `ha__mint_llat` / `ha__revoke_llat`
   - `ha__automation_delete`
 
 The flow is: (1) detect the need from a signal / Sir's request, (2)
