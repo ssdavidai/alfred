@@ -1002,6 +1002,32 @@ action dispatchRecallBot {
   entities: []
 }
 
+// Lane III (#113 PR5) — Alfred-in-meeting two-way voice ops. Three
+// actions + one query bind the RecallCard's live-bots section against
+// the new PR5 ctrl-api routes. muteRecallBot/unmuteRecallBot toggle
+// the wake-word→speak loop; recallBotSpeak is the manual "Speak now"
+// CTA; getRecallBotTranscript polls the per-bot transcript JSON
+// companion to the SSE stream.
+query getRecallBotTranscript {
+  fn: import { getRecallBotTranscript } from "@src/dashboard/operations",
+  entities: []
+}
+
+action muteRecallBot {
+  fn: import { muteRecallBot } from "@src/dashboard/operations",
+  entities: []
+}
+
+action unmuteRecallBot {
+  fn: import { unmuteRecallBot } from "@src/dashboard/operations",
+  entities: []
+}
+
+action recallBotSpeak {
+  fn: import { recallBotSpeak } from "@src/dashboard/operations",
+  entities: []
+}
+
 // Wave C — HA conversation setup card (#111 PR3). Reads the shared
 // `channel_tokens` table for rows with `channel='ha-conversation'`
 // (one row per HA install). Mint + revoke proxy to the same shared

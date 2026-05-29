@@ -31,6 +31,7 @@ import { connectAllMcp } from "./mcp-clients.js";
 import { computeIdentity, startEsphomeServer } from "./esphome-server.js";
 import { announceEsphomeMdns } from "./esphome-mdns.js";
 import { EsphomeVoiceSession } from "./esphome-session.js";
+import { handleRecallTurnRequest } from "./recall-server.js";
 
 export function verifySig(tenantId: string, sig: string | null | undefined): boolean {
   if (!sig) return false;
@@ -87,6 +88,21 @@ const httpServer = http.createServer((req, res) => {
   if (req.url === "/metrics") {
     res.writeHead(200, { "Content-Type": "text/plain; version=0.0.4" });
     res.end(renderMetrics());
+    return;
+  }
+  // /voice/recall-turn — ctrl-api calls here on every wake-word hit
+  // inside an active Recall meeting. Bearer is the shared internal
+  // token; we run ONE OpenAI Realtime turn and reply with audio. See
+  // recall-server.ts for the handler.
+  if (req.url === "/voice/recall-turn" && req.method === "POST") {
+    handleRecallTurnRequest(req, res).catch((err) => {
+      console.error("[recall-turn] handler error", err);
+      bumpMetric("errors");
+      if (!res.headersSent) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: String(err) }));
+      }
+    });
     return;
   }
   // Twilio "A CALL COMES IN" webhook — returns TwiML pointing at the

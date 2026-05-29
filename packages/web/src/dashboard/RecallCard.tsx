@@ -31,6 +31,10 @@ import {
   validateRecallApiKey,
   testRecallWebhook,
   terminateRecallBot,
+  getRecallBotTranscript,
+  muteRecallBot,
+  unmuteRecallBot,
+  recallBotSpeak,
 } from "wasp/client/operations";
 import {
   RECALL_AUTO_JOIN_POLICY_OPTIONS,
@@ -743,6 +747,25 @@ function RecallConfiguredPanel({
         )}
       </form>
 
+      {/* Live bots — PR5 — Alfred-in-meeting two-way voice */}
+      {visibleBots.filter((b) => b.status === "in_meeting").length > 0 && (
+        <div className="space-y-3">
+          <div
+            className="font-mono text-[10px] uppercase tracking-[0.22em]"
+            style={{ color: "var(--marginalia)" }}
+          >
+            Live bots — Alfred in the meeting
+          </div>
+          <div className="space-y-3">
+            {visibleBots
+              .filter((b) => b.status === "in_meeting")
+              .map((b) => (
+                <LiveBotRow key={b.id} botId={b.id} onSettled={onSettled} />
+              ))}
+          </div>
+        </div>
+      )}
+
       {/* Recent (active) bots table */}
       {visibleBots.length > 0 && (
         <div className="space-y-2">
@@ -916,5 +939,216 @@ function Hint({ children }: { children: React.ReactNode }) {
     >
       {children}
     </span>
+  );
+}
+
+// ─── live bot row — PR5 ──────────────────────────────────────────────────
+//
+// One row per in-meeting Recall bot, surfacing:
+//   * the live transcript (polled JSON companion to the SSE stream),
+//   * the "Mute Alfred" / "Unmute Alfred" toggle,
+//   * a "Speak now" textarea + button,
+//   * a wake-word-triggers counter.
+
+interface TranscriptEvent {
+  id: number;
+  kind: "partial" | "final" | "response" | "wake_word_hit";
+  speaker: string | null;
+  text: string;
+  ts_ms: number;
+  meeting_ms: number | null;
+}
+
+interface TranscriptPayload {
+  bot_id: string;
+  wake_word_triggers: number;
+  muted: boolean;
+  events: TranscriptEvent[];
+  unavailable?: boolean;
+}
+
+function LiveBotRow({
+  botId,
+  onSettled,
+}: {
+  botId: string;
+  onSettled: () => void;
+}) {
+  // Poll the transcript companion JSON every 2 seconds. The poll
+  // cadence is conservative on purpose — heavy meeting traffic gives
+  // 5+ transcript fragments per second on the SSE channel, but the
+  // dashboard view only needs second-resolution to feel live.
+  const { data: tx, refetch } = useQuery(
+    getRecallBotTranscript,
+    { bot_id: botId },
+    { refetchInterval: 2000, retry: false },
+  );
+  const payload = (tx as TranscriptPayload | undefined) ?? null;
+  const events = payload?.events ?? [];
+  const muted = payload?.muted ?? false;
+  const triggers = payload?.wake_word_triggers ?? 0;
+
+  const [muteBusy, setMuteBusy] = useState(false);
+  const [speakBusy, setSpeakBusy] = useState(false);
+  const [speakText, setSpeakText] = useState("");
+  const [speakMsg, setSpeakMsg] = useState<
+    { kind: "ok" | "err"; text: string } | null
+  >(null);
+
+  async function toggleMute() {
+    if (muteBusy) return;
+    setMuteBusy(true);
+    try {
+      if (muted) await unmuteRecallBot({ bot_id: botId });
+      else await muteRecallBot({ bot_id: botId });
+      refetch();
+      onSettled();
+    } catch (err) {
+      console.error("recall mute toggle failed", err);
+    } finally {
+      setMuteBusy(false);
+    }
+  }
+
+  async function speakNow(e?: React.FormEvent) {
+    if (e) e.preventDefault();
+    const text = speakText.trim();
+    if (!text || speakBusy) return;
+    setSpeakBusy(true);
+    setSpeakMsg(null);
+    try {
+      await recallBotSpeak({ bot_id: botId, text });
+      setSpeakText("");
+      setSpeakMsg({ kind: "ok", text: "Alfred is speaking." });
+      refetch();
+    } catch (err: any) {
+      setSpeakMsg({
+        kind: "err",
+        text: err?.message ?? err?.data?.error ?? "Couldn't send the line.",
+      });
+    } finally {
+      setSpeakBusy(false);
+      setTimeout(() => setSpeakMsg(null), 4000);
+    }
+  }
+
+  // Recent fragments — show the last 10 in chronological order.
+  const recent = events.slice(-10);
+
+  return (
+    <div className="border border-rule p-3 space-y-3">
+      <div className="flex items-baseline justify-between">
+        <code
+          className="font-mono text-[11px]"
+          style={{ color: "var(--ink)" }}
+        >
+          {truncateBotId(botId)}
+        </code>
+        <div className="flex gap-3 items-baseline">
+          <span
+            className="font-mono text-[10px] uppercase tracking-[0.22em]"
+            style={{ color: "var(--marginalia)" }}
+          >
+            Wake triggers · {triggers}
+          </span>
+          <button
+            type="button"
+            onClick={toggleMute}
+            disabled={muteBusy}
+            className="btn-link"
+            aria-pressed={muted}
+          >
+            {muteBusy ? "…" : muted ? "Unmute Alfred" : "Mute Alfred"}
+          </button>
+        </div>
+      </div>
+
+      {/* Live transcript */}
+      <div
+        className="font-mono text-[11px] space-y-1 max-h-40 overflow-y-auto"
+        style={{ color: "var(--ink)" }}
+      >
+        {payload?.unavailable && (
+          <div
+            className="font-body italic text-[12px]"
+            style={{ color: "var(--marginalia)" }}
+          >
+            Live transcript is not yet available for this tenant.
+          </div>
+        )}
+        {recent.length === 0 && !payload?.unavailable && (
+          <div
+            className="font-body italic text-[12px]"
+            style={{ color: "var(--marginalia)" }}
+          >
+            Listening…
+          </div>
+        )}
+        {recent.map((ev) => (
+          <div key={ev.id} className="flex gap-2">
+            <span
+              className="uppercase tracking-[0.18em] text-[9px]"
+              style={{
+                color:
+                  ev.kind === "wake_word_hit"
+                    ? "var(--brass)"
+                    : ev.kind === "response"
+                      ? "var(--marginalia)"
+                      : "var(--ink)",
+                minWidth: "6rem",
+              }}
+            >
+              {ev.kind === "response"
+                ? "Alfred"
+                : ev.kind === "wake_word_hit"
+                  ? "WAKE"
+                  : ev.speaker || "—"}
+            </span>
+            <span className="flex-1">{ev.text}</span>
+          </div>
+        ))}
+      </div>
+
+      {/* Speak now */}
+      <form onSubmit={speakNow} className="space-y-2">
+        <div
+          className="font-mono text-[10px] uppercase tracking-[0.22em]"
+          style={{ color: "var(--marginalia)" }}
+        >
+          Speak as Alfred
+        </div>
+        <textarea
+          value={speakText}
+          onChange={(e) => setSpeakText(e.target.value)}
+          maxLength={1000}
+          placeholder='e.g. "Pardon me — Sir asked me to note we\'re running long."'
+          rows={2}
+          className="w-full bg-transparent border border-rule px-2 py-1 font-mono text-[12px]"
+        />
+        <div className="flex gap-3 items-baseline">
+          <button
+            type="submit"
+            disabled={speakBusy || speakText.trim().length === 0}
+            className="btn-ghost"
+          >
+            {speakBusy ? "Speaking…" : "Speak now"}
+          </button>
+          {speakMsg && (
+            <span
+              className="font-body italic text-[12px]"
+              style={{
+                color:
+                  speakMsg.kind === "ok"
+                    ? "var(--marginalia)"
+                    : "var(--brass)",
+              }}
+            >
+              {speakMsg.kind === "ok" ? "✓ " : "✗ "}
+              {speakMsg.text}
+            </span>
+          )}
+        </div>
+      </form>
+    </div>
   );
 }
