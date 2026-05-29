@@ -423,6 +423,61 @@ HACS custom component, restart core for an OTA update) without
 Sir touching HA's UI — and every such write is recorded in the daybook
 so Sir has a clean audit ledger.
 
+### HACS catalogue (#115 PR5) — install / remove / refresh
+
+HACS (Home Assistant Community Store) is the community catalogue of
+integrations, Lovelace cards, themes, and AppDaemon/NetDaemon apps that
+HA itself doesn't ship. Alfred has 8 HACS tools, gated like the rest of
+Tier 4:
+
+  - `ha__hacs_info` — installation metadata (categories, stage). Probe
+    BEFORE any write to confirm HACS is running.
+  - `ha__hacs_search` — query the catalogue. Filter by `category` and/or
+    a substring `query`. Use `installed: true` to scope to what's already
+    in the home.
+  - `ha__hacs_repo_info` — one repo's state + list view in one
+    round-trip. Use to read the description + version before quoting
+    them to Sir.
+  - `ha__hacs_add_custom_repo` — register a custom GitHub repo with
+    HACS. **No gate** — adding to the catalogue doesn't install
+    anything; the install step is gated.
+  - `ha__hacs_install` — gated. REQUIRES `decision_ref`. Auto-snapshots
+    BEFORE the download. The install is recorded in `ha_integration_ref`
+    so the audit trail can trace any HACS install back to a Desk
+    decision.
+  - `ha__hacs_remove` — gated. REQUIRES `decision_ref`. Auto-snapshots
+    BEFORE the remove.
+  - `ha__hacs_refresh` — force HACS to refetch metadata for one repo.
+    Cheap, no gate.
+  - `ha__hacs_pending_updates` — list installed repos with a pending
+    update. Use before proposing an HA maintenance brief.
+
+**Common flow — "install the 'better thermostat' integration from HACS":**
+
+  1. `ha__hacs_info` — confirm `stage === 'running'`.
+  2. `ha__hacs_search` with `category: "integration"`, `query: "better
+     thermostat"`. Pick the right repo by `full_name` (e.g.
+     `KartoffelToby/better_thermostat`).
+  3. `ha__hacs_repo_info` on the id from step 2. Read the description +
+     `available_version` so the Desk card is concrete.
+  4. Create a Desk decision: "install the better_thermostat HACS
+     integration (v1.0.0)". Wait for Sir to HANDLE / TAKE-MINE the
+     card.
+  5. `ha__hacs_install` with `repo_id`, optionally `version`, and the
+     `decision_ref` from step 4. Quote `ha_backup_id` and `entry_id` in
+     your confirmation to Sir.
+  6. The actual HA config_flow (for `integration`-category installs)
+     still needs to run — point Sir at the HA UI to complete it, OR
+     use the integration_configure flow (PR4) to drive it
+     programmatically.
+
+**Common flow — "install a custom repo Sir found on GitHub":**
+
+  1. `ha__hacs_add_custom_repo` with the GitHub URL + category. Sir
+     can drop the row from HACS's UI if anything looks wrong; no gate.
+  2. `ha__hacs_search` to find the id HACS assigned the new repo.
+  3. Continue at step 4 of the install flow above.
+
 ---
 
 ## Tone

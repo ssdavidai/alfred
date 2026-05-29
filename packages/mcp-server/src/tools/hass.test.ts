@@ -23,6 +23,7 @@ import {
   HASS_PR7_TOOLS,
   HASS_INTEGRATION_TOOLS,
   HASS_USER_TOOLS,
+  HASS_HACS_TOOLS,
 } from "./hass.js";
 import { SUPPORTED_APPS, isAppId, getToolsForApp } from "./registry.js";
 
@@ -34,7 +35,7 @@ function getTool(name: string) {
 
 // ─── catalogue shape ────────────────────────────────────────────────────
 
-test("hass catalogue: exactly 61 tools (11 read + 15 write + 10 PR6 addon + 10 PR7 core+backup + 7 PR4 integration + 8 PR8 user)", () => {
+test("hass catalogue: exactly 69 tools (11 read + 15 write + 10 PR6 addon + 10 PR7 core+backup + 7 PR4 integration + 8 PR8 user + 8 PR5 HACS)", () => {
   assert.equal(HASS_READ_TOOLS.length, 11);
   // After #115 PR3 splice: PR4's 5 + PR3's 10 = 15 writes.
   assert.equal(HASS_DEFERRED_TOOLS.length, 15);
@@ -47,14 +48,16 @@ test("hass catalogue: exactly 61 tools (11 read + 15 write + 10 PR6 addon + 10 P
   // PR8: 8 user + LLAT tools (spec named 7; we added ha__list_user_llats
   // for token visibility before revoke).
   assert.equal(HASS_USER_TOOLS.length, 8);
-  assert.equal(ALL_HASS_TOOLS.length, 61);
+  // PR5: 8 HACS tools.
+  assert.equal(HASS_HACS_TOOLS.length, 8);
+  assert.equal(ALL_HASS_TOOLS.length, 69);
 });
 
-test("registry: hass is a supported app and registers all 61 tools", () => {
+test("registry: hass is a supported app and registers all 69 tools", () => {
   assert.ok(isAppId("hass"));
   assert.ok((SUPPORTED_APPS as Set<string>).has("hass"));
   const tools = getToolsForApp("hass");
-  assert.equal(tools.length, 61);
+  assert.equal(tools.length, 69);
 });
 
 test("hass: every tool name is unique", () => {
@@ -1804,4 +1807,213 @@ test("PR8: ha__mint_llat response shape MUST be redacted (the model never sees t
   const t = getTool("ha__mint_llat");
   assert.match(t.description, /NEVER include|llat_vw_id|vault id is the receipt/i);
   assert.match(t.description, /MASKING IS LOAD-BEARING|redacted: true/i);
+});
+
+// ═════════════════════════════════════════════════════════════════════════
+// === Tier 4 PR5: HACS tool unit tests ===
+// ═════════════════════════════════════════════════════════════════════════
+//
+// 11 tests covering the 8 PR5 HACS tools:
+//   1. all 8 names exist in HASS_HACS_TOOLS
+//   2-9. one buildRequest + schema test per tool
+//   10. gated tools (install/remove) call out decision_ref in description
+//   11. non-gated tools accept input without decision_ref
+
+const HACS_TOOL_NAMES = [
+  "ha__hacs_info",
+  "ha__hacs_search",
+  "ha__hacs_repo_info",
+  "ha__hacs_add_custom_repo",
+  "ha__hacs_install",
+  "ha__hacs_remove",
+  "ha__hacs_refresh",
+  "ha__hacs_pending_updates",
+];
+
+test("HACS PR5: all 8 tool names present in HASS_HACS_TOOLS", () => {
+  for (const name of HACS_TOOL_NAMES) {
+    assert.ok(
+      HASS_HACS_TOOLS.find((t) => t.name === name),
+      `${name} missing from HASS_HACS_TOOLS`,
+    );
+  }
+});
+
+test("ha__hacs_info: empty input schema, GET /hacs/info", () => {
+  const t = getTool("ha__hacs_info");
+  assert.equal(t.inputSchema.safeParse({}).success, true);
+  const r = t.buildRequest({});
+  assert.equal(r.method, "GET");
+  assert.equal(r.path, "/api/v1/channels/ha/hacs/info");
+});
+
+test("ha__hacs_search: optional query/category/installed/limit, builds GET /hacs/repos", () => {
+  const t = getTool("ha__hacs_search");
+  // Empty is valid (limit defaults).
+  assert.equal(t.inputSchema.safeParse({}).success, true);
+  // Bad category rejected.
+  assert.equal(
+    t.inputSchema.safeParse({ category: "bogus" }).success,
+    false,
+  );
+  // Limit out of range rejected.
+  assert.equal(
+    t.inputSchema.safeParse({ limit: 999 }).success,
+    false,
+  );
+  const r1 = t.buildRequest({
+    query: "thermostat",
+    category: "integration",
+    installed: true,
+    limit: 25,
+  });
+  assert.equal(r1.method, "GET");
+  assert.equal(r1.path, "/api/v1/channels/ha/hacs/repos");
+  assert.deepEqual(r1.query, {
+    q: "thermostat",
+    category: "integration",
+    installed: "1",
+    limit: "25",
+  });
+  // No filters → bare query
+  const r2 = t.buildRequest({ limit: 50 });
+  assert.deepEqual(r2.query, { limit: "50" });
+});
+
+test("ha__hacs_repo_info: repo_id required, encodeURIComponent applied", () => {
+  const t = getTool("ha__hacs_repo_info");
+  assert.equal(t.inputSchema.safeParse({}).success, false);
+  // Bad charset rejected at the schema level (no traversal possible).
+  assert.equal(
+    t.inputSchema.safeParse({ repo_id: "../bad" }).success,
+    false,
+  );
+  const r = t.buildRequest({ repo_id: "42" });
+  assert.equal(r.method, "GET");
+  assert.equal(r.path, "/api/v1/channels/ha/hacs/repo/42");
+});
+
+test("ha__hacs_add_custom_repo: url + category required, both shapes accepted", () => {
+  const t = getTool("ha__hacs_add_custom_repo");
+  assert.equal(t.inputSchema.safeParse({}).success, false);
+  assert.equal(
+    t.inputSchema.safeParse({ url: "not a url", category: "integration" })
+      .success,
+    false,
+    "bad url rejected",
+  );
+  assert.equal(
+    t.inputSchema.safeParse({ url: "user/repo", category: "bogus" }).success,
+    false,
+    "bad category rejected",
+  );
+  // owner/repo form
+  const r1 = t.buildRequest({ url: "user/x", category: "integration" });
+  assert.equal(r1.method, "POST");
+  assert.equal(r1.path, "/api/v1/channels/ha/hacs/repos");
+  assert.deepEqual(r1.body, { url: "user/x", category: "integration" });
+  // Full URL form
+  const r2 = t.buildRequest({
+    url: "https://github.com/user/x",
+    category: "plugin",
+  });
+  assert.equal(r2.body!.url, "https://github.com/user/x");
+});
+
+test("ha__hacs_install: decision_ref REQUIRED, version optional, body shape", () => {
+  const t = getTool("ha__hacs_install");
+  // Missing decision_ref rejected at schema level.
+  assert.equal(
+    t.inputSchema.safeParse({ repo_id: "1" }).success,
+    false,
+    "missing decision_ref → schema reject",
+  );
+  // Bad decision_ref shape rejected (whitespace).
+  assert.equal(
+    t.inputSchema.safeParse({
+      repo_id: "1",
+      decision_ref: "with space",
+    }).success,
+    false,
+  );
+  const r1 = t.buildRequest({
+    repo_id: "1",
+    decision_ref: "01JABC0000000000000000001",
+  });
+  assert.equal(r1.method, "POST");
+  assert.equal(r1.path, "/api/v1/channels/ha/hacs/install");
+  assert.deepEqual(r1.body, {
+    repo_id: "1",
+    decision_ref: "01JABC0000000000000000001",
+  });
+  const r2 = t.buildRequest({
+    repo_id: "1",
+    version: "1.0.0",
+    decision_ref: "01JABC0000000000000000001",
+  });
+  assert.equal(r2.body!.version, "1.0.0");
+});
+
+test("ha__hacs_remove: decision_ref REQUIRED, DELETE with encodeURIComponent on id", () => {
+  const t = getTool("ha__hacs_remove");
+  assert.equal(t.inputSchema.safeParse({ repo_id: "1" }).success, false);
+  const r = t.buildRequest({
+    repo_id: "42",
+    decision_ref: "01JABC0000000000000000001",
+  });
+  assert.equal(r.method, "DELETE");
+  assert.equal(r.path, "/api/v1/channels/ha/hacs/42");
+  assert.deepEqual(r.body, { decision_ref: "01JABC0000000000000000001" });
+});
+
+test("ha__hacs_refresh: repo_id only, POST + empty body", () => {
+  const t = getTool("ha__hacs_refresh");
+  assert.equal(t.inputSchema.safeParse({}).success, false);
+  const r = t.buildRequest({ repo_id: "5" });
+  assert.equal(r.method, "POST");
+  assert.equal(r.path, "/api/v1/channels/ha/hacs/5/refresh");
+  assert.deepEqual(r.body, {});
+});
+
+test("ha__hacs_pending_updates: GET with pending=1, limit honoured", () => {
+  const t = getTool("ha__hacs_pending_updates");
+  // Defaulted limit means empty input is valid.
+  assert.equal(t.inputSchema.safeParse({}).success, true);
+  const r = t.buildRequest({ limit: 25 });
+  assert.equal(r.method, "GET");
+  assert.equal(r.path, "/api/v1/channels/ha/hacs/repos");
+  assert.deepEqual(r.query, { pending: "1", limit: "25" });
+});
+
+test("HACS PR5: gated tools (install/remove) advertise decision_ref in description", () => {
+  for (const name of ["ha__hacs_install", "ha__hacs_remove"]) {
+    const t = getTool(name);
+    assert.ok(
+      /decision_ref/i.test(t.description),
+      `${name} description must call out decision_ref`,
+    );
+  }
+});
+
+test("HACS PR5: non-gated tools (info/search/repo_info/add_custom_repo/refresh/pending_updates) DO NOT require decision_ref", () => {
+  for (const name of [
+    "ha__hacs_info",
+    "ha__hacs_search",
+    "ha__hacs_repo_info",
+    "ha__hacs_add_custom_repo",
+    "ha__hacs_refresh",
+    "ha__hacs_pending_updates",
+  ]) {
+    const t = getTool(name);
+    const sample: Record<string, unknown> = {};
+    if (name === "ha__hacs_repo_info") sample.repo_id = "1";
+    if (name === "ha__hacs_add_custom_repo") {
+      sample.url = "user/x";
+      sample.category = "integration";
+    }
+    if (name === "ha__hacs_refresh") sample.repo_id = "1";
+    // No decision_ref in any of these.
+    const r = t.inputSchema.safeParse(sample);
+    assert.equal(r.success, true, `${name} must accept input WITHOUT decision_ref`);
+  }
 });

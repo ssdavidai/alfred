@@ -1049,6 +1049,11 @@ export function registerHaChannelRoutes(): void {
   // Vaultwarden item id (llat_vw_id) is returned. Sir reads the value
   // through the vault UI / vaultwarden MCP separately.
   registerHaUserRoutes();
+
+  // #115 PR5 — Tier 4 autonomy, HACS CRUD via the long-lived WS client
+  // landed in PR1. Independent of PR2/PR3/PR4/PR6/PR7/PR8; the splice
+  // block lives at the bottom of this file (`=== Tier 4 PR5: HACS ===`).
+  registerHaHacsRoutes();
 }
 
 /**
@@ -7212,3 +7217,514 @@ export function registerHaUserRoutes(): void {
 }
 
 // === END Tier 4 PR8 ═══════════════════════════════════════════════════
+
+// ═════════════════════════════════════════════════════════════════════════
+// === Tier 4 PR5: HACS ===
+// ═════════════════════════════════════════════════════════════════════════
+//
+// Issue #115 PR5 — Home Assistant Community Store CRUD via the long-lived
+// HA WebSocket client landed in PR1. Modern HACS no longer ships a REST
+// API; every CRUD verb crosses the `hacs/*` WS namespace. The surface
+// proxies through `getHaWsClient().wsCall(...)` for cheap shape parity
+// with the rest of Tier 4.
+//
+// LOAD-BEARING CONSTRAINTS
+// ------------------------
+// 1. Sir locked the gate matrix YES 2026-05-29. `install` and `remove`
+//    are destructive (a bad install can break HA on next restart;
+//    removing a HACS integration deletes its config_entry along with
+//    the rest of HACS's bookkeeping). Both REQUIRE `decision_ref` AND
+//    auto-snapshot via `triggerBackupBeforeAction` BEFORE the upstream
+//    WS call. The `add` verb (register a custom repository URL) does
+//    NOT install anything — it only adds the repo to HACS's local
+//    catalogue so a later `install` can target it. No gate, no snapshot.
+//    `refresh` / list / info / pending_updates are reads. No gate.
+//
+// 2. Every HACS-installed component is, by HA's own definition, an
+//    integration. When an `install` completes, we write to
+//    `ha_integration_ref` with `installed_by='alfred'` and the
+//    decision_ref so Sir can later trace any HACS install back to a
+//    Desk decision (the `# Architecture` row of the spec).
+//
+// 3. The four hacs/* call types this PR proxies are the ones today's
+//    agent verified live against Sir's HA (see the issue body):
+//      * `hacs/info`                — installation metadata
+//      * `hacs/repositories/list`   — full catalogue (~2950 repos today)
+//      * `hacs/repositories/add`    — register a custom repository URL
+//      * `hacs/repository/state`    — the row for one repo
+//      * `hacs/repository/refresh`  — force-refetch metadata
+//      * `hacs/repository/download` — install
+//      * `hacs/repository/remove`   — uninstall
+//
+// HACS category vocabulary (from `hacs/info.categories`):
+//     integration / plugin / theme / appdaemon / netdaemon
+// We accept the literal HACS strings on the input side and don't
+// translate — the spec calls them out unchanged so callers can copy
+// from HACS's own UI/docs.
+//
+// SPLICE BLOCK — keep everything between BEGIN / END markers contiguous.
+// PR2 / PR3 / PR4 / PR6 / PR7 own their own bounded blocks elsewhere in
+// this file. No file-wide rename or shared-helper edits inside this block.
+// `getHaWsClient`, `triggerBackupBeforeAction`, `recordHaWriteToDaybook`
+// are imported at the top of this file already (PR1 added the imports
+// when it landed the helpers; PR7 reused them and so do we).
+
+const HACS_CALL_TIMEOUT_MS = Number(
+  process.env.HA_HACS_TIMEOUT_MS ?? "20000",
+);
+
+// HACS categories the spec lists. Used to (a) validate the `category`
+// input on `add_custom_repo` and (b) filter the list response. We
+// intentionally accept any other string too on listing (HACS has added
+// categories historically — `python_script` exists on older HA, etc.)
+// but reject unknown strings on `add` so a typo doesn't leave a dead
+// row in HACS's catalogue.
+const HACS_ALLOWED_CATEGORIES = new Set([
+  "integration",
+  "plugin",
+  "theme",
+  "appdaemon",
+  "netdaemon",
+]);
+
+// HACS repo URLs are GitHub repos in `owner/name` form OR a full
+// `https://github.com/owner/name` URL. Accept either; HACS itself is
+// lax. The regex matches both shapes so callers don't have to strip
+// the host themselves. Source: the HACS docs at
+// https://hacs.xyz/docs/faq/custom_repositories.
+const HACS_REPO_URL_RE =
+  /^(https?:\/\/(?:www\.)?github\.com\/)?[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/?$/;
+
+function assertHacsRepoUrl(raw: unknown): string {
+  if (typeof raw !== "string" || raw.length === 0) {
+    throw new ValidationError("repository url is required and must be a non-empty string");
+  }
+  if (!HACS_REPO_URL_RE.test(raw)) {
+    throw new ValidationError(
+      "repository url must be a GitHub owner/name pair or a github.com URL",
+    );
+  }
+  return raw;
+}
+
+function assertHacsCategory(raw: unknown, strict: boolean): string {
+  if (typeof raw !== "string" || raw.length === 0) {
+    throw new ValidationError("category is required and must be a non-empty string");
+  }
+  if (strict && !HACS_ALLOWED_CATEGORIES.has(raw)) {
+    throw new ValidationError(
+      `category must be one of ${[...HACS_ALLOWED_CATEGORIES].join(", ")}`,
+    );
+  }
+  return raw;
+}
+
+// HACS repo ids are integers serialised as strings on most HA versions.
+// Lock down the character set so the path param can't smuggle a slash
+// or quote into our wsCall payload.
+const HACS_REPO_ID_RE = /^[A-Za-z0-9_.-]{1,64}$/;
+
+function assertHacsRepoId(raw: string): string {
+  if (!HACS_REPO_ID_RE.test(raw)) {
+    throw new ValidationError(
+      "repo id must be 1..64 chars of [A-Za-z0-9_.-]",
+    );
+  }
+  return raw;
+}
+
+/** Persist a `ha_integration_ref` row recording that Alfred installed
+ *  a HACS component. PR1's migration 0011 creates the table. */
+function recordHacsInstallToIntegrationLedger(args: {
+  repo_id: string;
+  decision_ref: string;
+}): { entry_id: string } {
+  // The HACS repo id is the closest stable identifier the WS surface
+  // gives us back from `download` — HACS lacks the
+  // config_entries/entry_id namespace until the principal completes a
+  // config_flow (only the `integration` category ever produces one).
+  // We key the ledger row on a deterministic `hacs:<repo_id>` so the
+  // audit trail captures the install regardless of whether HA later
+  // surfaces a config_entry.
+  const entry_id = `hacs:${args.repo_id}`;
+  const now = new Date().toISOString();
+  try {
+    getStateDb()
+      .prepare(
+        `INSERT INTO ha_integration_ref (entry_id, installed_by, decision_ref, installed_at)
+         VALUES (?, 'alfred', ?, ?)
+         ON CONFLICT(entry_id) DO UPDATE SET
+           installed_by = excluded.installed_by,
+           decision_ref = excluded.decision_ref,
+           installed_at = excluded.installed_at`,
+      )
+      .run(entry_id, args.decision_ref, now);
+  } catch {
+    // best-effort; never block the install on the audit row
+  }
+  return { entry_id };
+}
+
+/** Test seam — clear ha_integration_ref between fixture runs. */
+export function _resetHaHacsForTests(): void {
+  try {
+    getStateDb().prepare("DELETE FROM ha_integration_ref").run();
+  } catch {
+    // table may not exist on older fixtures; tests own migrations
+  }
+}
+
+/** Run a HACS WS call with the PR's standard timeout. Surfaces
+ *  upstream errors as a 502 ApiError so the route handler can return
+ *  a consistent envelope. */
+async function callHacs(
+  type: string,
+  payload: Record<string, unknown> = {},
+): Promise<unknown> {
+  try {
+    return await getHaWsClient().wsCall(type, payload, HACS_CALL_TIMEOUT_MS);
+  } catch (err) {
+    throw new ApiError(
+      502,
+      "HA_HACS_ERROR",
+      `HA WS ${type} failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
+/** Normalise one HACS repo row into a stable shape the dashboard and
+ *  MCP layer can consume. We keep the raw payload available under
+ *  `raw` so callers don't have to re-query for fields we haven't
+ *  surfaced yet. */
+interface HacsRepoView {
+  id: string | null;
+  name: string | null;
+  full_name: string | null;
+  description: string | null;
+  category: string | null;
+  installed: boolean;
+  installed_version: string | null;
+  available_version: string | null;
+  pending_update: boolean;
+  topics: string[];
+  raw: Record<string, unknown>;
+}
+
+function viewHacsRepo(raw: Record<string, unknown>): HacsRepoView {
+  const id =
+    typeof raw.id === "string"
+      ? (raw.id as string)
+      : typeof raw.id === "number"
+        ? String(raw.id)
+        : null;
+  const name = typeof raw.name === "string" ? (raw.name as string) : null;
+  const full_name =
+    typeof raw.full_name === "string" ? (raw.full_name as string) : null;
+  const description =
+    typeof raw.description === "string" ? (raw.description as string) : null;
+  const category =
+    typeof raw.category === "string" ? (raw.category as string) : null;
+  const installed = raw.installed === true;
+  const installed_version =
+    typeof raw.installed_version === "string"
+      ? (raw.installed_version as string)
+      : null;
+  const available_version =
+    typeof raw.available_version === "string"
+      ? (raw.available_version as string)
+      : null;
+  const pending_update = installed && raw.pending_update === true;
+  const topics = Array.isArray(raw.topics)
+    ? (raw.topics as unknown[]).filter((x): x is string => typeof x === "string")
+    : [];
+  return {
+    id,
+    name,
+    full_name,
+    description,
+    category,
+    installed,
+    installed_version,
+    available_version,
+    pending_update,
+    topics,
+    raw,
+  };
+}
+
+/** Case-insensitive substring match across the human-facing fields. */
+function matchesQuery(view: HacsRepoView, q: string): boolean {
+  const needle = q.toLowerCase();
+  for (const v of [view.name, view.full_name, view.description]) {
+    if (typeof v === "string" && v.toLowerCase().includes(needle)) return true;
+  }
+  for (const t of view.topics) {
+    if (t.toLowerCase().includes(needle)) return true;
+  }
+  return false;
+}
+
+export function registerHaHacsRoutes(): void {
+  // ────────────────────────────────────────────────────────────────────
+  // GET /api/v1/channels/ha/hacs/info
+  //
+  // Read, no gate. Returns `{ok, info}` where info is the verbatim
+  // `hacs/info` payload (categories, country, debug, dev,
+  // disabled_reason, has_pending_tasks, lovelace_mode, stage).
+  // ────────────────────────────────────────────────────────────────────
+  addRoute("GET", "/api/v1/channels/ha/hacs/info", async ({ res }) => {
+    const info = await callHacs("hacs/info");
+    sendJson(res, 200, { ok: true, info });
+  });
+
+  // ────────────────────────────────────────────────────────────────────
+  // GET /api/v1/channels/ha/hacs/repos
+  //
+  // Read, no gate. Returns `{ok, count, total, repos}` where repos is
+  // the filtered+normalised view list. Query params:
+  //   - category   — exact match against the row's category
+  //   - q          — substring match (name / full_name / description /
+  //                  topics)
+  //   - installed  — "1"/"true" filters to installed-only
+  //   - pending    — "1"/"true" filters to pending-update only
+  //   - limit      — clamp at 500 (HACS lists ~3k repos; the dashboard
+  //                  page renders 50 at a time)
+  // ────────────────────────────────────────────────────────────────────
+  addRoute("GET", "/api/v1/channels/ha/hacs/repos", async ({ res, query }) => {
+    const raw = await callHacs("hacs/repositories/list");
+    const total = Array.isArray(raw) ? raw.length : 0;
+    if (!Array.isArray(raw)) {
+      sendJson(res, 200, { ok: true, count: 0, total: 0, repos: [] });
+      return;
+    }
+    const category = query.get("category");
+    const q = query.get("q");
+    const installedOnly = ["1", "true", "yes"].includes(
+      (query.get("installed") ?? "").toLowerCase(),
+    );
+    const pendingOnly = ["1", "true", "yes"].includes(
+      (query.get("pending") ?? "").toLowerCase(),
+    );
+    const limit = Math.max(
+      1,
+      Math.min(Number(query.get("limit") ?? "500"), 500),
+    );
+    const repos: HacsRepoView[] = [];
+    for (const row of raw) {
+      if (!row || typeof row !== "object") continue;
+      const view = viewHacsRepo(row as Record<string, unknown>);
+      if (category && view.category !== category) continue;
+      if (installedOnly && !view.installed) continue;
+      if (pendingOnly && !view.pending_update) continue;
+      if (q && !matchesQuery(view, q)) continue;
+      repos.push(view);
+      if (repos.length >= limit) break;
+    }
+    sendJson(res, 200, {
+      ok: true,
+      count: repos.length,
+      total,
+      repos,
+    });
+  });
+
+  // ────────────────────────────────────────────────────────────────────
+  // GET /api/v1/channels/ha/hacs/repo/:id
+  //
+  // Read, no gate. Wraps `hacs/repository/state` for a single repo.
+  // Returns `{ok, repo, state}` where state is the raw response.
+  // ────────────────────────────────────────────────────────────────────
+  addRoute(
+    "GET",
+    "/api/v1/channels/ha/hacs/repo/:id",
+    async ({ res, params }) => {
+      const id = assertHacsRepoId(params.id);
+      const state = await callHacs("hacs/repository/state", { repository: id });
+      // Best-effort: surface the matching list row too so a single GET
+      // gives the dashboard everything it needs without two round-trips.
+      let repo: HacsRepoView | null = null;
+      try {
+        const all = await callHacs("hacs/repositories/list");
+        if (Array.isArray(all)) {
+          for (const row of all) {
+            if (!row || typeof row !== "object") continue;
+            const view = viewHacsRepo(row as Record<string, unknown>);
+            if (view.id === id) {
+              repo = view;
+              break;
+            }
+          }
+        }
+      } catch {
+        // best-effort; the state response is the primary surface
+      }
+      sendJson(res, 200, { ok: true, id, state, repo });
+    },
+  );
+
+  // ────────────────────────────────────────────────────────────────────
+  // POST /api/v1/channels/ha/hacs/repos
+  //
+  // Body: { url, category }
+  //
+  // Register a custom repository URL with HACS. NO gate — adding to
+  // HACS's catalogue is reversible (the principal can drop it from
+  // HACS's UI in a single click) and doesn't install anything until a
+  // later `install` call. Daybook also stays silent — this is a setup
+  // step Sir doesn't need a chronological log for.
+  // ────────────────────────────────────────────────────────────────────
+  addRoute("POST", "/api/v1/channels/ha/hacs/repos", async ({ res, body }) => {
+    if (typeof body !== "object" || body === null) {
+      throw new ValidationError("body must be a JSON object");
+    }
+    const b = body as Record<string, unknown>;
+    const url = assertHacsRepoUrl(b.url);
+    const category = assertHacsCategory(b.category, true);
+    const result = await callHacs("hacs/repositories/add", {
+      repository: url,
+      category,
+    });
+    sendJson(res, 200, {
+      ok: true,
+      url,
+      category,
+      result,
+    });
+  });
+
+  // ────────────────────────────────────────────────────────────────────
+  // POST /api/v1/channels/ha/hacs/install
+  //
+  // Body: { repo_id, version?, decision_ref }
+  //
+  // GATED — `decision_ref` REQUIRED. Auto-snapshot fires BEFORE the
+  // upstream `hacs/repository/download` so a failed install still
+  // surfaces snapshot intent. Daybook records the install (writes a
+  // `## HA writes` block under daybook/<YYYY-MM-DD>.md). On success,
+  // we record the install in `ha_integration_ref` keyed
+  // `hacs:<repo_id>` so Sir can later trace any HACS install back to
+  // the Desk decision that authorised it.
+  // ────────────────────────────────────────────────────────────────────
+  addRoute("POST", "/api/v1/channels/ha/hacs/install", async ({ res, body }) => {
+    if (typeof body !== "object" || body === null) {
+      throw new ValidationError("body must be a JSON object");
+    }
+    const b = body as Record<string, unknown>;
+    const repo_id = assertHacsRepoId(
+      typeof b.repo_id === "string" ? (b.repo_id as string) : "",
+    );
+    const decision_ref = assertDecisionRef(b.decision_ref);
+    const version =
+      typeof b.version === "string" && b.version.length > 0
+        ? (b.version as string)
+        : null;
+    // Snapshot BEFORE the install — even a failed download is intent
+    // we want in the ha_backup_ref ledger.
+    const snapshot = await triggerBackupBeforeAction(
+      "ha__hacs_install",
+      decision_ref,
+    );
+    const payload: Record<string, unknown> = { repository: repo_id };
+    if (version) payload.version = version;
+    const result = await callHacs("hacs/repository/download", payload);
+    // Record the install in the integration ledger so the audit ladder
+    // can answer "what did Alfred install via HACS?".
+    const ledger = recordHacsInstallToIntegrationLedger({
+      repo_id,
+      decision_ref,
+    });
+    const daybook = recordHaWriteToDaybook({
+      action: "ha__hacs_install",
+      summary: version
+        ? `HACS install ${repo_id} (version ${version})`
+        : `HACS install ${repo_id}`,
+      decision_ref,
+      extra: {
+        backup_ref_id: snapshot.id,
+        ha_backup_id: snapshot.ha_backup_id,
+        entry_id: ledger.entry_id,
+      },
+    });
+    sendJson(res, 200, {
+      ok: true,
+      repo_id,
+      version,
+      decision_ref,
+      backup_ref_id: snapshot.id,
+      ha_backup_id: snapshot.ha_backup_id,
+      entry_id: ledger.entry_id,
+      daybook,
+      result,
+    });
+  });
+
+  // ────────────────────────────────────────────────────────────────────
+  // DELETE /api/v1/channels/ha/hacs/:id
+  //
+  // Body: { decision_ref }
+  //
+  // GATED — `decision_ref` REQUIRED. Auto-snapshot fires BEFORE the
+  // upstream `hacs/repository/remove`. Daybook records the removal.
+  // The `ha_integration_ref` row stays in place with the original
+  // install metadata so the audit trail isn't lost when a HACS
+  // component is removed.
+  // ────────────────────────────────────────────────────────────────────
+  addRoute(
+    "DELETE",
+    "/api/v1/channels/ha/hacs/:id",
+    async ({ res, body, params }) => {
+      const repo_id = assertHacsRepoId(params.id);
+      if (typeof body !== "object" || body === null) {
+        throw new ValidationError("body must be a JSON object");
+      }
+      const decision_ref = assertDecisionRef(
+        (body as Record<string, unknown>).decision_ref,
+      );
+      const snapshot = await triggerBackupBeforeAction(
+        "ha__hacs_remove",
+        decision_ref,
+      );
+      const result = await callHacs("hacs/repository/remove", {
+        repository: repo_id,
+      });
+      const daybook = recordHaWriteToDaybook({
+        action: "ha__hacs_remove",
+        summary: `HACS remove ${repo_id}`,
+        decision_ref,
+        extra: {
+          backup_ref_id: snapshot.id,
+          ha_backup_id: snapshot.ha_backup_id,
+        },
+      });
+      sendJson(res, 200, {
+        ok: true,
+        repo_id,
+        decision_ref,
+        backup_ref_id: snapshot.id,
+        ha_backup_id: snapshot.ha_backup_id,
+        daybook,
+        result,
+      });
+    },
+  );
+
+  // ────────────────────────────────────────────────────────────────────
+  // POST /api/v1/channels/ha/hacs/:id/refresh
+  //
+  // Read-ish — forces HACS to refetch metadata for one repo. Cheap and
+  // reversible; no gate, no snapshot, no daybook entry.
+  // ────────────────────────────────────────────────────────────────────
+  addRoute(
+    "POST",
+    "/api/v1/channels/ha/hacs/:id/refresh",
+    async ({ res, params }) => {
+      const repo_id = assertHacsRepoId(params.id);
+      const result = await callHacs("hacs/repository/refresh", {
+        repository: repo_id,
+      });
+      sendJson(res, 200, { ok: true, repo_id, result });
+    },
+  );
+}
+
+// === END Tier 4 PR5 ═══════════════════════════════════════════════════

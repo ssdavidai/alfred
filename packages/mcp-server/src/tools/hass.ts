@@ -1848,13 +1848,252 @@ export const HASS_USER_TOOLS: ToolDef[] = [
 // ═════════════════════════════════════════════════════════════════════════
 // === END Tier 4 PR8 ═══════════════════════════════════════════════════
 
+// ═════════════════════════════════════════════════════════════════════════
+// === Tier 4 PR5: HACS ===
+// ═════════════════════════════════════════════════════════════════════════
+//
+// Issue #115/#158 PR5 — Home Assistant Community Store CRUD. 8 tools
+// fronting the `/api/v1/channels/ha/hacs/*` ctrl-api routes that PR5
+// adds in packages/ctrl/src/api/routes/channels_ha.ts. Every gated
+// route's tool re-asserts `decision_ref` shape on the MCP side so a
+// bad call from the agent rejects BEFORE we hit ctrl-api, mirroring
+// the loop-guard contract the PR4 write tools follow.
+//
+// Approval gate / snapshot matrix — Sir locked YES 2026-05-29 (spec §4):
+//
+// | Tool                          | decision_ref | auto-snapshot |
+// |-------------------------------|--------------|---------------|
+// | ha__hacs_info                 | no           | no            |
+// | ha__hacs_search               | no           | no            |
+// | ha__hacs_repo_info            | no           | no            |
+// | ha__hacs_add_custom_repo      | no           | no            |
+// | ha__hacs_install              | REQUIRED     | YES           |
+// | ha__hacs_remove               | REQUIRED     | YES           |
+// | ha__hacs_refresh              | no           | no            |
+// | ha__hacs_pending_updates      | no           | no            |
+//
+// LOAD-BEARING NUANCE — `add_custom_repo` registers a repository URL
+// with HACS but does NOT install anything. The principal can drop the
+// row from HACS's own UI in <2 minutes, so it stays free. The actual
+// install (which mutates `/config` and pulls files from GitHub) is the
+// gated step.
+//
+// SPLICE BLOCK — keep contiguous. PR2/PR3/PR4/PR6/PR7/PR8 own their own
+// bounded blocks elsewhere in this file.
 
-// Final catalogue: 61 tools total = 11 read + 15 writes (5 PR4 + 10 PR3 CRUD)
+const HacsCategoryParam = z
+  .enum(["integration", "plugin", "theme", "appdaemon", "netdaemon"])
+  .describe(
+    "HACS category. Five values map 1:1 to HACS's own taxonomy: `integration` (HA integrations), `plugin` (Lovelace cards), `theme` (Lovelace themes), `appdaemon` (AppDaemon apps), `netdaemon` (NetDaemon apps).",
+  );
+
+const HacsRepoIdParam = z
+  .string()
+  .min(1)
+  .max(64)
+  .regex(
+    /^[A-Za-z0-9_.-]+$/,
+    "repo_id must be 1..64 chars of [A-Za-z0-9_.-]",
+  )
+  .describe(
+    "HACS repository id — the integer (serialised as string) HACS uses internally. Resolve via `ha__hacs_search` first; never invent.",
+  );
+
+const HacsRepoUrlParam = z
+  .string()
+  .min(3)
+  .max(256)
+  .regex(
+    /^(https?:\/\/(?:www\.)?github\.com\/)?[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/?$/,
+    "url must be an `owner/repo` GitHub identifier or a github.com URL",
+  )
+  .describe(
+    "GitHub repo URL or `owner/repo` identifier. HACS accepts both shapes; the routing layer forwards verbatim.",
+  );
+
+const HacsDecisionRefParam = z
+  .string()
+  .min(6)
+  .max(256)
+  .regex(
+    /^[\x21-\x7E]+$/,
+    "decision_ref must be printable ASCII with no whitespace",
+  )
+  .describe(
+    "Vault path or ulid of the `decision/` record that authorised this write. REQUIRED. Alfred refuses without it — the middleware reads `vault/decision/<id>.md` and rejects if the decision is `reversed`.",
+  );
+
+export const HASS_HACS_TOOLS: ToolDef[] = [
+  {
+    name: "ha__hacs_info",
+    description:
+      "Probe HACS installation metadata via `hacs/info` — returns `{categories, country, debug, dev, disabled_reason, has_pending_tasks, lovelace_mode, stage}`. Use this BEFORE any HACS write to confirm HACS is up (`stage === 'running'`) and `disabled_reason === null`. Side-effect-free.",
+    inputSchema: z.object({}),
+    buildRequest: () => ({
+      method: "GET",
+      path: "/api/v1/channels/ha/hacs/info",
+    }),
+  },
+
+  {
+    name: "ha__hacs_search",
+    description:
+      "Search the HACS catalogue. Returns `{count, total, repos: [{id, name, full_name, description, category, installed, installed_version, available_version, pending_update, topics}]}`. Use `category` to scope to a tier (`integration` / `plugin` / `theme` / `appdaemon` / `netdaemon`). Use `query` for a substring match against name + description + topics. Use `installed: true` to list only what's already installed. `limit` clamps to 500 (default 50 for an agent flow — pass higher if you're paging).",
+    inputSchema: z.object({
+      query: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Substring matched against name, full_name, description, and topics (case-insensitive).",
+        ),
+      category: HacsCategoryParam.optional(),
+      installed: z
+        .boolean()
+        .optional()
+        .describe(
+          "When true, return only repos HACS reports as currently installed.",
+        ),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(500)
+        .default(50)
+        .describe(
+          "Hard cap on the returned `repos` array. Clamped to 500 server-side.",
+        ),
+    }),
+    buildRequest: ({ query, category, installed, limit }) => {
+      const q: Record<string, string> = {};
+      if (typeof query === "string") q.q = query;
+      if (typeof category === "string") q.category = category;
+      if (installed === true) q.installed = "1";
+      if (typeof limit === "number") q.limit = String(limit);
+      return {
+        method: "GET",
+        path: "/api/v1/channels/ha/hacs/repos",
+        query: q,
+      };
+    },
+  },
+
+  {
+    name: "ha__hacs_repo_info",
+    description:
+      "Fetch detailed state for one HACS repository via `hacs/repository/state`, plus the matching list view in a single round-trip. Returns `{ok, id, state, repo}`. Use BEFORE an install so you can show Sir the version + description in your confirmation message.",
+    inputSchema: z.object({
+      repo_id: HacsRepoIdParam,
+    }),
+    buildRequest: ({ repo_id }) => ({
+      method: "GET",
+      path: `/api/v1/channels/ha/hacs/repo/${encodeURIComponent(repo_id)}`,
+    }),
+  },
+
+  {
+    name: "ha__hacs_add_custom_repo",
+    description:
+      "Register a custom HACS repository URL. NO Desk decision required — adding to HACS's catalogue is reversible and doesn't install anything. Use this when Sir points you at a community repo that isn't in HACS's default index, then follow up with `ha__hacs_search` to find the new id and `ha__hacs_install` (gated) to actually pull it.",
+    inputSchema: z.object({
+      url: HacsRepoUrlParam,
+      category: HacsCategoryParam,
+    }),
+    buildRequest: ({ url, category }) => ({
+      method: "POST",
+      path: "/api/v1/channels/ha/hacs/repos",
+      body: { url, category },
+    }),
+  },
+
+  {
+    name: "ha__hacs_install",
+    description:
+      "Install (download) a HACS repository. **Gated** — REQUIRES `decision_ref`. ctrl-api auto-snapshots the HA install BEFORE running the download (snapshot id surfaces in the response so you can quote it). On success a `ha_integration_ref` row lands with `installed_by='alfred', decision_ref=<id>` so Sir can later trace any HACS install back to the Desk decision. Pass `version` to pin a specific tag; omit for HACS's default (latest stable).",
+    inputSchema: z.object({
+      repo_id: HacsRepoIdParam,
+      version: z
+        .string()
+        .min(1)
+        .max(64)
+        .optional()
+        .describe(
+          "Pin to a specific tag/version. Omit to install the HACS default (typically latest stable).",
+        ),
+      decision_ref: HacsDecisionRefParam,
+    }),
+    buildRequest: ({ repo_id, version, decision_ref }) => ({
+      method: "POST",
+      path: "/api/v1/channels/ha/hacs/install",
+      body: {
+        repo_id,
+        ...(version !== undefined ? { version } : {}),
+        decision_ref,
+      },
+    }),
+  },
+
+  {
+    name: "ha__hacs_remove",
+    description:
+      "Uninstall a HACS repository. **Gated** — REQUIRES `decision_ref`. ctrl-api auto-snapshots BEFORE the remove. The original `ha_integration_ref` row stays in place with the install metadata so the audit trail isn't lost. Note: for `integration`-category removes, the principal may still need to delete the related config_entry from HA's own UI; ha__hacs_remove only handles HACS's catalogue side.",
+    inputSchema: z.object({
+      repo_id: HacsRepoIdParam,
+      decision_ref: HacsDecisionRefParam,
+    }),
+    buildRequest: ({ repo_id, decision_ref }) => ({
+      method: "DELETE",
+      path: `/api/v1/channels/ha/hacs/${encodeURIComponent(repo_id)}`,
+      body: { decision_ref },
+    }),
+  },
+
+  {
+    name: "ha__hacs_refresh",
+    description:
+      "Force HACS to refetch metadata for one repository — cheap, reversible, no gate. Use when Sir reports a release is out but HACS hasn't surfaced it yet (e.g. immediately after a fresh upstream tag).",
+    inputSchema: z.object({
+      repo_id: HacsRepoIdParam,
+    }),
+    buildRequest: ({ repo_id }) => ({
+      method: "POST",
+      path: `/api/v1/channels/ha/hacs/${encodeURIComponent(repo_id)}/refresh`,
+      body: {},
+    }),
+  },
+
+  {
+    name: "ha__hacs_pending_updates",
+    description:
+      "List HACS-installed repositories with a pending update. Wraps `ha__hacs_search` with the `pending=1` filter on the ctrl-api side so the model doesn't have to scroll the full ~3k catalogue. Returns the same `{count, total, repos}` shape — `total` is the upstream catalogue size, `count` the number with pending updates.",
+    inputSchema: z.object({
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(500)
+        .default(50)
+        .describe("Hard cap on the returned `repos` array."),
+    }),
+    buildRequest: ({ limit }) => ({
+      method: "GET",
+      path: "/api/v1/channels/ha/hacs/repos",
+      query: {
+        pending: "1",
+        ...(typeof limit === "number" ? { limit: String(limit) } : {}),
+      },
+    }),
+  },
+];
+
+// === END Tier 4 PR5 ═══════════════════════════════════════════════════
+
+// Final catalogue: 69 tools total = 11 read + 15 writes (5 PR4 + 10 PR3 CRUD)
 // + 10 PR6 supervisor addon + 10 PR7 core+backups + 7 PR4 integration
-// + 8 PR8 user + LLAT. Order kept deliberately (reads first, writes next,
-// addon-CRUD next, core+backups next, integrations next, users+LLATs last)
-// so the model that lists the catalogue sees the safe read surface before
-// the destructive surfaces.
+// + 8 PR8 user + LLAT + 8 PR5 HACS. Order kept deliberately (reads first,
+// writes next, addon-CRUD next, core+backups next, integrations next,
+// users+LLATs next, HACS last) so the model that lists the catalogue sees
+// the safe read surface before the destructive surfaces.
 export const ALL_HASS_TOOLS: ToolDef[] = [
   ...HASS_READ_TOOLS,
   ...HASS_DEFERRED_TOOLS,
@@ -1862,4 +2101,5 @@ export const ALL_HASS_TOOLS: ToolDef[] = [
   ...HASS_PR7_TOOLS,
   ...HASS_INTEGRATION_TOOLS,
   ...HASS_USER_TOOLS,
+  ...HASS_HACS_TOOLS,
 ];
