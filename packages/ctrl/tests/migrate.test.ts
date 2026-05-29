@@ -36,12 +36,13 @@ describe("state.db migration runner", () => {
     const db = new DatabaseSync(":memory:");
     db.exec(schema);
     const v = runMigrations(db);
-    // Latest version moves as new migrations land. Today: 8
+    // Latest version moves as new migrations land. Today: 9
     // (0001_fix_pack + 0002_alfred_journal + 0003_tailscale_connection
     // + 0004_channel_tokens + 0005_ha_channel + 0006_files_table
-    // + 0007_recall + 0008_ha_event_subscription).
-    assert.equal(v, 8, "migrated to latest version");
-    assert.equal(userVersion(db), 8);
+    // + 0007_recall + 0008_ha_event_subscription
+    // + 0009_ha_registry_vanished).
+    assert.equal(v, 9, "migrated to latest version");
+    assert.equal(userVersion(db), 9);
     assert.ok(cols(db, "observation").includes("processed_at"), "0001: processed_at present after migrate");
     // 0002: alfred_journal + alfred_principal tables present.
     const tables = (
@@ -126,6 +127,16 @@ describe("state.db migration runner", () => {
       );
     }
 
+    // 0009: ha_registry.vanished_at column added (#110 PR 5). The
+    // HaBootstrapWorkflow tombstones (does NOT delete) entities that
+    // vanished from HA between pulls; the dashboard's "live" partial
+    // index over `vanished_at IS NULL` keeps the live read cheap.
+    const haRegCols = cols(db, "ha_registry");
+    assert.ok(
+      haRegCols.includes("vanished_at"),
+      "0009: ha_registry.vanished_at column added",
+    );
+
     db.close();
   });
 
@@ -134,7 +145,7 @@ describe("state.db migration runner", () => {
     db.exec(schema);
     runMigrations(db);
     const v2 = runMigrations(db);
-    assert.equal(v2, 8);
+    assert.equal(v2, 9);
     assert.equal(
       cols(db, "observation").filter((c) => c === "processed_at").length,
       1,

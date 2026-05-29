@@ -49,7 +49,7 @@
 
 import crypto from "node:crypto";
 import type { IncomingMessage } from "node:http";
-import { AuthError } from "./errors.js";
+import { ApiError, AuthError } from "./errors.js";
 import { getStateDb } from "../db/state.js";
 import {
   validateChannelToken,
@@ -322,6 +322,69 @@ function extractRemoteIp(req: IncomingMessage): string | null {
   const sock = (req as { socket?: { remoteAddress?: string } }).socket;
   return sock?.remoteAddress ?? null;
 }
+
+/** Require an operator-grade bearer (the master AAS_API_KEY) on the request.
+ *
+ *  The global `authenticate()` already accepts both the master key and the
+ *  scoped voice-bridge token (the latter gated by the allowlists above).
+ *  This helper layers an EXPLICIT operator-only check on top — used by
+ *  routes that handle sensitive material (HA LLAT retrieval, registry
+ *  bulk-upsert, on-demand workflow refresh) where defence-in-depth matters
+ *  even though those routes are NOT in either allowlist.
+ *
+ *  Failure modes:
+ *    * `apiKeyBuf` unset → returns silently (dev-only open-access mode).
+ *    * Bearer missing/malformed → throws ApiError(401).
+ *    * Bearer matches the voice-bridge token → throws ApiError(403). This
+ *      is the load-bearing branch: a voice-bridge sibling that ever tries
+ *      to reach an operator-only route must be told NO with a code that
+ *      surfaces in logs as a permission boundary, NOT confused with a
+ *      stale-token 401.
+ *    * Bearer matches a channel_tokens row (`pcp_*` / `cnv_*` / etc.) →
+ *      throws ApiError(403). Same rationale.
+ *    * Bearer matches the master key → returns.
+ *
+ *  IMPORTANT: never logs or echoes the bearer bytes — the operator-key
+ *  surface accepts an LLAT-shaped secret in its response payload, so the
+ *  failure path mustn't leak any token material via the error envelope.
+ */
+export function requireOperatorBearer(req: IncomingMessage): void {
+  if (!apiKeyBuf) return; // dev-only open-access mode (same as authenticate())
+
+  const raw = extractBearerToken(req);
+  if (!raw) {
+    throw new ApiError(401, "UNAUTHORIZED", "Missing or malformed Authorization header");
+  }
+
+  const tokenBuf = Buffer.from(raw);
+
+  // Master key — operator. Allowed.
+  if (
+    tokenBuf.length === apiKeyBuf.length &&
+    crypto.timingSafeEqual(tokenBuf, apiKeyBuf)
+  ) {
+    return;
+  }
+
+  // Voice-bridge token — explicitly forbidden. 403, not 401: this is a
+  // permission boundary, not a credentials problem.
+  if (
+    voiceBridgeKeyBuf &&
+    tokenBuf.length === voiceBridgeKeyBuf.length &&
+    crypto.timingSafeEqual(tokenBuf, voiceBridgeKeyBuf)
+  ) {
+    throw new ApiError(403, "FORBIDDEN", "Operator-only route");
+  }
+
+  // Channel token (pcp_…, ha-… etc.) — also forbidden. We don't have to
+  // look it up against the channel_tokens table; ANY non-master bearer
+  // that isn't voice-bridge falls through to this branch. Returning 403
+  // (not 401) makes the boundary explicit in the request log.
+  throw new ApiError(403, "FORBIDDEN", "Operator-only route");
+}
+
+// Re-export ApiError as an internal-only name used by requireOperatorBearer
+// — kept private to this module so callers see the right error class.
 
 /** Authenticate a channel-keyed bearer for one channel. Throws AuthError
  *  on no/bad/revoked token. Returns the row metadata on success.

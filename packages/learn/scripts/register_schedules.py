@@ -299,6 +299,23 @@ INTERVAL_SCHEDULES = [
         "workflow": "RecallDispatcherWorkflow",
         "interval": timedelta(minutes=5),
     },
+    {
+        # HA registry bootstrap (#110 PR5) — every 6h pulls the operator's
+        # HA install's full state / area / device / automation surface
+        # and refreshes ha_registry in state.db (via ctrl-api's
+        # /api/v1/channels/ha/registry/bulk route). The workflow is a
+        # no-op (returns ``{ok: False, code: "HA_NOT_CONNECTED"}``) when
+        # no HA install is connected, so the schedule costs only one
+        # ctrl-api GET per tick on tenants that haven't connected HA.
+        #
+        # 6 hours matches the spec §6.PR5 cadence. On-demand triggers
+        # via ctrl-api's /api/v1/channels/ha/registry/refresh route
+        # start a one-shot run with a unique workflow_id so they don't
+        # clash with the scheduled tick.
+        "id": "al-ha-bootstrap",
+        "workflow": "HaBootstrapWorkflow",
+        "interval": timedelta(hours=6),
+    },
 ]
 
 CALENDAR_SCHEDULES = [

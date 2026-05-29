@@ -2994,3 +2994,23 @@ export const disconnectHa = async (_args: unknown, context: any) => {
     path: "/api/v1/channels/ha/disconnect",
   });
 };
+
+/**
+ * Trigger an on-demand HaBootstrapWorkflow run (#110 PR5).
+ *
+ * Backs the "Refresh registry" CTA in the HaCard's connected-state
+ * expander. The workflow auto-runs every 6h via the
+ * ``al-ha-bootstrap`` Temporal schedule; this lets the operator force
+ * a refresh without waiting (useful when a new HA device was just
+ * commissioned and they want it to show up in the registry now).
+ *
+ * Returns ``{ ok, workflow_id, eta }``. The dashboard should re-fetch
+ * `getHaRegistry` after ~30s.
+ */
+export const refreshHaRegistry = async (_args: unknown, context: any) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/channels/ha/registry/refresh",
+  });
+};

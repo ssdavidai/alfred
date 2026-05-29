@@ -40,6 +40,7 @@ import {
   getHaRegistry,
   connectHa,
   disconnectHa,
+  refreshHaRegistry,
 } from "wasp/client/operations";
 import {
   deriveHaCardState,
@@ -173,6 +174,15 @@ export function HaCard() {
   // Disconnect state.
   const [discBusy, setDiscBusy] = useState(false);
 
+  // Refresh-registry state (#110 PR5). The CTA triggers a one-shot
+  // HaBootstrapWorkflow run via ctrl-api; the workflow takes ~30s on
+  // a small HA install. We disable the button while the request is
+  // in flight; after the request resolves we keep the "Refreshing…"
+  // label for a short cooldown so a double-click can't fire two
+  // workflows back to back.
+  const [refreshBusy, setRefreshBusy] = useState(false);
+  const [refreshMsg, setRefreshMsg] = useState<string | null>(null);
+
   // Expanders.
   const [registryOpen, setRegistryOpen] = useState(false);
   const [runsOpen, setRunsOpen] = useState(false);
@@ -248,6 +258,36 @@ export function HaCard() {
       setConnectErr(prefix ? `${base} (token ${prefix})` : base);
     } finally {
       setConnectBusy(false);
+    }
+  }
+
+  async function onRefreshRegistry() {
+    if (refreshBusy) return;
+    setRefreshBusy(true);
+    setRefreshMsg(null);
+    try {
+      const r = (await refreshHaRegistry({})) as
+        | { ok?: boolean; workflow_id?: string; eta?: string }
+        | undefined;
+      const eta = r?.eta ?? "30s";
+      setRefreshMsg(`Refresh queued — Alfred will pull again in ~${eta}.`);
+      // Re-fetch the registry after the typical workflow window so
+      // the counts populate without the operator having to click again.
+      window.setTimeout(() => {
+        refetchRegistry();
+      }, 35_000);
+    } catch (e) {
+      setRefreshMsg(
+        "Couldn't queue a refresh. Try again in a moment, or check that " +
+          "alfred-learn is healthy.",
+      );
+      console.error("ha refresh failed", e);
+    } finally {
+      // Short cooldown so a quick double-click doesn't fire two
+      // workflows back to back. The button stays disabled for 5s.
+      window.setTimeout(() => {
+        setRefreshBusy(false);
+      }, 5_000);
     }
   }
 
@@ -558,6 +598,14 @@ export function HaCard() {
               {voiceOpen ? "Hide voice surface" : "Voice surface"}
             </button>
             <button
+              onClick={onRefreshRegistry}
+              disabled={refreshBusy}
+              className="btn-link"
+              title="Pulls the latest entities/areas/devices from HA. Auto-runs every 6h."
+            >
+              {refreshBusy ? "Refreshing…" : "Refresh registry"}
+            </button>
+            <button
               onClick={onDisconnect}
               disabled={discBusy}
               className="btn-ghost"
@@ -565,6 +613,17 @@ export function HaCard() {
               {discBusy ? "Disconnecting…" : "Disconnect"}
             </button>
           </div>
+
+          {/* Refresh confirmation copy — letterpress cadence, no
+              flashing toast. Cleared on disconnect or next refresh. */}
+          {refreshMsg && (
+            <p
+              className="font-body italic text-[12px]"
+              style={{ color: "var(--marginalia)" }}
+            >
+              {refreshMsg}
+            </p>
+          )}
 
           {/* Registry expander — top 20 entities with friendly_name +
               entity_id. PR5 populates this; until then we show the

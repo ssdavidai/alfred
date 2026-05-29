@@ -22,6 +22,7 @@ import m0005 from "./migrations/0005_ha_channel.sql";
 import m0006 from "./migrations/0006_files_table.sql";
 import m0007 from "./migrations/0007_recall.sql";
 import m0008 from "./migrations/0008_ha_event_subscription.sql";
+import m0009 from "./migrations/0009_ha_registry_vanished.sql";
 
 interface Migration {
   version: number;
@@ -39,6 +40,7 @@ const MIGRATIONS: Migration[] = [
   { version: 6, name: "files_table",          sql: m0006 },
   { version: 7, name: "recall",               sql: m0007 },
   { version: 8, name: "ha_event_subscription", sql: m0008 },
+  { version: 9, name: "ha_registry_vanished",  sql: m0009 },
 ];
 
 /**

@@ -57,6 +57,7 @@ from src.workflows.stream_event_purge import StreamEventPurgeWorkflow
 from src.workflows.reversal_calibration import ReversalCalibrationWorkflow
 from src.workflows.briefing import BriefingWorkflow
 from src.workflows.recall_dispatcher import RecallDispatcherWorkflow
+from src.workflows.ha_bootstrap import HaBootstrapWorkflow
 
 # Chore template workflows (static + dynamic)
 from src.workflows.chores import ALL_CHORE_TEMPLATES
@@ -671,6 +672,15 @@ from src.activities.recall_dispatcher import (
     fetch_upcoming_calendar_events,
 )
 
+# HA registry bootstrap (#110 PR5) — two activities the HaBootstrapWorkflow
+# drives every 6h + on demand. The pull side reads the operator-configured
+# HA install via the LLAT route; the write side bulk-upserts into ha_registry
+# and tombstones vanished entities. See src/workflows/ha_bootstrap.py.
+from src.activities.ha_bootstrap import (
+    pull_ha_registry,
+    write_ha_registry,
+)
+
 # Validators used as activities
 from src.validators.frontmatter import validate_classification
 
@@ -726,6 +736,12 @@ _STATIC_WORKFLOWS = [
     # surviving event. Scheduled as ``al-recall-dispatcher`` in
     # register_schedules.py.
     RecallDispatcherWorkflow,
+    # HA registry bootstrap (#110 PR5) — every 6h pulls the operator's
+    # HA install state/area/device/automation surface and refreshes
+    # ha_registry. Scheduled as ``al-ha-bootstrap`` in
+    # register_schedules.py; also triggered on demand by the HaCard
+    # "Refresh registry" CTA via ctrl-api's /registry/refresh route.
+    HaBootstrapWorkflow,
     *ALL_CHORE_TEMPLATES,
 ]
 
@@ -1141,6 +1157,10 @@ ALL_ACTIVITIES = [
     check_recall_dispatch_state,
     dispatch_recall_bot,
     fetch_upcoming_calendar_events,
+    # HA registry bootstrap (#110 PR5) — see
+    # src.workflows.ha_bootstrap.HaBootstrapWorkflow.
+    pull_ha_registry,
+    write_ha_registry,
 ]
 
 

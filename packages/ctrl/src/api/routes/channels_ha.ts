@@ -31,7 +31,8 @@ import { addRoute } from "../server.js";
 import { sendJson, ValidationError, ApiError, ConflictError, NotFoundError } from "../errors.js";
 import { getStateDb } from "../../db/state.js";
 import { appendJournal } from "../../db/alfredJournal.js";
-import { channelTokenBearer } from "../auth.js";
+import { channelTokenBearer, requireOperatorBearer } from "../auth.js";
+import { dockerExec } from "../helpers.js";
 import { ulid } from "../../db/ulid.js";
 import fs from "node:fs";
 import { WebSocket } from "ws";
@@ -972,6 +973,16 @@ export function registerHaChannelRoutes(): void {
   addRoute("GET", "/api/v1/channels/ha/registry", async ({ res }) => {
     sendJson(res, 200, readRegistry());
   });
+
+  // #110 PR5 — registry bootstrap surface (LLAT retrieval + bulk upsert +
+  // on-demand refresh). All three routes are operator-only (master
+  // AAS_API_KEY); the LLAT route is the most sensitive — it returns the
+  // raw HA long-lived access token so alfred-learn's HaBootstrapWorkflow
+  // can call the HA REST/WS API directly. Voice-bridge + channel-token
+  // bearers are explicitly rejected with 403 (not 401) so the boundary
+  // surfaces clearly in audit logs even if those tokens are otherwise
+  // valid against the read paths in the same `/ha/*` namespace.
+  registerHaBootstrapRoutes();
 
   // #110 PR4 — the write surface (call_service, proposal create/apply,
   // snapshot rollback, subscribe/unsubscribe). Registration deferred
@@ -2025,4 +2036,318 @@ export function registerHaWriteRoutes(): void {
       sendJson(res, 200, { ok: true, closed_at: reread.closed_at });
     },
   );
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+// #110 PR5 — HA BOOTSTRAP REGISTRY SURFACE
+// ═════════════════════════════════════════════════════════════════════════
+//
+// Three operator-only routes for the HaBootstrapWorkflow (alfred-learn).
+// The workflow runs every 6h (Temporal schedule `al-ha-bootstrap`) and on
+// demand from the HaCard "Refresh registry" CTA. Its activity:
+//
+//   1. GETs /api/v1/channels/ha/status — to read the operator-configured
+//      HA URL and confirm the install is reachable;
+//   2. GETs /api/v1/channels/ha/llat   — to fetch the raw LLAT (this
+//      route is the sensitive one — see the guard below);
+//   3. calls HA's own REST API directly with that LLAT, pulling
+//      entity_registry / area_registry / device_registry / states /
+//      automations / services in parallel;
+//   4. POSTs the normalised result to /api/v1/channels/ha/registry/bulk
+//      which batch-upserts ha_registry rows and tombstones vanished IDs.
+//
+// The on-demand "Refresh registry" CTA on /channels invokes
+// POST /api/v1/channels/ha/registry/refresh which schedules a one-shot
+// run of the workflow via `temporal workflow start`.
+
+// Helper — bulk upsert body shape.
+interface HaRegistryBulkRow {
+  kind: string;
+  ha_id: string;
+  domain?: string | null;
+  area_id?: string | null;
+  friendly_name?: string | null;
+  state?: string | null;
+  attributes_json?: string | null;
+  payload_json: string;
+  last_changed?: string | null;
+  last_updated?: string | null;
+}
+
+// The 6 vault `kind` buckets this route accepts. Anything else is dropped
+// at parse time so a misbehaving activity can't insert a row that the
+// /registry read can't surface.
+const HA_REGISTRY_KINDS = new Set([
+  "entity",
+  "area",
+  "device",
+  "automation",
+  "scene",
+  "helper",
+]);
+
+function parseBulkBody(raw: unknown): HaRegistryBulkRow[] {
+  if (typeof raw !== "object" || raw === null) {
+    throw new ValidationError("body must be a JSON object");
+  }
+  const b = raw as Record<string, unknown>;
+  if (!Array.isArray(b.rows)) {
+    throw new ValidationError("rows must be an array");
+  }
+  const out: HaRegistryBulkRow[] = [];
+  for (const r of b.rows) {
+    if (typeof r !== "object" || r === null) continue;
+    const row = r as Record<string, unknown>;
+    if (typeof row.kind !== "string" || !HA_REGISTRY_KINDS.has(row.kind)) continue;
+    if (typeof row.ha_id !== "string" || row.ha_id.length === 0) continue;
+    if (typeof row.payload_json !== "string" || row.payload_json.length === 0) {
+      continue;
+    }
+    out.push({
+      kind: row.kind,
+      ha_id: row.ha_id,
+      domain: typeof row.domain === "string" ? row.domain : null,
+      area_id: typeof row.area_id === "string" ? row.area_id : null,
+      friendly_name:
+        typeof row.friendly_name === "string" ? row.friendly_name : null,
+      state: typeof row.state === "string" ? row.state : null,
+      attributes_json:
+        typeof row.attributes_json === "string" ? row.attributes_json : null,
+      payload_json: row.payload_json,
+      last_changed:
+        typeof row.last_changed === "string" ? row.last_changed : null,
+      last_updated:
+        typeof row.last_updated === "string" ? row.last_updated : null,
+    });
+  }
+  return out;
+}
+
+interface BulkUpsertResult {
+  inserted: number;
+  updated: number;
+  tombstoned: number;
+  total_after: number;
+}
+
+/** Single-transaction bulk upsert + tombstone of vanished rows.
+ *
+ *  Returns counts of inserted / updated / tombstoned / total_after for the
+ *  audit ledger. The tombstone branch only sets `vanished_at` for rows
+ *  that don't already have one — re-running with the same input doesn't
+ *  re-stamp the column, which the test suite asserts.
+ *
+ *  Privacy: this function never touches LLAT material — only entity_id /
+ *  state / friendly_name / payload_json (the raw HA record minus auth
+ *  headers, which were stripped by the activity before persisting). */
+function bulkUpsertHaRegistry(rows: HaRegistryBulkRow[]): BulkUpsertResult {
+  const db = getStateDb();
+  const now = new Date().toISOString();
+
+  // Pre-count to compute inserted vs updated. A small but useful piece of
+  // bookkeeping for the operator UI — without it we'd report the whole
+  // batch as "upserted" and lose the diff signal.
+  const inputKeys = new Set(rows.map((r) => `${r.kind}::${r.ha_id}`));
+
+  let inserted = 0;
+  let updated = 0;
+  let tombstoned = 0;
+
+  db.exec("BEGIN");
+  try {
+    // 1. Upsert pass — for each input row, INSERT … ON CONFLICT(kind, ha_id)
+    //    DO UPDATE. The PRIMARY KEY on ha_registry is (kind, ha_id) so the
+    //    conflict clause needs both columns.
+    const upsertStmt = db.prepare(
+      `INSERT INTO ha_registry (
+         kind, ha_id, domain, area_id, friendly_name, state,
+         attributes_json, payload_json, last_seen_at, last_changed,
+         last_updated, vanished_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+       ON CONFLICT(kind, ha_id) DO UPDATE SET
+         domain = excluded.domain,
+         area_id = excluded.area_id,
+         friendly_name = excluded.friendly_name,
+         state = excluded.state,
+         attributes_json = excluded.attributes_json,
+         payload_json = excluded.payload_json,
+         last_seen_at = excluded.last_seen_at,
+         last_changed = COALESCE(excluded.last_changed, ha_registry.last_changed),
+         last_updated = COALESCE(excluded.last_updated, ha_registry.last_updated),
+         vanished_at = NULL`,
+    );
+    const existsStmt = db.prepare(
+      "SELECT 1 FROM ha_registry WHERE kind = ? AND ha_id = ? LIMIT 1",
+    );
+    for (const row of rows) {
+      const existed = existsStmt.get(row.kind, row.ha_id);
+      upsertStmt.run(
+        row.kind,
+        row.ha_id,
+        row.domain ?? null,
+        row.area_id ?? null,
+        row.friendly_name ?? null,
+        row.state ?? null,
+        row.attributes_json ?? null,
+        row.payload_json,
+        now,
+        row.last_changed ?? null,
+        row.last_updated ?? null,
+      );
+      if (existed) updated += 1;
+      else inserted += 1;
+    }
+
+    // 2. Tombstone pass — every existing row whose (kind, ha_id) isn't in
+    //    the input set gets `vanished_at = now()`. We filter on
+    //    `vanished_at IS NULL` so the timestamp is stamped exactly ONCE
+    //    per row (subsequent runs with the same vanished set are no-ops).
+    //
+    //    The query is a single UPDATE with a NOT-IN list; SQLite handles
+    //    a few thousand entity_ids comfortably, which covers any realistic
+    //    HA install (typical: 200-500 entities, hoarder install: ~2000).
+    const candidates = db
+      .prepare("SELECT kind, ha_id FROM ha_registry WHERE vanished_at IS NULL")
+      .all() as Array<{ kind: string; ha_id: string }>;
+    const tombstoneStmt = db.prepare(
+      `UPDATE ha_registry
+         SET vanished_at = ?
+       WHERE kind = ? AND ha_id = ? AND vanished_at IS NULL`,
+    );
+    for (const c of candidates) {
+      const key = `${c.kind}::${c.ha_id}`;
+      if (inputKeys.has(key)) continue;
+      tombstoneStmt.run(now, c.kind, c.ha_id);
+      tombstoned += 1;
+    }
+
+    db.exec("COMMIT");
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
+  }
+
+  const totalRow = db
+    .prepare("SELECT COUNT(*) AS n FROM ha_registry")
+    .get() as { n: number } | undefined;
+  return {
+    inserted,
+    updated,
+    tombstoned,
+    total_after: Number(totalRow?.n ?? 0),
+  };
+}
+
+export function registerHaBootstrapRoutes(): void {
+  // ──────────────────────────────────────────────────────────────────────
+  // GET /api/v1/channels/ha/llat — operator-only LLAT retrieval.
+  //
+  // This is the sensitive route. The HaBootstrapWorkflow activity hits it
+  // exactly once per workflow run, fetches the raw LLAT off the
+  // Vaultwarden item, and uses it to call HA's REST/WS API. The token
+  // never lives in the workflow's persisted state — only in memory for
+  // the duration of one activity invocation.
+  //
+  // Defence in depth (per Sir's rule: never echo LLAT in errors or logs):
+  //   * requireOperatorBearer() rejects voice-bridge + channel-token
+  //     bearers with 403 (not 401) before the route even runs.
+  //   * The response body carries ONLY the LLAT — no echo of the URL,
+  //     ha_version, or other state.db fields that would surface
+  //     elsewhere on disk if the response was accidentally captured.
+  //   * 404 NOT_CONNECTED when the install isn't connected — same code
+  //     a probing 401-attempt would see, but with a distinct shape so
+  //     the workflow can no-op cleanly without a retry storm.
+  //   * Errors NEVER include the LLAT (the route never reflects request
+  //     fields into the error envelope).
+  // ──────────────────────────────────────────────────────────────────────
+  addRoute("GET", "/api/v1/channels/ha/llat", async ({ req, res }) => {
+    requireOperatorBearer(req);
+    const row = getHaConnectionRow();
+    if (!row || row.state !== "connected") {
+      throw new NotFoundError("Home Assistant is not connected");
+    }
+    let llat: string;
+    try {
+      llat = await readHaLlat();
+    } catch (err) {
+      if (err instanceof ApiError) throw err;
+      // Never let an unexpected error path echo back the bearer or the
+      // vault-cli response body.
+      throw new ApiError(502, "VAULT_UNREACHABLE", "vault-cli read failed");
+    }
+    sendJson(res, 200, { llat });
+  });
+
+  // ──────────────────────────────────────────────────────────────────────
+  // POST /api/v1/channels/ha/registry/bulk — operator-only bulk upsert.
+  //
+  // Body: { rows: HaRegistryBulkRow[] }
+  //
+  // The HaBootstrapWorkflow.write_ha_registry activity sends a single
+  // batch per run. The route does the upsert + tombstone in one
+  // transaction and returns { inserted, updated, tombstoned, total_after }.
+  // ──────────────────────────────────────────────────────────────────────
+  addRoute("POST", "/api/v1/channels/ha/registry/bulk", async ({ req, res, body }) => {
+    requireOperatorBearer(req);
+    const rows = parseBulkBody(body);
+    const result = bulkUpsertHaRegistry(rows);
+    sendJson(res, 200, { ok: true, ...result });
+  });
+
+  // ──────────────────────────────────────────────────────────────────────
+  // POST /api/v1/channels/ha/registry/refresh — on-demand workflow trigger.
+  //
+  // Operator CTA on /channels (HaCard "Refresh registry" button). Starts
+  // a one-shot HaBootstrapWorkflow run via `temporal workflow start`,
+  // returning the workflow_id immediately (202). The dashboard polls
+  // /registry afterwards.
+  //
+  // The workflow itself takes ~30s end-to-end on a small HA install
+  // (REST roundtrips dominate); we surface an ETA for the operator copy.
+  // ──────────────────────────────────────────────────────────────────────
+  addRoute("POST", "/api/v1/channels/ha/registry/refresh", async ({ req, res }) => {
+    requireOperatorBearer(req);
+    const row = getHaConnectionRow();
+    if (!row || row.state !== "connected") {
+      throw new ConflictError(
+        "Home Assistant is not connected. POST /api/v1/channels/ha/connect first.",
+      );
+    }
+    const workflowId = `ha-bootstrap-${Date.now()}`;
+    try {
+      await dockerExec("temporal", [
+        "temporal",
+        "workflow",
+        "start",
+        "--type",
+        "HaBootstrapWorkflow",
+        "--task-queue",
+        "alfred-learn",
+        "--workflow-id",
+        workflowId,
+      ]);
+    } catch (err) {
+      throw new ApiError(
+        502,
+        "TEMPORAL_UNREACHABLE",
+        err instanceof Error ? err.message : "temporal start failed",
+      );
+    }
+    sendJson(res, 202, {
+      ok: true,
+      workflow_id: workflowId,
+      eta: "30s",
+    });
+  });
+}
+
+/** For tests only — clear the ha_registry between runs without recreating
+ *  the whole state.db. The bulk-upsert tests in channels_ha_pr5.test.ts
+ *  call this in their `beforeEach`. */
+export function _resetHaRegistryForTests(): void {
+  try {
+    getStateDb().prepare("DELETE FROM ha_registry").run();
+  } catch {
+    /* table may not exist on first boot; tests run migrations themselves */
+  }
 }
