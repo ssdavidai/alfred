@@ -992,6 +992,36 @@ action terminateRecallBot {
   entities: []
 }
 
+// Wave C — HA conversation setup card (#111 PR3). Reads the shared
+// `channel_tokens` table for rows with `channel='ha-conversation'`
+// (one row per HA install). Mint + revoke proxy to the same shared
+// surface; both 404-fall-through to a "Coming in PR4" message so the
+// card never breaks the page.
+query getHaInstalledTokens {
+  fn: import { getHaInstalledTokens } from "@src/dashboard/operations",
+  entities: []
+}
+
+action mintHaChannelToken {
+  fn: import { mintHaChannelToken } from "@src/dashboard/operations",
+  entities: []
+}
+
+action revokeChannelToken {
+  fn: import { revokeChannelToken } from "@src/dashboard/operations",
+  entities: []
+}
+
+// Wave C — Voice satellites & wake-words card (#112 PR3). Reads the
+// list of ESPHome devices the voice-bridge has discovered on the
+// LAN. Status endpoint lands in #112 PR4; until then the operation
+// 404-falls-through to `{ devices: [], unavailable: true }` so the
+// card surfaces a helpful empty-state message instead of an error.
+query getEsphomeDevices {
+  fn: import { getEsphomeDevices } from "@src/dashboard/operations",
+  entities: []
+}
+
 query getAgentConfig {
   fn: import { getAgentConfig } from "@src/dashboard/operations",
   entities: []

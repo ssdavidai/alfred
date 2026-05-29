@@ -100,6 +100,8 @@ import {
   type TailscalePeersResponse,
 } from "./tailscaleCardCore";
 import RecallCard from "./RecallCard";
+import { HaConversationSetupCard } from "./HaConversationSetupCard";
+import { VoiceWakeWordsCard } from "./VoiceWakeWordsCard";
 
 // F57/C14 — the email card reads the live ctrl-api status, not a phantom
 // Instance row. `inbox_address` is only present once `configured`.
@@ -396,6 +398,28 @@ export default function ChannelsPage() {
               visual states (unconfigured / configured_starting /
               configured_running / error) come from telegramCardCore. */}
           <TelegramCard />
+
+          {/* Wave C / #111 PR3 — Voice → HA → Alfred (conversation).
+              The card surfaces the three-step install ritual for the
+              ssdavidai/alfred-ha HACS custom component, plus a table
+              of channel_tokens minted per HA install. Reads via
+              getHaInstalledTokens; mint/revoke routes are owned by
+              the shared channel-tokens surface (#111 PR1 + PR4).
+              NOTE: PR #110 PR3 will land a separate HaCard for the
+              HA *integration* status; when that ships, the canonical
+              order is <HaCard /> then this <HaConversationSetupCard />.
+              Until the alphabetical reflow lands, both new Wave-C
+              cards sit at the end of the page just before Terminal. */}
+          <HaConversationSetupCard />
+
+          {/* Wave C / #112 PR3 — Voice satellites & wake words.
+              Surfaces ESPHome devices the voice-bridge has discovered
+              (#112 PR1 listener) plus a multi-select wake-word
+              catalogue from fwartner/home-assistant-wakewords-collection.
+              Selection renders an ESPHome YAML snippet the principal
+              pastes into their satellite device YAML. Read-only —
+              wake-word install is paste-this-YAML, not click-a-button. */}
+          <VoiceWakeWordsCard />
 
           {/* Sir #8 — Terminal: SSH straight into the VM + `docker exec`
               into Hermes for the chattiest, lowest-latency door. Sir

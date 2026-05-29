@@ -2679,3 +2679,129 @@ export const deleteFile = async (
     path: `/api/v1/files/${encodeFilesPath(args.path)}`,
   });
 };
+
+// ============================================================
+// Wave C — HA conversation setup card (#111 PR3) and Voice
+// satellites / wake-words card (#112 PR3). Both cards land on
+// /channels; the HA card surfaces channel-token rows from
+// ctrl-api's shared channel_tokens table (PR #111 PR1), and the
+// voice card surfaces detected ESPHome satellites with graceful
+// 404 handling when the listener isn't enabled yet.
+// ============================================================
+
+/** Read the channel_tokens rows for `channel=ha-conversation`. Shape
+ *  comes from ctrl-api's GET /api/v1/channel-tokens (PR #111 PR1):
+ *  `{ tokens: ChannelTokenMeta[] }` where each meta omits the
+ *  token_hash and includes a public-safe `scope`. The web layer
+ *  passes through the rows verbatim; haConversationCardCore.ts
+ *  groups/sorts/filters into the install-table shape. */
+export const getHaInstalledTokens = async (_args: unknown, context: any) => {
+  const instance = await getUserInstance(context);
+  try {
+    return await proxyToTenant(instance, {
+      path: "/api/v1/channel-tokens",
+      query: { channel: "ha-conversation" },
+    });
+  } catch (e: any) {
+    // The shared channel-tokens surface lands in #111 PR1; the route
+    // is already on this branch, but tenants that haven't pulled the
+    // image yet will 404. Surface a graceful empty list so the card
+    // shows the "no installs yet" empty-state instead of an error.
+    if (e instanceof HttpError && e.statusCode === 404) {
+      return { tokens: [], unavailable: true };
+    }
+    throw e;
+  }
+};
+
+/** Mint a new ha-conversation channel token. The principal supplies
+ *  a free-form label (typically `ha:<installId>`) and the install id
+ *  (a uuid v4 or a slug) which we stash on `scope.haInstanceId` so
+ *  ctrl-api's validator can pin auth back to a specific HA install. */
+export const mintHaChannelToken = async (
+  args: { label?: string; installId?: string },
+  context: any,
+) => {
+  const label =
+    typeof args?.label === "string" && args.label.trim()
+      ? args.label.trim()
+      : null;
+  const installId =
+    typeof args?.installId === "string" && args.installId.trim()
+      ? args.installId.trim()
+      : null;
+  if (!installId) {
+    throw new HttpError(400, "installId required");
+  }
+  const instance = await getUserInstance(context);
+  try {
+    return await proxyToTenant(instance, {
+      method: "POST",
+      path: "/api/v1/channel-tokens/mint",
+      body: {
+        channel: "ha-conversation",
+        label: label ?? `ha:${installId}`,
+        scope: { haInstanceId: installId },
+      },
+    });
+  } catch (e: any) {
+    // PR #111 PR4 will surface a user-facing mint flow; until then,
+    // bubble a recognisable error so the card can show "Coming in
+    // PR4" without breaking the page.
+    if (e instanceof HttpError && e.statusCode === 404) {
+      throw new HttpError(
+        501,
+        "Mint surface not deployed yet (PR #111 PR4 lands the runtime mint).",
+      );
+    }
+    throw e;
+  }
+};
+
+/** Revoke (soft-delete) a channel token by id. The HA card uses this
+ *  to retire an install — the per-install bearer stops authenticating
+ *  on the next request. Idempotent on ctrl-api side. */
+export const revokeChannelToken = async (
+  args: { id?: string },
+  context: any,
+) => {
+  if (typeof args?.id !== "string" || !args.id.trim()) {
+    throw new HttpError(400, "id required");
+  }
+  const instance = await getUserInstance(context);
+  try {
+    return await proxyToTenant(instance, {
+      method: "POST",
+      path: `/api/v1/channel-tokens/${encodeURIComponent(args.id.trim())}/revoke`,
+    });
+  } catch (e: any) {
+    if (e instanceof HttpError && e.statusCode === 404) {
+      throw new HttpError(
+        501,
+        "Revoke surface not deployed yet (PR #111 PR4 lands the runtime mint).",
+      );
+    }
+    throw e;
+  }
+};
+
+/** Read the list of ESPHome satellites the voice-bridge has seen on
+ *  the local network. The listener landed in #112 PR1 but the
+ *  ctrl-api status endpoint is queued for #112 PR4 — when the route
+ *  isn't there yet, return `{ devices: [], unavailable: true }` so
+ *  the card surfaces "ESPHome listener disabled" copy instead of an
+ *  error toast. The card's job is to publish the catalogue + show
+ *  what's there; absence is a normal state. */
+export const getEsphomeDevices = async (_args: unknown, context: any) => {
+  const instance = await getUserInstance(context);
+  try {
+    return await proxyToTenant(instance, {
+      path: "/api/v1/channels/voice/esphome/devices",
+    });
+  } catch (e: any) {
+    if (e instanceof HttpError && e.statusCode === 404) {
+      return { devices: [], unavailable: true };
+    }
+    throw e;
+  }
+};
