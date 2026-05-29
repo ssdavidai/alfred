@@ -19,6 +19,7 @@ real-looking token.
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from typing import Any
 
@@ -233,16 +234,67 @@ def _ha_pull_handler(
             if llat_status == 200:
                 return httpx.Response(200, json={"llat": LLAT})
             return httpx.Response(llat_status, json={"error": "x"})
-        # HA REST surface
+        # ctrl-api Tier 4 WS-backed registries (#115/#158 PR1 closes #149).
+        # The activity now calls THIS route instead of HA REST for area /
+        # device / entity registries — REST returned 404 for these
+        # WS-only registries.
+        if path == "/api/v1/channels/ha/ws/registries":
+            ts = "2026-05-29T00:00:00Z"
+            rows = []
+            for a in areas_body:
+                rows.append(
+                    {
+                        "kind": "area",
+                        "ha_id": a.get("area_id", ""),
+                        "payload_json": json.dumps(a),
+                        "friendly_name": a.get("name"),
+                        "area_id": a.get("area_id"),
+                        "domain": None,
+                        "last_seen_at": ts,
+                    }
+                )
+            for d in devices_body:
+                rows.append(
+                    {
+                        "kind": "device",
+                        "ha_id": d.get("id", ""),
+                        "payload_json": json.dumps(d),
+                        "friendly_name": d.get("name"),
+                        "area_id": d.get("area_id"),
+                        "domain": None,
+                        "last_seen_at": ts,
+                    }
+                )
+            for e in entity_reg_body:
+                rows.append(
+                    {
+                        "kind": "entity",
+                        "ha_id": e.get("entity_id", ""),
+                        "payload_json": json.dumps(e),
+                        "friendly_name": e.get("name"),
+                        "area_id": e.get("area_id"),
+                        "domain": "light",
+                        "last_seen_at": ts,
+                    }
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "counts": {
+                        "areas": len(areas_body),
+                        "devices": len(devices_body),
+                        "entities": len(entity_reg_body),
+                        "scenes": 0,
+                        "scripts": 0,
+                    },
+                    "rows": rows,
+                },
+            )
+        # HA REST surface — `/api/states` + `/api/services` still REST.
         if path == "/api/states":
             code = ha_states_status_override or states_status
             return httpx.Response(code, json=states_body)
-        if path == "/api/config/area_registry/list":
-            return httpx.Response(200, json=areas_body)
-        if path == "/api/config/device_registry/list":
-            return httpx.Response(200, json=devices_body)
-        if path == "/api/config/entity_registry/list":
-            return httpx.Response(200, json=entity_reg_body)
         if path == "/api/services":
             return httpx.Response(200, json=services_body)
         return httpx.Response(404, json={"error": "no route"})
@@ -275,15 +327,21 @@ class TestPullActivity:
         assert entity_row["area_id"] == "kitchen"
         assert result["counts"]["entities"] == 1
 
-        # Audit: confirm exactly the 7 round-trips fired (2 ctrl, 5 HA).
+        # Audit: confirm exactly the 5 round-trips fired (3 ctrl, 2 HA).
+        # #115/#158 PR1 closed #149: area/device/entity registries are no
+        # longer fetched from HA REST (which 404'd them — they're WS-only)
+        # but from ctrl-api's `/api/v1/channels/ha/ws/registries` route
+        # that proxies through the long-lived HA WS client.
         paths = [str(r.url.path) for r in mock_ha["requests"]]
         assert paths.count("/api/v1/channels/ha/status") == 1
         assert paths.count("/api/v1/channels/ha/llat") == 1
+        assert paths.count("/api/v1/channels/ha/ws/registries") == 1
         assert paths.count("/api/states") == 1
-        assert paths.count("/api/config/area_registry/list") == 1
-        assert paths.count("/api/config/device_registry/list") == 1
-        assert paths.count("/api/config/entity_registry/list") == 1
         assert paths.count("/api/services") == 1
+        # The old REST registry routes MUST NOT be hit any more.
+        assert paths.count("/api/config/area_registry/list") == 0
+        assert paths.count("/api/config/device_registry/list") == 0
+        assert paths.count("/api/config/entity_registry/list") == 0
 
     @pytest.mark.asyncio
     async def test_ha_401_does_not_raise(self, mock_ha):

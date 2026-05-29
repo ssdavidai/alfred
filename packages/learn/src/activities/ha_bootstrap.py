@@ -342,16 +342,22 @@ async def pull_ha_registry() -> dict[str, Any]:
     if not isinstance(llat, str) or not llat:
         return {"ok": False, "code": "LLAT_MISSING", "rows": []}
 
-    # (3) Parallel pull from HA's REST surface.
+    # (3) Parallel pull.
+    #
+    # `/api/states` + `/api/services` are HA REST endpoints that work.
+    # Area / device / entity registries return 404 on REST (they're
+    # WS-only) — #115/#158 PR1 closes #149 by adding a ctrl-api route
+    # `/api/v1/channels/ha/ws/registries` that proxies through the
+    # long-lived WS client. We call it once and split the result by
+    # `kind` into the three registry buckets.
     async with httpx.AsyncClient() as client:
         coros = [
             _ha_get(client, ha_url, "/api/states", llat),
-            _ha_get(client, ha_url, "/api/config/area_registry/list", llat),
-            _ha_get(client, ha_url, "/api/config/device_registry/list", llat),
-            _ha_get(client, ha_url, "/api/config/entity_registry/list", llat),
             _ha_get(client, ha_url, "/api/services", llat),
         ]
         results = await asyncio.gather(*coros, return_exceptions=True)
+
+    ws_code, ws_body = await _ctrl_get("/api/v1/channels/ha/ws/registries")
 
     # Check for HA 401 first — that's a known operator misconfig
     # (LLAT rotated in HA but not in Vault). Surface as a known refusal
@@ -378,10 +384,46 @@ async def pull_ha_registry() -> dict[str, Any]:
             raise RuntimeError(f"HA pull HTTP {s} on call #{i}")
 
     states = bodies[0] if isinstance(bodies[0], list) else []
-    areas = bodies[1] if isinstance(bodies[1], list) else []
-    devices = bodies[2] if isinstance(bodies[2], list) else []
-    entity_reg = bodies[3] if isinstance(bodies[3], list) else []
-    services = bodies[4] if isinstance(bodies[4], list) else []
+    services = bodies[1] if isinstance(bodies[1], list) else []
+
+    # WS-backed registries via ctrl-api `/ws/registries`. The route
+    # returns rows pre-normalised for the bulk-upsert path; we lift
+    # areas/devices/entities back out so the existing normalise_ha_pull
+    # contract holds (it pulls automation/scene off `/api/states` and
+    # joins area_id from entity_registry). If the WS route is down the
+    # workflow still proceeds with `states` + `services`, matching the
+    # pre-#149 behaviour where REST 404'd these registries (logged but
+    # not fatal — downstream upsert is happy with empty buckets).
+    areas: list[dict[str, Any]] = []
+    devices: list[dict[str, Any]] = []
+    entity_reg: list[dict[str, Any]] = []
+    if ws_code == 200 and isinstance(ws_body, dict) and ws_body.get("ok"):
+        ws_rows = ws_body.get("rows", [])
+        if isinstance(ws_rows, list):
+            for row in ws_rows:
+                if not isinstance(row, dict):
+                    continue
+                kind = row.get("kind")
+                payload_raw = row.get("payload_json")
+                if not isinstance(payload_raw, str):
+                    continue
+                try:
+                    payload = json.loads(payload_raw)
+                except ValueError:
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                if kind == "area":
+                    areas.append(payload)
+                elif kind == "device":
+                    devices.append(payload)
+                elif kind == "entity":
+                    entity_reg.append(payload)
+    else:
+        logger.warning(
+            "ws/registries pull failed (status=%s) — proceeding with empty area/device/entity buckets",
+            ws_code,
+        )
 
     rows = normalise_ha_pull(states, areas, devices, entity_reg)
 

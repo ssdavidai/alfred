@@ -36,13 +36,14 @@ describe("state.db migration runner", () => {
     const db = new DatabaseSync(":memory:");
     db.exec(schema);
     const v = runMigrations(db);
-    // Latest version moves as new migrations land. Today: 10
+    // Latest version moves as new migrations land. Today: 11
     // (0001_fix_pack + 0002_alfred_journal + 0003_tailscale_connection
     // + 0004_channel_tokens + 0005_ha_channel + 0006_files_table
     // + 0007_recall + 0008_ha_event_subscription
-    // + 0009_ha_registry_vanished + 0010_files_cold_archive).
-    assert.equal(v, 10, "migrated to latest version");
-    assert.equal(userVersion(db), 10);
+    // + 0009_ha_registry_vanished + 0010_files_cold_archive
+    // + 0011_ha_tier4).
+    assert.equal(v, 11, "migrated to latest version");
+    assert.equal(userVersion(db), 11);
     assert.ok(cols(db, "observation").includes("processed_at"), "0001: processed_at present after migrate");
     // 0002: alfred_journal + alfred_principal tables present.
     const tables = (
@@ -209,6 +210,36 @@ describe("state.db migration runner", () => {
       "0010: files.path UNIQUE constraint dropped — dedupe needs shared paths",
     );
 
+    // 0011: Tier 4 HA autonomy — ha_backup_ref + ha_integration_ref +
+    // ha_user_ref tables present (#115/#158 PR1).
+    for (const t of ["ha_backup_ref", "ha_integration_ref", "ha_user_ref"]) {
+      assert.ok(tables.includes(t), `0011: ${t} table created`);
+    }
+    for (const required of [
+      "id",
+      "ha_backup_id",
+      "triggered_by",
+      "decision_ref",
+      "ts",
+    ]) {
+      assert.ok(
+        cols(db, "ha_backup_ref").includes(required),
+        `0011: ha_backup_ref.${required} present`,
+      );
+    }
+    for (const required of ["entry_id", "installed_by", "decision_ref", "installed_at"]) {
+      assert.ok(
+        cols(db, "ha_integration_ref").includes(required),
+        `0011: ha_integration_ref.${required} present`,
+      );
+    }
+    for (const required of ["ha_user_id", "name", "decision_ref", "llat_vw_id", "created_at"]) {
+      assert.ok(
+        cols(db, "ha_user_ref").includes(required),
+        `0011: ha_user_ref.${required} present`,
+      );
+    }
+
     db.close();
   });
 
@@ -217,7 +248,7 @@ describe("state.db migration runner", () => {
     db.exec(schema);
     runMigrations(db);
     const v2 = runMigrations(db);
-    assert.equal(v2, 10);
+    assert.equal(v2, 11);
     assert.equal(
       cols(db, "observation").filter((c) => c === "processed_at").length,
       1,

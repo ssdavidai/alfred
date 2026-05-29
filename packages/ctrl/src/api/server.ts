@@ -63,6 +63,7 @@ import {
   registerRecallWebhookRoute,
 } from "./routes/channels_recall.js";
 import { registerHaChannelRoutes } from "./routes/channels_ha.js";
+import { registerHaWsRoutes } from "./routes/channels_ha_ws.js";
 import { registerChannelTokenRoutes } from "./routes/channel_tokens.js";
 import { registerChannelsTokensRoutes } from "./routes/channels_tokens.js";
 import { registerComposioWebhookRoutes } from "./routes/composioWebhook.js";
@@ -200,6 +201,11 @@ export function createApiServer(): http.Server {
   // ships the non-streaming /turn route; #110 PR1 extends with discovery
   // routes; PR3+ extends with tool partitioning + streaming.
   registerHaChannelRoutes();
+  // /api/v1/channels/ha/ws/* — Tier 4 long-lived WS surface (#115/#158 PR1).
+  // status + WS-backed registry pull. Closes #149 (the area/device gap
+  // from #110 PR5 — REST returned 404 for area_registry/list because
+  // those registries are WS-only).
+  registerHaWsRoutes();
   // /api/v1/channel-tokens/* — shared per-channel bearer-token surface
   // (#111 PR1, Sir's decision Q2). HA-conversation tokens land here; HA
   // Voice (#112) joins next; Paperclip migrates onto it later.
