@@ -50,9 +50,12 @@ function tableNames(db: DatabaseSync): string[] {
 }
 
 describe("alfred_journal migration", () => {
-  it("bumps user_version to 2", () => {
+  it("bumps user_version to the latest migration", () => {
+    // 0002 alone took us to 2; 0003 (tailscale_connection — issue #109 PR 1)
+    // takes us to 3. The runner applies every migration > current version,
+    // so the value naturally tracks the highest registered version.
     const db = makeDb();
-    assert.equal(userVersion(db), 2);
+    assert.equal(userVersion(db), 3);
     db.close();
   });
 

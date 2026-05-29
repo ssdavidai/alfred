@@ -1450,6 +1450,47 @@ services:
     mem_limit: 256m
     pids_limit: 256
 
+  # ── Tailscale sidecar (profile: tailscale) — issue #109 PR 1 ─────────
+  # OFF by default on every fresh tenant. `docker compose up -d` does NOT
+  # start this container — only `docker compose --profile tailscale up -d`
+  # does (which PR 3's /connections card will invoke on the principal's
+  # "Turn on" click). The principal then drives Connect from the dashboard
+  # and the sidecar joins their own tailnet via Tailscale's device-style
+  # auth-URL flow (path C; see docs/specs/issue-109-tailscale-via-ui.md).
+  #
+  # Hostname: derived from $DOMAIN with dots replaced by dashes
+  # (e.g. DOMAIN=home.alfred.black → home-alfred-black). Compose's variable
+  # interpolation does NOT support Bash-style `${VAR//./-}` pattern
+  # substitution, so bootstrap.sh derives the value and writes it to .env
+  # as TAILSCALE_HOSTNAME_PREFIX. The fallback to $DOMAIN here is purely
+  # defensive — Tailscale accepts dotted hostnames but normalises them,
+  # which is less predictable than the bootstrap-derived form.
+  # See §3.2.1 of the spec.
+  #
+  # State (the node key in tailscaled.state) lives in the named volume
+  # `tailscale_data`; surviving `docker compose pull` is the whole point.
+  # PR 2 lands the ctrl-api routes that drive `tailscale up / status /
+  # logout / down` via `docker exec`; PR 3 the /connections card; PR 4
+  # `tailscale cert` + `tailscale serve` for inbound from the tailnet.
+  tailscale:
+    image: tailscale/tailscale:stable
+    profiles: ["tailscale"]
+    hostname: "${TAILSCALE_HOSTNAME_PREFIX:-${DOMAIN}}"
+    environment:
+      TS_AUTHKEY: "${TAILSCALE_AUTHKEY:-}"
+      TS_STATE_DIR: "/var/lib/tailscale"
+      TS_HOSTNAME: "${TAILSCALE_HOSTNAME_PREFIX:-${DOMAIN}}"
+      TS_USERSPACE: "false"
+      TS_EXTRA_ARGS: "--accept-routes ${TAILSCALE_TAGS:+--advertise-tags=${TAILSCALE_TAGS}}"
+    volumes:
+      - tailscale_data:/var/lib/tailscale
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    restart: unless-stopped
+    mem_limit: 128m
+
   # ── Vexa — transcript bot stack (profile: vexa) ─────────────────────
   # `docker compose --profile vexa up -d`. 9 services, ~3 GB resident.
   # Folded inline here (the alfred-platform fleet ran Vexa as a separate
@@ -1719,6 +1760,10 @@ volumes:
   sure_pgdata:
   sure_redis:
   paperclip_data:
+  # Tailscale sidecar state — node key in tailscaled.state survives
+  # `docker compose pull/up/restart`. Issue #109 PR 1. See §3.5 of
+  # docs/specs/issue-109-tailscale-via-ui.md.
+  tailscale_data:
   vexa_redis:
   vexa_postgres:
   vexa_minio:

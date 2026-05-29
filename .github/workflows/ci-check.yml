@@ -129,6 +129,24 @@ jobs:
         run: docker compose config --quiet
       - name: docker compose config (vexa profile)
         run: docker compose --profile vexa config --quiet
+      - name: docker compose config (tailscale profile — issue #109 PR 1)
+        run: docker compose --profile tailscale config --quiet
+      - name: tailscale OFF by default (no service unless profile passed)
+        # PR 1's acceptance gate: `docker compose up -d` alone must NEVER
+        # bring up the tailscale sidecar. Profile gating is the load-bearing
+        # contract — if this assertion ever flips, every existing tenant
+        # would silently start joining a tailnet on next deploy.
+        run: |
+          set -euo pipefail
+          if docker compose config --services | grep -qx tailscale; then
+            echo "FAIL: tailscale service appeared under the default profile." >&2
+            exit 1
+          fi
+          if ! docker compose --profile tailscale config --services | grep -qx tailscale; then
+            echo "FAIL: tailscale service missing under --profile tailscale." >&2
+            exit 1
+          fi
+          echo "OK: tailscale is profile-gated, off by default."
 
   bootstrap-lint:
     runs-on: ubuntu-latest

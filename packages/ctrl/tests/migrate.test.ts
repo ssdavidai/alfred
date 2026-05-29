@@ -36,10 +36,10 @@ describe("state.db migration runner", () => {
     const db = new DatabaseSync(":memory:");
     db.exec(schema);
     const v = runMigrations(db);
-    // The latest version moves as new migrations land. Today: 2
-    // (0001_fix_pack + 0002_alfred_journal).
-    assert.equal(v, 2, "migrated to latest version");
-    assert.equal(userVersion(db), 2);
+    // The latest version moves as new migrations land. Today: 3
+    // (0001_fix_pack + 0002_alfred_journal + 0003_tailscale_connection).
+    assert.equal(v, 3, "migrated to latest version");
+    assert.equal(userVersion(db), 3);
     assert.ok(cols(db, "observation").includes("processed_at"), "0001: processed_at present after migrate");
     // 0002: alfred_journal + alfred_principal tables present.
     const tables = (
@@ -52,6 +52,45 @@ describe("state.db migration runner", () => {
       tables.includes("alfred_principal"),
       "0002: alfred_principal table created",
     );
+    // 0003: tailscale_connection singleton table present, with the
+    // CHECK(id=1) guard that pins the table to one row. Issue #109 PR 1.
+    assert.ok(
+      tables.includes("tailscale_connection"),
+      "0003: tailscale_connection table created",
+    );
+    const tsCols = cols(db, "tailscale_connection");
+    for (const required of [
+      "id",
+      "state",
+      "tailnet_ip",
+      "tailnet_hostname",
+      "authkey_used_at",
+      "auth_url",
+      "last_status_probe_at",
+      "last_error",
+      "created_at",
+      "updated_at",
+    ]) {
+      assert.ok(
+        tsCols.includes(required),
+        `0003: tailscale_connection.${required} present`,
+      );
+    }
+    // Singleton guard: a second row at id=2 must be rejected by the CHECK.
+    const now = Date.now();
+    db.prepare(
+      "INSERT INTO tailscale_connection (id, state, created_at, updated_at) VALUES (?, ?, ?, ?)",
+    ).run(1, "disabled", now, now);
+    assert.throws(
+      () =>
+        db
+          .prepare(
+            "INSERT INTO tailscale_connection (id, state, created_at, updated_at) VALUES (?, ?, ?, ?)",
+          )
+          .run(2, "disabled", now, now),
+      /CHECK constraint failed/i,
+      "0003: CHECK(id=1) blocks a second tailscale_connection row",
+    );
     db.close();
   });
 
@@ -60,7 +99,7 @@ describe("state.db migration runner", () => {
     db.exec(schema);
     runMigrations(db);
     const v2 = runMigrations(db);
-    assert.equal(v2, 2);
+    assert.equal(v2, 3);
     assert.equal(
       cols(db, "observation").filter((c) => c === "processed_at").length,
       1,

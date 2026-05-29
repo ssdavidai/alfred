@@ -202,6 +202,39 @@ if [[ -z "${existing_uid}" || "${existing_uid}" == "default" ]]; then
 fi
 
 green "Auto-secrets: ${GENERATED} generated, ${KEPT} kept (already set)."
+
+# ── 4. TAILSCALE_HOSTNAME_PREFIX (issue #109 PR 1) ──────────────────
+# The Tailscale sidecar runs only with `--profile tailscale` and is OFF on
+# every fresh tenant; the principal opts in via the /connections card. We
+# still derive the tailnet hostname here, though: compose's variable
+# interpolation does not support Bash-style `${VAR//./-}`, so the dotted
+# DOMAIN has to be transformed in shell. Writing the result to .env keeps
+# the value visible + predictable across `docker compose pull` and makes
+# the tailnet device name an operator-tunable knob (override by editing).
+# TAILSCALE_AUTHKEY is intentionally NOT auto-generated — it is either
+# pasted by the principal (path A) or unused (path C: device-auth URL).
+existing_prefix="$(trim "$(env_get TAILSCALE_HOSTNAME_PREFIX)")"
+if [[ -z "${existing_prefix}" ]]; then
+	domain_value="$(trim "$(env_get DOMAIN)")"
+	if [[ -n "${domain_value}" ]]; then
+		prefix="${domain_value//./-}"
+		if grep -qE "^#?TAILSCALE_HOSTNAME_PREFIX=" "${ENV_FILE}" 2>/dev/null; then
+			tmp="$(mktemp)"
+			awk -v v="${prefix}" '
+				$0 ~ "^#?TAILSCALE_HOSTNAME_PREFIX=" && !d { print "TAILSCALE_HOSTNAME_PREFIX=" v; d=1; next }
+				{ print }
+			' "${ENV_FILE}" > "${tmp}"
+			mv "${tmp}" "${ENV_FILE}"
+		else
+			printf 'TAILSCALE_HOSTNAME_PREFIX=%s\n' "${prefix}" >> "${ENV_FILE}"
+		fi
+		green "Derived TAILSCALE_HOSTNAME_PREFIX=${prefix} from DOMAIN."
+	fi
+fi
+
 bold ""
 green "Bootstrap complete. Next:  docker compose up -d"
 green "(Vexa is opt-in:           docker compose --profile vexa up -d)"
+green "(Tailscale is opt-in:      docker compose --profile tailscale up -d tailscale"
+green "                            — set TAILSCALE_ENABLED=true first; PR 3 will"
+green "                              wire the /connections card.)"
