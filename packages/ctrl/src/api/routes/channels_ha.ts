@@ -1054,6 +1054,13 @@ export function registerHaChannelRoutes(): void {
   // landed in PR1. Independent of PR2/PR3/PR4/PR6/PR7/PR8; the splice
   // block lives at the bottom of this file (`=== Tier 4 PR5: HACS ===`).
   registerHaHacsRoutes();
+
+  // #115 PR2 — Tier 4 autonomy, registries CRUD. Areas / devices /
+  // entities / labels — all WS-only on HA's side, all cheap +
+  // reversible, no decision_ref gate per Sir's locked YES defaults
+  // (2026-05-29). See the "=== Tier 4 PR2: Registries CRUD ===" block
+  // at the bottom of this file.
+  registerHaPr2RegistriesRoutes();
 }
 
 /**
@@ -7728,3 +7735,605 @@ export function registerHaHacsRoutes(): void {
 }
 
 // === END Tier 4 PR5 ═══════════════════════════════════════════════════
+
+// ═════════════════════════════════════════════════════════════════════════
+// === Tier 4 PR2: Registries CRUD ===
+// ═════════════════════════════════════════════════════════════════════════
+//
+// Issue #115 PR2 — 14 new routes fronting HA's four registry surfaces:
+//
+//   area_registry    — list / create / update / delete  (WS only)
+//   device_registry  — list / get / update              (WS only — no
+//                      create/delete; devices come from integrations)
+//   entity_registry  — list / get / update / remove     (WS only)
+//   label_registry   — list / create / update / delete  (WS only)
+//
+// Why this lives in its own bounded block
+// ----------------------------------------
+// PR3, PR4, PR6, PR7, and PR8 already landed in this file with their
+// own bounded blocks. By keeping every registry route in ONE contiguous
+// block at the file tail, a future rebase against this file is one
+// mechanical "is this block intact?" check. No edits to shared helpers,
+// no insertion points scattered through the file.
+//
+// Per Sir's defaults (locked 2026-05-29):
+//
+//   * NO `decision_ref` gate — every verb in here is cheap + reversible:
+//     create an area → delete it; rename an entity → rename it back.
+//     The verb whose effect a non-technical principal couldn't reverse in
+//     <2 minutes through HA's own UI gets a gate; renaming the kitchen
+//     light doesn't.
+//   * NO snapshot — same rationale; registry mutations don't take HA
+//     down.
+//   * NO daybook entry — the daybook surface is for changes Sir would
+//     notice (core_restart, addon_install, integration_add). Renaming
+//     an entity is noise.
+//
+// The WS calls themselves
+// -----------------------
+// HA's WS protocol for these (verified against `homeassistant/core` HEAD
+// 2026-05):
+//
+//   {type: "config/area_registry/list"}
+//   {type: "config/area_registry/create", name, …}
+//   {type: "config/area_registry/update", area_id, name?, icon?, labels?, …}
+//   {type: "config/area_registry/delete", area_id}
+//
+//   {type: "config/device_registry/list"}
+//   {type: "config/device_registry/get", device_id} — not all HA versions; we
+//     read from list() and filter as a fallback so an older HA still works.
+//   {type: "config/device_registry/update", device_id, name_by_user?, area_id?,
+//     labels?, disabled_by?}
+//
+//   {type: "config/entity_registry/list"}
+//   {type: "config/entity_registry/get", entity_id}
+//   {type: "config/entity_registry/update", entity_id, name?, icon?, area_id?,
+//     hidden_by?, disabled_by?, labels?, new_entity_id?, aliases?, …}
+//   {type: "config/entity_registry/remove", entity_id}
+//
+//   {type: "config/label_registry/list"}
+//   {type: "config/label_registry/create", name, …}
+//   {type: "config/label_registry/update", label_id, name?, color?, icon?, description?}
+//   {type: "config/label_registry/delete", label_id}
+//
+// Wrap each `client.wsCall(...)` in try/catch → wrapHaWsError so the
+// failure envelope matches the PR7 block (502 HA_WS_ERROR with the
+// upstream error message preserved).
+
+/**
+ * Default WS timeout for registry calls. Registry CRUD is fast (~50ms
+ * on a local HA); ten seconds is generous enough that a transiently
+ * slow HA still passes.
+ */
+const HA_REGISTRY_WS_TIMEOUT_MS = Number(
+  process.env.HA_REGISTRY_WS_TIMEOUT_MS ?? "10000",
+);
+
+/**
+ * Area / device / label id format. HA mints these as a slug from the
+ * create-time name — lowercase ASCII + underscores. The shape we want
+ * to enforce here is the URL-traversal guard: no `/`, no leading dot,
+ * length 1..128.
+ */
+const HA_REGISTRY_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.:\-]{0,127}$/;
+
+function assertRegistryId(raw: string, kind: string): string {
+  if (!HA_REGISTRY_ID_RE.test(raw)) {
+    throw new ValidationError(
+      `${kind} id must be 1..128 chars of [A-Za-z0-9_.:-], starting with [A-Za-z0-9]`,
+    );
+  }
+  return raw;
+}
+
+/**
+ * Entity id format. Strict dotted form — `<domain>.<object_id>` with
+ * lowercase ASCII + underscores. Mirrors the MCP tool's EntityIdParam.
+ */
+const HA_PR2_ENTITY_ID_RE = /^[a-z0-9_]+\.[a-z0-9_]+$/;
+
+function assertPr2EntityId(raw: string): string {
+  if (!HA_PR2_ENTITY_ID_RE.test(raw)) {
+    throw new ValidationError(
+      "entity_id must be HA's dotted form `<domain>.<object_id>`",
+    );
+  }
+  return raw;
+}
+
+/** Read an optional string field; rejects empty strings + non-strings. */
+function pr2OptionalString(
+  raw: unknown,
+  field: string,
+  maxLen = 256,
+): string | undefined {
+  if (raw === undefined) return undefined;
+  if (raw === null) return undefined;
+  if (typeof raw !== "string" || raw.length === 0) {
+    throw new ValidationError(`${field} must be a non-empty string`);
+  }
+  if (raw.length > maxLen) {
+    throw new ValidationError(`${field} must be <= ${maxLen} chars`);
+  }
+  return raw;
+}
+
+/**
+ * Allow null/undefined OR string. HA uses `null` to clear a field
+ * (e.g. {area_id: null} unassigns the area from a device). We honour
+ * that — the route passes through `null` if the caller sent it.
+ */
+function pr2NullableString(
+  raw: unknown,
+  field: string,
+  maxLen = 256,
+): { present: boolean; value: string | null } {
+  if (raw === undefined) return { present: false, value: null };
+  if (raw === null) return { present: true, value: null };
+  if (typeof raw !== "string") {
+    throw new ValidationError(`${field} must be a string or null`);
+  }
+  if (raw.length === 0) {
+    throw new ValidationError(`${field} must be non-empty or null`);
+  }
+  if (raw.length > maxLen) {
+    throw new ValidationError(`${field} must be <= ${maxLen} chars`);
+  }
+  return { present: true, value: raw };
+}
+
+/** Optional string[] of label ids. */
+function pr2OptionalStringArray(
+  raw: unknown,
+  field: string,
+): string[] | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (!Array.isArray(raw)) {
+    throw new ValidationError(`${field} must be an array of strings`);
+  }
+  for (const v of raw) {
+    if (typeof v !== "string" || v.length === 0) {
+      throw new ValidationError(`${field} entries must be non-empty strings`);
+    }
+  }
+  return raw as string[];
+}
+
+/** Parse a body object — throws on non-object input. */
+function pr2AssertBodyObject(body: unknown): Record<string, unknown> {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    throw new ValidationError("body must be a JSON object");
+  }
+  return body as Record<string, unknown>;
+}
+
+export function registerHaPr2RegistriesRoutes(): void {
+  // ── areas ─────────────────────────────────────────────────────────────
+
+  // GET /api/v1/channels/ha/areas — WS `config/area_registry/list`.
+  // Returns `{ok, areas: [...]}` straight from HA. Cheap, no gate.
+  addRoute("GET", "/api/v1/channels/ha/areas", async ({ res }) => {
+    await loadHaCredentials();
+    let result: unknown;
+    try {
+      result = await getHaWsClient().wsCall(
+        "config/area_registry/list",
+        {},
+        HA_REGISTRY_WS_TIMEOUT_MS,
+      );
+    } catch (err) {
+      throw wrapHaWsError("config/area_registry/list", err);
+    }
+    const areas = Array.isArray(result) ? result : [];
+    sendJson(res, 200, { ok: true, areas });
+  });
+
+  // POST /api/v1/channels/ha/areas — WS `config/area_registry/create`.
+  // Body: { name (required), icon?, picture?, aliases?, labels?, floor_id? }.
+  // No gate (cheap, reversible — DELETE undoes it).
+  addRoute("POST", "/api/v1/channels/ha/areas", async ({ res, body }) => {
+    const b = pr2AssertBodyObject(body);
+    const name = pr2OptionalString(b.name, "name", 128);
+    if (name === undefined) {
+      throw new ValidationError("name is required");
+    }
+    const wsPayload: Record<string, unknown> = { name };
+    const icon = pr2OptionalString(b.icon, "icon", 64);
+    if (icon !== undefined) wsPayload.icon = icon;
+    const picture = pr2OptionalString(b.picture, "picture", 256);
+    if (picture !== undefined) wsPayload.picture = picture;
+    const floorId = pr2OptionalString(b.floor_id, "floor_id", 128);
+    if (floorId !== undefined) wsPayload.floor_id = floorId;
+    const aliases = pr2OptionalStringArray(b.aliases, "aliases");
+    if (aliases !== undefined) wsPayload.aliases = aliases;
+    const labels = pr2OptionalStringArray(b.labels, "labels");
+    if (labels !== undefined) wsPayload.labels = labels;
+    await loadHaCredentials();
+    let result: unknown;
+    try {
+      result = await getHaWsClient().wsCall(
+        "config/area_registry/create",
+        wsPayload,
+        HA_REGISTRY_WS_TIMEOUT_MS,
+      );
+    } catch (err) {
+      throw wrapHaWsError("config/area_registry/create", err);
+    }
+    const r = (result ?? {}) as Record<string, unknown>;
+    const area_id = typeof r.area_id === "string" ? r.area_id : null;
+    sendJson(res, 200, { ok: true, area_id, area: result });
+  });
+
+  // PUT /api/v1/channels/ha/areas/:id — WS `config/area_registry/update`.
+  // Body fields all optional — only fields the caller sets get forwarded.
+  addRoute(
+    "PUT",
+    "/api/v1/channels/ha/areas/:id",
+    async ({ res, body, params }) => {
+      const area_id = assertRegistryId(params.id, "area");
+      const b = pr2AssertBodyObject(body);
+      const wsPayload: Record<string, unknown> = { area_id };
+      const name = pr2OptionalString(b.name, "name", 128);
+      if (name !== undefined) wsPayload.name = name;
+      // icon/picture/floor_id accept null (unset) — use pr2NullableString.
+      const icon = pr2NullableString(b.icon, "icon", 64);
+      if (icon.present) wsPayload.icon = icon.value;
+      const picture = pr2NullableString(b.picture, "picture", 256);
+      if (picture.present) wsPayload.picture = picture.value;
+      const floorId = pr2NullableString(b.floor_id, "floor_id", 128);
+      if (floorId.present) wsPayload.floor_id = floorId.value;
+      const aliases = pr2OptionalStringArray(b.aliases, "aliases");
+      if (aliases !== undefined) wsPayload.aliases = aliases;
+      const labels = pr2OptionalStringArray(b.labels, "labels");
+      if (labels !== undefined) wsPayload.labels = labels;
+      await loadHaCredentials();
+      let result: unknown;
+      try {
+        result = await getHaWsClient().wsCall(
+          "config/area_registry/update",
+          wsPayload,
+          HA_REGISTRY_WS_TIMEOUT_MS,
+        );
+      } catch (err) {
+        throw wrapHaWsError("config/area_registry/update", err);
+      }
+      sendJson(res, 200, { ok: true, area_id, area: result });
+    },
+  );
+
+  // DELETE /api/v1/channels/ha/areas/:id — WS `config/area_registry/delete`.
+  // No gate — areas are cheap to recreate; HA itself moves any
+  // entities/devices in the area to "no area" on delete (non-destructive
+  // to the underlying things).
+  addRoute(
+    "DELETE",
+    "/api/v1/channels/ha/areas/:id",
+    async ({ res, params }) => {
+      const area_id = assertRegistryId(params.id, "area");
+      await loadHaCredentials();
+      let result: unknown;
+      try {
+        result = await getHaWsClient().wsCall(
+          "config/area_registry/delete",
+          { area_id },
+          HA_REGISTRY_WS_TIMEOUT_MS,
+        );
+      } catch (err) {
+        throw wrapHaWsError("config/area_registry/delete", err);
+      }
+      sendJson(res, 200, { ok: true, area_id, data: result });
+    },
+  );
+
+  // ── devices ──────────────────────────────────────────────────────────
+
+  // GET /api/v1/channels/ha/devices — WS `config/device_registry/list`.
+  addRoute("GET", "/api/v1/channels/ha/devices", async ({ res }) => {
+    await loadHaCredentials();
+    let result: unknown;
+    try {
+      result = await getHaWsClient().wsCall(
+        "config/device_registry/list",
+        {},
+        HA_REGISTRY_WS_TIMEOUT_MS,
+      );
+    } catch (err) {
+      throw wrapHaWsError("config/device_registry/list", err);
+    }
+    const devices = Array.isArray(result) ? result : [];
+    sendJson(res, 200, { ok: true, devices });
+  });
+
+  // GET /api/v1/channels/ha/devices/:id — pull one device by reading the
+  // list and filtering. HA doesn't expose a per-device `get` WS verb on
+  // every version, and the list is cheap (~50ms on a local HA), so this
+  // is the durable shape.
+  addRoute(
+    "GET",
+    "/api/v1/channels/ha/devices/:id",
+    async ({ res, params }) => {
+      const device_id = assertRegistryId(params.id, "device");
+      await loadHaCredentials();
+      let result: unknown;
+      try {
+        result = await getHaWsClient().wsCall(
+          "config/device_registry/list",
+          {},
+          HA_REGISTRY_WS_TIMEOUT_MS,
+        );
+      } catch (err) {
+        throw wrapHaWsError("config/device_registry/list", err);
+      }
+      const devices = Array.isArray(result) ? result : [];
+      const device = devices.find((d) => {
+        const dd = d as Record<string, unknown>;
+        return dd.id === device_id;
+      });
+      if (!device) {
+        throw new NotFoundError(`device ${device_id} not found`);
+      }
+      sendJson(res, 200, { ok: true, device_id, device });
+    },
+  );
+
+  // PUT /api/v1/channels/ha/devices/:id — WS
+  // `config/device_registry/update`. Fields the caller may set:
+  // name_by_user / area_id / disabled_by / labels. HA accepts `null` to
+  // clear name_by_user / area_id / disabled_by.
+  addRoute(
+    "PUT",
+    "/api/v1/channels/ha/devices/:id",
+    async ({ res, body, params }) => {
+      const device_id = assertRegistryId(params.id, "device");
+      const b = pr2AssertBodyObject(body);
+      const wsPayload: Record<string, unknown> = { device_id };
+      const nameByUser = pr2NullableString(b.name_by_user, "name_by_user", 128);
+      if (nameByUser.present) wsPayload.name_by_user = nameByUser.value;
+      const areaId = pr2NullableString(b.area_id, "area_id", 128);
+      if (areaId.present) wsPayload.area_id = areaId.value;
+      const disabledBy = pr2NullableString(b.disabled_by, "disabled_by", 64);
+      if (disabledBy.present) wsPayload.disabled_by = disabledBy.value;
+      const labels = pr2OptionalStringArray(b.labels, "labels");
+      if (labels !== undefined) wsPayload.labels = labels;
+      await loadHaCredentials();
+      let result: unknown;
+      try {
+        result = await getHaWsClient().wsCall(
+          "config/device_registry/update",
+          wsPayload,
+          HA_REGISTRY_WS_TIMEOUT_MS,
+        );
+      } catch (err) {
+        throw wrapHaWsError("config/device_registry/update", err);
+      }
+      sendJson(res, 200, { ok: true, device_id, device: result });
+    },
+  );
+
+  // ── entities ─────────────────────────────────────────────────────────
+
+  // GET /api/v1/channels/ha/entities — WS `config/entity_registry/list`.
+  addRoute("GET", "/api/v1/channels/ha/entities", async ({ res }) => {
+    await loadHaCredentials();
+    let result: unknown;
+    try {
+      result = await getHaWsClient().wsCall(
+        "config/entity_registry/list",
+        {},
+        HA_REGISTRY_WS_TIMEOUT_MS,
+      );
+    } catch (err) {
+      throw wrapHaWsError("config/entity_registry/list", err);
+    }
+    const entities = Array.isArray(result) ? result : [];
+    sendJson(res, 200, { ok: true, entities });
+  });
+
+  // GET /api/v1/channels/ha/entities/:id — WS `config/entity_registry/get`.
+  addRoute(
+    "GET",
+    "/api/v1/channels/ha/entities/:id",
+    async ({ res, params }) => {
+      const entity_id = assertPr2EntityId(params.id);
+      await loadHaCredentials();
+      let result: unknown;
+      try {
+        result = await getHaWsClient().wsCall(
+          "config/entity_registry/get",
+          { entity_id },
+          HA_REGISTRY_WS_TIMEOUT_MS,
+        );
+      } catch (err) {
+        throw wrapHaWsError("config/entity_registry/get", err);
+      }
+      if (result === null || result === undefined) {
+        throw new NotFoundError(`entity ${entity_id} not found`);
+      }
+      sendJson(res, 200, { ok: true, entity_id, entity: result });
+    },
+  );
+
+  // PUT /api/v1/channels/ha/entities/:id — WS
+  // `config/entity_registry/update`. Fields the caller may set:
+  // name / icon / area_id / hidden_by / disabled_by / labels / new_entity_id /
+  // aliases. HA accepts `null` to clear most of these.
+  addRoute(
+    "PUT",
+    "/api/v1/channels/ha/entities/:id",
+    async ({ res, body, params }) => {
+      const entity_id = assertPr2EntityId(params.id);
+      const b = pr2AssertBodyObject(body);
+      const wsPayload: Record<string, unknown> = { entity_id };
+      const name = pr2NullableString(b.name, "name", 128);
+      if (name.present) wsPayload.name = name.value;
+      const icon = pr2NullableString(b.icon, "icon", 64);
+      if (icon.present) wsPayload.icon = icon.value;
+      const areaId = pr2NullableString(b.area_id, "area_id", 128);
+      if (areaId.present) wsPayload.area_id = areaId.value;
+      const hiddenBy = pr2NullableString(b.hidden_by, "hidden_by", 64);
+      if (hiddenBy.present) wsPayload.hidden_by = hiddenBy.value;
+      const disabledBy = pr2NullableString(b.disabled_by, "disabled_by", 64);
+      if (disabledBy.present) wsPayload.disabled_by = disabledBy.value;
+      const labels = pr2OptionalStringArray(b.labels, "labels");
+      if (labels !== undefined) wsPayload.labels = labels;
+      // new_entity_id supports renaming the dotted form itself; same
+      // entity-id regex applies.
+      if (b.new_entity_id !== undefined && b.new_entity_id !== null) {
+        if (typeof b.new_entity_id !== "string") {
+          throw new ValidationError("new_entity_id must be a string");
+        }
+        assertPr2EntityId(b.new_entity_id);
+        wsPayload.new_entity_id = b.new_entity_id;
+      }
+      const aliases = pr2OptionalStringArray(b.aliases, "aliases");
+      if (aliases !== undefined) wsPayload.aliases = aliases;
+      await loadHaCredentials();
+      let result: unknown;
+      try {
+        result = await getHaWsClient().wsCall(
+          "config/entity_registry/update",
+          wsPayload,
+          HA_REGISTRY_WS_TIMEOUT_MS,
+        );
+      } catch (err) {
+        throw wrapHaWsError("config/entity_registry/update", err);
+      }
+      sendJson(res, 200, { ok: true, entity_id, entity: result });
+    },
+  );
+
+  // DELETE /api/v1/channels/ha/entities/:id — WS
+  // `config/entity_registry/remove`. Only removable entities (those
+  // marked `entity_category=config` or whose integration allows
+  // removal) can be deleted; HA returns an error otherwise, which we
+  // propagate through wrapHaWsError as 502.
+  //
+  // No gate — HA's own UI exposes this with no confirmation; the agent
+  // contract is just "I'm cleaning up an orphaned entity".
+  addRoute(
+    "DELETE",
+    "/api/v1/channels/ha/entities/:id",
+    async ({ res, params }) => {
+      const entity_id = assertPr2EntityId(params.id);
+      await loadHaCredentials();
+      let result: unknown;
+      try {
+        result = await getHaWsClient().wsCall(
+          "config/entity_registry/remove",
+          { entity_id },
+          HA_REGISTRY_WS_TIMEOUT_MS,
+        );
+      } catch (err) {
+        throw wrapHaWsError("config/entity_registry/remove", err);
+      }
+      sendJson(res, 200, { ok: true, entity_id, data: result });
+    },
+  );
+
+  // ── labels ───────────────────────────────────────────────────────────
+
+  // GET /api/v1/channels/ha/labels — WS `config/label_registry/list`.
+  addRoute("GET", "/api/v1/channels/ha/labels", async ({ res }) => {
+    await loadHaCredentials();
+    let result: unknown;
+    try {
+      result = await getHaWsClient().wsCall(
+        "config/label_registry/list",
+        {},
+        HA_REGISTRY_WS_TIMEOUT_MS,
+      );
+    } catch (err) {
+      throw wrapHaWsError("config/label_registry/list", err);
+    }
+    const labels = Array.isArray(result) ? result : [];
+    sendJson(res, 200, { ok: true, labels });
+  });
+
+  // POST /api/v1/channels/ha/labels — WS `config/label_registry/create`.
+  // Body: { name (required), color?, icon?, description? }.
+  addRoute("POST", "/api/v1/channels/ha/labels", async ({ res, body }) => {
+    const b = pr2AssertBodyObject(body);
+    const name = pr2OptionalString(b.name, "name", 128);
+    if (name === undefined) {
+      throw new ValidationError("name is required");
+    }
+    const wsPayload: Record<string, unknown> = { name };
+    const color = pr2OptionalString(b.color, "color", 32);
+    if (color !== undefined) wsPayload.color = color;
+    const icon = pr2OptionalString(b.icon, "icon", 64);
+    if (icon !== undefined) wsPayload.icon = icon;
+    const description = pr2OptionalString(b.description, "description", 256);
+    if (description !== undefined) wsPayload.description = description;
+    await loadHaCredentials();
+    let result: unknown;
+    try {
+      result = await getHaWsClient().wsCall(
+        "config/label_registry/create",
+        wsPayload,
+        HA_REGISTRY_WS_TIMEOUT_MS,
+      );
+    } catch (err) {
+      throw wrapHaWsError("config/label_registry/create", err);
+    }
+    const r = (result ?? {}) as Record<string, unknown>;
+    const label_id = typeof r.label_id === "string" ? r.label_id : null;
+    sendJson(res, 200, { ok: true, label_id, label: result });
+  });
+
+  // PUT /api/v1/channels/ha/labels/:id — WS `config/label_registry/update`.
+  addRoute(
+    "PUT",
+    "/api/v1/channels/ha/labels/:id",
+    async ({ res, body, params }) => {
+      const label_id = assertRegistryId(params.id, "label");
+      const b = pr2AssertBodyObject(body);
+      const wsPayload: Record<string, unknown> = { label_id };
+      const name = pr2OptionalString(b.name, "name", 128);
+      if (name !== undefined) wsPayload.name = name;
+      const color = pr2NullableString(b.color, "color", 32);
+      if (color.present) wsPayload.color = color.value;
+      const icon = pr2NullableString(b.icon, "icon", 64);
+      if (icon.present) wsPayload.icon = icon.value;
+      const description = pr2NullableString(b.description, "description", 256);
+      if (description.present) wsPayload.description = description.value;
+      await loadHaCredentials();
+      let result: unknown;
+      try {
+        result = await getHaWsClient().wsCall(
+          "config/label_registry/update",
+          wsPayload,
+          HA_REGISTRY_WS_TIMEOUT_MS,
+        );
+      } catch (err) {
+        throw wrapHaWsError("config/label_registry/update", err);
+      }
+      sendJson(res, 200, { ok: true, label_id, label: result });
+    },
+  );
+
+  // DELETE /api/v1/channels/ha/labels/:id — WS `config/label_registry/delete`.
+  // HA removes the label binding from any area/device/entity that
+  // referenced it (the things themselves stay).
+  addRoute(
+    "DELETE",
+    "/api/v1/channels/ha/labels/:id",
+    async ({ res, params }) => {
+      const label_id = assertRegistryId(params.id, "label");
+      await loadHaCredentials();
+      let result: unknown;
+      try {
+        result = await getHaWsClient().wsCall(
+          "config/label_registry/delete",
+          { label_id },
+          HA_REGISTRY_WS_TIMEOUT_MS,
+        );
+      } catch (err) {
+        throw wrapHaWsError("config/label_registry/delete", err);
+      }
+      sendJson(res, 200, { ok: true, label_id, data: result });
+    },
+  );
+}
+
+// === END Tier 4 PR2 ═══════════════════════════════════════════════════
+

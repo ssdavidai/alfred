@@ -24,6 +24,7 @@ import {
   HASS_INTEGRATION_TOOLS,
   HASS_USER_TOOLS,
   HASS_HACS_TOOLS,
+  HASS_PR2_TOOLS,
 } from "./hass.js";
 import { SUPPORTED_APPS, isAppId, getToolsForApp } from "./registry.js";
 
@@ -35,7 +36,7 @@ function getTool(name: string) {
 
 // ─── catalogue shape ────────────────────────────────────────────────────
 
-test("hass catalogue: exactly 69 tools (11 read + 15 write + 10 PR6 addon + 10 PR7 core+backup + 7 PR4 integration + 8 PR8 user + 8 PR5 HACS)", () => {
+test("hass catalogue: exactly 85 tools (11 read + 15 write + 10 PR6 addon + 10 PR7 core+backup + 7 PR4 integration + 8 PR8 user + 8 PR5 HACS + 16 PR2 registries)", () => {
   assert.equal(HASS_READ_TOOLS.length, 11);
   // After #115 PR3 splice: PR4's 5 + PR3's 10 = 15 writes.
   assert.equal(HASS_DEFERRED_TOOLS.length, 15);
@@ -50,14 +51,16 @@ test("hass catalogue: exactly 69 tools (11 read + 15 write + 10 PR6 addon + 10 P
   assert.equal(HASS_USER_TOOLS.length, 8);
   // PR5: 8 HACS tools.
   assert.equal(HASS_HACS_TOOLS.length, 8);
-  assert.equal(ALL_HASS_TOOLS.length, 69);
+  // PR2: 16 registries CRUD tools (areas/devices/entities/labels).
+  assert.equal(HASS_PR2_TOOLS.length, 16);
+  assert.equal(ALL_HASS_TOOLS.length, 85);
 });
 
-test("registry: hass is a supported app and registers all 69 tools", () => {
+test("registry: hass is a supported app and registers all 85 tools", () => {
   assert.ok(isAppId("hass"));
   assert.ok((SUPPORTED_APPS as Set<string>).has("hass"));
   const tools = getToolsForApp("hass");
-  assert.equal(tools.length, 69);
+  assert.equal(tools.length, 85);
 });
 
 test("hass: every tool name is unique", () => {
@@ -2015,5 +2018,361 @@ test("HACS PR5: non-gated tools (info/search/repo_info/add_custom_repo/refresh/p
     // No decision_ref in any of these.
     const r = t.inputSchema.safeParse(sample);
     assert.equal(r.success, true, `${name} must accept input WITHOUT decision_ref`);
+  }
+});
+
+// ─── #115 PR2 — registries CRUD tools (areas/devices/entities/labels) ──
+
+const PR2_TOOL_NAMES = [
+  "ha__area_create",
+  "ha__area_update",
+  "ha__area_delete",
+  "ha__device_set_area",
+  "ha__device_set_name",
+  "ha__device_disable",
+  "ha__device_label",
+  "ha__entity_rename",
+  "ha__entity_set_area",
+  "ha__entity_hide",
+  "ha__entity_disable",
+  "ha__entity_label",
+  "ha__label_create",
+  "ha__label_update",
+  "ha__label_delete",
+  "ha__label_apply",
+];
+
+test("PR2: every registries tool is registered and unique", () => {
+  for (const name of PR2_TOOL_NAMES) {
+    const t = HASS_PR2_TOOLS.find((x) => x.name === name);
+    assert.ok(t, `${name} missing from HASS_PR2_TOOLS`);
+  }
+  const names = HASS_PR2_TOOLS.map((t) => t.name);
+  assert.equal(new Set(names).size, names.length);
+  // No tool name from PR2 collides with an earlier wave.
+  for (const t of HASS_PR2_TOOLS) {
+    const matches = ALL_HASS_TOOLS.filter((x) => x.name === t.name).length;
+    assert.equal(matches, 1, `${t.name} must appear exactly once in ALL_HASS_TOOLS`);
+  }
+});
+
+test("PR2 ha__area_create: name required; POST /areas; optional fields ride along", () => {
+  const t = getTool("ha__area_create");
+  assert.equal(t.inputSchema.safeParse({}).success, false, "name required");
+  const minimal = { name: "Garage" };
+  assert.equal(t.inputSchema.safeParse(minimal).success, true);
+  const r1 = t.buildRequest(minimal);
+  assert.equal(r1.method, "POST");
+  assert.equal(r1.path, "/api/v1/channels/ha/areas");
+  assert.deepEqual(r1.body, { name: "Garage" });
+  // optional fields pass through.
+  const full = {
+    name: "Master Bedroom",
+    icon: "mdi:bed",
+    picture: "/local/master.jpg",
+    floor_id: "upstairs",
+    aliases: ["main bedroom", "our room"],
+    labels: ["bedtime"],
+  };
+  assert.equal(t.inputSchema.safeParse(full).success, true);
+  const r2 = t.buildRequest(full);
+  assert.deepEqual(r2.body, full);
+});
+
+test("PR2 ha__area_update: area_id required, optional name/icon/etc.; PUT /areas/:id", () => {
+  const t = getTool("ha__area_update");
+  assert.equal(t.inputSchema.safeParse({}).success, false, "area_id required");
+  // bad id chars rejected.
+  assert.equal(
+    t.inputSchema.safeParse({ area_id: "../etc" }).success,
+    false,
+    "URL-traversal guard",
+  );
+  // valid with just area_id.
+  const minimal = { area_id: "kitchen" };
+  assert.equal(t.inputSchema.safeParse(minimal).success, true);
+  const r1 = t.buildRequest(minimal);
+  assert.equal(r1.method, "PUT");
+  assert.equal(r1.path, "/api/v1/channels/ha/areas/kitchen");
+  assert.deepEqual(r1.body, {});
+  // null icon clears the icon (HA semantics).
+  const withNull = { area_id: "kitchen", icon: null, name: "Lounge" };
+  assert.equal(t.inputSchema.safeParse(withNull).success, true);
+  const r2 = t.buildRequest(withNull);
+  assert.deepEqual(r2.body, { name: "Lounge", icon: null });
+});
+
+test("PR2 ha__area_delete: area_id required, NO body, DELETE /areas/:id", () => {
+  const t = getTool("ha__area_delete");
+  assert.equal(t.inputSchema.safeParse({}).success, false);
+  const r = t.buildRequest({ area_id: "kitchen" });
+  assert.equal(r.method, "DELETE");
+  assert.equal(r.path, "/api/v1/channels/ha/areas/kitchen");
+  assert.equal(r.body, undefined);
+});
+
+test("PR2 ha__device_set_area: device_id + area_id (nullable); PUT /devices/:id with area_id only", () => {
+  const t = getTool("ha__device_set_area");
+  // both required.
+  assert.equal(t.inputSchema.safeParse({}).success, false);
+  assert.equal(
+    t.inputSchema.safeParse({ device_id: "abc123" }).success,
+    false,
+    "area_id required (null allowed)",
+  );
+  // null area_id is valid (unassign).
+  const unassign = { device_id: "abc123def456", area_id: null };
+  assert.equal(t.inputSchema.safeParse(unassign).success, true);
+  const r1 = t.buildRequest(unassign);
+  assert.equal(r1.method, "PUT");
+  assert.equal(r1.path, "/api/v1/channels/ha/devices/abc123def456");
+  assert.deepEqual(r1.body, { area_id: null });
+  // string area_id.
+  const r2 = t.buildRequest({ device_id: "abc123def456", area_id: "garage" });
+  assert.deepEqual(r2.body, { area_id: "garage" });
+});
+
+test("PR2 ha__device_set_name: PUT /devices/:id with name_by_user; null restores integration name", () => {
+  const t = getTool("ha__device_set_name");
+  // null name is valid (clear).
+  const args = { device_id: "abc123", name: "Living Room Sconce" };
+  assert.equal(t.inputSchema.safeParse(args).success, true);
+  const r = t.buildRequest(args);
+  assert.equal(r.method, "PUT");
+  assert.equal(r.path, "/api/v1/channels/ha/devices/abc123");
+  assert.deepEqual(r.body, { name_by_user: "Living Room Sconce" });
+  // null clears.
+  const clear = { device_id: "abc123", name: null };
+  assert.equal(t.inputSchema.safeParse(clear).success, true);
+  assert.deepEqual(t.buildRequest(clear).body, { name_by_user: null });
+});
+
+test("PR2 ha__device_disable: PUT /devices/:id with disabled_by; only 'user'/null sane values", () => {
+  const t = getTool("ha__device_disable");
+  // 'user' valid.
+  assert.equal(
+    t.inputSchema.safeParse({ device_id: "abc", disabled_by: "user" }).success,
+    true,
+  );
+  // null valid (re-enable).
+  assert.equal(
+    t.inputSchema.safeParse({ device_id: "abc", disabled_by: null }).success,
+    true,
+  );
+  // bogus enum value rejected.
+  assert.equal(
+    t.inputSchema.safeParse({ device_id: "abc", disabled_by: "alfred" })
+      .success,
+    false,
+  );
+  const r = t.buildRequest({ device_id: "abc", disabled_by: "user" });
+  assert.equal(r.path, "/api/v1/channels/ha/devices/abc");
+  assert.deepEqual(r.body, { disabled_by: "user" });
+});
+
+test("PR2 ha__device_label: full-replace labels; PUT /devices/:id with labels array", () => {
+  const t = getTool("ha__device_label");
+  // labels required.
+  assert.equal(t.inputSchema.safeParse({ device_id: "abc" }).success, false);
+  // empty array is valid (clears labels).
+  assert.equal(
+    t.inputSchema.safeParse({ device_id: "abc", labels: [] }).success,
+    true,
+  );
+  const args = { device_id: "abc", labels: ["critical", "bedtime"] };
+  assert.equal(t.inputSchema.safeParse(args).success, true);
+  const r = t.buildRequest(args);
+  assert.equal(r.method, "PUT");
+  assert.deepEqual(r.body, { labels: ["critical", "bedtime"] });
+});
+
+test("PR2 ha__entity_rename: entity_id (dotted) + name (nullable); PUT /entities/:id", () => {
+  const t = getTool("ha__entity_rename");
+  // bad entity_id format rejected.
+  assert.equal(
+    t.inputSchema.safeParse({ entity_id: "NoDot", name: "x" }).success,
+    false,
+  );
+  assert.equal(
+    t.inputSchema.safeParse({ entity_id: "light.kitchen_main", name: "Kitchen Main" })
+      .success,
+    true,
+  );
+  const r = t.buildRequest({
+    entity_id: "light.kitchen_main",
+    name: "Kitchen Main",
+    icon: "mdi:lightbulb",
+  });
+  assert.equal(r.method, "PUT");
+  assert.equal(r.path, "/api/v1/channels/ha/entities/light.kitchen_main");
+  assert.deepEqual(r.body, { name: "Kitchen Main", icon: "mdi:lightbulb" });
+});
+
+test("PR2 ha__entity_set_area: PUT /entities/:id with area_id; null clears the override", () => {
+  const t = getTool("ha__entity_set_area");
+  assert.equal(
+    t.inputSchema.safeParse({ entity_id: "light.kitchen_main", area_id: "kitchen" })
+      .success,
+    true,
+  );
+  assert.equal(
+    t.inputSchema.safeParse({ entity_id: "light.kitchen_main", area_id: null })
+      .success,
+    true,
+  );
+  const r = t.buildRequest({
+    entity_id: "light.kitchen_main",
+    area_id: "kitchen",
+  });
+  assert.equal(r.method, "PUT");
+  assert.equal(r.path, "/api/v1/channels/ha/entities/light.kitchen_main");
+  assert.deepEqual(r.body, { area_id: "kitchen" });
+});
+
+test("PR2 ha__entity_hide and ha__entity_disable: PUT /entities/:id with the right field", () => {
+  const tHide = getTool("ha__entity_hide");
+  const rHide = tHide.buildRequest({
+    entity_id: "binary_sensor.diag_n",
+    hidden_by: "user",
+  });
+  assert.deepEqual(rHide.body, { hidden_by: "user" });
+  // bogus enum rejected.
+  assert.equal(
+    tHide.inputSchema.safeParse({
+      entity_id: "binary_sensor.x",
+      hidden_by: "alfred",
+    }).success,
+    false,
+  );
+
+  const tDis = getTool("ha__entity_disable");
+  const rDis = tDis.buildRequest({
+    entity_id: "sensor.cloud_thing",
+    disabled_by: null,
+  });
+  assert.deepEqual(rDis.body, { disabled_by: null });
+});
+
+test("PR2 ha__entity_label: PUT /entities/:id with labels array", () => {
+  const t = getTool("ha__entity_label");
+  const args = { entity_id: "light.kitchen_main", labels: ["security"] };
+  assert.equal(t.inputSchema.safeParse(args).success, true);
+  const r = t.buildRequest(args);
+  assert.equal(r.path, "/api/v1/channels/ha/entities/light.kitchen_main");
+  assert.deepEqual(r.body, { labels: ["security"] });
+});
+
+test("PR2 ha__label_create: name required; POST /labels with optional fields", () => {
+  const t = getTool("ha__label_create");
+  assert.equal(t.inputSchema.safeParse({}).success, false);
+  const minimal = { name: "Bedtime" };
+  assert.equal(t.inputSchema.safeParse(minimal).success, true);
+  assert.deepEqual(t.buildRequest(minimal).body, { name: "Bedtime" });
+  const full = {
+    name: "Critical",
+    color: "red",
+    icon: "mdi:alert",
+    description: "Devices that must always work.",
+  };
+  assert.equal(t.inputSchema.safeParse(full).success, true);
+  const r = t.buildRequest(full);
+  assert.equal(r.method, "POST");
+  assert.equal(r.path, "/api/v1/channels/ha/labels");
+  assert.deepEqual(r.body, full);
+});
+
+test("PR2 ha__label_update and ha__label_delete: PUT and DELETE /labels/:id", () => {
+  const tUpd = getTool("ha__label_update");
+  assert.equal(tUpd.inputSchema.safeParse({}).success, false);
+  const upd = {
+    label_id: "bedtime",
+    name: "Evening Routine",
+    color: null,
+    icon: "mdi:weather-night",
+  };
+  assert.equal(tUpd.inputSchema.safeParse(upd).success, true);
+  const rUpd = tUpd.buildRequest(upd);
+  assert.equal(rUpd.method, "PUT");
+  assert.equal(rUpd.path, "/api/v1/channels/ha/labels/bedtime");
+  assert.deepEqual(rUpd.body, {
+    name: "Evening Routine",
+    color: null,
+    icon: "mdi:weather-night",
+  });
+
+  const tDel = getTool("ha__label_delete");
+  assert.equal(tDel.inputSchema.safeParse({}).success, false);
+  const rDel = tDel.buildRequest({ label_id: "bedtime" });
+  assert.equal(rDel.method, "DELETE");
+  assert.equal(rDel.path, "/api/v1/channels/ha/labels/bedtime");
+  assert.equal(rDel.body, undefined);
+});
+
+test("PR2 ha__label_apply: target_kind routes to the right registry PUT, body carries [label_id]", () => {
+  const t = getTool("ha__label_apply");
+  // bad enum rejected.
+  assert.equal(
+    t.inputSchema.safeParse({
+      target_kind: "thingie",
+      target_id: "x",
+      label_id: "y",
+    }).success,
+    false,
+  );
+  // area.
+  const rA = t.buildRequest({
+    target_kind: "area",
+    target_id: "kitchen",
+    label_id: "critical",
+  });
+  assert.equal(rA.path, "/api/v1/channels/ha/areas/kitchen");
+  assert.deepEqual(rA.body, { labels: ["critical"] });
+  // device.
+  const rD = t.buildRequest({
+    target_kind: "device",
+    target_id: "abc123",
+    label_id: "bedtime",
+  });
+  assert.equal(rD.path, "/api/v1/channels/ha/devices/abc123");
+  assert.deepEqual(rD.body, { labels: ["bedtime"] });
+  // entity.
+  const rE = t.buildRequest({
+    target_kind: "entity",
+    target_id: "light.kitchen_main",
+    label_id: "security",
+  });
+  assert.equal(rE.path, "/api/v1/channels/ha/entities/light.kitchen_main");
+  assert.deepEqual(rE.body, { labels: ["security"] });
+});
+
+test("PR2: every tool description has 'No approval gate' AND mentions a list-tool resolution hint", () => {
+  // Sir's locked YES: cheap reversible verbs run free. Tests pin the
+  // tool docs so a future agent doesn't quietly add a gate.
+  for (const t of HASS_PR2_TOOLS) {
+    assert.ok(
+      /no approval gate/i.test(t.description),
+      `${t.name} description must say 'No approval gate' to pin the locked-YES default`,
+    );
+  }
+  // Resolution hints — every CRUD tool whose id comes from the principal
+  // (device/entity/label updates) should point at the list endpoint that
+  // resolves the id. Areas are slug-shaped + small in number so the
+  // mention isn't strictly required for area updates/deletes.
+  const ID_TOOL_HINTS: Record<string, RegExp> = {
+    ha__device_set_area: /ha__list_devices|ha__list_areas/,
+    ha__device_set_name: /ha__list_devices/,
+    ha__device_label: /ha__list_devices/,
+    ha__entity_rename: /ha__list_entities/,
+    ha__entity_set_area: /ha__list_entities|ha__list_areas/,
+    ha__entity_label: /ha__list_entities/,
+    ha__label_update: /ha__list_labels/,
+    ha__label_delete: /ha__list_labels/,
+  };
+  for (const [name, re] of Object.entries(ID_TOOL_HINTS)) {
+    const t = getTool(name);
+    assert.ok(
+      re.test(t.description),
+      `${name} description should hint at the list tool that resolves ids (${re})`,
+    );
   }
 });
