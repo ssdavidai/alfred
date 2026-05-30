@@ -1276,6 +1276,98 @@ async function fetchToolkitTools(
 }
 
 // ---------------------------------------------------------------------------
+// Composio executor — HTTP sidecar (default) with docker-exec fallback.
+// ---------------------------------------------------------------------------
+//
+// Phase A latency cut. The legacy path shells out:
+//
+//     docker exec alfred-learn python3 -c "<inline script>"
+//
+// …which spends ~3-4 seconds spinning up Python + importing the Composio SDK
+// on every call. A long-running FastAPI sidecar at port 8788 inside the
+// alfred-learn container keeps the SDK warm; calls now take ~300-500 ms.
+//
+// COMPOSIO_EXECUTOR=docker forces the old path as an emergency rollback.
+// =========================================================================
+
+const COMPOSIO_EXECUTOR = (process.env.COMPOSIO_EXECUTOR ?? "http").toLowerCase();
+const COMPOSIO_SIDECAR_URL =
+  process.env.COMPOSIO_SIDECAR_URL ?? "http://alfred-learn:8788";
+const COMPOSIO_SIDECAR_TIMEOUT_MS = Number(
+  process.env.COMPOSIO_SIDECAR_TIMEOUT_MS ?? 60_000,
+);
+
+interface ComposioExecArgs {
+  apiKey: string;
+  userId: string;
+  actionSlug: string;
+  arguments: Record<string, unknown>;
+  connectedAccountId: string;
+}
+
+/**
+ * Execute a Composio action against alfred-learn's sidecar. Falls back to a
+ * docker-exec shell-out if COMPOSIO_EXECUTOR=docker is set (rollback knob).
+ *
+ * Returns the raw result dict from ``execute_action`` — including the
+ * action-level error envelope ({error: "...", action: "..."}). HTTP-layer
+ * failures throw ApiError so the route handler returns a useful status.
+ */
+export async function executeComposioAction(
+  args: ComposioExecArgs,
+): Promise<Record<string, unknown>> {
+  if (COMPOSIO_EXECUTOR === "http") {
+    let resp: Response;
+    try {
+      resp = await fetch(`${COMPOSIO_SIDECAR_URL}/composio/execute`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: args.actionSlug,
+          arguments: args.arguments,
+          user_id: args.userId,
+          connected_account_id: args.connectedAccountId,
+        }),
+        signal: AbortSignal.timeout(COMPOSIO_SIDECAR_TIMEOUT_MS),
+      });
+    } catch (err: any) {
+      // Network / timeout / DNS failures land here.
+      throw new ApiError(
+        502,
+        "COMPOSIO_SIDECAR_UNREACHABLE",
+        `Composio sidecar unreachable: ${err?.message ?? String(err)}`,
+      );
+    }
+    if (!resp.ok) {
+      let body: any = {};
+      try { body = await resp.json(); } catch { /* ignore */ }
+      const code = body?.error?.code ?? "COMPOSIO_SIDECAR_HTTP_ERROR";
+      const message =
+        body?.error?.message ?? `Composio sidecar returned HTTP ${resp.status}`;
+      throw new ApiError(502, code, message);
+    }
+    return (await resp.json()) as Record<string, unknown>;
+  }
+
+  // Fallback: docker exec (legacy slow path).
+  const script = `
+import json, os
+os.environ.setdefault("COMPOSIO_API_KEY", ${JSON.stringify(args.apiKey)})
+os.environ["COMPOSIO_USER_ID"] = ${JSON.stringify(args.userId)}
+from src.integrations.composio_client import execute_action
+result = execute_action(
+    ${JSON.stringify(args.actionSlug)},
+    json.loads(${JSON.stringify(JSON.stringify(args.arguments))}),
+    user_id=${JSON.stringify(args.userId)},
+    connected_account_id=${JSON.stringify(args.connectedAccountId)},
+)
+print(json.dumps(result, default=str))
+`.trim();
+  const output = await dockerExec("alfred-learn", ["python3", "-c", script]);
+  return JSON.parse(output.trim()) as Record<string, unknown>;
+}
+
+// ---------------------------------------------------------------------------
 // Route registration
 // ---------------------------------------------------------------------------
 
@@ -3094,26 +3186,16 @@ export function registerIntegrationRoutes(): void {
     }
 
     try {
-      // Execute via docker exec into alfred-learn container (Python SDK).
-      // Pass both COMPOSIO_API_KEY and COMPOSIO_USER_ID so the Python client
-      // scopes the call correctly — the alfred-learn container already has
-      // these from its env_file, but we set them explicitly for robustness.
-      const script = `
-import json, os, sys
-os.environ.setdefault("COMPOSIO_API_KEY", ${JSON.stringify(apiKey)})
-os.environ["COMPOSIO_USER_ID"] = ${JSON.stringify(userId)}
-from src.integrations.composio_client import execute_action
-result = execute_action(
-    ${JSON.stringify(actionSlug)},
-    json.loads(${JSON.stringify(JSON.stringify(mergedArgs))}),
-    user_id=${JSON.stringify(userId)},
-    connected_account_id=${JSON.stringify(connectedAccountId)},
-)
-print(json.dumps(result, default=str))
-`.trim();
-
-      const output = await dockerExec("alfred-learn", ["python3", "-c", script]);
-      const result = JSON.parse(output.trim());
+      // Execute via the alfred-learn Composio sidecar (HTTP) by default —
+      // ~9× faster than the docker-exec shell-out it replaces. Set
+      // COMPOSIO_EXECUTOR=docker for emergency rollback.
+      const result = await executeComposioAction({
+        apiKey,
+        userId,
+        actionSlug,
+        arguments: mergedArgs as Record<string, unknown>,
+        connectedAccountId,
+      });
       let response: unknown = { action: actionSlug, toolkit, result };
       // Strip Gmail metadata-mode bulk fields (see stripGmailMetadataResponse
       // for the policy). Composio's adapter ignores `format: "metadata"` and
@@ -3127,7 +3209,10 @@ print(json.dumps(result, default=str))
       }
       sendJson(res, 200, response);
     } catch (err: any) {
-      sendJson(res, 500, {
+      // ApiError from executeComposioAction carries a useful status code
+      // (e.g. 502 sidecar unreachable). Preserve it; otherwise 500.
+      const status = err instanceof ApiError ? err.statusCode : 500;
+      sendJson(res, status, {
         error: `Composio execute failed: ${err.message?.slice(0, 300)}`,
         action: actionSlug,
       });
@@ -3204,21 +3289,13 @@ print(json.dumps(result, default=str))
     }
 
     try {
-      const script = `
-import json, os
-os.environ.setdefault("COMPOSIO_API_KEY", ${JSON.stringify(apiKey)})
-os.environ["COMPOSIO_USER_ID"] = ${JSON.stringify(userId)}
-from src.integrations.composio_client import execute_action
-result = execute_action(
-    "GMAIL_GET_PROFILE",
-    {"userId": "me"},
-    user_id=${JSON.stringify(userId)},
-    connected_account_id=${JSON.stringify(connId)},
-)
-print(json.dumps(result, default=str))
-`.trim();
-      const output = await dockerExec("alfred-learn", ["python3", "-c", script]);
-      const parsed = JSON.parse(output.trim());
+      const parsed = await executeComposioAction({
+        apiKey,
+        userId,
+        actionSlug: "GMAIL_GET_PROFILE",
+        arguments: { userId: "me" },
+        connectedAccountId: connId,
+      });
       // GMAIL_GET_PROFILE returns { data: { emailAddress: "...", ... } }
       const data = (parsed && typeof parsed === "object" ? (parsed as any).data ?? parsed : {}) as any;
       const email = data?.emailAddress || data?.email || null;

@@ -4,6 +4,11 @@ pyyaml==6.0.2
 requests>=2.31.0
 composio>=0.11.0
 
+# Composio HTTP sidecar (src/composio_server.py) — long-running FastAPI app
+# that replaces the docker-exec shell-out from ctrl-api. ~4s → ~500ms per call.
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+
 # Behavioral profiler (#283)
 setuptools<70  # tsfresh needs pkg_resources, removed in setuptools>=82
 pandas==2.2.3
