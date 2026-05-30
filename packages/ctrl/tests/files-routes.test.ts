@@ -876,7 +876,7 @@ describe("/api/v1/files/* — PR 1", () => {
         .prepare(
           `SELECT * FROM audit WHERE subject_ref = ? AND action_type = 'files_purge' LIMIT 1`,
         )
-        .get(up.payload.id) as { id: string; summary: string } | undefined;
+        .get(up.payload.path) as { id: string; summary: string } | undefined;
       assert.ok(audit, "audit row must exist for files_purge");
     });
 
@@ -1052,6 +1052,390 @@ describe("/api/v1/files/* — PR 1", () => {
         `/api/v1/files/${up.payload.id}/extract`,
       );
       assert.equal(refire.status, 409);
+    });
+  });
+
+  // ─── #114 §7 + §8 — restore route + audit ledger writes ──────────────
+  //
+  // The restore route is the symmetric inverse of soft-delete. We exercise:
+  //
+  //   * dedupe-shared bytes (two uploads of the same content) survive
+  //     delete + restore — the blob stays on disk because the other ref
+  //     holds it, restore clears the tombstone, list shows it again
+  //   * sole-reference delete reaps the blob → restore 410s with
+  //     BLOB_REAPED (the row is preserved for the audit trail but the
+  //     bytes are gone, so we surface the limit clearly)
+  //   * an already-live row → restore 409s with NOT_DELETED (idempotent
+  //     no-op would mask operator mistakes)
+  //   * the list route honours `include_deleted=true` and `only_deleted=true`
+  //
+  // The audit-ledger block exercises every mutation route and asserts a
+  // matching row landed in the `audit` table. We assert against a real
+  // appendAudit call (not a mock) — appendAudit writes to the same
+  // state.db this test fixture wires up at the top of the file, so a
+  // SELECT round-trip is the contract. Issue #114 §14 step 8.
+
+  describe("POST /restore/:file_id — #114 §7", () => {
+    it("undeletes a row whose blob is still on disk (dedupe path)", async () => {
+      // Two uploads of the same content → ref_count=2 on the canonical
+      // file_blobs row.
+      const content = Buffer.from("shared-bytes-for-dedupe");
+      const a = await uploadBlob("a.txt", content, "text/plain");
+      const b = await uploadBlob("b.txt", content, "text/plain");
+      assert.equal(a.status, 201);
+      assert.equal(b.status, 201);
+      assert.equal(b.payload.deduped, true);
+
+      // Delete one — the bytes survive because the OTHER row still
+      // points at them.
+      const del = await invokeRoute(
+        "DELETE",
+        `/api/v1/files/${a.payload.path}`,
+      );
+      assert.equal(del.status, 200);
+      const sharedAbs = path.join(FILES_ROOT, b.payload.path);
+      assert.ok(
+        fs.existsSync(sharedAbs),
+        "blob must survive delete when another row shares it",
+      );
+
+      // Restore — the tombstone clears, ref_count bumps back up.
+      const restored = await invokeRoute(
+        "POST",
+        `/api/v1/files/restore/${a.payload.id}`,
+      );
+      assert.equal(restored.status, 200);
+      assert.equal(restored.payload.id, a.payload.id);
+      assert.equal(restored.payload.deleted_at, null);
+      assert.ok(typeof restored.payload.restored_at === "number");
+
+      // List excluding deleted now contains BOTH rows again.
+      const list = await invokeRoute("GET", "/api/v1/files/list");
+      assert.equal(list.payload.total, 2);
+    });
+
+    it("410 BLOB_REAPED when the sole-reference blob was reaped on delete", async () => {
+      const up = await uploadBlob(
+        "lonely.txt",
+        Buffer.from("only-copy"),
+        "text/plain",
+      );
+      assert.equal(up.status, 201);
+      // Sole-reference delete → file_blobs row removed, bytes unlinked.
+      const del = await invokeRoute(
+        "DELETE",
+        `/api/v1/files/${up.payload.path}`,
+      );
+      assert.equal(del.status, 200);
+      const blobRow = getStateDb()
+        .prepare(`SELECT * FROM file_blobs WHERE sha256 = ?`)
+        .get(up.payload.sha256) as any;
+      assert.equal(
+        blobRow,
+        undefined,
+        "file_blobs row must be reaped when ref_count hits 0",
+      );
+
+      const restored = await invokeRoute(
+        "POST",
+        `/api/v1/files/restore/${up.payload.id}`,
+      );
+      assert.equal(restored.status, 410);
+      assert.equal(restored.payload.error.code, "BLOB_REAPED");
+    });
+
+    it("409 NOT_DELETED when the file is still live", async () => {
+      const up = await uploadBlob("live.txt", Buffer.from("x"), "text/plain");
+      const restored = await invokeRoute(
+        "POST",
+        `/api/v1/files/restore/${up.payload.id}`,
+      );
+      assert.equal(restored.status, 409);
+      assert.equal(restored.payload.error.code, "NOT_DELETED");
+    });
+
+    it("404 when the file_id doesn't exist", async () => {
+      const restored = await invokeRoute(
+        "POST",
+        "/api/v1/files/restore/01HFAKEULIDFAKEULIDFAKEUL",
+      );
+      assert.equal(restored.status, 404);
+    });
+
+    it("round-trip: delete then restore yields original row state", async () => {
+      // Make the content shared so the blob survives the delete.
+      const content = Buffer.from("round-trip-bytes");
+      const keep = await uploadBlob(
+        "keep.txt",
+        content,
+        "text/plain",
+        { original_filename: "keep.txt", principal_label: "keeper" },
+      );
+      const trip = await uploadBlob(
+        "trip.txt",
+        content,
+        "text/plain",
+        { original_filename: "trip.txt", principal_label: "tripper" },
+      );
+      assert.equal(trip.payload.deduped, true);
+
+      const before = getStateDb()
+        .prepare(`SELECT * FROM files WHERE id = ?`)
+        .get(trip.payload.id) as any;
+
+      await invokeRoute("DELETE", `/api/v1/files/${trip.payload.path}`);
+      await invokeRoute(
+        "POST",
+        `/api/v1/files/restore/${trip.payload.id}`,
+      );
+
+      const after = getStateDb()
+        .prepare(`SELECT * FROM files WHERE id = ?`)
+        .get(trip.payload.id) as any;
+
+      // Every field except deleted_at (null → null) is unchanged.
+      assert.equal(after.id, before.id);
+      assert.equal(after.path, before.path);
+      assert.equal(after.size_bytes, before.size_bytes);
+      assert.equal(after.sha256, before.sha256);
+      assert.equal(after.content_type, before.content_type);
+      assert.equal(after.original_filename, before.original_filename);
+      assert.equal(after.principal_label, before.principal_label);
+      assert.equal(after.uploaded_by, before.uploaded_by);
+      assert.equal(after.uploaded_at, before.uploaded_at);
+      assert.equal(after.deleted_at, null);
+
+      // keep.txt was unaffected.
+      void keep;
+    });
+  });
+
+  describe("GET /list?include_deleted= + ?only_deleted= — #114 §7", () => {
+    it("excludes tombstoned rows by default", async () => {
+      const a = await uploadBlob("a.txt", Buffer.from("a"), "text/plain");
+      const b = await uploadBlob("b.txt", Buffer.from("b"), "text/plain");
+      await invokeRoute("DELETE", `/api/v1/files/${a.payload.path}`);
+      const r = await invokeRoute("GET", "/api/v1/files/list");
+      assert.equal(r.status, 200);
+      assert.equal(r.payload.total, 1);
+      assert.equal(r.payload.items[0].id, b.payload.id);
+    });
+
+    it("include_deleted=true returns live + tombstoned together", async () => {
+      const a = await uploadBlob("a.txt", Buffer.from("a"), "text/plain");
+      const b = await uploadBlob("b.txt", Buffer.from("b"), "text/plain");
+      await invokeRoute("DELETE", `/api/v1/files/${a.payload.path}`);
+      const r = await invokeRoute("GET", "/api/v1/files/list", {
+        url: "/api/v1/files/list?include_deleted=true",
+      });
+      assert.equal(r.status, 200);
+      assert.equal(r.payload.total, 2);
+      const ids = r.payload.items.map((x: any) => x.id).sort();
+      assert.deepEqual(ids, [a.payload.id, b.payload.id].sort());
+    });
+
+    it("only_deleted=true returns ONLY tombstoned rows in the 30d window", async () => {
+      const a = await uploadBlob("a.txt", Buffer.from("a"), "text/plain");
+      const b = await uploadBlob("b.txt", Buffer.from("b"), "text/plain");
+      await invokeRoute("DELETE", `/api/v1/files/${a.payload.path}`);
+      const r = await invokeRoute("GET", "/api/v1/files/list", {
+        url: "/api/v1/files/list?only_deleted=true",
+      });
+      assert.equal(r.status, 200);
+      assert.equal(r.payload.total, 1);
+      assert.equal(r.payload.items[0].id, a.payload.id);
+      assert.ok(r.payload.items[0].deleted_at);
+      // sanity: b is live, not in this view.
+      void b;
+    });
+
+    it("only_deleted=true honours the trash_window_ms cutoff", async () => {
+      const a = await uploadBlob("old.txt", Buffer.from("o"), "text/plain");
+      await invokeRoute("DELETE", `/api/v1/files/${a.payload.path}`);
+      // Backdate the tombstone to 60 days ago, then query with a 30d
+      // window — the row must NOT come back.
+      const sixtyDaysAgo = Date.now() - 60 * 24 * 60 * 60 * 1000;
+      getStateDb()
+        .prepare(`UPDATE files SET deleted_at = ? WHERE id = ?`)
+        .run(sixtyDaysAgo, a.payload.id);
+      const r = await invokeRoute("GET", "/api/v1/files/list", {
+        url: "/api/v1/files/list?only_deleted=true",
+      });
+      assert.equal(r.payload.total, 0);
+      // … but a longer window picks it up.
+      const r2 = await invokeRoute("GET", "/api/v1/files/list", {
+        url: `/api/v1/files/list?only_deleted=true&trash_window_ms=${
+          90 * 24 * 60 * 60 * 1000
+        }`,
+      });
+      assert.equal(r2.payload.total, 1);
+    });
+  });
+
+  describe("audit ledger — #114 §8", () => {
+    // Each mutation in /api/v1/files/* must write one row to the `audit`
+    // table via appendAudit (the shared helper in state.ts). We assert
+    // the row landed by SELECTing on `target_path = files/<id>` —
+    // matching the `GET /api/v1/audit?target=files/<id>` round-trip the
+    // /study#audit feed will use. Beforehand we clear the audit table so
+    // each case's WHERE returns exactly the rows it produced.
+    beforeEach(() => {
+      getStateDb().exec("DELETE FROM audit");
+    });
+
+    function auditRowsFor(fileId: string): any[] {
+      return getStateDb()
+        .prepare(
+          `SELECT * FROM audit WHERE target_path = ? ORDER BY ts ASC, id ASC`,
+        )
+        .all(`files/${fileId}`) as any[];
+    }
+
+    it("upload writes a files_upload audit row", async () => {
+      const up = await uploadBlob(
+        "audited.txt",
+        Buffer.from("hi"),
+        "text/plain",
+      );
+      const rows = auditRowsFor(up.payload.id);
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0].action_type, "files_upload");
+      // Default actor = `principal` because the multipart didn't set
+      // `uploaded_by`.
+      assert.equal(rows[0].actor, "principal");
+      assert.equal(rows[0].target_kind, "file");
+      assert.equal(rows[0].subject_ref, up.payload.path);
+      const payload = JSON.parse(rows[0].payload_json);
+      assert.equal(payload.id, up.payload.id);
+      assert.equal(payload.size_bytes, 2);
+    });
+
+    it("upload honours the `uploaded_by` text field as the actor", async () => {
+      const up = await uploadBlob(
+        "by-alfred.txt",
+        Buffer.from("a"),
+        "text/plain",
+        { uploaded_by: "alfred" },
+      );
+      const rows = auditRowsFor(up.payload.id);
+      assert.equal(rows[0].actor, "alfred");
+    });
+
+    it("PATCH writes a files_patch row with before/after", async () => {
+      const up = await uploadBlob(
+        "to-label.txt",
+        Buffer.from("x"),
+        "text/plain",
+      );
+      // Drain the upload row so we only assert on the patch one.
+      getStateDb().exec("DELETE FROM audit");
+      await invokeRoute("PATCH", `/api/v1/files/${up.payload.path}`, {
+        body: { principal_label: "after-label" },
+      });
+      const rows = auditRowsFor(up.payload.id);
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0].action_type, "files_patch");
+      const changes = JSON.parse(rows[0].changes_json);
+      assert.equal(changes.principal_label.before, null);
+      assert.equal(changes.principal_label.after, "after-label");
+    });
+
+    it("DELETE writes a files_soft_delete row with an undo recipe", async () => {
+      const up = await uploadBlob(
+        "deleting.txt",
+        Buffer.from("d"),
+        "text/plain",
+      );
+      getStateDb().exec("DELETE FROM audit");
+      await invokeRoute("DELETE", `/api/v1/files/${up.payload.path}`);
+      const rows = auditRowsFor(up.payload.id);
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0].action_type, "files_soft_delete");
+      const undo = JSON.parse(rows[0].undo_json);
+      assert.equal(undo.method, "POST");
+      assert.equal(undo.path, `/api/v1/files/restore/${up.payload.id}`);
+      // payload.blob_reaped flags whether the bytes survived.
+      const payload = JSON.parse(rows[0].payload_json);
+      assert.equal(payload.blob_reaped, true);
+    });
+
+    it("DELETE flags blob_reaped=false when another row shares the sha256", async () => {
+      const content = Buffer.from("survives-delete");
+      const a = await uploadBlob("a.txt", content, "text/plain");
+      await uploadBlob("b.txt", content, "text/plain");
+      getStateDb().exec("DELETE FROM audit");
+      await invokeRoute("DELETE", `/api/v1/files/${a.payload.path}`);
+      const rows = auditRowsFor(a.payload.id);
+      const payload = JSON.parse(rows[0].payload_json);
+      assert.equal(payload.blob_reaped, false);
+    });
+
+    it("restore writes a files_restore row with an inverse undo recipe", async () => {
+      const content = Buffer.from("keep-blob-alive");
+      const a = await uploadBlob("a.txt", content, "text/plain");
+      await uploadBlob("b.txt", content, "text/plain");
+      await invokeRoute("DELETE", `/api/v1/files/${a.payload.path}`);
+      getStateDb().exec("DELETE FROM audit");
+      const restored = await invokeRoute(
+        "POST",
+        `/api/v1/files/restore/${a.payload.id}`,
+      );
+      assert.equal(restored.status, 200);
+      const rows = auditRowsFor(a.payload.id);
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0].action_type, "files_restore");
+      const undo = JSON.parse(rows[0].undo_json);
+      assert.equal(undo.method, "DELETE");
+      assert.equal(undo.path, `/api/v1/files/${a.payload.path}`);
+      const changes = JSON.parse(rows[0].changes_json);
+      assert.ok(typeof changes.deleted_at.before === "number");
+      assert.equal(changes.deleted_at.after, null);
+    });
+
+    it("PATCH actor resolution falls back to x-alfred-actor header", async () => {
+      const up = await uploadBlob(
+        "hdr.txt",
+        Buffer.from("h"),
+        "text/plain",
+      );
+      getStateDb().exec("DELETE FROM audit");
+      await invokeRoute("PATCH", `/api/v1/files/${up.payload.path}`, {
+        body: { principal_label: "hdr-label" },
+        headers: { "x-alfred-actor": "chore:weekly-sync" },
+      });
+      const rows = auditRowsFor(up.payload.id);
+      assert.equal(rows[0].actor, "chore:weekly-sync");
+    });
+
+    it("DELETE body { actor: 'alfred' } overrides the header default", async () => {
+      const up = await uploadBlob(
+        "via-mcp.txt",
+        Buffer.from("m"),
+        "text/plain",
+      );
+      getStateDb().exec("DELETE FROM audit");
+      await invokeRoute("DELETE", `/api/v1/files/${up.payload.path}`, {
+        body: { actor: "alfred" },
+        headers: { "content-type": "application/json" },
+      });
+      const rows = auditRowsFor(up.payload.id);
+      assert.equal(rows[0].actor, "alfred");
+    });
+
+    it("invalid actor strings fall back to the default", async () => {
+      const up = await uploadBlob(
+        "bad-actor.txt",
+        Buffer.from("b"),
+        "text/plain",
+      );
+      getStateDb().exec("DELETE FROM audit");
+      await invokeRoute("DELETE", `/api/v1/files/${up.payload.path}`, {
+        body: { actor: "naughty;DROP TABLE users" },
+        headers: { "content-type": "application/json" },
+      });
+      const rows = auditRowsFor(up.payload.id);
+      // Default fallback when the candidate fails the VALID_ACTOR_RE.
+      assert.equal(rows[0].actor, "principal");
     });
   });
 });

@@ -33,6 +33,8 @@ import {
   getFileStat,
   updateFileLabel,
   deleteFile,
+  listDeletedFiles,
+  restoreFile,
 } from "wasp/client/operations";
 import { Frame } from "../client/components/ab/Frame";
 import {
@@ -321,8 +323,56 @@ export default function FilesPage() {
       if (selectedPath === row.path) setSelectedPath(null);
       refetchList();
       refetchUsage();
+      // The recycle bin's count changes too — refetch so the expander
+      // header label updates in lockstep.
+      refetchDeleted();
     } catch (err: any) {
       addBanner("error", `Delete failed: ${err?.message ?? "error"}`);
+    }
+  }
+
+  // ── Recently-deleted expander (#114 §7 + §8) ──────────────────────────
+  //
+  // The /files surface gains a collapsed-by-default panel listing files
+  // soft-deleted in the last 30 days. Each row carries a Restore button
+  // that calls the new POST /api/v1/files/restore/:file_id route; the
+  // 410 BLOB_REAPED case (sole reference reaped at delete time, bytes
+  // gone) surfaces verbatim so Sir sees a clear "this can't be restored"
+  // banner rather than a silent no-op.
+  const [showDeleted, setShowDeleted] = useState(false);
+  const {
+    data: deletedData,
+    refetch: refetchDeleted,
+  } = useQuery(
+    listDeletedFiles,
+    { limit: 100 },
+    { retry: false, enabled: showDeleted },
+  );
+  const deletedRows: FileRow[] = useMemo(() => {
+    const items = (deletedData as any)?.items;
+    return Array.isArray(items) ? (items as FileRow[]) : [];
+  }, [deletedData]);
+  const restoreAction = useAction(restoreFile);
+  const [restoringId, setRestoringId] = useState<string | null>(null);
+  async function onRestore(row: FileRow) {
+    if (restoringId) return;
+    setRestoringId(row.id);
+    try {
+      await restoreAction({ file_id: row.id });
+      addBanner(
+        "success",
+        `Restored ${row.original_filename ?? row.path}`,
+      );
+      refetchList();
+      refetchUsage();
+      refetchDeleted();
+    } catch (err: any) {
+      addBanner(
+        "error",
+        `Restore failed: ${err?.message ?? "error"}`,
+      );
+    } finally {
+      setRestoringId(null);
     }
   }
 
@@ -782,6 +832,109 @@ export default function FilesPage() {
               </p>
             )}
           </aside>
+        </div>
+
+        {/* Recently deleted — collapsed-by-default expander. The query
+            fires only when expanded so a quiet /files page doesn't pay
+            for an extra round-trip. Each row gets a Restore button that
+            calls POST /api/v1/files/restore/:file_id. Issue #114 §7. */}
+        <div className="border-t border-rule pt-6 mt-8">
+          <button
+            type="button"
+            onClick={() => setShowDeleted((v) => !v)}
+            className="flex items-baseline gap-2 font-mono text-[10px] uppercase tracking-[0.22em]"
+            style={{ color: "var(--marginalia)" }}
+            aria-expanded={showDeleted}
+            data-testid="files-recently-deleted-toggle"
+          >
+            <span style={{ color: "var(--brass)" }}>
+              {showDeleted ? "▾" : "▸"}
+            </span>
+            <span>Recently deleted</span>
+            {showDeleted && deletedData ? (
+              <span style={{ color: "var(--marginalia)" }}>
+                ({(deletedData as any).total ?? deletedRows.length} within 30 days)
+              </span>
+            ) : null}
+          </button>
+          {showDeleted && (
+            <div className="mt-3 border border-rule p-3">
+              {deletedRows.length === 0 ? (
+                <p
+                  className="font-body italic text-[14px]"
+                  style={{ color: "var(--marginalia)" }}
+                >
+                  Nothing recently deleted.
+                </p>
+              ) : (
+                <table className="w-full font-body text-[13px]">
+                  <thead>
+                    <tr
+                      className="font-mono text-[10px] uppercase tracking-[0.18em]"
+                      style={{ color: "var(--marginalia)" }}
+                    >
+                      <th className="text-left py-2 pr-3">Name</th>
+                      <th className="text-right py-2 pr-3">Size</th>
+                      <th className="text-left py-2 pr-3">Deleted</th>
+                      <th className="text-left py-2 pr-3">SHA-256</th>
+                      <th className="w-24"></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {deletedRows.map((row) => (
+                      <tr
+                        key={row.id}
+                        style={{ borderTop: "1px solid var(--rule)" }}
+                        data-testid={`files-deleted-row-${row.id}`}
+                      >
+                        <td className="py-2 pr-3 truncate max-w-[260px]">
+                          {row.original_filename ?? row.path}
+                        </td>
+                        <td
+                          className="py-2 pr-3 text-right font-mono text-[11px]"
+                          style={{ color: "var(--marginalia)" }}
+                        >
+                          {formatBytes(row.size_bytes)}
+                        </td>
+                        <td
+                          className="py-2 pr-3 font-mono text-[11px]"
+                          style={{ color: "var(--marginalia)" }}
+                        >
+                          {row.deleted_at
+                            ? formatUploadedAt(row.deleted_at)
+                            : ""}
+                        </td>
+                        <td
+                          className="py-2 pr-3 font-mono text-[11px]"
+                          style={{ color: "var(--marginalia)" }}
+                        >
+                          {shortSha(row.sha256)}
+                        </td>
+                        <td>
+                          <button
+                            type="button"
+                            onClick={() => onRestore(row)}
+                            disabled={restoringId === row.id}
+                            className="font-mono text-[10px] uppercase tracking-[0.22em]"
+                            style={{
+                              color:
+                                restoringId === row.id
+                                  ? "var(--marginalia)"
+                                  : "var(--brass)",
+                            }}
+                            data-testid={`files-restore-${row.id}`}
+                            title="Restore this file"
+                          >
+                            {restoringId === row.id ? "Restoring…" : "↩ Restore"}
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Banners */}

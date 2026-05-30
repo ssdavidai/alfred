@@ -2940,6 +2940,54 @@ export const deleteFile = async (
   });
 };
 
+/** GET /api/v1/files/list?only_deleted=true — the trash bin view.
+ *
+ *  Used by the /files "Recently deleted" expander to render a list of
+ *  soft-deleted files inside the 30-day restore window. The shape
+ *  matches getFilesList; we pass `only_deleted=true` on the wire so the
+ *  ctrl-api side flips the WHERE clause without exposing the SQL knob
+ *  to the dashboard. Issue #114 §14 step 7.
+ *
+ *  Annotation `Promise<any>` — the Wasp Payload trap. */
+export const listDeletedFiles = async (
+  args: { limit?: number } | undefined,
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const instance = await getUserInstance(context);
+  const query: Record<string, string> = { only_deleted: "true" };
+  if (typeof args?.limit === "number" && args.limit > 0) {
+    query.limit = String(Math.floor(args.limit));
+  }
+  return proxyToTenant(instance, {
+    path: "/api/v1/files/list",
+    query,
+  });
+};
+
+/** POST /api/v1/files/restore/:file_id — undo a soft-delete.
+ *
+ *  Closes the §14 step 7 loop ("Restore it. Telegram answers again.").
+ *  ctrl-api 410s with `BLOB_REAPED` if the blob was reaped at delete
+ *  time (sole reference, dedupe ref_count dropped to zero) — the UI
+ *  surfaces the message verbatim so Sir can tell why a restore failed.
+ *
+ *  Annotation `Promise<any>` — the Wasp Payload trap. */
+export const restoreFile = async (
+  args: { file_id: string },
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  if (typeof args?.file_id !== "string" || !args.file_id.trim()) {
+    throw new HttpError(400, "file_id required");
+  }
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: `/api/v1/files/restore/${encodeURIComponent(args.file_id.trim())}`,
+  });
+};
+
 // ============================================================
 // Wave C — HA conversation setup card (#111 PR3) and Voice
 // satellites / wake-words card (#112 PR3). Both cards land on
