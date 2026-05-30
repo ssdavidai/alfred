@@ -350,16 +350,11 @@ globalThis.fetch = (async (input: any, init?: any) => {
     const id = objMatch[1];
     const item = vaultStore.find((i) => i.id === id);
     if (!item) return makeJsonResponse({ success: false, message: "not found" }, 404);
-    // SHAPE NOTE — channels_ha.ts:readHaLlat reads `j.data.login.password`
-    // (single-wrapped post-23917964) but api/lib/ha_ws_client.ts:readHaLlat
-    // reads `j.data.data.login.password` (double-wrapped). Mirror both
-    // shapes so EITHER reader resolves the LLAT cleanly. We carry the
-    // full item at `data` AND a nested `data.data = item` self-reference;
-    // every other consumer ignores the extra key.
-    return makeJsonResponse({
-      success: true,
-      data: { ...item, data: item },
-    });
+    // SHAPE — vault-cli (`bw serve`) returns single-wrapped
+    // `{success, data: <item>}` for GET /object/item/:id. BOTH
+    // `channels_ha.ts:readHaLlat` and (post-#155 fix)
+    // `api/lib/ha_ws_client.ts:readHaLlat` read `j.data.login.password`.
+    return makeJsonResponse({ success: true, data: item });
   }
   if (url.endsWith("/object/item") && method === "POST") {
     const b = JSON.parse(bodyRaw ?? "{}");

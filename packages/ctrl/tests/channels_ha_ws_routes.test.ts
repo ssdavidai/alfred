@@ -166,10 +166,14 @@ const originalFetch = globalThis.fetch;
 globalThis.fetch = (async (input: any) => {
   const url = typeof input === "string" ? input : (input?.url ?? String(input));
   if (url.includes("/object/item/")) {
+    // vault-cli (`bw serve`) returns single-wrapped `{success,data:<item>}` for
+    // GET /object/item/:id — NOT double-wrapped. The HaWsClient.readHaLlat
+    // reads `j.data.login.password`. See channels_ha_vault_parse.test.ts for
+    // the full bw-serve shape contract. (Fix for #155.)
     return new Response(
       JSON.stringify({
         success: true,
-        data: { data: { login: { password: "llat_test", username: null, uris: [] } } },
+        data: { login: { password: "llat_test", username: null, uris: [] } },
       }),
       { status: 200, headers: { "content-type": "application/json" } },
     );
@@ -272,5 +276,56 @@ describe("/api/v1/channels/ha/ws/* — #115/#158 PR1", () => {
     const parsed = JSON.parse(kitchenArea!.payload_json as string) as Record<string, unknown>;
     assert.equal(parsed.area_id, "kitchen");
     assert.equal(parsed.name, "Kitchen");
+  });
+
+  // Regression guard for #155 — if a future agent re-introduces the
+  // double-wrap shape in `ha_ws_client.ts:readHaLlat`, the route MUST
+  // refuse to lift an LLAT and surface HA_WS_REGISTRY_FAILED. Pairs with
+  // the positive test above: positive proves single-wrap works; this
+  // proves double-wrap fails. Live-observed failure mode (home, 2026-05-30):
+  // `{"error":{"code":"HA_WS_REGISTRY_FAILED","message":"...HaWsClient not
+  // authed within 10000ms (last_error=LLAT read failed:
+  // vault-cli returned an HA item without a login.password)"}}`.
+  it("GET /ha/ws/registries — 502s when vault-cli double-wraps single-object responses (regression guard for #155)", async () => {
+    // Swap fetch to return the WRONG (double-wrap) shape that the bug
+    // assumed. ha_ws_client.readHaLlat must look at `data.login.password`,
+    // not `data.data.login.password`, so this must fail to extract.
+    globalThis.fetch = (async (input: any) => {
+      const url = typeof input === "string" ? input : (input?.url ?? String(input));
+      if (url.includes("/object/item/")) {
+        return new Response(
+          JSON.stringify({
+            success: true,
+            // Wrong shape — embeds login.password under data.data instead
+            // of data. Pre-fix readHaLlat read this and "worked" — but
+            // the real bw serve never returns this for single-object GET.
+            data: { data: { login: { password: "llat_test", username: null, uris: [] } } },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return originalFetch(input);
+    }) as typeof fetch;
+    // Reset so the client re-tries auth with the broken-shape vault-cli.
+    _resetHaWsClientForTests();
+
+    const r = await call("GET", "/api/v1/channels/ha/ws/registries");
+    assert.equal(r.status, 502, JSON.stringify(r.payload));
+    assert.equal(r.payload.error?.code, "HA_WS_REGISTRY_FAILED");
+
+    // Restore the correct-shape mock for any subsequent test ordering.
+    globalThis.fetch = (async (input: any) => {
+      const url = typeof input === "string" ? input : (input?.url ?? String(input));
+      if (url.includes("/object/item/")) {
+        return new Response(
+          JSON.stringify({
+            success: true,
+            data: { login: { password: "llat_test", username: null, uris: [] } },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return originalFetch(input);
+    }) as typeof fetch;
   });
 });
