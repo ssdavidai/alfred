@@ -198,17 +198,23 @@ interface ToolDispositionsResp {
   dispositions: ToolDisposition[];
 }
 
-// Plain async functions, no Wasp generic types. The Wasp-generated
-// `GetToolDispositions<void, T>` constraint rejects the `(args, context)`
-// shape for void-input queries; the dashboard convention (see
-// setTelegramBotToken, getTelegramChannelStatus, etc.) is to just declare
-// the shape inline. The Wasp runtime introspects main.wasp for the wire
-// shape — the TS types here are local hints, not the source of truth.
+// Plain async functions, no Wasp generic types AND no explicit return
+// type. The Wasp-generated `GenericAuthenticatedOperationDefinition`
+// constraint requires `Promise<Payload>`, and a concrete custom type
+// is not assignable to `Payload`. The dashboard convention
+// (setTelegramBotToken, setPaperclipApiKey, ~14 others) is plain
+// async + context: any, with no return-type annotation (so TS infers
+// the loose `Promise<any>` that satisfies the constraint). The Wasp
+// runtime reads main.wasp for the wire schema — the TS types here
+// are local hints, not the source of truth.
+//
+// Memory: PRs #139 and #145 both fixed the same `Promise<T>` trap. Do
+// not reintroduce explicit return types on Wasp operations.
 
 export const getToolDispositions = async (
   _args: unknown,
   context: any,
-): Promise<ToolDispositionsResp> => {
+): Promise<any> => {
   if (!context.user) throw new HttpError(401, "Not authenticated");
   const instance = await getUserInstance(context);
   const resp = (await proxyToTenant(instance, {
@@ -235,7 +241,7 @@ interface SetToolDispositionResp {
 export const setToolDisposition = async (
   args: SetToolDispositionArgs,
   context: any,
-): Promise<SetToolDispositionResp> => {
+): Promise<any> => {
   if (!context.user) throw new HttpError(401, "Not authenticated");
   const server = String(args?.server ?? "").trim();
   const disposition = args?.disposition;
