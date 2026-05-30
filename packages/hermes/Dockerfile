@@ -178,6 +178,36 @@ RUN python3 /tmp/patch_openai_sdk.py \
  && rm /tmp/patch_openai_sdk.py
 
 # =============================================================================
+# Patch: profile-dir-aware parent chmod in hermes_cli/auth.py.
+#
+# Upstream Hermes' _save_auth_store (and the qwen + nous shared-store
+# variants) hard-codes `os.chmod(<path>.parent, 0o700)` on every save —
+# token refresh, provider login, write-back of cached creds. In
+# alfred-black HERMES_HOME points at a *profile* dir
+# (e.g. /hermes-state/profiles/codex-builder) whose mode is owned by the
+# init container. PR #118 set the codex-builder profile dir to 0o711 so
+# the paperclip-hermes adapter (uid 1000) can traverse to .env for the
+# gateway's API_SERVER_KEY; an auth-store save then resets it back to
+# 0o700 and the next paperclip → :18793 dispatch 401s with
+# hermes_auth_failed / invalid_api_key (GH #119). The companion fix —
+# HERMES_HOME_MODE=0711 in the codex-builder profile .env — handles the
+# `_secure_dir(home)` path that fires at every CLI startup; this patch
+# handles the auth-save path that fires at every token write.
+#
+# See patch_upstream_hermes_auth.py for the full rationale. The patch is
+# idempotent + tripwire'd; a future HERMES_REF bump that moves any of
+# the three needles fails the build loudly.
+#
+# Sir 2026-05-30 — durable fix for GH #119.
+COPY packages/hermes/patch_upstream_hermes_auth.py /tmp/patch_upstream_hermes_auth.py
+RUN python3 /tmp/patch_upstream_hermes_auth.py \
+ && grep -q "alfred-black: profile-dir-aware chmod" \
+        /usr/local/lib/python3.12/site-packages/hermes_cli/auth.py \
+ && grep -q "_alfred_is_profile_dir" \
+        /usr/local/lib/python3.12/site-packages/hermes_cli/auth.py \
+ && rm /tmp/patch_upstream_hermes_auth.py
+
+# =============================================================================
 # Bake the hermes-lcm plugin (lossless cross-session context engine).
 # =============================================================================
 # The `stephenschoettler/hermes-lcm` plugin enables Hermes' LCM context engine
