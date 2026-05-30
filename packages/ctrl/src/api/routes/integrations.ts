@@ -1515,12 +1515,17 @@ async function cacheComposioPrimaryDefaults(
         return null;
       }
       const body = (await res.json()) as any;
-      // Composio responses vary: items may live under data.items, result.items, items.
+      // Composio's GOOGLECALENDAR_LIST_CALENDARS returns
+      // {data: {calendars: [...]}} (verified live on home.alfred.black —
+      // each calendar entry carries `primary: true` on Sir's main calendar).
+      // Older docs reference data.items; we fall back through those legacy
+      // shapes for resilience if the SDK ever pivots back.
       const items: any[] =
+        body?.data?.calendars ||
         body?.data?.items ||
         body?.result?.items ||
         body?.items ||
-        body?.data ||
+        (Array.isArray(body?.data) ? body.data : []) ||
         [];
       const primary = items.find((c: any) => c?.primary === true) ||
         items.find((c: any) => c?.id === "primary") ||
