@@ -199,3 +199,123 @@ test("reverse_decision · id required", () => {
   const r = reverse.inputSchema.safeParse({});
   assert.equal(r.success, false);
 });
+
+// ─── tool disposition + delegate_to_focused_agent (Phase B) ─────────────────
+
+const listDispositions = getTool("list_tool_dispositions");
+const setDisposition = getTool("set_tool_disposition");
+const delegateFocused = getTool("delegate_to_focused_agent");
+
+test("list_tool_dispositions · no args, GET /api/v1/agents/tool-disposition", () => {
+  const r = listDispositions.inputSchema.safeParse({});
+  assert.equal(r.success, true);
+  const req = listDispositions.buildRequest({});
+  assert.equal(req.method, "GET");
+  assert.equal(req.path, "/api/v1/agents/tool-disposition");
+});
+
+test("set_tool_disposition · validates server enum (9 known servers)", () => {
+  for (const server of [
+    "alfred-ctrl", "alfred", "sure", "plane", "vaultwarden",
+    "execute", "paperclip", "hass", "files",
+  ]) {
+    const r = setDisposition.inputSchema.safeParse({
+      server, disposition: "delegated",
+    });
+    assert.equal(r.success, true, `server ${server} should pass`);
+  }
+  const bad = setDisposition.inputSchema.safeParse({
+    server: "ghost", disposition: "delegated",
+  });
+  assert.equal(bad.success, false);
+});
+
+test("set_tool_disposition · disposition enum", () => {
+  const ok1 = setDisposition.inputSchema.safeParse({
+    server: "sure", disposition: "direct",
+  });
+  const ok2 = setDisposition.inputSchema.safeParse({
+    server: "sure", disposition: "delegated",
+  });
+  const bad = setDisposition.inputSchema.safeParse({
+    server: "sure", disposition: "stealthy",
+  });
+  assert.equal(ok1.success, true);
+  assert.equal(ok2.success, true);
+  assert.equal(bad.success, false);
+});
+
+test("set_tool_disposition · defaults updated_by to 'alfred'", () => {
+  const req = setDisposition.buildRequest({
+    server: "paperclip", disposition: "delegated",
+  });
+  assert.equal(req.method, "POST");
+  assert.equal(req.path, "/api/v1/agents/tool-disposition");
+  const body = req.body as any;
+  assert.equal(body.server, "paperclip");
+  assert.equal(body.disposition, "delegated");
+  assert.equal(body.updated_by, "alfred");
+});
+
+test("set_tool_disposition · honours explicit updated_by", () => {
+  const req = setDisposition.buildRequest({
+    server: "sure", disposition: "delegated", updated_by: "sir",
+  });
+  const body = req.body as any;
+  assert.equal(body.updated_by, "sir");
+});
+
+test("set_tool_disposition · description carries self-protection rule", () => {
+  // The skill + the tool description both have to call out the
+  // confirmation-phrase requirement for alfred-ctrl / alfred / execute.
+  // Pin the phrase here so a future refactor of the description doesn't
+  // silently drop the guard.
+  assert.ok(
+    setDisposition.description.includes("alfred-ctrl"),
+    "self-protection clause must mention alfred-ctrl",
+  );
+  assert.ok(
+    setDisposition.description.includes("execute"),
+    "self-protection clause must mention execute",
+  );
+  assert.ok(
+    setDisposition.description.includes(
+      'yes, change my Alfred\'s tool disposition',
+    ),
+    "self-protection clause must carry the confirmation phrase verbatim",
+  );
+});
+
+test("delegate_to_focused_agent · task + domain required", () => {
+  const bad1 = delegateFocused.inputSchema.safeParse({ domain: "sure" });
+  const bad2 = delegateFocused.inputSchema.safeParse({ task: "do the thing" });
+  assert.equal(bad1.success, false);
+  assert.equal(bad2.success, false);
+
+  const ok = delegateFocused.inputSchema.safeParse({
+    task: "Pull this week's emails from Acme",
+    domain: "gmail",
+  });
+  assert.equal(ok.success, true);
+});
+
+test("delegate_to_focused_agent · optional context flows through", () => {
+  const req = delegateFocused.buildRequest({
+    task: "Pull tomorrow's events",
+    domain: "googlecalendar",
+    context: "Sir's primary calendar id is abc-123.",
+  });
+  assert.equal(req.method, "POST");
+  assert.equal(req.path, "/api/v1/agents/focused-subagent");
+  const body = req.body as any;
+  assert.equal(body.task, "Pull tomorrow's events");
+  assert.equal(body.domain, "googlecalendar");
+  assert.equal(body.context, "Sir's primary calendar id is abc-123.");
+});
+
+test("delegate_to_focused_agent · description tells LLM to relay verbatim", () => {
+  assert.ok(
+    delegateFocused.description.toLowerCase().includes("verbatim"),
+    "description must tell the LLM to relay the subagent reply verbatim",
+  );
+});

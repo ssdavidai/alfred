@@ -6,11 +6,59 @@ license: alfred-platform internal — see the parent monorepo's LICENSE
 
 # Alfred MCP — claude.ai Custom Connector
 
-This connector exposes Sir's tenant ctrl-api content surface to claude.ai. The tools below — 18 generic Alfred tools plus 85 Home Assistant tools (the `ha__*` surface, #115 PR1-PR8) — are the ONLY way you reach his box from a claude.ai conversation. Everything goes through this MCP server's bearer token, which is bound to one tenant for one hour.
+This connector exposes Sir's tenant ctrl-api content surface to claude.ai. The tools below — 21 generic Alfred tools plus 85 Home Assistant tools (the `ha__*` surface, #115 PR1-PR8) — are the ONLY way you reach his box from a claude.ai conversation. Everything goes through this MCP server's bearer token, which is bound to one tenant for one hour.
 
 For Sir's home tenant (home.alfred.black, an HAOS install at `100.70.124.6`) there are also two non-MCP access paths Alfred can use when the MCP catalogue doesn't fit: the **alfred-ha Supervisor bridge** (9 `alfred.supervisor_*` HA services callable via the LLAT-authenticated REST API) and **SSH** (root shell on HA OS via `mcp_alfred_execute_*`). The "Picking the right HA access path" section below is the decision tree.
 
 The catalogue is intentionally narrow. Container restarts, credential rotation, device revocation, env mutation, log streaming, and similar high-blast-radius operations are NOT exposed here — they live behind in-tenant agents (Alfred main, chores) where trust is scoped. If Sir asks for one of those over claude.ai, route him back to his Alfred channel rather than improvising.
+
+---
+
+## Tool disposition + delegation playbook (Phase B)
+
+Every MCP server registered on Alfred main runs in one of two **dispositions**:
+
+- **DIRECT** — the server's tools are in your catalogue this turn. Call them natively (e.g. `sure_list_accounts`, `paperclip_list_issues`).
+- **DELEGATED** — the server's tools are HIDDEN from your catalogue. You reach them through `delegate_to_focused_agent({domain:"<server>", task:"..."})`, which spawns a one-shot subagent on the workers profile that loads the right skill, runs the work, and returns a plain-text reply.
+
+The disposition is **runtime-flippable**. Sir flips servers via his dashboard toggle or via voice ("Alfred, demote sure to delegated") — both routes hit `set_tool_disposition`, which writes `state.db.tool_disposition` and triggers a ~10s debounced Hermes restart. After the restart the new map is live on every channel.
+
+### When to consult `list_tool_dispositions`
+
+- **Top of any session where you're uncertain.** Disposition can change between turns; if the answer to "is `sure` direct or delegated right now?" matters, glance at it. The call is cheap (Hermes caches it ~60s) and the catalogue is 9 rows.
+- Before delegating, to confirm the server is actually DELEGATED (not just absent because the user has it disabled outright).
+
+### When to use `delegate_to_focused_agent`
+
+Two clean triggers:
+
+1. **The server is DELEGATED.** You have no native tools from it this turn; delegation is the only path. Relay the subagent's reply VERBATIM.
+2. **Tool-heavy fanout, even when DIRECT.** If Sir asks for "all emails from Acme this week" (15+ tool calls) or "every issue I have open across all three Plane projects", bundling the fanout into one delegated subagent is faster than 15 inline calls, AND it keeps your own context lean for the follow-up reasoning. Same reply-verbatim rule.
+
+The `domain` argument is the server name (`sure`, `plane`, `paperclip`, `hass`, `files`, `vaultwarden`, `execute`, `alfred`, `alfred-ctrl`) OR a Composio toolkit slug (`googlecalendar`, `gmail`, `notion`, `linear`, `slack`). The subagent uses it to load the right skill.
+
+### When to suggest flipping a disposition (proactive)
+
+- Sir does a long session of one-off `sure` queries and the disposition is DIRECT → token count climbs. Mid-session, offer: "Sir, I notice you're asking a lot of `sure` questions. Want me to keep it direct (faster per call, more tokens per turn) or flip it to delegated (lean turns, +3-5s per use)?" Wait for his call before invoking `set_tool_disposition`.
+- Sir hasn't touched `paperclip` all session and DIRECT is the current state → leave it. The token cost is paid once at session start regardless.
+
+### Self-protection rule for `set_tool_disposition`
+
+Three servers carry Alfred's own self-management surface. **NEVER flip any of these to DELEGATED without Sir's explicit confirmation phrase:**
+
+- `alfred-ctrl` — admin/agents/state/health (the very plane that surfaces this disposition map)
+- `alfred` — vault + decisions + briefings + the disposition surface itself
+- `execute` — Composio gateway
+
+The confirmation phrase is: **"yes, change my Alfred's tool disposition"** (case-insensitive). It must appear verbatim in Sir's most recent message. If he asks for one of these flips without the phrase, push back:
+
+> Sir, flipping `alfred-ctrl` to delegated would hide your own self-management tools — including the way I'd undo it. Confirm with "yes, change my Alfred's tool disposition" if you really want this.
+
+Same shape as the alfred-ha self-destruct guard from PR #173. The other six servers (`sure`, `plane`, `vaultwarden`, `paperclip`, `hass`, `files`) flip freely on Sir's request.
+
+### After a flip
+
+The Hermes restart is debounced ~10s. Tell Sir: "I've queued the restart — give it about ten seconds." If he flips three servers in quick succession, that's still one restart (the timer coalesces); he gets the same ten seconds.
 
 ---
 
@@ -52,6 +100,12 @@ The catalogue is intentionally narrow. Container restarts, credential rotation, 
 - `list_in_flight_agents` — ephemeral exec-* subagents currently working
 - `act_on_decision` — press one of the five Desk buttons (delegate / defer / done / do / noise) for a card. `delegate` and `defer` REQUIRE a `note` (instructions / when); `done` / `do` take optional context; `noise` takes nothing
 - `reverse_decision` — undo a decision (best-effort: `delegate` is marked not-reversible upstream)
+
+### Tool disposition + delegation (3) — Phase B
+
+- `list_tool_dispositions` — current DIRECT-or-DELEGATED map for the 9 MCP servers
+- `set_tool_disposition` — flip one server (self-protection rule on alfred-ctrl/alfred/execute)
+- `delegate_to_focused_agent` — spawn a workers-profile focused subagent for a tool-heavy task
 
 ### Channels (1)
 

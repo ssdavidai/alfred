@@ -172,6 +172,15 @@ services:
       # data is invisible to the rest of the stack. See the hermes service
       # volumes for the matching mount on the consumer side.
       - hermes_codex_work:/work
+      # Phase B — runtime-flippable tool dispositions. The init container's
+      # render_mcp_servers.py reads state.db.tool_disposition READ-ONLY to
+      # decide which MCP servers on main get `tools.include: []`. ctrl-api
+      # remains the SOLE writer; this mount is :ro so the init container
+      # can never accidentally write to the single-writer DB. On a fresh
+      # tenant the file doesn't yet exist — the mutator falls back to
+      # all-direct (matching the migration seed) so init never blocks on
+      # this signal.
+      - state_data:/ctrl-data:ro
     env_file:
       - .env
     environment:
@@ -180,6 +189,12 @@ services:
       # and the hermes runtime sees the same volume at the same path.
       - HERMES_DATA_DIR=/hermes-state
       - HERMES_RUNTIME_HOME=/hermes-state
+      # Phase B — path to ctrl-api's state.db for the disposition reader.
+      # The mount above lands the volume at /ctrl-data; the DB lives at
+      # /ctrl-data/alfred-state.db (matching ctrl-api's STATE_DB_PATH
+      # default of /state/alfred-state.db). Best-effort: render_mcp_servers
+      # gracefully degrades if the file or table is missing.
+      - STATE_DB_PATH=/ctrl-data/alfred-state.db
       # init step 9 seeds the sender allowlist + stages the Sure/owner email
       # files from OWNER_EMAIL. env_file already injects it, but pin it
       # explicitly so the canonical name is unambiguous at this boundary (C9).

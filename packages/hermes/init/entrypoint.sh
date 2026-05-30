@@ -522,6 +522,7 @@ for profile in "${PROFILES_RENDERED[@]}"; do
         PROFILE_DIR="$INIT_PROFILE_DIR" \
         HERMES_RUNTIME_PROFILE_DIR="$RUNTIME_PROFILE_DIR" \
         CTRL_API_URL="${CTRL_API_URL:-http://ctrl-api:3100}" \
+        STATE_DB_PATH="${STATE_DB_PATH:-/ctrl-data/alfred-state.db}" \
             python3 /setup/render_mcp_servers.py "$profile" \
             || echo "[init] WARN: render_mcp_servers.py failed for $profile (non-fatal)"
     fi
