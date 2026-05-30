@@ -809,6 +809,32 @@ export function registerHaChannelRoutes(): void {
     // Validate the body shape.
     const parsed = parseTurnBody(body);
 
+    // === Preflight short-circuit ===
+    // alfred-ha integration's _preflight (custom_components/alfred/_validators.py)
+    // POSTs with text === "__alfred_ha_preflight__" to verify host/token without
+    // burning a Hermes turn or its cold-start latency. Reply 200 immediately so the
+    // integration's 5s timeout doesn't fire false `cannot_connect`. This is BEFORE
+    // the rate limit + journal + Hermes call paths.
+    if (parsed.text === "__alfred_ha_preflight__") {
+      sendJson(res, 200, {
+        response: {
+          speech: {
+            plain: {
+              speech: "preflight ok",
+              extra_data: null,
+            },
+          },
+          card: {},
+          language: parsed.language ?? "en",
+          response_type: "action_done",
+          data: { targets: [], success: [], failed: [] },
+        },
+        conversation_id: parsed.conversationId ?? "preflight",
+        continue_conversation: false,
+      });
+      return;
+    }
+
     // Rate-limit per HA installation. Returns 403 with RATE_LIMITED on
     // exceed — the custom component surfaces this as a HA error result
     // ("Alfred is busy, try again in a moment" per spec §5.1).
