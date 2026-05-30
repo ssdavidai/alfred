@@ -20,6 +20,109 @@ import { addRoute } from "../server.js";
 import { sendJson } from "../errors.js";
 import { dockerExec, dockerComposeCmd, HERMES_CMD, HERMES_CONTAINER } from "../helpers.js";
 
+// ---------------------------------------------------------------------------
+// Per-MCP-server live tool catalogue cache (issue #185).
+//
+// For `mcp_servers.<name>.tools.include` ABSENT (mode='all'), config.yaml has
+// no list of names — Hermes passes through whatever the running MCP server
+// advertises. The only authoritative source is the running process. Hermes'
+// HTTP API has no introspection route (probed live: /v1/tools, /v1/mcp,
+// /v1/mcp_servers all 404), so we shell out to `hermes mcp test <server>`,
+// which connects to the server, lists its tools with descriptions, and exits
+// in ~250-300ms per server. Result is text — parsed into the structured
+// {name, description} shape callers expect.
+//
+// Cached for 30s per server. A Hermes restart blows the catalogue but we
+// don't need to coordinate with the restart lifecycle — the next request
+// after the TTL just re-fetches. A 30s window is short enough that a
+// dispositions flip (which triggers a debounced restart) is reflected on
+// the user's next refresh.
+// ---------------------------------------------------------------------------
+interface DiscoveredMcpTool {
+  name: string;
+  description: string;
+}
+interface McpToolsCacheEntry {
+  tools: DiscoveredMcpTool[];
+  fetchedAt: number;
+  /** True if the `hermes mcp test` invocation failed; we still cache for a
+   *  short window so a misconfigured server doesn't spam docker exec on
+   *  every /tools refresh. */
+  failed: boolean;
+}
+const MCP_TOOLS_CACHE = new Map<string, McpToolsCacheEntry>();
+const MCP_TOOLS_CACHE_TTL_MS = 30_000;
+const MCP_TOOLS_FAILED_TTL_MS = 5_000;
+
+/**
+ * Parse the text output of `hermes mcp test <server>` into a list of
+ * {name, description} pairs. The CLI prints a header (Testing/Transport/
+ * Auth/Connected/Tools discovered), a blank line, then one tool per line:
+ *
+ *     <name>                                  <description-truncated-to-~60ch>
+ *
+ * Names start at column ≥4, are word-character identifiers; description
+ * is whatever follows the run of ≥2 spaces. Truncation is the CLI's, not
+ * ours — we don't try to recover the full description. (Once Hermes grows
+ * a JSON output flag we can switch.)
+ */
+function parseHermesMcpTestOutput(stdout: string): DiscoveredMcpTool[] {
+  const out: DiscoveredMcpTool[] = [];
+  for (const line of stdout.split("\n")) {
+    // Skip header rows + empty rows + status markers (✓ / ✗).
+    if (!line.trim()) continue;
+    if (/^\s*(Testing|Transport|Auth|Available)\b/.test(line)) continue;
+    if (/^\s*[✓✗]/.test(line)) continue;
+    // Tool rows: ≥4 leading spaces, identifier, then ≥2 spaces, then prose.
+    const m = line.match(/^\s{4,}([A-Za-z_][\w-]*)\s{2,}(.*\S)\s*$/);
+    if (!m) continue;
+    out.push({ name: m[1], description: m[2] });
+  }
+  return out;
+}
+
+/**
+ * Discover the live tool catalogue advertised by one MCP server.
+ *
+ * Calls `hermes mcp test <server>` inside the hermes container. Cached for
+ * MCP_TOOLS_CACHE_TTL_MS so repeat hits on the /tools route within a session
+ * don't pay the ~300ms exec cost N times. Returns [] on any failure (server
+ * unknown, container missing, parse mismatch) — the caller falls back to
+ * whatever shape it had before.
+ *
+ * @param server  MCP-server name as it appears in config.yaml.mcp_servers
+ *                (e.g. 'alfred', 'execute', 'plane', 'files').
+ */
+async function discoverMcpToolsAdvertised(
+  server: string,
+): Promise<DiscoveredMcpTool[]> {
+  const cached = MCP_TOOLS_CACHE.get(server);
+  const now = Date.now();
+  if (cached) {
+    const ttl = cached.failed ? MCP_TOOLS_FAILED_TTL_MS : MCP_TOOLS_CACHE_TTL_MS;
+    if (now - cached.fetchedAt < ttl) return cached.tools;
+  }
+  try {
+    const stdout = await dockerExec(HERMES_CONTAINER, [
+      ...HERMES_CMD,
+      "mcp",
+      "test",
+      server,
+    ]);
+    const tools = parseHermesMcpTestOutput(stdout);
+    MCP_TOOLS_CACHE.set(server, { tools, fetchedAt: now, failed: tools.length === 0 });
+    return tools;
+  } catch {
+    MCP_TOOLS_CACHE.set(server, { tools: [], fetchedAt: now, failed: true });
+    return [];
+  }
+}
+
+/** Reset the per-server cache. Test-only. */
+export function _resetMcpToolsCacheForTest(): void {
+  MCP_TOOLS_CACHE.clear();
+}
+
 // Hermes resolves all profile state under HERMES_HOME (default /opt/data in
 // the runtime container — see packages/hermes/Dockerfile). Each profile lives
 // at ${HERMES_HOME}/profiles/<profile>/config.yaml. ctrl-api reads the `main`
@@ -343,24 +446,27 @@ export function registerHermesRoutes(): void {
       tool_count: number | null;
     }> = [];
 
+    // Partition servers by mode first so the `all` branch can fan out the
+    // `hermes mcp test` calls in parallel — sequentially we'd pay
+    // N × ~300ms; in parallel the wall-clock is whichever server is slowest.
+    const allModeServers: string[] = [];
     for (const server of mcpServers) {
       const serverCfg = mcpSection?.[server] ?? {};
       const includeRaw = serverCfg?.tools?.include;
       const isExplicitList = Array.isArray(includeRaw);
       const known = MCP_SERVER_TOOLS[server];
 
-      let mode: "whitelist" | "all" | "none";
-      let toolCount: number | null;
-
       if (isExplicitList && includeRaw.length === 0) {
-        mode = "none";
-        toolCount = 0;
-      } else if (isExplicitList) {
-        mode = "whitelist";
-        toolCount = includeRaw.length;
-        // Surface every whitelisted name. Descriptions only exist for the
-        // few servers in MCP_SERVER_TOOLS; the rest fall back to a
-        // placeholder rather than blocking the row from appearing.
+        mcpServerInclusion.push({ server, mode: "none", tool_count: 0 });
+        continue;
+      }
+      if (isExplicitList) {
+        // Whitelist — the LLM sees exactly these names every turn. Surface
+        // them straight from config.yaml. The runtime's full advertised
+        // catalogue may be a superset (e.g. `sure` whitelists 23 of 95) but
+        // showing the superset would be MORE dishonest than the whitelist.
+        const count = includeRaw.length;
+        mcpServerInclusion.push({ server, mode: "whitelist", tool_count: count });
         for (const name of includeRaw as unknown[]) {
           if (typeof name !== "string") continue;
           const desc =
@@ -374,12 +480,55 @@ export function registerHermesRoutes(): void {
               known?.find((t) => t.name === name)?.prime_only ?? false,
           });
         }
+        continue;
+      }
+      // No include list at all → mode='all'. Schedule a live discovery call
+      // and fill in mode/count below once they resolve.
+      allModeServers.push(server);
+    }
+
+    // Fan out the `hermes mcp test` calls for `all`-mode servers (issue #185).
+    // Each is cached in MCP_TOOLS_CACHE; cold path is ~300ms per server,
+    // warm path is a Map lookup. The N servers run concurrently so the
+    // wall-clock for the cold path is ~max, not ~sum.
+    const allModeResults = await Promise.all(
+      allModeServers.map(async (server) => ({
+        server,
+        tools: await discoverMcpToolsAdvertised(server),
+      })),
+    );
+
+    for (const { server, tools: discovered } of allModeResults) {
+      const known = MCP_SERVER_TOOLS[server];
+      if (discovered.length > 0) {
+        mcpServerInclusion.push({
+          server,
+          mode: "all",
+          tool_count: discovered.length,
+        });
+        for (const t of discovered) {
+          // Description fallback: live description wins; the curated
+          // MCP_SERVER_TOOLS map is description-only fallback, not the
+          // source of truth for which tools exist.
+          const curated = known?.find((k) => k.name === t.name);
+          if (curated?.prime_only && !primeEnabled) continue;
+          mcpTools.push({
+            name: t.name,
+            server,
+            description: t.description || curated?.description || "",
+            prime_only: curated?.prime_only ?? false,
+          });
+        }
       } else if (known) {
-        // No `tools.include` set, and we have a curated description list:
-        // expose those (this preserves the alfred-ctrl behaviour where the
-        // 4 known tools have rich descriptions).
-        mode = "all";
-        toolCount = null;
+        // Discovery failed (parse mismatch, container missing, …) but we
+        // do have curated descriptions for this server — fall back to the
+        // pre-#185 behaviour so the page degrades cleanly instead of
+        // pretending the server is empty.
+        mcpServerInclusion.push({
+          server,
+          mode: "all",
+          tool_count: null,
+        });
         for (const t of known) {
           if (t.prime_only && !primeEnabled) continue;
           mcpTools.push({
@@ -390,15 +539,14 @@ export function registerHermesRoutes(): void {
           });
         }
       } else {
-        // No include list AND no curated descriptions — Hermes is passing
-        // through whatever the server advertises, but ctrl-api can't
-        // enumerate without asking the running process. Surface the row
-        // honestly so the UI can render "all tools" instead of "0 tools".
-        mode = "all";
-        toolCount = null;
+        // Discovery failed AND no curated fallback — surface the row
+        // honestly. The UI renders "all tools" + the fallback copy.
+        mcpServerInclusion.push({
+          server,
+          mode: "all",
+          tool_count: null,
+        });
       }
-
-      mcpServerInclusion.push({ server, mode, tool_count: toolCount });
     }
     mcpTools.sort((a, b) => a.name.localeCompare(b.name));
     mcpServerInclusion.sort((a, b) => a.server.localeCompare(b.server));

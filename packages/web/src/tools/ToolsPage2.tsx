@@ -514,9 +514,11 @@ function McpServerCard({
   //   2. Do we have a per-tool catalogue we can show? (depends on mode)
   //
   // mode='whitelist' → we know the exact count + the names; render both.
-  // mode='all'       → all of the server's tools are exposed, but ctrl-api
-  //                    doesn't know the list (would have to ask the running
-  //                    MCP process). Render "all tools" with no expander.
+  // mode='all'       → ctrl-api enumerates the live catalogue via
+  //                    `hermes mcp test <server>` (issue #185). When the
+  //                    discovery succeeded we have the count + the names;
+  //                    when it didn't, tool_count is null and we render
+  //                    "all tools" as a fallback label.
   // mode='none'      → 0 tools on main; the server is being treated as
   //                    DELEGATED. Render "0 (delegated)" — never "misconfigured".
   // inclusion=null    → API older than 2026-05-30; fall back to the previous
@@ -524,7 +526,8 @@ function McpServerCard({
   const inclusionMode = inclusion?.mode ?? null;
   const inclusionCount = inclusion?.tool_count ?? null;
   const countLabel: string =
-    inclusionMode === "whitelist" && inclusionCount !== null
+    (inclusionMode === "whitelist" || inclusionMode === "all") &&
+    inclusionCount !== null
       ? `${inclusionCount} ${inclusionCount === 1 ? "tool" : "tools"}`
       : inclusionMode === "all"
         ? "all tools"
@@ -624,13 +627,17 @@ function McpServerCard({
           ) : null}
         </>
       ) : inclusionMode === "all" ? (
+        // Live discovery failed for this `all`-mode server. The card still
+        // says "all tools" but we can't show the names. This is the
+        // pre-#185 fallback shape — it should be rare now (Hermes-restart
+        // window, container missing, parser mismatch).
         <p
           className="font-body italic text-[13px] mt-3"
           style={{ color: "var(--marginalia)" }}
         >
           Every tool this MCP server advertises is passed through to the
-          main runtime. Exact list isn't surfaced here yet — Hermes knows
-          it; ctrl-api would have to ask the running process.
+          main runtime. The live catalogue couldn't be read just now —
+          Hermes may be restarting; refresh in a few seconds.
         </p>
       ) : inclusionMode === "none" ? (
         <p
