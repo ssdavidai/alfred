@@ -326,25 +326,88 @@ export function registerHermesRoutes(): void {
       description: string;
       prime_only: boolean;
     }> = [];
+    // Per-server inclusion metadata — used by the /tools UI's disposition
+    // panel so it can render "23 tools (whitelisted)" vs "all tools (count
+    // not surfaced)" vs "none — delegated" without lying.
+    const mcpServerInclusion: Array<{
+      server: string;
+      // 'whitelist' — config.yaml has tools.include with explicit names; we
+      //   know the exact catalogue and surface it in mcp_tools below.
+      // 'all'       — no tools.include set; Hermes passes through whatever
+      //   the spawned MCP server advertises. We can't enumerate without
+      //   asking the running process, so we report the count as unknown.
+      // 'none'      — tools.include is an empty array (the DELEGATED shape
+      //   from PR #178). The server still runs for the workers profile but
+      //   main's LLM sees nothing.
+      mode: "whitelist" | "all" | "none";
+      tool_count: number | null;
+    }> = [];
+
     for (const server of mcpServers) {
+      const serverCfg = mcpSection?.[server] ?? {};
+      const includeRaw = serverCfg?.tools?.include;
+      const isExplicitList = Array.isArray(includeRaw);
       const known = MCP_SERVER_TOOLS[server];
-      if (!known) continue;
-      for (const t of known) {
-        if (t.prime_only && !primeEnabled) continue;
-        mcpTools.push({
-          name: t.name,
-          server,
-          description: t.description,
-          prime_only: t.prime_only,
-        });
+
+      let mode: "whitelist" | "all" | "none";
+      let toolCount: number | null;
+
+      if (isExplicitList && includeRaw.length === 0) {
+        mode = "none";
+        toolCount = 0;
+      } else if (isExplicitList) {
+        mode = "whitelist";
+        toolCount = includeRaw.length;
+        // Surface every whitelisted name. Descriptions only exist for the
+        // few servers in MCP_SERVER_TOOLS; the rest fall back to a
+        // placeholder rather than blocking the row from appearing.
+        for (const name of includeRaw as unknown[]) {
+          if (typeof name !== "string") continue;
+          const desc =
+            known?.find((t) => t.name === name)?.description ??
+            "(tool advertised by the MCP server; description not catalogued in ctrl-api)";
+          mcpTools.push({
+            name,
+            server,
+            description: desc,
+            prime_only:
+              known?.find((t) => t.name === name)?.prime_only ?? false,
+          });
+        }
+      } else if (known) {
+        // No `tools.include` set, and we have a curated description list:
+        // expose those (this preserves the alfred-ctrl behaviour where the
+        // 4 known tools have rich descriptions).
+        mode = "all";
+        toolCount = null;
+        for (const t of known) {
+          if (t.prime_only && !primeEnabled) continue;
+          mcpTools.push({
+            name: t.name,
+            server,
+            description: t.description,
+            prime_only: t.prime_only,
+          });
+        }
+      } else {
+        // No include list AND no curated descriptions — Hermes is passing
+        // through whatever the server advertises, but ctrl-api can't
+        // enumerate without asking the running process. Surface the row
+        // honestly so the UI can render "all tools" instead of "0 tools".
+        mode = "all";
+        toolCount = null;
       }
+
+      mcpServerInclusion.push({ server, mode, tool_count: toolCount });
     }
     mcpTools.sort((a, b) => a.name.localeCompare(b.name));
+    mcpServerInclusion.sort((a, b) => a.server.localeCompare(b.server));
 
     sendJson(res, 200, {
       builtin_tools: builtinTools,
       mcp_tools: mcpTools,
       mcp_servers: mcpServers,
+      mcp_server_inclusion: mcpServerInclusion,
       prime_enabled: primeEnabled,
     });
   });

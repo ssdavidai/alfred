@@ -65,11 +65,26 @@ interface McpTool {
   prime_only: boolean;
 }
 
+interface McpServerInclusion {
+  server: string;
+  // 'whitelist' — tools.include in config.yaml lists explicit names → we
+  //   know the exact catalogue and the count is meaningful.
+  // 'all'       — no whitelist; Hermes passes through whatever the spawned
+  //   MCP server advertises. ctrl-api can't enumerate without asking the
+  //   running process, so render the count as unknown.
+  // 'none'      — tools.include is an empty array (the DELEGATED shape from
+  //   PR #178). Server still serves the workers profile, just hidden on main.
+  mode: "whitelist" | "all" | "none";
+  tool_count: number | null;
+}
+
 export default function ToolsPage2() {
   const { data, isLoading } = useQuery(getAllowedTools);
   const apps: AppEntry[] = (data?.apps ?? []) as AppEntry[];
   const builtins: BuiltinTool[] = (data?.builtin_tools ?? []) as BuiltinTool[];
   const mcps: McpTool[] = (data?.mcp_tools ?? []) as McpTool[];
+  const mcpInclusion: McpServerInclusion[] =
+    (data?.mcp_server_inclusion ?? []) as McpServerInclusion[];
 
   const { data: dispData, refetch: refetchDispositions } =
     useQuery(getToolDispositions);
@@ -137,18 +152,38 @@ export default function ToolsPage2() {
     builtins.length +
     mcps.length;
 
-  // Group filtered MCP tools by server, joined with the live disposition row.
-  // Servers with a disposition row but no tools in the catalogue still
-  // appear (so Sir can flip them ahead of time); servers in the catalogue
-  // but missing from the disposition table render as DIRECT (the seeded
-  // default — happens only on a pre-migration tenant).
+  // Group filtered MCP tools by server, joined with the live disposition
+  // row AND the per-server inclusion shape from config.yaml. Each server
+  // card surfaces three orthogonal facts:
+  //   • disposition (DIRECT vs DELEGATED, from state.db.tool_disposition)
+  //   • inclusion shape (whitelist / all / none, from config.yaml mcp_servers)
+  //   • per-tool detail (only meaningful when inclusion = whitelist)
+  //
+  // The two states the OLD UI conflated are now distinct:
+  //   - disposition=DIRECT + inclusion=all  → "all tools available, count not
+  //     surfaced". No misleading "0 tools / misconfigured" message.
+  //   - disposition=DELEGATED                → inclusion will be 'none' after
+  //     the debounced restart fires; we render 'delegated' regardless.
   const mcpServerGroups = useMemo(() => {
+    const inclusionMap = new Map<string, McpServerInclusion>();
+    for (const i of mcpInclusion) inclusionMap.set(i.server, i);
+
     const byServer = new Map<
       string,
-      { server: string; tools: McpTool[]; disposition: ToolDispositionRow | null }
+      {
+        server: string;
+        tools: McpTool[];
+        disposition: ToolDispositionRow | null;
+        inclusion: McpServerInclusion | null;
+      }
     >();
     for (const d of dispositions) {
-      byServer.set(d.server, { server: d.server, tools: [], disposition: d });
+      byServer.set(d.server, {
+        server: d.server,
+        tools: [],
+        disposition: d,
+        inclusion: inclusionMap.get(d.server) ?? null,
+      });
     }
     for (const m of filteredMcps) {
       const existing = byServer.get(m.server);
@@ -159,6 +194,7 @@ export default function ToolsPage2() {
           server: m.server,
           tools: [m],
           disposition: null,
+          inclusion: inclusionMap.get(m.server) ?? null,
         });
       }
     }
@@ -166,7 +202,7 @@ export default function ToolsPage2() {
     return Array.from(byServer.values()).sort((a, b) =>
       a.server.localeCompare(b.server),
     );
-  }, [dispositions, filteredMcps]);
+  }, [dispositions, filteredMcps, mcpInclusion]);
 
   const handleFlip = async (
     server: string,
@@ -430,6 +466,7 @@ export default function ToolsPage2() {
                       server={g.server}
                       tools={g.tools}
                       disposition={g.disposition}
+                      inclusion={g.inclusion}
                       restartingSince={restarts[g.server] ?? null}
                       onFlip={handleFlip}
                     />
@@ -448,12 +485,14 @@ function McpServerCard({
   server,
   tools,
   disposition,
+  inclusion,
   restartingSince,
   onFlip,
 }: {
   server: string;
   tools: McpTool[];
   disposition: ToolDispositionRow | null;
+  inclusion: McpServerInclusion | null;
   restartingSince: number | null;
   onFlip: (server: string, next: "direct" | "delegated") => void | Promise<void>;
 }) {
@@ -470,6 +509,31 @@ function McpServerCard({
     : null;
   const updatedBy = disposition?.updated_by ?? null;
 
+  // Two facts the previous render conflated:
+  //   1. How many tools does the LLM SEE on every turn? (from inclusion)
+  //   2. Do we have a per-tool catalogue we can show? (depends on mode)
+  //
+  // mode='whitelist' → we know the exact count + the names; render both.
+  // mode='all'       → all of the server's tools are exposed, but ctrl-api
+  //                    doesn't know the list (would have to ask the running
+  //                    MCP process). Render "all tools" with no expander.
+  // mode='none'      → 0 tools on main; the server is being treated as
+  //                    DELEGATED. Render "0 (delegated)" — never "misconfigured".
+  // inclusion=null    → API older than 2026-05-30; fall back to the previous
+  //                    catalogue-only behaviour, but DON'T say "misconfigured".
+  const inclusionMode = inclusion?.mode ?? null;
+  const inclusionCount = inclusion?.tool_count ?? null;
+  const countLabel: string =
+    inclusionMode === "whitelist" && inclusionCount !== null
+      ? `${inclusionCount} ${inclusionCount === 1 ? "tool" : "tools"}`
+      : inclusionMode === "all"
+        ? "all tools"
+        : inclusionMode === "none"
+          ? "0 tools (delegated)"
+          : tools.length > 0
+            ? `${tools.length} ${tools.length === 1 ? "tool" : "tools"}`
+            : "—";
+
   return (
     <li className="border border-rule p-5">
       <div className="flex items-baseline justify-between gap-4 flex-wrap">
@@ -479,7 +543,7 @@ function McpServerCard({
             className="font-mono text-[10px] uppercase tracking-[0.22em]"
             style={{ color: "var(--marginalia)" }}
           >
-            {tools.length} {tools.length === 1 ? "tool" : "tools"}
+            {countLabel}
           </span>
         </div>
         <div className="flex items-center gap-3">
@@ -559,12 +623,29 @@ function McpServerCard({
             </ul>
           ) : null}
         </>
+      ) : inclusionMode === "all" ? (
+        <p
+          className="font-body italic text-[13px] mt-3"
+          style={{ color: "var(--marginalia)" }}
+        >
+          Every tool this MCP server advertises is passed through to the
+          main runtime. Exact list isn't surfaced here yet — Hermes knows
+          it; ctrl-api would have to ask the running process.
+        </p>
+      ) : inclusionMode === "none" ? (
+        <p
+          className="font-body italic text-[13px] mt-3"
+          style={{ color: "var(--marginalia)" }}
+        >
+          Tools hidden from main. The server still runs and is reachable
+          via <code>delegate_to_focused_agent</code> on the workers profile.
+        </p>
       ) : (
         <p
           className="font-body italic text-[13px] mt-3"
           style={{ color: "var(--marginalia)" }}
         >
-          (no tools loaded — server may be misconfigured)
+          (catalogue not yet surfaced — disposition control still works)
         </p>
       )}
     </li>

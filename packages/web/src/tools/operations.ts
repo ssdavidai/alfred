@@ -87,6 +87,18 @@ export const getAllowedTools: GetAllowedTools<void, any> = async (
     Array.isArray(builtinMcpResp?.builtin_tools) ? builtinMcpResp.builtin_tools : [];
   const mcp_tools: Array<{ name: string; server: string; description: string; prime_only: boolean }> =
     Array.isArray(builtinMcpResp?.mcp_tools) ? builtinMcpResp.mcp_tools : [];
+  // Per-server inclusion mode (whitelist / all / none) + count so the
+  // dashboard can render "23 tools" vs "all tools (count not surfaced)"
+  // honestly. Added 2026-05-30 — the previous endpoint only knew about
+  // the curated MCP_SERVER_TOOLS map (alfred-ctrl only) and silently
+  // returned 0 for every other server.
+  const mcp_server_inclusion: Array<{
+    server: string;
+    mode: "whitelist" | "all" | "none";
+    tool_count: number | null;
+  }> = Array.isArray(builtinMcpResp?.mcp_server_inclusion)
+    ? builtinMcpResp.mcp_server_inclusion
+    : [];
   const prime_enabled: boolean = Boolean(builtinMcpResp?.prime_enabled);
 
   // 2. All connected apps + their auto-config state. We join with
@@ -166,6 +178,7 @@ export const getAllowedTools: GetAllowedTools<void, any> = async (
     apps: appResults,
     builtin_tools,
     mcp_tools,
+    mcp_server_inclusion,
     prime_enabled,
   };
 };
