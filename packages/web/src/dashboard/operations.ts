@@ -38,6 +38,7 @@ import {
   type OnboardingGmailMode,
 } from "../server/onboardingGmailMode";
 import { checkGmailConnection } from "../integrations/operations";
+import { pickTailnetHostnameForDashboard } from "./tailscaleCardCore";
 
 // ============================================================
 // AgentPhone (Phase 8 — dashboard PhonePage)
@@ -1105,6 +1106,25 @@ export const getDashboardData: GetDashboardData<void, any> = async (
   // Single aggregated endpoint — one tunnel round-trip instead of six
   const raw = await proxyToTenant(instance, { path: "/api/v1/admin/dashboard" });
 
+  // #109 PR5: fire a tiny secondary probe for Tailscale state. We can't
+  // bundle this into /admin/dashboard without a server-side change there
+  // (the singleton tailscale_connection row lives in ctrl-api state.db,
+  // and /admin/dashboard already round-trips a bunch of containers/health
+  // queries). Keep the probe fail-soft: any error → tailscaleHostname stays
+  // null and the dashboard renders exactly as it did pre-this-patch.
+  let tailscaleHostnameFromLive: string | null = null;
+  try {
+    const ts = await proxyToTenant(instance, {
+      path: "/api/v1/channels/tailscale/status",
+    });
+    tailscaleHostnameFromLive = pickTailnetHostnameForDashboard(ts);
+  } catch {
+    // Fail-soft. Tailscale may be off; probe may 502; ctrl-api may have
+    // skipped its singleton row. tailscaleHostname stays null and widgets
+    // that read it render the no-tailnet state.
+    tailscaleHostnameFromLive = null;
+  }
+
   const healthRaw = raw?.health ?? null;
   const vaultRaw = raw?.vault ?? null;
   const inboxRaw = raw?.inbox ?? null;
@@ -1155,7 +1175,13 @@ export const getDashboardData: GetDashboardData<void, any> = async (
     instance: {
       status: instance!.status,
       tier: instance!.tier,
-      tailscaleHostname: instance!.tailscaleHostname ?? null,
+      // #109 PR5: was always null (single-VM tenantProxy.getUserInstance
+      // returns {} so the back-compat `instance!.tailscaleHostname` field
+      // is undefined). Populate from the live ctrl-api status probe so
+      // dashboard widgets that read this field light up as soon as the
+      // principal connects on /channels.
+      tailscaleHostname:
+        tailscaleHostnameFromLive ?? instance!.tailscaleHostname ?? null,
       subdomainUrl: (instance as any).subdomainUrl ?? null,
       agentmailInboxAddress: (instance as any).agentmailInboxAddress ?? null,
     },

@@ -30,6 +30,7 @@ import {
   formatProbeTime,
   isProbablyValidAuthKey,
   normalisePeer,
+  pickTailnetHostnameForDashboard,
   redactAuthKey,
   type TailscaleStatus,
   type TailscalePeersResponse,
@@ -350,4 +351,89 @@ test("formatProbeTime: just now / N min / N hours / N days", () => {
   assert.equal(formatProbeTime(Number.NaN), "");
   assert.equal(formatProbeTime(0), "");
   assert.equal(formatProbeTime(-1), "");
+});
+
+// ── pickTailnetHostnameForDashboard (#109 PR5) ────────────────────────────
+
+test("pickTailnetHostnameForDashboard: connected with hostname → that hostname", () => {
+  const status: TailscaleStatus = {
+    ...BASE,
+    state: "connected",
+    tailnet_hostname: "home-alfred-black-1.tail5ec603.ts.net",
+    tailnet_ip: "100.111.15.65",
+  };
+  assert.equal(
+    pickTailnetHostnameForDashboard(status),
+    "home-alfred-black-1.tail5ec603.ts.net",
+  );
+});
+
+test("pickTailnetHostnameForDashboard: connected but hostname empty/null → null", () => {
+  assert.equal(
+    pickTailnetHostnameForDashboard({
+      ...BASE,
+      state: "connected",
+      tailnet_hostname: null,
+    }),
+    null,
+  );
+  assert.equal(
+    pickTailnetHostnameForDashboard({
+      ...BASE,
+      state: "connected",
+      tailnet_hostname: "",
+    }),
+    null,
+  );
+  assert.equal(
+    pickTailnetHostnameForDashboard({
+      ...BASE,
+      state: "connected",
+      tailnet_hostname: "   ",
+    }),
+    null,
+  );
+});
+
+test("pickTailnetHostnameForDashboard: not connected → null even with a hostname present", () => {
+  for (const state of [
+    "disabled",
+    "starting",
+    "authenticating",
+    "error",
+  ] as const) {
+    assert.equal(
+      pickTailnetHostnameForDashboard({
+        ...BASE,
+        state,
+        tailnet_hostname: "stale.tail5ec603.ts.net",
+      }),
+      null,
+      `state=${state} must return null`,
+    );
+  }
+});
+
+test("pickTailnetHostnameForDashboard: garbage input fails soft", () => {
+  assert.equal(pickTailnetHostnameForDashboard(null), null);
+  assert.equal(pickTailnetHostnameForDashboard(undefined), null);
+  assert.equal(pickTailnetHostnameForDashboard("not an object"), null);
+  assert.equal(pickTailnetHostnameForDashboard(42), null);
+  assert.equal(pickTailnetHostnameForDashboard({}), null);
+  // Hostname-only without state → null (defensive).
+  assert.equal(
+    pickTailnetHostnameForDashboard({ tailnet_hostname: "x" }),
+    null,
+  );
+});
+
+test("pickTailnetHostnameForDashboard: trims whitespace before returning", () => {
+  assert.equal(
+    pickTailnetHostnameForDashboard({
+      ...BASE,
+      state: "connected",
+      tailnet_hostname: "  home-alfred-black-1.tail5ec603.ts.net  ",
+    }),
+    "home-alfred-black-1.tail5ec603.ts.net",
+  );
 });

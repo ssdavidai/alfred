@@ -378,6 +378,30 @@ export function formatProbeTime(
   return `${days} ${days === 1 ? "day" : "days"} ago`;
 }
 
+// ── Dashboard-payload helper ─────────────────────────────────────────────
+
+/**
+ * Pick the tailnet hostname out of a /channels/tailscale/status payload
+ * for callers that only care whether to surface the field as a connected
+ * value (the dashboard's `instance.tailscaleHostname` slot). Returns the
+ * trimmed hostname iff the connection is live AND the hostname is a
+ * non-empty string; otherwise null. Fail-soft: any shape mismatch → null.
+ *
+ * Lives in tailscaleCardCore (and not in operations.ts) so the derivation
+ * can unit-test under node:test without pulling in the Wasp server-op
+ * surface.
+ *
+ * #109 PR 5.
+ */
+export function pickTailnetHostnameForDashboard(
+  status: unknown,
+): string | null {
+  if (!status || typeof status !== "object") return null;
+  const s = status as Partial<TailscaleStatus>;
+  if (s.state !== "connected") return null;
+  return pickNonEmpty(s.tailnet_hostname);
+}
+
 // ── Internal helpers ─────────────────────────────────────────────────────
 
 function pickNonEmpty(s: string | null | undefined): string | null {
