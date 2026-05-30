@@ -141,7 +141,17 @@ class ExecuteRequest(BaseModel):
 # packages/ctrl/src/api/routes/integrations.ts where the execute route
 # uses the same rule.
 
-CTRL_API_URL = os.environ.get("CTRL_API_URL", "http://alfred-ctrl-api:3100")
+# ALFRED_CTRL_URL is the canonical env var alfred-learn already uses elsewhere
+# (vault_client.py, etc.); fall back to CTRL_API_URL for forward-compat. The
+# default `http://ctrl-api:3100` matches the alfred-black docker-compose
+# service name (verified live on home.alfred.black 2026-05-30). An earlier
+# default of `alfred-ctrl-api` produced silent "Temporary failure in name
+# resolution" warnings and the defaults injection never fired.
+CTRL_API_URL = (
+    os.environ.get("ALFRED_CTRL_URL")
+    or os.environ.get("CTRL_API_URL")
+    or "http://ctrl-api:3100"
+)
 CTRL_API_KEY = os.environ.get("AAS_API_KEY", "")
 CTRL_DEFAULTS_TTL_SECONDS = int(os.environ.get("COMPOSIO_DEFAULTS_TTL_SECONDS", "300"))
 
