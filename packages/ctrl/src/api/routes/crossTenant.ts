@@ -4,6 +4,20 @@
  * Admin-only feature: allows Sir's Alfred to ask questions to other tenants'
  * Alfreds via the Tailscale mesh. Each tenant gets a receiving endpoint; the
  * sending tool is only active when CROSS_TENANT_PEERS is set in the env.
+ *
+ * NOTE (#109): the `tailscaleIp` / `tailscaleHost` fields below refer to an
+ * **opt-in cross-tenant mesh** that the operator configures by hand via
+ * CROSS_TENANT_PEERS. This is orthogonal to the principal-owned Tailscale
+ * opt-in introduced in #109 (the `/channels/tailscale/*` routes + the
+ * `tailscale` compose profile). Two distinct surfaces:
+ *
+ *   • cross-tenant peer mesh — operator configures peer IPs explicitly via
+ *     env. Lives in env, not in the principal's tailnet.
+ *
+ *   • principal Tailscale — the principal joins THEIR OWN tailnet from
+ *     `/channels`. See `channels_tailscale.ts`.
+ *
+ * Do not entangle the two — a tenant can use either, both, or neither.
  */
 import fs from "node:fs";
 import { addRoute } from "../server.js";

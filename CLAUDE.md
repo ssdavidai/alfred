@@ -15,7 +15,13 @@ section here.
 
 `alfred-black` is the single-VM, `docker compose up` reframing of the old
 `alfred-platform` SaaS fleet: **one repo, one VM, one stack**. No Hetzner
-auto-provisioning, no Tailscale, no Cloudflare provisioning, no billing.
+auto-provisioning, no operator-owned Tailscale tailnet, no Cloudflare
+provisioning, no billing.
+
+(Note: there IS an optional Tailscale sidecar, off by default — see §15
+"Optional Tailscale opt-in (#109)". It's the *principal's* tailnet, not
+the operator's. The old SaaS-era admin tailnet does not exist in this
+repo.)
 
 The AI runtime is **Hermes Agent** (`NousResearch/hermes-agent`), which
 replaces OpenClaw's two-container split with one Docker image running
@@ -796,6 +802,59 @@ the `IdentityAgent=none` opt.
 `state_data` / `ingest_data` / `alfred_data` / `hermes_data` are
 recoverable but contain history — back them up if you care about the
 audit trail / observations / instinct training data.
+`tailscale_data` (when the optional Tailscale sidecar is on — §15.11)
+holds the `tailscaled.state` node identity; lose it and the principal
+has to re-approve the device on `login.tailscale.com`.
+
+### 15.11 Optional Tailscale opt-in (#109)
+
+There IS a Tailscale sidecar in `docker-compose.yaml`, but it is
+**gated by `profiles: [tailscale]` and off by default**. `docker compose
+up -d` (the default) never starts it. The model is: the principal joins
+**their own** tailnet from the dashboard (`/channels` → Tailscale card).
+The operator owns nothing here — no Sir-side tailnet, no shared keys.
+
+Flip on for an existing tenant:
+
+```bash
+# 1. Edit /opt/alfred/.env
+TAILSCALE_ENABLED=true
+
+# 2. Bring the sidecar up
+docker compose --profile tailscale up -d tailscale
+
+# 3. Principal goes to /channels, clicks Connect on the Tailscale card,
+#    either pastes a tskey-auth-… key OR uses the device-auth URL the
+#    card surfaces (login.tailscale.com/a/<code>).
+
+# 4. Once the card shows "Connected", ctrl-api can mint the tailnet
+#    LE cert + bind it into Caddy:
+#    POST /api/v1/channels/tailscale/cert  {"domain":"<tailnet-hostname>"}
+#    Reach the dashboard at https://<tailnet-hostname> from any device
+#    on the principal's tailnet.
+```
+
+Key files:
+- `docker-compose.yaml` — `tailscale` service under `profiles: [tailscale]`.
+- `packages/ctrl/src/api/routes/channels_tailscale.ts` — status/connect/
+  disconnect/peers/cert/serve/funnel.
+- `packages/web/src/dashboard/tailscaleCardCore.ts` — pure card state
+  derivation + 18 tests under `node:test`.
+- `packages/web/src/dashboard/ChannelsPage.tsx` (`<TailscaleCard />`) —
+  the principal-facing surface.
+- `caddy/Caddyfile` — `import /tailscale-snippets/*.caddy` hot-loads the
+  per-domain stanza the cert route drops in.
+
+The public `<tenant>.alfred.black` hostname keeps working unchanged.
+Tailscale is **additive**, never a replacement. Webhook ingress (Composio,
+Paperclip, OMI, …) stays on the public Caddy hostname.
+
+Caveat: outbound MagicDNS (e.g. `curl http://homeassistant.tail-xxxx.ts.net`
+from inside the Hermes container) requires either (a) `network_mode:
+service:tailscale` on the consumer service, or (b) explicit `dns:`
+pointing at the sidecar. Neither is wired by default — flag a follow-up
+issue if the principal needs Alfred to reach their tailnet from inside
+containers.
 
 ---
 

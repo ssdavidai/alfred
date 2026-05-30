@@ -3,6 +3,30 @@
 **Date:** 2026-02-25
 **Scope:** Full security review of alfred-ctrl provisioning system, OpenClaw deployment, and supporting infrastructure.
 
+> **HISTORICAL CONTEXT — pre-`alfred-black` merge (May 2026).** This
+> document describes the security model of the **legacy multi-tenant
+> `alfred-platform` SaaS fleet**, which had:
+>
+> - a Sir-operated "admin tailnet" joining every tenant VM under
+>   `tag:admin` + `tag:tenant`,
+> - host-level `apt-get install tailscale` baked into cloud-init,
+> - shared OpenClaw infrastructure across tenants.
+>
+> **None of that applies to `alfred-black` (the current single-VM,
+> single-tenant `docker compose up` model).** The Tailscale story in
+> alfred-black is the principal-owned opt-in introduced by GH issue
+> #109 (see `CLAUDE.md` §15.11 + `deploy/README.md` "Enabling Tailscale
+> on an existing tenant"). The sidecar lives in `docker-compose.yaml`
+> under `profiles: [tailscale]`, off by default, and joins **the
+> principal's** tailnet — never an operator-owned one. Findings #5
+> (auth-key persistence) and #10 (supply-chain curl|sh) below are no
+> longer applicable in that form, though their underlying lessons
+> (treat auth keys as short-lived; never bake unverified install
+> scripts into bootstrap) carried forward into the new design.
+>
+> Read this file for the threat-modelling vocabulary and Layer 1/2/3
+> taxonomy — not as a description of what's deployed today.
+
 ---
 
 ## External Threat Landscape
