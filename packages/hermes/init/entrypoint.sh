@@ -524,6 +524,16 @@ for profile in "${PROFILES_RENDERED[@]}"; do
         CTRL_API_URL="${CTRL_API_URL:-http://ctrl-api:3100}" \
             python3 /setup/render_mcp_servers.py "$profile" \
             || echo "[init] WARN: render_mcp_servers.py failed for $profile (non-fatal)"
+
+        # --- 6a-bis. Main-profile tool-catalogue trim (issue #175) ----------
+        # Backfill `mcp_servers.{sure,hass,paperclip}.tools.include` on
+        # operator-owned configs so existing tenants benefit from the
+        # template's whitelist without an operator hand-edit. Idempotent,
+        # main-only (no-op on workers/heavy/codex-builder). Also asserts
+        # `kanban.dispatch_in_gateway: false` if the operator hasn't set it.
+        PROFILE_DIR="$INIT_PROFILE_DIR" \
+            python3 /setup/migrate_main_profile_tool_trim.py "$profile" \
+            || echo "[init] WARN: migrate_main_profile_tool_trim.py failed for $profile (non-fatal)"
     fi
 done
 

@@ -83,6 +83,13 @@ COPY packages/hermes/init/render_sms_gateway.py ./render_sms_gateway.py
 # required MCP server entries (e.g. `hass` PR #128, `files` PR #130) into
 # the operator-owned per-profile config.yaml. Sibling of render_sms_gateway.
 COPY packages/hermes/init/render_mcp_servers.py ./render_mcp_servers.py
+# migrate_main_profile_tool_trim.py — idempotent ADD-only mutator that
+# backfills `mcp_servers.{sure,hass,paperclip}.tools.include` on the
+# operator-owned main-profile config.yaml. Issue #175 (2026-05-30): voice
+# /HA-Assist calendar queries timed out because the main profile was
+# inlining 321 MCP tool schemas (~67k input tokens per turn). Workers/
+# heavy/codex-builder are unaffected (no-op). Sibling of render_mcp_servers.
+COPY packages/hermes/init/migrate_main_profile_tool_trim.py ./migrate_main_profile_tool_trim.py
 # Paperclip auto-bootstrap. Invoked as the entrypoint of the sibling
 # `paperclip-init` compose service (see docker-compose.yaml). Not run by
 # this image's default entrypoint.sh — keeps the main init container

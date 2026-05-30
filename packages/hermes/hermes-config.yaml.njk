@@ -120,6 +120,24 @@ agent:
   restart_drain_timeout: 60
 
 # =============================================================================
+# Kanban dispatcher — disabled fleet-wide
+# =============================================================================
+# Hermes ships with a built-in kanban board surface — a SQLite-backed task
+# queue at <HERMES_HOME>/profiles/<p>/kanban.db that the gateway can poll
+# every 60s to spawn workers for ready tasks. Alfred Black does NOT use it:
+# work coordination flows through Paperclip (which has its own runtime
+# workspace concept) and Plane (issues). With dispatch_in_gateway=True
+# (Hermes default), the gateway tries to open kanban.db every tick — and
+# when the file/dir is readonly to the gateway user, the result is a 60-
+# second-spaced ERROR Traceback in the logs that swamps every other signal
+# (see issue #175 log noise on home.alfred.black, 2026-05-30).
+#
+# Disabling here on every profile makes the dispatcher a no-op without
+# touching filesystem perms or runtime image config — the right knob.
+kanban:
+  dispatch_in_gateway: false
+
+# =============================================================================
 # Cron jobs
 # =============================================================================
 {%- if is_main %}
@@ -444,6 +462,67 @@ mcp_servers:
       AAS_API_KEY: "${AAS_API_KEY}"
     timeout: 120
     connect_timeout: 60
+{%- if is_main %}
+    # MAIN-PROFILE TOOL TRIM — see issue #175 (2026-05-30, Sir's
+    # voice-bridge calendar-query timeout).
+    #
+    # The full sure catalogue is 95 tools. At 321 tools total, every Hermes
+    # `/v1/responses` turn carries ~67 k input tokens (the JSON-Schema for
+    # every tool inlines into the system prompt). That makes the model's
+    # time-to-first-token ~3-5 s per turn, and a multi-turn tool-cascade
+    # (the calendar query alone is 8 turns × 16 tool calls) blows past the
+    # voice-bridge's 90 s budget.
+    #
+    # `tools.include` is a Hermes-native whitelist (see
+    # /usr/local/lib/python3.12/site-packages/tools/mcp_tool.py:2967-2974
+    # in hermes-agent v2026.5.16). Tools NOT listed are still REACHABLE on
+    # the workers profile (which keeps the full catalogue) and via
+    # `delegate_task` — they're just not inlined into main's tool schema.
+    #
+    # The retained surface is the user-facing chat's actual hot path:
+    # account/transaction/holding reads, the bulk-edit endpoints Sir
+    # categorises with, and the budget + sync top-level verbs. Niche CRUD
+    # (single-transaction create/update/split/unsplit, manual valuations,
+    # category/merchant/tag/rule mutation, holding cost-basis, transfer
+    # confirmation, recurring management, shares/invitations, imports,
+    # api-usage admin, full-tenant reset) routes through workers via
+    # `delegate_task` when the principal asks for it. Anything Sir CAN'T
+    # do via main's catalogue, he can still do via "ask Alfred to do X" —
+    # main delegates and reports.
+    tools:
+      include:
+        # net-worth + accounts (reads + the rare account create)
+        - get_balance_sheet
+        - list_accounts
+        - create_manual_account
+        - update_account
+        # transactions: reads + the bulk verbs Sir uses for categorisation
+        - list_transactions
+        - get_transaction
+        - bulk_update_transactions
+        - bulk_delete_transactions
+        # categories / merchants / tags / rules — list-only on main; create
+        # via delegate_task. update_budget_category stays because it's the
+        # one principal-driven write surface (budget allocations).
+        - list_categories
+        - list_merchants
+        - list_tags
+        - list_rules
+        - update_budget_category
+        - find_or_bootstrap_budget
+        # holdings + trades — reads only; cost-basis / security remap on workers
+        - list_holdings
+        - get_holding
+        - list_trades
+        - get_trade
+        # imports + exports — top-level lifecycle
+        - list_imports
+        - create_export
+        # tenant-wide ops the principal actually invokes
+        - trigger_sync
+        - cluster_transactions
+        - identify_recurring_patterns
+{%- endif %}
 
   plane:
     command: "node"
@@ -500,6 +579,50 @@ mcp_servers:
       AAS_API_KEY: "${AAS_API_KEY}"
     timeout: 120
     connect_timeout: 60
+    # MAIN-PROFILE TOOL TRIM — see issue #175. hass has 85 tools (covering
+    # the full HA admin surface: backups, HACS, users, LLATs, addons,
+    # integrations, area/device/label registries, …). The user-facing
+    # chat needs the OPERATOR surface — registry reads + state + history
+    # + the proposal/apply/rollback write path. Admin verbs (addons,
+    # users, LLATs, HACS, backups, registry mutations, integrations
+    # management) route through the dashboard's Home page UI or via
+    # `delegate_task` on workers when an automation needs them.
+    tools:
+      include:
+        # connection + registry reads (the everyday ops surface)
+        - ha__connection_status
+        - ha__list_entities
+        - ha__get_state
+        - ha__get_history
+        - ha__get_logbook
+        - ha__list_areas
+        - ha__list_devices
+        - ha__list_automations
+        - ha__list_scripts
+        - ha__get_calendars
+        - ha__resolve_entity
+        # the safe write path: proposal → apply → rollback. ha__call_service
+        # stays because the principal asks the agent to turn things on/off
+        # all day and the loop-guard contract is enforced server-side.
+        - ha__call_service
+        - ha__propose_automation
+        - ha__apply_proposal
+        - ha__rollback_snapshot
+        - ha__subscribe_events
+        # automation/scene/script read+write (PR3 first-class CRUD)
+        - ha__list_automations_full
+        - ha__create_automation
+        - ha__update_automation
+        - ha__delete_automation
+        - ha__create_scene
+        - ha__update_scene
+        - ha__delete_scene
+        - ha__create_script
+        - ha__update_script
+        - ha__delete_script
+        # core check/version — light read surface every triage flow uses
+        - ha__core_version
+        - ha__core_check_config
 {%- endif %}
 
   # --- paperclip: Paperclip's first-party MCP server (paperclip.ing) -------
@@ -539,6 +662,40 @@ mcp_servers:
       PAPERCLIP_AGENT_ID: "${PAPERCLIP_AGENT_ID}"
     timeout: 120
     connect_timeout: 60
+{%- if is_main %}
+    # MAIN-PROFILE TOOL TRIM — see issue #175. The upstream
+    # @paperclipai/mcp-server exposes 40 tools across issues / approvals
+    # / documents / projects / goals / runtime workspaces. The user-facing
+    # chat needs read access + the issue/comment/approval surface Sir
+    # actually drives; the workspace runtime control surface, document
+    # revisions, and link/unlink primitives are workers-only (the
+    # paperclip heartbeat agent on workers handles them autonomously).
+    tools:
+      include:
+        # identity / inbox
+        - paperclipMe
+        - paperclipInboxLite
+        # issue lifecycle (Sir's most-asked surface)
+        - paperclipListIssues
+        - paperclipGetIssue
+        - paperclipGetHeartbeatContext
+        - paperclipCreateIssue
+        - paperclipUpdateIssue
+        # comments — the chat surface for ongoing issues
+        - paperclipListComments
+        - paperclipAddComment
+        # approvals — the principal's decision surface
+        - paperclipListApprovals
+        - paperclipCreateApproval
+        - paperclipGetApproval
+        - paperclipApprovalDecision
+        # projects / agents / goals — directory reads
+        - paperclipListProjects
+        - paperclipGetProject
+        - paperclipListAgents
+        - paperclipGetAgent
+        - paperclipListGoals
+{%- endif %}
 
 {%- if is_main or profile == "workers" %}
 
