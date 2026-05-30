@@ -668,4 +668,219 @@ describe("/api/v1/files/* — PR 1", () => {
       assert.ok(row.last_accessed_at && row.last_accessed_at > 0);
     });
   });
+
+  // ── Lane D₁ routes (#114): describe / move / purge ────────────────────────
+  //
+  // The three routes the MCP `describe` / `move` / `hard_delete` tools
+  // wrap. We exercise the happy-path shape, the move's two address modes
+  // (basename vs full path), and the purge's two-stage gate (refuse on a
+  // live row, accept on a soft-deleted row).
+
+  describe("GET /describe/* (Lane D₁ metadata-getter)", () => {
+    it("returns the rich-metadata projection for a live row", async () => {
+      const up = await uploadBlob(
+        "contract.pdf",
+        Buffer.from("pdf-bytes"),
+        "application/pdf",
+        { principal_label: "Q3 Acme contract" },
+      );
+      const desc = await invokeRoute(
+        "GET",
+        `/api/v1/files/describe/${up.payload.path}`,
+      );
+      assert.equal(desc.status, 200);
+      assert.equal(desc.payload.id, up.payload.id);
+      assert.equal(desc.payload.name, "contract.pdf");
+      assert.equal(desc.payload.mime, "application/pdf");
+      assert.equal(desc.payload.size_bytes, "pdf-bytes".length);
+      assert.equal(desc.payload.principal_label, "Q3 Acme contract");
+      // `summary` and `alfred_read_at` are populated by Lane B's
+      // FileExtractionWorkflow; null in tests where the workflow can't
+      // reach docker.
+      assert.equal(typeof desc.payload.created_at, "number");
+      assert.equal(typeof desc.payload.updated_at, "number");
+      assert.equal(desc.payload.deleted_at, null);
+    });
+
+    it("ALSO returns soft-deleted rows (with deleted_at populated)", async () => {
+      const up = await uploadBlob(
+        "vanishing.txt",
+        Buffer.from("bye"),
+        "text/plain",
+      );
+      const del = await invokeRoute("DELETE", `/api/v1/files/${up.payload.path}`);
+      assert.equal(del.status, 200);
+      // stat would 404 on this path — describe returns 200 with deleted_at set.
+      const desc = await invokeRoute(
+        "GET",
+        `/api/v1/files/describe/${up.payload.path}`,
+      );
+      assert.equal(desc.status, 200);
+      assert.ok(desc.payload.deleted_at, "deleted_at must be populated");
+    });
+
+    it("returns 404 for an unknown path", async () => {
+      const desc = await invokeRoute(
+        "GET",
+        "/api/v1/files/describe/01HFAKEULIDFAKEULIDFAKEUL/nope.bin",
+      );
+      assert.equal(desc.status, 404);
+    });
+  });
+
+  describe("POST /:file_id/move (Lane D₁)", () => {
+    it("basename-only move renames the file in place and updates the row", async () => {
+      const up = await uploadBlob(
+        "draft.md",
+        Buffer.from("hello"),
+        "text/markdown",
+      );
+      const move = await invokeRoute(
+        "POST",
+        `/api/v1/files/${up.payload.id}/move`,
+        { body: { path: "final.md" } },
+      );
+      assert.equal(move.status, 200);
+      const expectedUlid = up.payload.path.split("/")[0];
+      assert.equal(move.payload.path, `${expectedUlid}/final.md`);
+      assert.equal(move.payload.original_filename, "final.md");
+      // On-disk file moved.
+      const absNew = path.join(FILES_ROOT, expectedUlid, "final.md");
+      assert.ok(fs.existsSync(absNew), `new path must exist on disk`);
+      const absOld = path.join(FILES_ROOT, expectedUlid, "draft.md");
+      assert.ok(!fs.existsSync(absOld), `old path must be gone`);
+      // file_blobs.path tracks the move.
+      const blob = getStateDb()
+        .prepare(`SELECT path FROM file_blobs WHERE sha256 = ?`)
+        .get(up.payload.sha256) as { path: string };
+      assert.equal(blob.path, `${expectedUlid}/final.md`);
+      // Audit row written.
+      const audit = getStateDb()
+        .prepare(
+          `SELECT * FROM audit WHERE subject_ref = ? AND action_type = 'files_move' LIMIT 1`,
+        )
+        .get(up.payload.id) as { id: string; target_path: string } | undefined;
+      assert.ok(audit, "audit row must exist for files_move");
+      assert.equal(audit.target_path, `${expectedUlid}/final.md`);
+    });
+
+    it("404s on an unknown file_id", async () => {
+      const move = await invokeRoute(
+        "POST",
+        "/api/v1/files/01HFAKEULIDFAKEULIDFAKEUL/move",
+        { body: { path: "x.txt" } },
+      );
+      assert.equal(move.status, 404);
+    });
+
+    it("400s on missing body.path", async () => {
+      const up = await uploadBlob(
+        "a.txt",
+        Buffer.from("a"),
+        "text/plain",
+      );
+      const move = await invokeRoute(
+        "POST",
+        `/api/v1/files/${up.payload.id}/move`,
+        { body: {} },
+      );
+      assert.equal(move.status, 400);
+    });
+
+    it("rejects `..` traversal", async () => {
+      const up = await uploadBlob(
+        "b.txt",
+        Buffer.from("b"),
+        "text/plain",
+      );
+      const move = await invokeRoute(
+        "POST",
+        `/api/v1/files/${up.payload.id}/move`,
+        { body: { path: "../escape.txt" } },
+      );
+      assert.equal(move.status, 400);
+    });
+
+    it("409s when the bytes are shared via dedupe (ref_count > 1)", async () => {
+      // Two identical uploads → dedupe → ref_count = 2 on the canonical blob.
+      const content = Buffer.from("dupe-content");
+      const up1 = await uploadBlob("a.bin", content, "application/octet-stream");
+      const up2 = await uploadBlob("b.bin", content, "application/octet-stream");
+      // Sanity: dedupe happened.
+      const blob = getStateDb()
+        .prepare(`SELECT ref_count FROM file_blobs WHERE sha256 = ?`)
+        .get(up1.payload.sha256) as { ref_count: number };
+      assert.equal(blob.ref_count, 2, "PR 5 dedupe must have set ref_count = 2");
+      const move = await invokeRoute(
+        "POST",
+        `/api/v1/files/${up2.payload.id}/move`,
+        { body: { path: "renamed.bin" } },
+      );
+      assert.equal(move.status, 409);
+      assert.equal(move.payload.error.code, "SHARED_BLOB");
+    });
+  });
+
+  describe("POST /:file_id/purge (Lane D₁ hard-delete)", () => {
+    it("refuses to purge a live (non-soft-deleted) row with 409", async () => {
+      const up = await uploadBlob(
+        "still-here.txt",
+        Buffer.from("alive"),
+        "text/plain",
+      );
+      const purge = await invokeRoute(
+        "POST",
+        `/api/v1/files/${up.payload.id}/purge`,
+      );
+      assert.equal(purge.status, 409);
+      assert.equal(purge.payload.error.code, "PURGE_REQUIRES_SOFT_DELETE");
+      // Row still there.
+      const row = getStateDb()
+        .prepare(`SELECT id FROM files WHERE id = ?`)
+        .get(up.payload.id);
+      assert.ok(row, "row must still exist after a refused purge");
+    });
+
+    it("purges a soft-deleted row, removes it from the DB, and writes an audit row", async () => {
+      const up = await uploadBlob(
+        "doomed.txt",
+        Buffer.from("doomed"),
+        "text/plain",
+      );
+      // Soft-delete first.
+      const del = await invokeRoute(
+        "DELETE",
+        `/api/v1/files/${up.payload.path}`,
+      );
+      assert.equal(del.status, 200);
+      // Now purge.
+      const purge = await invokeRoute(
+        "POST",
+        `/api/v1/files/${up.payload.id}/purge`,
+      );
+      assert.equal(purge.status, 200);
+      assert.equal(purge.payload.id, up.payload.id);
+      assert.ok(purge.payload.purged_at, "purged_at must be populated");
+      // Row is gone outright.
+      const row = getStateDb()
+        .prepare(`SELECT id FROM files WHERE id = ?`)
+        .get(up.payload.id);
+      assert.equal(row, undefined, "row must be gone after purge");
+      // Audit row was written.
+      const audit = getStateDb()
+        .prepare(
+          `SELECT * FROM audit WHERE subject_ref = ? AND action_type = 'files_purge' LIMIT 1`,
+        )
+        .get(up.payload.id) as { id: string; summary: string } | undefined;
+      assert.ok(audit, "audit row must exist for files_purge");
+    });
+
+    it("404s on an unknown file_id", async () => {
+      const purge = await invokeRoute(
+        "POST",
+        "/api/v1/files/01HFAKEULIDFAKEULIDFAKEUL/purge",
+      );
+      assert.equal(purge.status, 404);
+    });
+  });
 });

@@ -23,17 +23,20 @@ function getTool(name: string) {
 
 // ─── catalogue shape ────────────────────────────────────────────────────────
 
-test("ALL_FILES_TOOLS — exactly 9 tools, correct names", () => {
-  assert.equal(ALL_FILES_TOOLS.length, 9);
+test("ALL_FILES_TOOLS — exactly 12 tools, correct names (Lane D₁ adds move/describe-getter/hard_delete; renames the label-setter to set_label)", () => {
+  assert.equal(ALL_FILES_TOOLS.length, 12);
   const names = ALL_FILES_TOOLS.map((t) => t.name).sort();
   assert.deepEqual(names, [
     "create",
     "delete",
     "describe",
+    "hard_delete",
     "list",
+    "move",
     "read_base64",
     "read_text",
     "search",
+    "set_label",
     "stat",
     "usage",
   ]);
@@ -210,25 +213,85 @@ test("usage · no args, → GET /api/v1/files/usage", () => {
   assert.equal(req.path, "/api/v1/files/usage");
 });
 
-// ─── describe ──────────────────────────────────────────────────────────────
+// ─── set_label (the PR 2 `describe` tool, renamed in Lane D₁) ─────────────
 
-test("describe · path + description required → PATCH /api/v1/files/<path> with principal_label", () => {
-  const t = getTool("describe");
+test("set_label · path + label required → PATCH /api/v1/files/<path> with principal_label", () => {
+  const t = getTool("set_label");
   assert.equal(t.inputSchema.safeParse({}).success, false);
   assert.equal(t.inputSchema.safeParse({ path: "x" }).success, false);
   const req = t.buildRequest({
     path: "01J9X/receipt.pdf",
-    description: "pizza receipt 2026-05-28",
+    label: "pizza receipt 2026-05-28",
   });
   assert.equal(req.method, "PATCH");
   assert.equal(req.path, "/api/v1/files/01J9X/receipt.pdf");
   assert.deepEqual(req.body, { principal_label: "pizza receipt 2026-05-28" });
 });
 
-test("describe · empty string description is allowed (clears the label)", () => {
-  const t = getTool("describe");
-  const r = t.inputSchema.safeParse({ path: "01J9X/x.bin", description: "" });
+test("set_label · empty string label is allowed (clears the label)", () => {
+  const t = getTool("set_label");
+  const r = t.inputSchema.safeParse({ path: "01J9X/x.bin", label: "" });
   assert.equal(r.success, true);
-  const req = t.buildRequest({ path: "01J9X/x.bin", description: "" });
+  const req = t.buildRequest({ path: "01J9X/x.bin", label: "" });
   assert.deepEqual(req.body, { principal_label: "" });
+});
+
+// ─── move (Lane D₁) ────────────────────────────────────────────────────────
+
+test("move · file_id + new_path required → POST /api/v1/files/:file_id/move with {path}", () => {
+  const t = getTool("move");
+  assert.equal(t.inputSchema.safeParse({}).success, false);
+  assert.equal(t.inputSchema.safeParse({ file_id: "" }).success, false);
+  assert.equal(
+    t.inputSchema.safeParse({ file_id: "01J9X", new_path: "" }).success,
+    false,
+  );
+  const req = t.buildRequest({
+    file_id: "01J9X7YZA5K2HFVQB7M3VN8DTQ",
+    new_path: "final-draft.pdf",
+  });
+  assert.equal(req.method, "POST");
+  assert.equal(req.path, "/api/v1/files/01J9X7YZA5K2HFVQB7M3VN8DTQ/move");
+  assert.deepEqual(req.body, { path: "final-draft.pdf" });
+});
+
+test("move · full ULID/<name> shape passes through", () => {
+  const t = getTool("move");
+  const req = t.buildRequest({
+    file_id: "01J9X7YZA5K2HFVQB7M3VN8DTQ",
+    new_path: "01J9X7YZA5K2HFVQB7M3VN8DTQ/renamed.md",
+  });
+  assert.deepEqual(req.body, {
+    path: "01J9X7YZA5K2HFVQB7M3VN8DTQ/renamed.md",
+  });
+});
+
+// ─── describe (Lane D₁ metadata-getter) ────────────────────────────────────
+
+test("describe · path required → GET /api/v1/files/describe/<path>", () => {
+  const t = getTool("describe");
+  assert.equal(t.inputSchema.safeParse({}).success, false);
+  assert.equal(t.inputSchema.safeParse({ path: "" }).success, false);
+  const req = t.buildRequest({ path: "01J9X/q3-contract.pdf" });
+  assert.equal(req.method, "GET");
+  assert.equal(req.path, "/api/v1/files/describe/01J9X/q3-contract.pdf");
+});
+
+test("describe · metadata-getter has no body on the wire", () => {
+  const t = getTool("describe");
+  const req = t.buildRequest({ path: "01J9X/x" });
+  assert.equal(req.body, undefined);
+});
+
+// ─── hard_delete (Lane D₁) ─────────────────────────────────────────────────
+
+test("hard_delete · file_id required → POST /api/v1/files/:file_id/purge", () => {
+  const t = getTool("hard_delete");
+  assert.equal(t.inputSchema.safeParse({}).success, false);
+  assert.equal(t.inputSchema.safeParse({ file_id: "" }).success, false);
+  const req = t.buildRequest({ file_id: "01J9X7YZA5K2HFVQB7M3VN8DTQ" });
+  assert.equal(req.method, "POST");
+  assert.equal(req.path, "/api/v1/files/01J9X7YZA5K2HFVQB7M3VN8DTQ/purge");
+  // No body — the file_id is the only argument.
+  assert.equal(req.body, undefined);
 });

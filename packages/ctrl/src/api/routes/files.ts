@@ -60,6 +60,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError, NotFoundError, ApiError } from "../errors.js";
 import { getStateDb } from "../../db/state.js";
+import { appendAudit } from "./state.js";
 
 // ── Configuration ──────────────────────────────────────────────────────────
 
@@ -1205,7 +1206,352 @@ export function registerFilesRoutes(): void {
       }
       db.prepare(`DELETE FROM file_blobs WHERE sha256 = ?`).run(row.sha256);
     }
+    appendAudit({
+      action_type: "files_soft_delete",
+      actor: "principal",
+      source: "ctrl-api",
+      target_path: row.path,
+      target_kind: "file",
+      subject_ref: row.id,
+      summary: `soft-deleted file ${row.original_filename ?? row.path}`,
+      payload: { id: row.id, sha256: row.sha256, size_bytes: row.size_bytes },
+    });
     sendJson(res, 200, { id: row.id, path: row.path, deleted_at: now });
+  });
+
+  // GET /api/v1/files/describe/* — rich metadata getter (issue #114 Lane D₁).
+  //
+  // Unlike `stat`, `describe` ALWAYS returns the row even if soft-deleted,
+  // and includes a `summary` slot for the (not-yet-shipped) extraction
+  // pipeline. The principal-facing fields are projected to a compact shape
+  // that mirrors the Lane D₁ MCP tool contract:
+  //
+  //   { id, name, path, size_bytes, mime, principal_label, summary,
+  //     created_at, updated_at, alfred_read_at, deleted_at }
+  //
+  // Where:
+  //   * `name`           ← original_filename
+  //   * `mime`           ← content_type
+  //   * `created_at`     ← uploaded_at (ms)
+  //   * `updated_at`     ← max(uploaded_at, last_accessed_at) (ms)
+  //   * `alfred_read_at` ← last_accessed_at (ms or null)
+  //   * `summary`        ← null today; populated when the extraction
+  //                        pipeline lands (#114 PR §13 PR5).
+  //
+  // Soft-deleted rows return 200 with `deleted_at` populated so the
+  // principal can ask Alfred "did I delete that file last week?" and get
+  // a sensible answer instead of a 404.
+  addRoute("GET", "/api/v1/files/describe/*", async ({ res, params }) => {
+    const relPath = params.path ?? "";
+    if (!relPath) throw new ValidationError("path is required");
+    const raw = getStateDb()
+      .prepare(`SELECT * FROM files WHERE path = ? LIMIT 1`)
+      .get(relPath) as Record<string, unknown> | undefined;
+    if (!raw) throw new NotFoundError(`file not found: ${relPath}`);
+    const row = rowFromDb(raw);
+    const updatedAt =
+      row.last_accessed_at != null && row.last_accessed_at > row.uploaded_at
+        ? row.last_accessed_at
+        : row.uploaded_at;
+    sendJson(res, 200, {
+      id: row.id,
+      name: row.original_filename,
+      path: row.path,
+      size_bytes: row.size_bytes,
+      mime: row.content_type,
+      principal_label: row.principal_label,
+      summary: null,
+      created_at: row.uploaded_at,
+      updated_at: updatedAt,
+      alfred_read_at: row.last_accessed_at,
+      deleted_at: row.deleted_at,
+    });
+  });
+
+  // POST /api/v1/files/:file_id/move — rename or move a file (issue #114 Lane D₁).
+  //
+  // Body: { path: "<new-relative-path>" } where `<new-relative-path>` is
+  // either:
+  //   * a bare basename ("better-name.pdf") — keeps the existing ULID dir
+  //     and re-points the on-disk file under it, OR
+  //   * a full "<ULID>/<safe-name>" pair — moves to a different ULID dir.
+  //
+  // Path sanitization mirrors upload: directory traversal is rejected
+  // (resolveBlobPath catches `..`), the filename is sanitized via the
+  // existing sanitizeFilename helper, and the on-disk file is renamed
+  // atomically with fs.renameSync. The `files.path` column is updated
+  // in lockstep.
+  //
+  // Dedupe interaction. If the row's sha256 has `ref_count > 1` (another
+  // upload has dedupe-pointed at the same blob), we DON'T rename the
+  // on-disk file — that would break the other references. Instead we
+  // 409 with a clear hint that the principal should `delete` + re-upload
+  // under the new name. The path in `files.path` stays canonical to the
+  // shared blob.
+  //
+  // Cold-promoted blobs are also refused with 409 — the cold filename is
+  // the ULID + .zst suffix and changing it would desync the file_blobs
+  // pointer. Operator-only `cold-restore` first, then move.
+  //
+  // Returns the full row (post-rename) under the same shape `stat` uses.
+  addRoute("POST", "/api/v1/files/:file_id/move", async ({ res, params, body }) => {
+    const fileId = params.file_id ?? "";
+    if (!fileId) throw new ValidationError("file_id is required");
+    const db = getStateDb();
+    const raw = db
+      .prepare(`SELECT * FROM files WHERE id = ? AND deleted_at IS NULL LIMIT 1`)
+      .get(fileId) as Record<string, unknown> | undefined;
+    if (!raw) throw new NotFoundError(`file not found: ${fileId}`);
+    const row = rowFromDb(raw);
+
+    const patch =
+      body && typeof body === "object" && !Array.isArray(body)
+        ? (body as Record<string, unknown>)
+        : {};
+    const requestedRaw = patch.path;
+    if (typeof requestedRaw !== "string" || !requestedRaw.trim()) {
+      throw new ValidationError("body.path is required (non-empty string)");
+    }
+    const requested = requestedRaw.trim().replace(/^\/+/, "");
+    if (requested.includes("..")) {
+      throw new ValidationError("path may not contain `..`");
+    }
+
+    // Cold + shared-blob refuse paths.
+    if (isColdPath(row.path)) {
+      throw new ApiError(
+        409,
+        "COLD_BLOB",
+        "cannot move a cold-archived file; restore it first with POST /cold-restore/:file_id",
+      );
+    }
+    const blobRow = db
+      .prepare(`SELECT ref_count, path FROM file_blobs WHERE sha256 = ?`)
+      .get(row.sha256) as { ref_count: number; path: string } | undefined;
+    if (blobRow && blobRow.ref_count > 1) {
+      throw new ApiError(
+        409,
+        "SHARED_BLOB",
+        `cannot move a file whose bytes are shared via dedupe (ref_count=${blobRow.ref_count}); delete + re-upload under the new name instead`,
+      );
+    }
+
+    // Resolve the requested path. Two shapes:
+    //   - basename only: keep the existing ULID dir, change the filename
+    //   - "<ULID>/<name>": full path (allows moving across ULID dirs)
+    const slashIdx = requested.indexOf("/");
+    let newRelPath: string;
+    let newOriginalFilename = row.original_filename;
+    if (slashIdx < 0) {
+      // basename-only: preserve the row's current ULID dir.
+      const currentUlid = row.path.split("/")[0];
+      if (!/^[0-9A-HJKMNP-TV-Z]{26}$/.test(currentUlid)) {
+        throw new ApiError(
+          500,
+          "INVALID_CURRENT_PATH",
+          `existing path does not start with a ULID: ${row.path}`,
+        );
+      }
+      const safeName = sanitizeFilename(requested);
+      newRelPath = path.posix.join(currentUlid, safeName);
+      newOriginalFilename = requested;
+    } else {
+      const [reqUlid, ...rest] = requested.split("/");
+      const tail = rest.join("/");
+      if (!/^[0-9A-HJKMNP-TV-Z]{26}$/.test(reqUlid)) {
+        throw new ValidationError(
+          `path's first segment must be a 26-char ULID (got ${reqUlid})`,
+        );
+      }
+      const safeName = sanitizeFilename(tail || "file");
+      newRelPath = path.posix.join(reqUlid, safeName);
+      newOriginalFilename = tail || row.original_filename;
+    }
+
+    if (newRelPath === row.path) {
+      // No-op. Return the existing row unchanged.
+      sendJson(res, 200, rowToJson(row));
+      return;
+    }
+
+    // Collision check: another live row must not already own the target path.
+    const collision = db
+      .prepare(
+        `SELECT id FROM files WHERE path = ? AND deleted_at IS NULL AND id != ? LIMIT 1`,
+      )
+      .get(newRelPath, row.id) as { id: string } | undefined;
+    if (collision) {
+      throw new ApiError(
+        409,
+        "PATH_TAKEN",
+        `another file already lives at ${newRelPath}`,
+      );
+    }
+
+    // Rename the bytes on disk. Create the destination ULID dir if it
+    // doesn't exist (only possible on the cross-ULID move shape).
+    const oldAbs = resolveBlobPath(row.path);
+    const newAbs = resolveBlobPath(newRelPath);
+    if (!fs.existsSync(oldAbs)) {
+      throw new ApiError(
+        410,
+        "BLOB_MISSING",
+        `the row exists but the blob at ${row.path} is gone`,
+      );
+    }
+    fs.mkdirSync(path.dirname(newAbs), { recursive: true });
+    fs.renameSync(oldAbs, newAbs);
+
+    // Reap the source ULID dir if it's now empty (basename-only moves
+    // keep the same dir, so this is mostly a cross-ULID move concern).
+    const oldDir = path.dirname(oldAbs);
+    if (oldDir !== path.dirname(newAbs)) {
+      try {
+        fs.rmdirSync(oldDir);
+      } catch {
+        /* dir not empty / not ours — fine. */
+      }
+    }
+
+    // Update the canonical blob path + the per-file row in a single tx.
+    db.exec("BEGIN");
+    try {
+      db.prepare(`UPDATE file_blobs SET path = ? WHERE sha256 = ?`).run(
+        newRelPath,
+        row.sha256,
+      );
+      db.prepare(
+        `UPDATE files SET path = ?, original_filename = ? WHERE id = ?`,
+      ).run(newRelPath, newOriginalFilename, row.id);
+      db.exec("COMMIT");
+    } catch (err) {
+      db.exec("ROLLBACK");
+      // Best-effort: swap the file back so the DB and disk agree.
+      try {
+        fs.renameSync(newAbs, oldAbs);
+      } catch {
+        /* if this fails the operator must reconcile by hand */
+      }
+      throw err;
+    }
+
+    appendAudit({
+      action_type: "files_move",
+      actor: "principal",
+      source: "ctrl-api",
+      target_path: newRelPath,
+      target_kind: "file",
+      subject_ref: row.id,
+      summary: `moved file ${row.path} → ${newRelPath}`,
+      changes: { path: { from: row.path, to: newRelPath } },
+      payload: {
+        id: row.id,
+        sha256: row.sha256,
+        original_filename_from: row.original_filename,
+        original_filename_to: newOriginalFilename,
+      },
+    });
+
+    const after = db
+      .prepare(`SELECT * FROM files WHERE id = ? LIMIT 1`)
+      .get(row.id) as Record<string, unknown>;
+    sendJson(res, 200, rowToJson(rowFromDb(after)));
+  });
+
+  // POST /api/v1/files/:file_id/purge — hard delete (issue #114 Lane D₁).
+  //
+  // The principal-facing "permanently empty the recycle bin" surface.
+  // Refuses to purge a row that is NOT already soft-deleted — the
+  // soft-delete step is a deliberate two-stage gate (one click to send
+  // to recycle bin, a second to flush) and the MCP tool mirrors that
+  // shape.
+  //
+  // Behaviour:
+  //   * 409 PURGE_REQUIRES_SOFT_DELETE if the row's `deleted_at IS NULL`.
+  //   * 404 if the id doesn't exist at all.
+  //   * 200 + `{id, path, purged_at}` on success.
+  //
+  // On success the `files` row is DELETED outright (the principal said
+  // "really, get rid of it"). The audit row stays — the audit ledger
+  // outlives the file. If the file's sha256 was the last reference and
+  // its bytes are still on-disk (we soft-delete with ref_count
+  // bookkeeping, so this is the common case), the bytes are unlinked
+  // and the `file_blobs` row deleted too. If the bytes are shared
+  // (ref_count > 1 — possible when a duplicate upload pointed at the
+  // same canonical blob), the on-disk bytes stay and only the
+  // per-file row vanishes.
+  addRoute("POST", "/api/v1/files/:file_id/purge", async ({ res, params }) => {
+    const fileId = params.file_id ?? "";
+    if (!fileId) throw new ValidationError("file_id is required");
+    const db = getStateDb();
+    const raw = db
+      .prepare(`SELECT * FROM files WHERE id = ? LIMIT 1`)
+      .get(fileId) as Record<string, unknown> | undefined;
+    if (!raw) throw new NotFoundError(`file not found: ${fileId}`);
+    const row = rowFromDb(raw);
+    if (row.deleted_at == null) {
+      throw new ApiError(
+        409,
+        "PURGE_REQUIRES_SOFT_DELETE",
+        "the file must be soft-deleted (DELETE /api/v1/files/<path>) before it can be purged",
+      );
+    }
+
+    // Drop the principal-facing row.
+    db.prepare(`DELETE FROM files WHERE id = ?`).run(row.id);
+
+    // Reap the on-disk bytes IFF this row was holding the last reference.
+    // The soft-delete path already decremented ref_count; the canonical
+    // row may have been removed entirely (ref_count == 0 → DELETE FROM
+    // file_blobs in the soft-delete handler). If it's still around with
+    // ref_count > 0 the bytes are shared and we leave them alone.
+    const blob = db
+      .prepare(
+        `SELECT path, ref_count, cold_promoted_at FROM file_blobs WHERE sha256 = ?`,
+      )
+      .get(row.sha256) as
+      | { path: string; ref_count: number; cold_promoted_at: number | null }
+      | undefined;
+    if (blob && blob.ref_count <= 0) {
+      try {
+        if (isColdPath(blob.path)) {
+          const abs = resolveColdBlobPath(blob.path);
+          if (fs.existsSync(abs)) fs.unlinkSync(abs);
+        } else {
+          const abs = resolveBlobPath(blob.path);
+          if (fs.existsSync(abs)) fs.unlinkSync(abs);
+          const parentDir = path.dirname(abs);
+          try {
+            fs.rmdirSync(parentDir);
+          } catch {
+            /* dir not empty / not ours — fine. */
+          }
+        }
+      } catch (err) {
+        console.warn(
+          `[files] purge: could not unlink ${blob.path}: ${(err as Error).message}`,
+        );
+      }
+      db.prepare(`DELETE FROM file_blobs WHERE sha256 = ?`).run(row.sha256);
+    }
+
+    const purgedAt = Date.now();
+    appendAudit({
+      action_type: "files_purge",
+      actor: "principal",
+      source: "ctrl-api",
+      target_path: row.path,
+      target_kind: "file",
+      subject_ref: row.id,
+      summary: `hard-deleted file ${row.original_filename ?? row.path}`,
+      payload: {
+        id: row.id,
+        sha256: row.sha256,
+        size_bytes: row.size_bytes,
+        soft_deleted_at: row.deleted_at,
+      },
+    });
+    sendJson(res, 200, { id: row.id, path: row.path, purged_at: purgedAt });
   });
 
   // GET /api/v1/files/cold-candidates?older_than_ms=…
