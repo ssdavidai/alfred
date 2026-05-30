@@ -25,7 +25,11 @@
  * catalog internally (CATALOG_TTL_MS), so the per-toolkit HTTP round-trip to
  * Composio is amortized across all users on this tenant.
  */
-import type { GetAllowedTools } from "wasp/server/operations";
+import type {
+  GetAllowedTools,
+  GetToolDispositions,
+  SetToolDisposition,
+} from "wasp/server/operations";
 import { HttpError } from "wasp/server";
 import { getUserInstance, proxyToTenant } from "../server/tenantProxy";
 
@@ -167,5 +171,86 @@ export const getAllowedTools: GetAllowedTools<void, any> = async (
     builtin_tools,
     mcp_tools,
     prime_enabled,
+  };
+};
+
+// ----------------------------------------------------------------------------
+// Tool dispositions (Phase B) — per-MCP-server DIRECT/DELEGATED toggle
+// ----------------------------------------------------------------------------
+// The `tool_disposition` table in state.db records, for each of the 9 MCP
+// servers Hermes-main loads, whether its tools are exposed inline (DIRECT)
+// or hidden behind the `delegate_to_focused_agent` gateway (DELEGATED).
+// Defaults are all-DIRECT so existing tenants behave unchanged. A flip
+// queues a debounced Hermes restart (~10s) so the new `tools.include: []`
+// whitelist takes effect.
+//
+// Three servers are SELF-PROTECTED: alfred-ctrl, alfred, execute. Delegating
+// them would break Alfred's ability to reach the ctrl-api side of his own
+// brain (alfred-ctrl), call his own briefing/decision tools (alfred), or
+// run the Composio progressive-disclosure surface that Phase A optimised
+// (execute). The backend accepts the flip but the UI surfaces them as
+// locked with an explanation.
+
+export interface ToolDisposition {
+  server: string;
+  disposition: "direct" | "delegated";
+  updated_at: string;
+  updated_by: string | null;
+}
+
+interface ToolDispositionsResp {
+  dispositions: ToolDisposition[];
+}
+
+export const getToolDispositions: GetToolDispositions<void, ToolDispositionsResp> =
+  async (_args, context) => {
+    if (!context.user) throw new HttpError(401, "Not authenticated");
+    const instance = await getUserInstance(context);
+    const resp = (await proxyToTenant(instance, {
+      path: "/api/v1/agents/tool-disposition",
+    })) as ToolDispositionsResp;
+    return {
+      dispositions: Array.isArray(resp?.dispositions) ? resp.dispositions : [],
+    };
+  };
+
+interface SetToolDispositionArgs {
+  server: string;
+  disposition: "direct" | "delegated";
+}
+
+interface SetToolDispositionResp {
+  ok: boolean;
+  server: string;
+  disposition: "direct" | "delegated";
+  restart_queued: boolean;
+  restart_in_ms: number;
+}
+
+export const setToolDisposition: SetToolDisposition<
+  SetToolDispositionArgs,
+  SetToolDispositionResp
+> = async (args, context) => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const server = String(args?.server ?? "").trim();
+  const disposition = args?.disposition;
+  if (!server) throw new HttpError(400, "server required");
+  if (disposition !== "direct" && disposition !== "delegated") {
+    throw new HttpError(400, "disposition must be 'direct' or 'delegated'");
+  }
+  const instance = await getUserInstance(context);
+  // updated_by is always 'sir' from the UI — Alfred himself flips via the
+  // MCP tool which sets updated_by='alfred'. The init seed uses 'init'.
+  const resp = await proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/agents/tool-disposition",
+    body: { server, disposition, updated_by: "sir" },
+  });
+  return {
+    ok: Boolean(resp?.ok ?? true),
+    server: String(resp?.server ?? server),
+    disposition: (resp?.disposition ?? disposition) as "direct" | "delegated",
+    restart_queued: Boolean(resp?.restart_queued ?? false),
+    restart_in_ms: Number(resp?.restart_in_ms ?? 10_000),
   };
 };

@@ -1587,6 +1587,21 @@ query getAllowedTools {
   entities: [ComposioConnection]
 }
 
+// Phase B tool dispositions: read the 9-row direct/delegated map for the
+// MCP servers Hermes-main loads, and flip a server between the two
+// modes. The action queues a debounced Hermes restart so the new
+// `tools.include: []` whitelist takes effect; the UI shows a "Hermes is
+// restarting" line and refetches once the window closes.
+query getToolDispositions {
+  fn: import { getToolDispositions } from "@src/tools/operations",
+  entities: []
+}
+
+action setToolDisposition {
+  fn: import { setToolDisposition } from "@src/tools/operations",
+  entities: []
+}
+
 // ============================================================
 // Intuition (Learning Engine)
 // ============================================================
