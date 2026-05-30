@@ -1509,6 +1509,58 @@ test("PR4 integration: ha__integration_remove gated on decision_ref + entry_id, 
   assert.deepEqual(req.body, { decision_ref: "decision/2026-05-29-rm.md" });
 });
 
+// #115 — Alfred self-protection guard on ha__integration_remove.
+// Regression guard: tonight (2026-05-30) Sir accidentally asked Alfred to
+// remove the alfred-ha integration, conversation.alfred disappeared, Voice PE
+// went silent, took ~20 min to recover. The skill doc + tool description both
+// now carry an exact-phrase requirement before Alfred will remove the entry
+// whose domain is `alfred`. These two tests pin that — a future refactor that
+// drops the guard fails CI before it ships.
+test("#115 self-protection: ha__integration_remove description carries the SELF-PROTECTION + exact-phrase guard", () => {
+  const t = getTool("ha__integration_remove");
+  assert.ok(
+    /SELF-PROTECTION/.test(t.description),
+    "description must mention SELF-PROTECTION (regression guard)",
+  );
+  assert.ok(
+    t.description.includes(
+      "yes, sever my own connection to Home Assistant",
+    ),
+    "description must include the EXACT confirmation phrase verbatim",
+  );
+  assert.ok(
+    /alfred/.test(t.description),
+    "description must name the `alfred` domain so the model knows when the guard fires",
+  );
+});
+
+test("#115 self-protection: skill doc names the exact phrase under ha__integration_remove", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const { fileURLToPath } = await import("node:url");
+  const { dirname, resolve } = await import("node:path");
+  const here = dirname(fileURLToPath(import.meta.url));
+  // src/tools/hass.test.ts → ../../skills/alfred-mcp-skill.md
+  const skillPath = resolve(here, "../../skills/alfred-mcp-skill.md");
+  const doc = await readFile(skillPath, "utf8");
+  assert.ok(
+    doc.includes("yes, sever my own connection to Home Assistant"),
+    "skill doc must carry the EXACT confirmation phrase (case-sensitive)",
+  );
+  // and the phrase must appear inside the PR4 integration_remove section, not
+  // some unrelated paragraph. Anchor on the PR4 section header.
+  const pr4Idx = doc.indexOf(
+    '### "Install / remove / reload a Home Assistant integration"',
+  );
+  assert.ok(pr4Idx >= 0, "PR4 section header must exist");
+  const phraseIdx = doc.indexOf(
+    "yes, sever my own connection to Home Assistant",
+  );
+  assert.ok(
+    phraseIdx > pr4Idx,
+    "the confirmation phrase must appear inside (after) the PR4 section header",
+  );
+});
+
 test("PR4 integration: ha__integration_reload is gateless and builds POST .../reload", () => {
   const t = getTool("ha__integration_reload");
   const ok = t.inputSchema.safeParse({ entry_id: "01JC123" });

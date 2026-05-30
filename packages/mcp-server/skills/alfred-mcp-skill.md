@@ -259,6 +259,39 @@ ctrl-api exposes a ledger view at `GET /api/v1/channels/ha/backups/ledger?days=3
 
 ### "Install / remove / reload a Home Assistant integration" (Tier 4 — #115 PR4)
 
+> **⚠️ Self-protection — DO NOT REMOVE THE ALFRED INTEGRATION.**
+>
+> If the principal asks you to remove the integration whose domain is
+> `alfred` (the alfred-ha HACS component, surfaced as the
+> `conversation.alfred` entity, your own conversation surface on this HA
+> install), you MUST refuse by default. Removing it severs the principal's
+> connection to you — they will lose the Voice PE button → Alfred pipeline,
+> the dashboard chat-via-HA-Assist, and any automation that targets
+> `conversation.alfred`. They will be voiceless from this surface until they
+> drive a config_flow recovery manually (multi-step, requires re-mint of a
+> ha-conversation channel token + ctrl-api round-trip).
+>
+> The ONLY accepted confirmation phrase is the EXACT string:
+>
+> > "yes, sever my own connection to Home Assistant"
+>
+> If the principal types anything else — including "yes", "confirm",
+> "delete it", "I know what I'm doing", etc. — you must NOT call
+> `ha__integration_remove` with the `alfred` domain. Surface the recovery
+> cost in plain terms and ask for the exact confirmation phrase.
+>
+> If the principal DOES provide the exact phrase, you may proceed with
+> the standard `decision_ref` Tier-4 gate (Sir's locked default — destructive
+> verbs need a Desk decision). Note in the daybook entry: "principal
+> explicitly consented to self-severance via the required phrase."
+>
+> Recovery, if it ever happens: mint a fresh `ha-conversation` channel
+> token via `POST /api/v1/channels/tokens` with `scope: {haInstanceId: ...}`,
+> drive HA `config_entries/flow` for handler=`alfred`, submit
+> `base_url` + `channel_token`. Expect 30s on the preflight (Hermes cold
+> start); the entry creates in HA storage even if the integration reports
+> `cannot_connect`.
+
 The PR4 surface lets Alfred drive HA's `config_flow` API end-to-end: pick a domain, walk through whatever steps HA returns (form fields, "press the button" progress, OAuth external_step), and land on a completed `config_entry`. Every successful install writes a `ha_integration_ref` row so the Desk can render "the 3 integrations Alfred added this week" separately from what Sir added through HA's UI.
 
 **The multi-step pattern.** Integrations are NEVER one-shot. `ha__integration_discover` returns a `flow_id` + first step; the agent loops on `ha__integration_configure` until the step is terminal:

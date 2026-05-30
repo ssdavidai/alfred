@@ -1553,7 +1553,9 @@ export const HASS_INTEGRATION_TOOLS: ToolDef[] = [
   {
     name: "ha__integration_remove",
     description:
-      "Remove an installed config_entry — uninstall the integration. **GATED** — `decision_ref` REQUIRED. **AUTO-SNAPSHOT** — ctrl-api takes a HA snapshot BEFORE the upstream `config_entries/remove` call. On success the matching `ha_integration_ref` row is soft-deleted (a `removed_at` timestamp is stamped; the row stays so the audit trail 'Alfred installed and then removed this' survives). The response includes `backup_ref_id` — mention 'snapshot taken' in your reply. Use `ha__integration_info` first to confirm Sir wants to remove THIS entry (entry titles can be confusingly similar — Hue Bridge 1 vs Hue Bridge 2).",
+      "Remove an installed config_entry — uninstall the integration. **GATED** — `decision_ref` REQUIRED. **AUTO-SNAPSHOT** — ctrl-api takes a HA snapshot BEFORE the upstream `config_entries/remove` call. " +
+      "⚠️ SELF-PROTECTION: if the entry's domain is `alfred` (the alfred-ha integration that surfaces `conversation.alfred` — your own conversation surface on this HA install), REFUSE unless the principal types the EXACT phrase 'yes, sever my own connection to Home Assistant'. Anything else (\"yes\", \"confirm\", \"delete it\", \"I know what I'm doing\") is not enough — surface the recovery cost (loss of Voice PE → Alfred pipeline, HA-Assist chat, any automation targeting `conversation.alfred`) and ask for the exact phrase. See the skill doc's PR4 section for the full rule + recovery steps. " +
+      "On success the matching `ha_integration_ref` row is soft-deleted (a `removed_at` timestamp is stamped; the row stays so the audit trail 'Alfred installed and then removed this' survives). The response includes `backup_ref_id` — mention 'snapshot taken' in your reply. Use `ha__integration_info` first to confirm Sir wants to remove THIS entry (entry titles can be confusingly similar — Hue Bridge 1 vs Hue Bridge 2).",
     inputSchema: z.object({
       entry_id: IntegrationEntryIdParam,
       decision_ref: IntegrationDecisionRefParam,
