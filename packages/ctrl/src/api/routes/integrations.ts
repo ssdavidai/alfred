@@ -13,6 +13,7 @@ import { sendJson, ValidationError, NotFoundError, ApiError } from "../errors.js
 import { dockerExec } from "../helpers.js";
 import { createOrReuseOmiStream } from "./streams.js";
 import { composeInboundWebhookUrl } from "./webhooksInbound.js";
+import { getStateDb } from "../../db/state.js";
 
 // Synthetic catalog slugs are NOT real Composio toolkits — they render bespoke
 // modals (DEVICE_PAIR / INBOUND_WEBHOOK) and have their own routes. Posting one
@@ -717,6 +718,7 @@ async function generateComposioSkill(
   toolkit: string,
   connId: string,
   apiKey: string,
+  composioUserId?: string,
 ): Promise<{ actions_count: number; skill_path: string; written_paths: string[] }> {
   // Fetch actions from Composio v3 API. The v2 /actions endpoint was retired
   // (returns HTTP 410); every connection authorised after the cutoff produced
@@ -799,6 +801,38 @@ async function generateComposioSkill(
   // so the agent never makes that mistake again, regardless of toolkit.
   const userIdClarification = buildUserIdClarification();
 
+  // Phase C — surface any cached primary-entity defaults so the agent doesn't
+  // need to fan out (LIST_CALENDARS → per-id EVENTS_LIST) on common queries.
+  // Currently: googlecalendar's primary calendarId is auto-applied by the
+  // sidecar before each composio_execute. We mention it in SKILL.md so the
+  // agent both (a) knows the cached id exists and (b) understands it CAN
+  // pass calendarId explicitly when targeting a non-primary calendar.
+  let defaultsCallout = "";
+  if (composioUserId) {
+    const cached = readComposioUserDefaults(toolkit, composioUserId);
+    if (cached && Object.keys(cached.defaults).length > 0) {
+      if (toolkit === "googlecalendar" && typeof cached.defaults.calendarId === "string") {
+        defaultsCallout =
+          `\n## Primary calendar shortcut\n\n` +
+          `Sir's primary calendar id (\`${cached.defaults.calendarId}\`) is automatically applied to ` +
+          `\`GOOGLECALENDAR_EVENTS_LIST\`, \`GOOGLECALENDAR_CREATE_EVENT\`, \`GOOGLECALENDAR_FIND_EVENT\` ` +
+          `and similar single-calendar actions when you call them with no \`calendarId\`. ` +
+          `To target a different calendar, pass \`calendarId\` explicitly. No need to call ` +
+          `\`GOOGLECALENDAR_LIST_CALENDARS\` first for the common case.\n`;
+      } else {
+        // Generic fallback for future toolkits — keeps the surface honest
+        // when gmail / notion / etc. land their own cached defaults.
+        const summary = Object.entries(cached.defaults)
+          .map(([k, v]) => `\`${k}\` = \`${typeof v === "string" ? v : JSON.stringify(v)}\``)
+          .join(", ");
+        defaultsCallout =
+          `\n## Cached defaults\n\n` +
+          `The following arg(s) are auto-applied to every ${displayName} action ` +
+          `unless you pass them explicitly: ${summary}.\n`;
+      }
+    }
+  }
+
   const skillContent = `---
 name: alfred-composio-${toolkit}
 description: ${displayName} integration — ${actions.length} available actions via the MCP self tool (POST /api/v1/integrations/execute).
@@ -817,7 +851,7 @@ Connected via Composio. Call actions through the MCP \`self\` tool: \`self({endp
 
 ${streamActions.length > 0 ? `**Stream**: ${recommended ? `${recommended.name} (auto-configured, polling every ${Math.round(recommended.interval / 60)} min)` : "available but not auto-configured"}` : ""}
 **Tool actions**: ${toolActions.length} | **Stream actions**: ${streamActions.length}
-${userIdClarification}${toolkitGuidance}
+${userIdClarification}${defaultsCallout}${toolkitGuidance}
 ## Actions
 
 ${actionTable}
@@ -1365,6 +1399,158 @@ print(json.dumps(result, default=str))
 `.trim();
   const output = await dockerExec("alfred-learn", ["python3", "-c", script]);
   return JSON.parse(output.trim()) as Record<string, unknown>;
+}
+
+// ===========================================================================
+// Phase C — primary-entity defaults cache.
+// ===========================================================================
+//
+// Sir's "what's on my calendar tomorrow" query used to fan out across all 7
+// of his connected Google calendars: Hermes called
+// GOOGLECALENDAR_LIST_CALENDARS, then GOOGLECALENDAR_EVENTS_LIST per id.
+// Phase A (HTTP sidecar) made each call ~9x cheaper, but the FANOUT itself
+// still added ~25-30s. Phase C caches the per-tenant primary calendar id
+// (and the same shape applies to Gmail primary inbox + Notion default
+// workspace once we wire those) so the sidecar can inject
+// `calendarId: <id>` into the action arguments before the SDK call. Hermes'
+// single GOOGLECALENDAR_EVENTS_LIST request then targets the right calendar
+// directly — no LIST_CALENDARS scan, no per-id fanout.
+//
+// The cache lives in state.db (migration 0015). Writes happen at:
+//   * OAuth-completion (auto-config) — one shot per connection;
+//   * POST /api/v1/integrations/:toolkit/refresh-defaults — manual refresh.
+// Reads happen at:
+//   * GET /api/v1/integrations/defaults?toolkit=...&user_id=... — called by
+//     the alfred-learn composio sidecar before each composio_execute.
+//   * generateComposioSkill — to surface the cached id in the SKILL.md.
+
+interface ComposioDefaults {
+  defaults: Record<string, unknown>;
+  source: string | null;
+  updated_at: string;
+}
+
+function readComposioUserDefaults(
+  toolkit: string,
+  userId: string,
+): ComposioDefaults | null {
+  try {
+    const db = getStateDb();
+    const row = db
+      .prepare(
+        `SELECT default_args_json, source, updated_at
+           FROM composio_user_defaults
+          WHERE toolkit = ? AND user_id = ?`,
+      )
+      .get(toolkit.toLowerCase(), userId) as
+      | { default_args_json: string; source: string | null; updated_at: string }
+      | undefined;
+    if (!row) return null;
+    let defaults: Record<string, unknown> = {};
+    try { defaults = JSON.parse(row.default_args_json); } catch { defaults = {}; }
+    return { defaults, source: row.source, updated_at: row.updated_at };
+  } catch (err: any) {
+    console.error(`[composio-defaults] read failed: ${err?.message ?? err}`);
+    return null;
+  }
+}
+
+function writeComposioUserDefaults(
+  toolkit: string,
+  userId: string,
+  defaults: Record<string, unknown>,
+  source: string,
+): void {
+  const db = getStateDb();
+  db.prepare(
+    `INSERT INTO composio_user_defaults (toolkit, user_id, default_args_json, updated_at, source)
+     VALUES (?, ?, ?, datetime('now'), ?)
+     ON CONFLICT(toolkit, user_id) DO UPDATE SET
+       default_args_json = excluded.default_args_json,
+       updated_at = excluded.updated_at,
+       source = excluded.source`,
+  ).run(toolkit.toLowerCase(), userId, JSON.stringify(defaults), source);
+}
+
+/**
+ * Cache the primary-entity default arg(s) for a freshly-connected toolkit.
+ *
+ * For each toolkit, we call the relevant Composio "list" action via the
+ * sidecar, pick the user's primary entity, and persist its id as a default
+ * arg that the sidecar will merge into future execute calls.
+ *
+ * Best-effort: any failure is logged + swallowed — the connection still
+ * works (Hermes will fan out as before). Returns the cached object or null.
+ *
+ * Currently wired for:
+ *   * googlecalendar → `{calendarId: <primary>}` via
+ *     GOOGLECALENDAR_LIST_CALENDARS.
+ *
+ * Skeleton TODOs:
+ *   * gmail → primary inbox label / userId='me' is already the default; we
+ *     mostly want to cache the email address for the SKILL example.
+ *   * notion → default workspace via NOTION_LIST_USERS / search.
+ */
+async function cacheComposioPrimaryDefaults(
+  toolkit: string,
+  composioUserId: string,
+  connectedAccountId: string,
+): Promise<Record<string, unknown> | null> {
+  const tk = toolkit.toLowerCase();
+  try {
+    if (tk === "googlecalendar") {
+      const res = await fetch(`${COMPOSIO_SIDECAR_URL}/composio/execute`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "GOOGLECALENDAR_LIST_CALENDARS",
+          arguments: {},
+          user_id: composioUserId,
+          connected_account_id: connectedAccountId,
+        }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!res.ok) {
+        console.warn(`[composio-defaults] LIST_CALENDARS http ${res.status} for ${composioUserId}`);
+        return null;
+      }
+      const body = (await res.json()) as any;
+      // Composio responses vary: items may live under data.items, result.items, items.
+      const items: any[] =
+        body?.data?.items ||
+        body?.result?.items ||
+        body?.items ||
+        body?.data ||
+        [];
+      const primary = items.find((c: any) => c?.primary === true) ||
+        items.find((c: any) => c?.id === "primary") ||
+        items[0];
+      const id = primary?.id;
+      if (typeof id !== "string" || !id) {
+        console.warn(`[composio-defaults] no primary calendar found for ${composioUserId}`);
+        return null;
+      }
+      const defaults = { calendarId: id };
+      writeComposioUserDefaults("googlecalendar", composioUserId, defaults, "oauth_completion");
+      console.log(`[composio-defaults] cached googlecalendar primary=${id} for ${composioUserId}`);
+      return defaults;
+    }
+
+    // TODO: gmail → cache the primary email address surfaced by
+    // GMAIL_GET_PROFILE.emailAddress. The action defaults already use
+    // userId='me' so the LLM doesn't need an id to act, but exposing the
+    // address in SKILL.md ("Sir's inbox: <email>") helps the agent reason.
+    //
+    // TODO: notion → cache the default workspace id from
+    // NOTION_GET_ABOUT_ME / NOTION_LIST_USERS. Useful default for
+    // NOTION_CREATE_PAGE / NOTION_SEARCH calls that otherwise need an
+    // explicit parent.
+
+    return null;
+  } catch (err: any) {
+    console.warn(`[composio-defaults] cache failed for ${tk}: ${err?.message ?? err}`);
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -3440,9 +3626,26 @@ export function registerIntegrationRoutes(): void {
         } catch { /* migration is best-effort */ }
       }
 
-      // 5. Generate skill file
+      // 5. Cache primary-entity defaults (Phase C). Best-effort: we run BEFORE
+      //    skill generation so the SKILL.md can surface the cached id in its
+      //    usage section. Failures are logged + swallowed; the connection
+      //    still works (Hermes will fan out as before, which is the
+      //    pre-Phase-C behaviour). Currently caches googlecalendar's primary
+      //    calendar id; gmail + notion follow the same shape (see TODOs in
+      //    cacheComposioPrimaryDefaults).
       try {
-        const skillResult = await generateComposioSkill(toolkit, connId, apiKey);
+        const cached = await cacheComposioPrimaryDefaults(toolkit, userId, connId);
+        if (cached) {
+          summary.defaults_cached = cached;
+        }
+      } catch (err: any) {
+        summary.defaults_error = err?.message?.slice(0, 200);
+      }
+
+      // 6. Generate skill file (after defaults are cached so the SKILL.md
+      //    can name the cached id in its Common usage section).
+      try {
+        const skillResult = await generateComposioSkill(toolkit, connId, apiKey, userId);
         summary.skill_generated = skillResult.skill_path;
         summary.actions_count = skillResult.actions_count;
       } catch (err: any) {
@@ -3454,6 +3657,84 @@ export function registerIntegrationRoutes(): void {
       sendJson(res, 500, { error: `Auto-config failed: ${err.message}` });
     }
   });
+
+  // =========================================================================
+  // GET /api/v1/integrations/defaults — Phase C cache lookup.
+  //
+  // Returns the cached default args that should be merged into the next
+  // composio_execute call for (toolkit, user_id). Called from the alfred-learn
+  // sidecar BEFORE every Composio action so e.g. GOOGLECALENDAR_EVENTS_LIST
+  // picks up `calendarId: <primary id>` automatically without the LLM having
+  // to fan out across all of Sir's calendars.
+  //
+  // Auth: same scheme as the rest of /api/v1/integrations — addRoute applies
+  // ctrl-api's bearer-key middleware via the registration path, and the
+  // sidecar lives on the same per-tenant Docker network behind that token.
+  //
+  // Response shape:
+  //   200 { defaults: {...} | null, source?: string, updated_at?: string }
+  //   400 if toolkit/user_id missing.
+  // =========================================================================
+  addRoute("GET", "/api/v1/integrations/defaults", async ({ res, query }) => {
+    const toolkit = (query.get("toolkit") ?? "").toLowerCase();
+    const userId = query.get("user_id") ?? "";
+    if (!toolkit || !userId) {
+      throw new ValidationError("toolkit and user_id query params are required");
+    }
+    const cached = readComposioUserDefaults(toolkit, userId);
+    if (!cached) {
+      sendJson(res, 200, { defaults: null });
+      return;
+    }
+    sendJson(res, 200, {
+      defaults: cached.defaults,
+      source: cached.source,
+      updated_at: cached.updated_at,
+    });
+  });
+
+  // =========================================================================
+  // POST /api/v1/integrations/:toolkit/refresh-defaults — manual refresh.
+  //
+  // Re-runs the cache-fill path (cacheComposioPrimaryDefaults) for the
+  // current tenant's connection of `toolkit`. Useful when:
+  //   * Sir adds/removes a Google calendar and wants the primary re-resolved;
+  //   * a tenant predates Phase C and never got its defaults cached;
+  //   * we're debugging the sidecar's default-args injection live.
+  //
+  // Response:
+  //   200 {toolkit, cached: {...} | null, connection_id}
+  //   404 if no ACTIVE connection found for the toolkit.
+  // =========================================================================
+  addRoute(
+    "POST",
+    "/api/v1/integrations/:toolkit/refresh-defaults",
+    async ({ res, params }) => {
+      const toolkit = (params.toolkit ?? "").toLowerCase();
+      if (!toolkit) {
+        throw new ValidationError("toolkit path param required");
+      }
+      const apiKey = getComposioApiKey();
+      const userId = getComposioUserId();
+      const owned = await fetchAllOwnedConnectedAccounts(apiKey, userId);
+      const match = owned.find(
+        (a: any) =>
+          (a.toolkit?.slug ?? a.appName ?? "").toLowerCase() === toolkit &&
+          a.status === "ACTIVE",
+      );
+      if (!match) {
+        throw new NotFoundError(
+          `No ACTIVE ${toolkit} connection found for this tenant`,
+        );
+      }
+      const cached = await cacheComposioPrimaryDefaults(toolkit, userId, match.id);
+      sendJson(res, 200, {
+        toolkit,
+        connection_id: match.id,
+        cached,
+      });
+    },
+  );
 
   // =========================================================================
   // POST /api/v1/integrations/regenerate-skills — rebuild every connected
@@ -3493,7 +3774,7 @@ export function registerIntegrationRoutes(): void {
           continue;
         }
         try {
-          const out = await generateComposioSkill(toolkit, connId, apiKey);
+          const out = await generateComposioSkill(toolkit, connId, apiKey, userId);
           activeToolkits.add(toolkit);
           results.push({
             connection_id: connId,

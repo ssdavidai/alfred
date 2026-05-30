@@ -28,6 +28,7 @@ import m0011 from "./migrations/0011_ha_tier4.sql";
 import m0012 from "./migrations/0012_ha_integration_ref_removed_at.sql";
 import m0013 from "./migrations/0013_recall_realtime.sql";
 import m0014 from "./migrations/0014_tool_disposition.sql";
+import m0015 from "./migrations/0015_composio_user_defaults.sql";
 
 interface Migration {
   version: number;
@@ -51,6 +52,7 @@ const MIGRATIONS: Migration[] = [
   { version: 12, name: "ha_integration_ref_removed_at", sql: m0012 },
   { version: 13, name: "recall_realtime",     sql: m0013 },
   { version: 14, name: "tool_disposition",    sql: m0014 },
+  { version: 15, name: "composio_user_defaults", sql: m0015 },
 ];
 
 /**

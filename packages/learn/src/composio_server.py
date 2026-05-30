@@ -39,6 +39,25 @@ Run via uvicorn from entrypoint.sh:
 Binds to all interfaces because ctrl-api reaches it via Docker DNS
 (``http://alfred-learn:8788``); the alfred-learn container only exposes
 its ports inside the per-tenant docker network.
+
+------------------------------------------------------------------------
+
+Phase C — primary-entity defaults cache.
+
+Before each ``/composio/execute`` we ask ctrl-api what default args are
+cached for ``(toolkit, user_id)``. If anything is cached (e.g. Sir's
+primary Google calendar id under ``googlecalendar``), we merge those
+defaults *under* the LLM-supplied arguments so the agent's request still
+overrides if it explicitly named a calendar. This short-cuts the "what's
+on my calendar tomorrow" fanout: Hermes' single
+GOOGLECALENDAR_EVENTS_LIST gets ``calendarId: <primary>`` injected and
+hits the right calendar in one shot.
+
+The lookup is cached for ``CTRL_DEFAULTS_TTL_SECONDS`` (default 300s) per
+(toolkit, user_id) so a flurry of executes inside one Hermes turn don't
+each hit ctrl-api. Failures are logged + swallowed — the execute still
+goes through with the LLM-supplied args verbatim (== pre-Phase-C
+behaviour).
 """
 
 from __future__ import annotations
@@ -46,9 +65,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
 from typing import Any
 
+import httpx
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -110,6 +131,96 @@ class ExecuteRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Phase C — defaults lookup
+# ---------------------------------------------------------------------------
+#
+# Toolkit derivation matches the convention ctrl-api uses elsewhere
+# (action_slug.split('_')[0].lower()). For Composio action names like
+# ``GOOGLECALENDAR_EVENTS_LIST`` or ``GMAIL_FETCH_EMAILS`` the first
+# underscore-delimited segment IS the toolkit slug — confirmed in
+# packages/ctrl/src/api/routes/integrations.ts where the execute route
+# uses the same rule.
+
+CTRL_API_URL = os.environ.get("CTRL_API_URL", "http://alfred-ctrl-api:3100")
+CTRL_API_KEY = os.environ.get("AAS_API_KEY", "")
+CTRL_DEFAULTS_TTL_SECONDS = int(os.environ.get("COMPOSIO_DEFAULTS_TTL_SECONDS", "300"))
+
+# Process-local cache: (toolkit, user_id) -> (expires_at_epoch, defaults_dict)
+_defaults_cache: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
+_defaults_cache_lock = asyncio.Lock()
+
+
+def derive_toolkit_from_action(action_slug: str) -> str:
+    """Pull the toolkit slug out of an action name.
+
+    ``GOOGLECALENDAR_EVENTS_LIST`` → ``googlecalendar``
+    ``GMAIL_FETCH_EMAILS`` → ``gmail``
+    ``NOTION_CREATE_PAGE`` → ``notion``
+
+    Returns lowercase. Empty string if the action has no underscore.
+    """
+    if not action_slug:
+        return ""
+    head = action_slug.split("_", 1)[0]
+    return head.lower()
+
+
+async def fetch_user_defaults(toolkit: str, user_id: str) -> dict[str, Any]:
+    """Fetch cached default args from ctrl-api with a process-local TTL.
+
+    Returns an empty dict on any failure — execute_action then proceeds
+    with only the LLM-supplied args (== pre-Phase-C behaviour). We DO
+    NOT block the request on ctrl-api availability.
+    """
+    if not toolkit or not user_id:
+        return {}
+    key = (toolkit, user_id)
+    now = time.monotonic()
+    async with _defaults_cache_lock:
+        cached = _defaults_cache.get(key)
+        if cached and cached[0] > now:
+            return cached[1]
+
+    url = f"{CTRL_API_URL}/api/v1/integrations/defaults"
+    headers = {}
+    if CTRL_API_KEY:
+        headers["Authorization"] = f"Bearer {CTRL_API_KEY}"
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(2.5)) as client:
+            resp = await client.get(
+                url,
+                params={"toolkit": toolkit, "user_id": user_id},
+                headers=headers,
+            )
+        if resp.status_code != 200:
+            logger.warning(
+                "defaults lookup non-200 (%s) for toolkit=%s user_id=%s",
+                resp.status_code,
+                toolkit,
+                user_id,
+            )
+            return {}
+        body = resp.json()
+        defaults = body.get("defaults") or {}
+        if not isinstance(defaults, dict):
+            defaults = {}
+    except Exception as exc:  # noqa: BLE001 — best-effort
+        logger.warning(
+            "defaults lookup failed for toolkit=%s user_id=%s: %s", toolkit, user_id, exc
+        )
+        defaults = {}
+
+    async with _defaults_cache_lock:
+        _defaults_cache[key] = (now + CTRL_DEFAULTS_TTL_SECONDS, defaults)
+    return defaults
+
+
+def _invalidate_defaults_cache() -> None:
+    """Clear the in-process TTL cache. Exposed for tests + future admin route."""
+    _defaults_cache.clear()
+
+
+# ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 
@@ -127,12 +238,32 @@ async def composio_execute(req: ExecuteRequest) -> JSONResponse:
     so concurrent requests don't serialize on the event loop. The Composio
     SDK is thread-safe for execute_action calls (each call constructs its
     own httpx request).
+
+    Phase C: cached primary-entity defaults are merged in under the
+    LLM-supplied arguments. The agent's explicit args always win (e.g. if
+    the LLM names a non-primary calendar, we don't overwrite it with the
+    primary id).
     """
     try:
+        toolkit = derive_toolkit_from_action(req.action)
+        defaults: dict[str, Any] = {}
+        if toolkit and req.user_id:
+            defaults = await fetch_user_defaults(toolkit, req.user_id)
+
+        # LLM args override cached defaults.
+        merged_args: dict[str, Any] = {**defaults, **(req.arguments or {})}
+        if defaults:
+            logger.info(
+                "merged defaults toolkit=%s user_id=%s keys=%s",
+                toolkit,
+                req.user_id,
+                sorted(defaults.keys()),
+            )
+
         result = await asyncio.to_thread(
             execute_action,
             req.action,
-            req.arguments,
+            merged_args,
             req.user_id,
             req.connected_account_id,
         )
