@@ -61,6 +61,7 @@ import { addRoute } from "../server.js";
 import { sendJson, ValidationError, NotFoundError, ApiError } from "../errors.js";
 import { getStateDb } from "../../db/state.js";
 import { appendAudit } from "./state.js";
+import { dockerExec } from "../helpers.js";
 
 // ── Configuration ──────────────────────────────────────────────────────────
 
@@ -234,6 +235,15 @@ interface FileRow {
   deleted_at: number | null;
   cold_promoted_at: number | null;
   ref_count: number;
+  // #114 Lane B — content-extraction columns. `alfred_read_at` flips
+  // from null → unix-ms when the FileExtractionWorkflow finishes;
+  // drives the "Alfred read it" badge on /files. `summary` is the
+  // one-paragraph description (null while pending OR on error).
+  // `extraction_error` is a short reason code (`unsupported_mime`,
+  // `extractor_failed`, `summariser_failed`); null on success.
+  alfred_read_at: number | null;
+  summary: string | null;
+  extraction_error: string | null;
 }
 
 function rowFromDb(raw: Record<string, unknown>): FileRow {
@@ -255,6 +265,13 @@ function rowFromDb(raw: Record<string, unknown>): FileRow {
     cold_promoted_at:
       raw.cold_promoted_at == null ? null : Number(raw.cold_promoted_at),
     ref_count: raw.ref_count == null ? 1 : Number(raw.ref_count),
+    // #114 Lane B — extraction columns. These three are nullable on
+    // the SQL side; coerce in the same defensive shape as the rest.
+    alfred_read_at:
+      raw.alfred_read_at == null ? null : Number(raw.alfred_read_at),
+    summary: raw.summary == null ? null : String(raw.summary),
+    extraction_error:
+      raw.extraction_error == null ? null : String(raw.extraction_error),
   };
 }
 
@@ -626,7 +643,70 @@ function rowToJson(row: FileRow): Record<string, unknown> {
     last_accessed_at: row.last_accessed_at,
     deleted_at: row.deleted_at,
     cold_promoted_at: row.cold_promoted_at,
+    // #114 Lane B — extraction surface for the /files badge.
+    alfred_read_at: row.alfred_read_at,
+    summary: row.summary,
+    extraction_error: row.extraction_error,
   };
+}
+
+// ── extraction trigger (#114 Lane B) ─────────────────────────────────────
+//
+// After a successful upload, fire-and-forget a one-shot FileExtractionWorkflow
+// run on the alfred-learn task queue. The workflow reads the blob via
+// GET /api/v1/files/blob/:path, picks the right extractor by mime, calls
+// the workers gateway for a summary, and PATCHes us back via
+// `/api/v1/files/:id/extraction`. The upload response NEVER blocks on
+// this — the badge appears asynchronously on the /files page.
+//
+// `docker compose exec temporal temporal workflow start` is the same
+// out-of-process trigger pattern the HA-bootstrap route already uses
+// (channels_ha.ts → `POST /channels/ha/registry/refresh`). Failures
+// are logged and swallowed: a missed extraction is far less bad than a
+// failed upload from the principal's view.
+//
+// Set `FILES_EXTRACTION_ENABLED=false` to short-circuit (useful for
+// the ctrl-api test harness, where the temporal CLI isn't available).
+const FILES_EXTRACTION_ENABLED =
+  (process.env.FILES_EXTRACTION_ENABLED ?? "true").toLowerCase() !== "false";
+
+function triggerFileExtraction(fileId: string, contentType: string | null): void {
+  if (!FILES_EXTRACTION_ENABLED) return;
+  // Skip extraction for mime types we know we cannot summarise. Saves a
+  // round trip + a "unsupported_mime" stamp on every screenshot.
+  // The workflow itself enforces the same gate; this is an early-out.
+  const ct = (contentType ?? "").toLowerCase();
+  const KNOWN_BINARY_NOOPS = ["application/zip", "application/x-tar", "application/gzip"];
+  if (KNOWN_BINARY_NOOPS.includes(ct)) return;
+
+  // Workflow-id includes the file id so a re-fire on the same upload
+  // (e.g. operator-driven retry) is idempotent on Temporal's side.
+  const workflowId = `file-extract-${fileId}`;
+  const input = JSON.stringify({ file_id: fileId });
+  // Fire-and-forget. The shell-out to `docker compose exec temporal` is
+  // ~500ms on a warm tenant; we explicitly do NOT `await` the promise.
+  void dockerExec("temporal", [
+    "temporal",
+    "workflow",
+    "start",
+    "--type",
+    "FileExtractionWorkflow",
+    "--task-queue",
+    "alfred-learn",
+    "--workflow-id",
+    workflowId,
+    "--input",
+    input,
+  ]).catch((err) => {
+    // ALREADY_EXISTS is fine — the workflow id is dedup-keyed, a duplicate
+    // start is a no-op from the principal's view. Anything else is logged
+    // so the operator can see it in the ctrl-api journal.
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes("ALREADY_EXISTS") || msg.includes("workflow execution already started")) {
+      return;
+    }
+    console.warn(`[files] FileExtractionWorkflow start failed for ${fileId}: ${msg}`);
+  });
 }
 
 // ── bootstrap ─────────────────────────────────────────────────────────────
@@ -880,6 +960,160 @@ export function registerFilesRoutes(): void {
       uploaded_at: now,
       deduped,
     });
+
+    // #114 Lane B — fire-and-forget extraction. Runs after the response
+    // is sent so a slow temporal CLI dispatch can never tax the upload
+    // path. The workflow's workflow_id is keyed on file_id, so a
+    // duplicate start surfaces as ALREADY_EXISTS and is silently
+    // ignored. Cheapest defensible posture: trigger on every upload.
+    triggerFileExtraction(id, contentType);
+  });
+
+  // PATCH /api/v1/files/:file_id/extraction
+  //
+  // #114 Lane B — the FileExtractionWorkflow's write-back surface. The
+  // alfred-learn workflow extracts the file's text, calls the workers
+  // gateway for a one-paragraph summary, and POSTs the result here so
+  // the /files page can render the "Alfred read it" badge.
+  //
+  // Body:
+  //   {
+  //     "alfred_read_at"   : <unix-ms> | null,
+  //     "summary"          : string | null,
+  //     "extraction_error" : string | null
+  //   }
+  //
+  // Semantics:
+  //   * success path → workflow sends `alfred_read_at = <now>`,
+  //     `summary = "<paragraph>"`, `extraction_error = null`.
+  //   * failure path → workflow sends `alfred_read_at = null`,
+  //     `summary = null`, `extraction_error = "<reason_code>"`.
+  //
+  // The route is keyed by `file_id` (not the `<ULID>/<name>` path) so
+  // the workflow doesn't have to know about dedupe path rewrites.
+  // Soft-deleted rows are rejected — a tombstoned upload has no
+  // principal-facing surface, so the workflow shouldn't be stamping it.
+  //
+  // Registration order matters: the wildcard PATCH `/api/v1/files/*`
+  // (principal_label edit, PR 2) is registered later in this function
+  // and would otherwise eat this route's matches. Keeping this one
+  // here, right after upload, makes the specific path win.
+  addRoute("PATCH", "/api/v1/files/:file_id/extraction", async ({ res, params, body }) => {
+    const fileId = params.file_id ?? "";
+    if (!fileId) throw new ValidationError("file_id is required");
+    const db = getStateDb();
+    const raw = db
+      .prepare(`SELECT * FROM files WHERE id = ? LIMIT 1`)
+      .get(fileId) as Record<string, unknown> | undefined;
+    if (!raw) throw new NotFoundError(`file not found: ${fileId}`);
+    const row = rowFromDb(raw);
+    if (row.deleted_at != null) {
+      throw new ApiError(
+        409,
+        "TOMBSTONED",
+        `cannot stamp extraction on a tombstoned file: ${fileId}`,
+      );
+    }
+
+    const patch =
+      body && typeof body === "object" && !Array.isArray(body)
+        ? (body as Record<string, unknown>)
+        : {};
+
+    // Partial-replacing: a missing key in the body leaves the
+    // corresponding column unchanged (lets future pipelines stamp one
+    // column at a time without re-sending the others).
+    let nextReadAt: number | null = row.alfred_read_at;
+    let nextSummary: string | null = row.summary;
+    let nextError: string | null = row.extraction_error;
+    let touched = false;
+
+    if (Object.prototype.hasOwnProperty.call(patch, "alfred_read_at")) {
+      const v = patch.alfred_read_at;
+      if (v === null || v === undefined || v === "") {
+        nextReadAt = null;
+      } else if (typeof v === "number" && Number.isFinite(v) && v >= 0) {
+        nextReadAt = Math.floor(v);
+      } else {
+        throw new ValidationError("alfred_read_at must be a non-negative number or null");
+      }
+      touched = true;
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, "summary")) {
+      const v = patch.summary;
+      if (v === null || v === undefined) {
+        nextSummary = null;
+      } else if (typeof v === "string") {
+        const trimmed = v.trim();
+        // Hard cap matches the spec §8 "one-paragraph summary"; 4 KiB
+        // is comfortably above a long English paragraph and well below
+        // the SQLite per-cell ceiling.
+        if (trimmed.length > 4096) {
+          throw new ValidationError("summary exceeds 4 KiB cap");
+        }
+        nextSummary = trimmed === "" ? null : trimmed;
+      } else {
+        throw new ValidationError("summary must be a string or null");
+      }
+      touched = true;
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, "extraction_error")) {
+      const v = patch.extraction_error;
+      if (v === null || v === undefined) {
+        nextError = null;
+      } else if (typeof v === "string") {
+        const trimmed = v.trim();
+        if (trimmed.length > 256) {
+          throw new ValidationError("extraction_error exceeds 256-char cap");
+        }
+        nextError = trimmed === "" ? null : trimmed;
+      } else {
+        throw new ValidationError("extraction_error must be a string or null");
+      }
+      touched = true;
+    }
+
+    if (touched) {
+      db.prepare(
+        `UPDATE files
+            SET alfred_read_at = ?, summary = ?, extraction_error = ?
+          WHERE id = ?`,
+      ).run(nextReadAt, nextSummary, nextError, row.id);
+    }
+
+    const after = db
+      .prepare(`SELECT * FROM files WHERE id = ? LIMIT 1`)
+      .get(row.id) as Record<string, unknown>;
+    sendJson(res, 200, rowToJson(rowFromDb(after)));
+  });
+
+  // POST /api/v1/files/:file_id/extract
+  //
+  // #114 Lane B — operator re-fire of the extraction workflow. If a
+  // file has `extraction_error` set, this endpoint lets the operator
+  // (or an MCP-triggered re-try) restart the FileExtractionWorkflow.
+  // The workflow's id is keyed on file_id, so an in-flight run rejects
+  // with ALREADY_EXISTS (the trigger swallows that) — the route still
+  // returns 202.
+  addRoute("POST", "/api/v1/files/:file_id/extract", async ({ res, params }) => {
+    const fileId = params.file_id ?? "";
+    if (!fileId) throw new ValidationError("file_id is required");
+    const db = getStateDb();
+    const raw = db
+      .prepare(`SELECT * FROM files WHERE id = ? LIMIT 1`)
+      .get(fileId) as Record<string, unknown> | undefined;
+    if (!raw) throw new NotFoundError(`file not found: ${fileId}`);
+    const row = rowFromDb(raw);
+    if (row.deleted_at != null) {
+      throw new ApiError(409, "TOMBSTONED", `cannot extract a tombstoned file: ${fileId}`);
+    }
+    // Clear any prior error so the UI's "subtle error state" stops
+    // showing the moment a retry starts.
+    db.prepare(
+      `UPDATE files SET extraction_error = NULL WHERE id = ?`,
+    ).run(row.id);
+    triggerFileExtraction(row.id, row.content_type);
+    sendJson(res, 202, { ok: true, file_id: row.id, eta: "30s" });
   });
 
   // GET /api/v1/files/list?prefix=&q=&limit=&offset=
@@ -1909,6 +2143,7 @@ export function registerFilesRoutes(): void {
       restored_bytes: blob.size_bytes,
     });
   });
+
 }
 
 // ── private: blob stream (split out for the tests + future PR 2 reuse) ─────

@@ -46,6 +46,11 @@ process.env.FILES_ROOT = FILES_ROOT;
 // above the 32-byte sample blobs the other tests upload.
 process.env.FILES_QUOTA_HARD_BYTES = String(1024 * 1024);
 process.env.FILES_QUOTA_SOFT_BYTES = String(512 * 1024);
+// #114 Lane B — disable the fire-and-forget FileExtractionWorkflow
+// trigger. The test harness has no temporal CLI to dispatch to; the
+// catch-and-warn would log noisily on every upload assertion. The
+// trigger is unit-tested separately in the extraction.test.ts file.
+process.env.FILES_EXTRACTION_ENABLED = "false";
 
 // ── module imports (after env is set) ──────────────────────────────────────
 
@@ -881,6 +886,172 @@ describe("/api/v1/files/* — PR 1", () => {
         "/api/v1/files/01HFAKEULIDFAKEULIDFAKEUL/purge",
       );
       assert.equal(purge.status, 404);
+    });
+  });
+
+  // ─── #114 Lane B — extraction surface ────────────────────────────────────
+  //
+  // The FileExtractionWorkflow runs out-of-process and PATCHes back
+  // here. These tests cover the route shape: what shapes are accepted
+  // on the wire, how the row reflects after a stamp, the soft-delete
+  // tombstone guard, the cap enforcement, and the operator re-fire
+  // entry point. The fire-and-forget trigger itself is short-circuited
+  // by FILES_EXTRACTION_ENABLED=false at the top of this file.
+
+  describe("PATCH /:file_id/extraction — Lane B", () => {
+    it("stamps alfred_read_at + summary on a fresh row", async () => {
+      const up = await uploadBlob(
+        "contract.txt",
+        Buffer.from("contract body"),
+        "text/plain",
+      );
+      assert.equal(up.status, 201);
+      // Default columns are null at upload time.
+      assert.equal(up.payload.alfred_read_at ?? null, null);
+      assert.equal(up.payload.summary ?? null, null);
+      assert.equal(up.payload.extraction_error ?? null, null);
+
+      const patch = await invokeRoute(
+        "PATCH",
+        `/api/v1/files/${up.payload.id}/extraction`,
+        {
+          body: {
+            alfred_read_at: 1717000000000,
+            summary: "A short contract draft — one paragraph.",
+            extraction_error: null,
+          },
+        },
+      );
+      assert.equal(patch.status, 200);
+      assert.equal(patch.payload.alfred_read_at, 1717000000000);
+      assert.equal(
+        patch.payload.summary,
+        "A short contract draft — one paragraph.",
+      );
+      assert.equal(patch.payload.extraction_error, null);
+      // The list-row carries the same shape.
+      const list = await invokeRoute("GET", "/api/v1/files/list");
+      const listed = list.payload.items.find((r: any) => r.id === up.payload.id);
+      assert.ok(listed, "row should appear in /list");
+      assert.equal(listed.alfred_read_at, 1717000000000);
+      assert.equal(listed.summary, "A short contract draft — one paragraph.");
+    });
+
+    it("stamps extraction_error on a failure path", async () => {
+      const up = await uploadBlob("img.bin", Buffer.from("img"), "image/png");
+      const patch = await invokeRoute(
+        "PATCH",
+        `/api/v1/files/${up.payload.id}/extraction`,
+        {
+          body: {
+            alfred_read_at: null,
+            summary: null,
+            extraction_error: "unsupported_mime",
+          },
+        },
+      );
+      assert.equal(patch.status, 200);
+      assert.equal(patch.payload.alfred_read_at, null);
+      assert.equal(patch.payload.summary, null);
+      assert.equal(patch.payload.extraction_error, "unsupported_mime");
+    });
+
+    it("rejects a tombstoned file with 409", async () => {
+      const up = await uploadBlob("tomb.txt", Buffer.from("t"), "text/plain");
+      // Soft-delete.
+      const del = await invokeRoute(
+        "DELETE",
+        `/api/v1/files/${up.payload.path}`,
+      );
+      assert.equal(del.status, 200);
+      const patch = await invokeRoute(
+        "PATCH",
+        `/api/v1/files/${up.payload.id}/extraction`,
+        { body: { summary: "should not land" } },
+      );
+      assert.equal(patch.status, 409);
+    });
+
+    it("404s on an unknown file_id", async () => {
+      const patch = await invokeRoute(
+        "PATCH",
+        "/api/v1/files/01HNOSUCHFILE000000000000/extraction",
+        { body: { summary: "x" } },
+      );
+      assert.equal(patch.status, 404);
+    });
+
+    it("rejects a summary above the 4 KiB cap with 400", async () => {
+      const up = await uploadBlob("big.txt", Buffer.from("big"), "text/plain");
+      const huge = "x".repeat(4100);
+      const patch = await invokeRoute(
+        "PATCH",
+        `/api/v1/files/${up.payload.id}/extraction`,
+        { body: { summary: huge } },
+      );
+      assert.equal(patch.status, 400);
+    });
+
+    it("partial PATCH leaves untouched columns alone", async () => {
+      const up = await uploadBlob("p.txt", Buffer.from("p"), "text/plain");
+      // First, stamp a success.
+      await invokeRoute(
+        "PATCH",
+        `/api/v1/files/${up.payload.id}/extraction`,
+        {
+          body: {
+            alfred_read_at: 1717111111111,
+            summary: "first summary",
+            extraction_error: null,
+          },
+        },
+      );
+      // Then, send a partial PATCH that only sets extraction_error —
+      // summary should survive.
+      const patch = await invokeRoute(
+        "PATCH",
+        `/api/v1/files/${up.payload.id}/extraction`,
+        { body: { extraction_error: "stamp_failed" } },
+      );
+      assert.equal(patch.status, 200);
+      assert.equal(patch.payload.summary, "first summary");
+      assert.equal(patch.payload.extraction_error, "stamp_failed");
+      assert.equal(patch.payload.alfred_read_at, 1717111111111);
+    });
+  });
+
+  describe("POST /:file_id/extract — Lane B operator re-fire", () => {
+    it("returns 202 and clears any prior extraction_error", async () => {
+      const up = await uploadBlob("r.txt", Buffer.from("r"), "text/plain");
+      // First stamp an error to verify it gets cleared.
+      await invokeRoute(
+        "PATCH",
+        `/api/v1/files/${up.payload.id}/extraction`,
+        { body: { extraction_error: "summariser_failed" } },
+      );
+      const refire = await invokeRoute(
+        "POST",
+        `/api/v1/files/${up.payload.id}/extract`,
+      );
+      assert.equal(refire.status, 202);
+      assert.equal(refire.payload.ok, true);
+      assert.equal(refire.payload.file_id, up.payload.id);
+      // The error column is back to null even though the trigger is
+      // disabled in this test (the route clears it eagerly).
+      const row = getStateDb()
+        .prepare(`SELECT extraction_error FROM files WHERE id = ?`)
+        .get(up.payload.id) as { extraction_error: string | null };
+      assert.equal(row.extraction_error, null);
+    });
+
+    it("rejects a tombstoned file with 409", async () => {
+      const up = await uploadBlob("rt.txt", Buffer.from("rt"), "text/plain");
+      await invokeRoute("DELETE", `/api/v1/files/${up.payload.path}`);
+      const refire = await invokeRoute(
+        "POST",
+        `/api/v1/files/${up.payload.id}/extract`,
+      );
+      assert.equal(refire.status, 409);
     });
   });
 });

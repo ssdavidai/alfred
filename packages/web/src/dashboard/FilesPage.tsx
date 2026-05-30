@@ -36,7 +36,9 @@ import {
 } from "wasp/client/operations";
 import { Frame } from "../client/components/ab/Frame";
 import {
+  badgeLabel,
   buildPrefixTree,
+  deriveBadgeState,
   deriveQuotaView,
   derivePreviewMode,
   formatBytes,
@@ -47,6 +49,7 @@ import {
   shortSha,
   shouldRejectUpload,
   uploadPercent,
+  type BadgeState,
   type FileRow,
   type FilesUsage,
   type LabelEditState,
@@ -679,8 +682,11 @@ export default function FilesPage() {
                             : "transparent",
                         }}
                       >
-                        <td className="py-2 pr-3 truncate max-w-[260px]">
-                          {row.original_filename ?? row.path}
+                        <td className="py-2 pr-3 max-w-[300px]">
+                          <span className="truncate inline-block align-bottom max-w-[200px]">
+                            {row.original_filename ?? row.path}
+                          </span>
+                          <AlfredReadBadge row={row} />
                         </td>
                         <td
                           className="py-2 pr-3 text-right font-mono text-[11px]"
@@ -808,6 +814,96 @@ export default function FilesPage() {
 
 // ── upload row ─────────────────────────────────────────────────────────────
 
+// #114 Lane B — the "Alfred read it" badge.
+//
+// State machine (deriveBadgeState):
+//   * settled — brass pill, summary tooltip on hover.
+//   * pending — soft pulse + "Reading…" label (≤2 min after upload).
+//   * stale   — render nothing (a row Alfred never got around to).
+//   * errored — muted "Couldn't read" pill, reason_code on hover.
+//
+// Kept as a separate component so the row table stays readable.
+function AlfredReadBadge({ row }: { row: FileRow }) {
+  const state: BadgeState = deriveBadgeState(row);
+  if (state === "stale") return null;
+  const label = badgeLabel(state);
+  const tooltip =
+    state === "settled"
+      ? row.summary ?? "Alfred read this file."
+      : state === "errored"
+        ? `Couldn't read: ${row.extraction_error ?? "unknown reason"}`
+        : "Alfred is reading this file…";
+  const bg =
+    state === "settled"
+      ? "color-mix(in oklab, var(--brass) 14%, transparent)"
+      : state === "errored"
+        ? "color-mix(in oklab, var(--marginalia) 18%, transparent)"
+        : "color-mix(in oklab, var(--brass) 8%, transparent)";
+  const fg =
+    state === "settled"
+      ? "var(--brass)"
+      : state === "errored"
+        ? "var(--marginalia)"
+        : "var(--brass)";
+  const pulse = state === "pending" ? "animate-pulse" : "";
+  return (
+    <span
+      className={`inline-flex items-center px-1.5 py-[1px] ml-2 font-mono text-[9px] uppercase tracking-[0.18em] rounded-sm ${pulse}`}
+      style={{ background: bg, color: fg }}
+      title={tooltip}
+    >
+      {label}
+    </span>
+  );
+}
+
+// #114 Lane B — side-panel summary block.
+//
+// Renders the full extraction summary (settled) or a short reason
+// line (errored). Hidden for `pending`/`stale` rows — the badge in
+// the row already carries the affordance and the side panel stays
+// quiet until Alfred has something to say.
+function AlfredReadSummary({ row }: { row: FileRow }) {
+  const state: BadgeState = deriveBadgeState(row);
+  if (state === "settled" && row.summary) {
+    return (
+      <div className="border border-rule px-3 py-2 mt-3" style={{ borderColor: "var(--rule)" }}>
+        <div
+          className="font-mono text-[9px] uppercase tracking-[0.22em] mb-1"
+          style={{ color: "var(--brass)" }}
+        >
+          Alfred read it
+        </div>
+        <p className="font-body text-[13px] leading-snug" style={{ color: "var(--ink)" }}>
+          {row.summary}
+        </p>
+      </div>
+    );
+  }
+  if (state === "errored") {
+    return (
+      <div
+        className="border border-dashed px-3 py-2 mt-3"
+        style={{ borderColor: "var(--rule)" }}
+      >
+        <div
+          className="font-mono text-[9px] uppercase tracking-[0.22em] mb-1"
+          style={{ color: "var(--marginalia)" }}
+        >
+          Couldn't read
+        </div>
+        <p
+          className="font-mono text-[11px]"
+          style={{ color: "var(--marginalia)" }}
+        >
+          {row.extraction_error}
+        </p>
+      </div>
+    );
+  }
+  return null;
+}
+
 function UploadRow({ item }: { item: UploadItem }) {
   const pct = Math.round(uploadPercent(item));
   const isDone = item.status === "completed";
@@ -872,6 +968,12 @@ function PreviewPane({
       <div className="font-mono text-[11px]" style={{ color: "var(--marginalia)" }}>
         {formatBytes(stat_size)} · {formatUploadedAt(stat_uploaded)}
       </div>
+
+      {/* #114 Lane B — "Alfred read it" affordance. The badge appears
+          inline in the row; the side panel surfaces the full summary
+          (when present) and the reason code (when extraction failed). */}
+      <AlfredReadSummary row={stat ?? row} />
+
 
       {mode === "image" && (
         <img

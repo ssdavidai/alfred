@@ -36,16 +36,16 @@ describe("state.db migration runner", () => {
     const db = new DatabaseSync(":memory:");
     db.exec(schema);
     const v = runMigrations(db);
-    // Latest version moves as new migrations land. Today: 15
+    // Latest version moves as new migrations land. Today: 16
     // (0001_fix_pack + 0002_alfred_journal + 0003_tailscale_connection
     // + 0004_channel_tokens + 0005_ha_channel + 0006_files_table
     // + 0007_recall + 0008_ha_event_subscription
     // + 0009_ha_registry_vanished + 0010_files_cold_archive
     // + 0011_ha_tier4 + 0012_ha_integration_ref_removed_at
     // + 0013_recall_realtime + 0014_tool_disposition
-    // + 0015_composio_user_defaults).
-    assert.equal(v, 15, "migrated to latest version");
-    assert.equal(userVersion(db), 15);
+    // + 0015_composio_user_defaults + 0016_files_extraction).
+    assert.equal(v, 16, "migrated to latest version");
+    assert.equal(userVersion(db), 16);
     assert.ok(cols(db, "observation").includes("processed_at"), "0001: processed_at present after migrate");
     // 0002: alfred_journal + alfred_principal tables present.
     const tables = (
@@ -247,6 +247,21 @@ describe("state.db migration runner", () => {
       );
     }
 
+    // 0016: files.{alfred_read_at, summary, extraction_error} present.
+    // These are the three columns the FileExtractionWorkflow writes
+    // back via PATCH /api/v1/files/:id/extraction (#114 Lane B).
+    const filesColsAfter = cols(db, "files");
+    for (const required of [
+      "alfred_read_at",
+      "summary",
+      "extraction_error",
+    ]) {
+      assert.ok(
+        filesColsAfter.includes(required),
+        `0016: files.${required} present`,
+      );
+    }
+
     db.close();
   });
 
@@ -255,7 +270,7 @@ describe("state.db migration runner", () => {
     db.exec(schema);
     runMigrations(db);
     const v2 = runMigrations(db);
-    assert.equal(v2, 15);
+    assert.equal(v2, 16);
     assert.equal(
       cols(db, "observation").filter((c) => c === "processed_at").length,
       1,

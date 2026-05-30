@@ -35,6 +35,67 @@ export interface FileRow {
   uploaded_at: number;
   last_accessed_at: number | null;
   deleted_at: number | null;
+  // #114 Lane B — extraction columns. `alfred_read_at` flips
+  // null → unix-ms once the FileExtractionWorkflow finishes; drives
+  // the "Alfred read it" badge. `summary` is the one-paragraph
+  // description shown in the row's hover tooltip + side panel.
+  // `extraction_error` is the subtle-error state (null on success or
+  // while pending). All three are optional so existing rows + the
+  // pre-Lane-B ctrl-api response shape stay assignable.
+  alfred_read_at?: number | null;
+  summary?: string | null;
+  extraction_error?: string | null;
+}
+
+// #114 Lane B — visual state machine for the "Alfred read it" badge.
+// Derived purely from the three extraction columns + the row's age:
+//
+//   * "settled" — extraction succeeded; show the brass-coloured
+//                 "Alfred read it" pill + the summary tooltip.
+//   * "pending" — extraction hasn't stamped yet AND the row is fresh
+//                 (uploaded <2 min ago). Show a soft "Reading…" pulse.
+//   * "stale"   — extraction hasn't stamped and the row is older than
+//                 2 min. Either the workflow never fired (e.g. tenant
+//                 booted without alfred-learn) or it dropped silently.
+//                 Show nothing — no pulse, no badge.
+//   * "errored" — `extraction_error` is set. Show the muted-rust
+//                 "Alfred couldn't read this" affordance with the
+//                 reason code as the tooltip.
+export type BadgeState = "settled" | "pending" | "stale" | "errored";
+
+/** Stale-after threshold for the "Reading…" pulse. Two minutes is
+ *  comfortably above the §14 promise of 30s and accounts for a cold
+ *  tenant warm-up (Hermes hit, first clerk call). */
+export const PENDING_STALE_AFTER_MS = 2 * 60_000;
+
+/** Derive the badge state from a row. `now` is injectable for tests. */
+export function deriveBadgeState(
+  row: FileRow,
+  now: number = Date.now(),
+): BadgeState {
+  if (row.alfred_read_at && row.alfred_read_at > 0) return "settled";
+  if (row.extraction_error && row.extraction_error.length > 0) {
+    return "errored";
+  }
+  const age = now - (row.uploaded_at ?? 0);
+  if (age <= PENDING_STALE_AFTER_MS) return "pending";
+  return "stale";
+}
+
+/** Render the principal-readable label for the badge state. The
+ *  "settled" copy is the row's tooltip on hover; this function returns
+ *  the short pill text. */
+export function badgeLabel(state: BadgeState): string {
+  switch (state) {
+    case "settled":
+      return "Alfred read it";
+    case "pending":
+      return "Reading…";
+    case "errored":
+      return "Couldn't read";
+    case "stale":
+      return "";
+  }
 }
 
 export interface FilesUsage {
