@@ -25,11 +25,7 @@
  * catalog internally (CATALOG_TTL_MS), so the per-toolkit HTTP round-trip to
  * Composio is amortized across all users on this tenant.
  */
-import type {
-  GetAllowedTools,
-  GetToolDispositions,
-  SetToolDisposition,
-} from "wasp/server/operations";
+import type { GetAllowedTools } from "wasp/server/operations";
 import { HttpError } from "wasp/server";
 import { getUserInstance, proxyToTenant } from "../server/tenantProxy";
 
@@ -202,17 +198,26 @@ interface ToolDispositionsResp {
   dispositions: ToolDisposition[];
 }
 
-export const getToolDispositions: GetToolDispositions<void, ToolDispositionsResp> =
-  async (_args, context) => {
-    if (!context.user) throw new HttpError(401, "Not authenticated");
-    const instance = await getUserInstance(context);
-    const resp = (await proxyToTenant(instance, {
-      path: "/api/v1/agents/tool-disposition",
-    })) as ToolDispositionsResp;
-    return {
-      dispositions: Array.isArray(resp?.dispositions) ? resp.dispositions : [],
-    };
+// Plain async functions, no Wasp generic types. The Wasp-generated
+// `GetToolDispositions<void, T>` constraint rejects the `(args, context)`
+// shape for void-input queries; the dashboard convention (see
+// setTelegramBotToken, getTelegramChannelStatus, etc.) is to just declare
+// the shape inline. The Wasp runtime introspects main.wasp for the wire
+// shape — the TS types here are local hints, not the source of truth.
+
+export const getToolDispositions = async (
+  _args: unknown,
+  context: any,
+): Promise<ToolDispositionsResp> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const instance = await getUserInstance(context);
+  const resp = (await proxyToTenant(instance, {
+    path: "/api/v1/agents/tool-disposition",
+  })) as ToolDispositionsResp;
+  return {
+    dispositions: Array.isArray(resp?.dispositions) ? resp.dispositions : [],
   };
+};
 
 interface SetToolDispositionArgs {
   server: string;
@@ -227,10 +232,10 @@ interface SetToolDispositionResp {
   restart_in_ms: number;
 }
 
-export const setToolDisposition: SetToolDisposition<
-  SetToolDispositionArgs,
-  SetToolDispositionResp
-> = async (args, context) => {
+export const setToolDisposition = async (
+  args: SetToolDispositionArgs,
+  context: any,
+): Promise<SetToolDispositionResp> => {
   if (!context.user) throw new HttpError(401, "Not authenticated");
   const server = String(args?.server ?? "").trim();
   const disposition = args?.disposition;
