@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from src.activities.chore_generation import (
     _extract_description_timezone,
+    _extract_registered_workflow_name,
     _slice_profile_for_opportunity,
     _try_parse_envelope,
     _validate_cron_expression,
@@ -165,6 +166,140 @@ class TestValidateEnvelope:
         ok, err = _validate_envelope(env)
         assert not ok
         assert "5-field" in err
+
+
+# ---------------------------------------------------------------------------
+# GH #150 — workflow_class_name <-> @workflow.defn name consistency
+#
+# When the envelope's workflow_class_name doesn't match the Temporal name
+# the source actually registers, the schedule fires forever against an
+# unregistered workflow type. The original bug surfaced as
+# `GitHubFailureTriageWorkflow` (envelope, capital H) vs
+# `@workflow.defn(name="GithubFailureTriageWorkflow")` (source, lowercase h).
+# ---------------------------------------------------------------------------
+
+def _source_with_defn(class_name: str, defn_name: str | None = None) -> str:
+    """Return minimal valid-looking source declaring one @workflow.defn class."""
+    decorator = (
+        f"@workflow.defn(name={defn_name!r})" if defn_name is not None
+        else "@workflow.defn"
+    )
+    return (
+        "from __future__ import annotations\n"
+        "from temporalio import workflow\n"
+        "\n"
+        f"{decorator}\n"
+        f"class {class_name}:\n"
+        "    @workflow.run\n"
+        "    async def run(self) -> None:\n"
+        "        return None\n"
+    )
+
+
+class TestExtractRegisteredWorkflowName:
+    """_extract_registered_workflow_name returns the Temporal-side name."""
+
+    def test_bare_class_no_name_kwarg(self):
+        src = _source_with_defn("MyWorkflow")
+        class_name, registered = _extract_registered_workflow_name(src)
+        assert class_name == "MyWorkflow"
+        assert registered == "MyWorkflow"
+
+    def test_explicit_name_kwarg_wins(self):
+        src = _source_with_defn("InternalClass", defn_name="ExternalNameWorkflow")
+        class_name, registered = _extract_registered_workflow_name(src)
+        assert class_name == "InternalClass"
+        assert registered == "ExternalNameWorkflow"
+
+    def test_unparseable_returns_none_pair(self):
+        class_name, registered = _extract_registered_workflow_name("def : :: not python")
+        assert class_name is None
+        assert registered is None
+
+    def test_no_defn_class_returns_none_pair(self):
+        src = (
+            "from __future__ import annotations\n"
+            "x = 1\n"
+        )
+        class_name, registered = _extract_registered_workflow_name(src)
+        assert class_name is None
+        assert registered is None
+
+    def test_multiple_defn_classes_returns_none_pair(self):
+        # We don't pick one arbitrarily — let the structural validator
+        # complain about the "exactly one @workflow.defn class" rule.
+        src = (
+            _source_with_defn("OneWorkflow")
+            + "\n"
+            + _source_with_defn("TwoWorkflow")
+        )
+        class_name, registered = _extract_registered_workflow_name(src)
+        assert class_name is None
+        assert registered is None
+
+
+class TestEnvelopeWorkflowNameConsistency:
+    """_validate_envelope rejects envelope/source workflow-name mismatches."""
+
+    def test_matching_bare_class_passes(self):
+        env = _good_envelope()
+        env["workflow_class_name"] = "FooWorkflow"
+        env["python_source"] = _source_with_defn("FooWorkflow")
+        ok, err = _validate_envelope(env)
+        assert ok, err
+
+    def test_matching_name_kwarg_passes(self):
+        env = _good_envelope()
+        env["workflow_class_name"] = "ExposedWorkflow"
+        env["python_source"] = _source_with_defn(
+            "InternalImpl", defn_name="ExposedWorkflow"
+        )
+        ok, err = _validate_envelope(env)
+        assert ok, err
+
+    def test_github_capital_h_envelope_lowercase_source_rejected(self):
+        """The exact GH #150 symptom — capital-H envelope, lowercase-h class."""
+        env = _good_envelope()
+        env["workflow_class_name"] = "GitHubFailureTriageWorkflow"
+        env["python_source"] = _source_with_defn("GithubFailureTriageWorkflow")
+        ok, err = _validate_envelope(env)
+        assert not ok
+        assert "GitHubFailureTriageWorkflow" in err
+        assert "GithubFailureTriageWorkflow" in err
+
+    def test_github_lowercase_h_envelope_capital_source_rejected(self):
+        """Same drift, the other direction."""
+        env = _good_envelope()
+        env["workflow_class_name"] = "GithubFailureTriageWorkflow"
+        env["python_source"] = _source_with_defn("GitHubFailureTriageWorkflow")
+        ok, err = _validate_envelope(env)
+        assert not ok
+        assert "GitHubFailureTriageWorkflow" in err
+        assert "GithubFailureTriageWorkflow" in err
+
+    def test_name_kwarg_mismatch_explains_override(self):
+        """When @workflow.defn(name=...) overrides the class name, the
+        rejection should call out the override so the retry loop knows
+        which knob to turn."""
+        env = _good_envelope()
+        env["workflow_class_name"] = "InternalImplWorkflow"
+        env["python_source"] = _source_with_defn(
+            "InternalImplWorkflow", defn_name="ExposedNameWorkflow"
+        )
+        ok, err = _validate_envelope(env)
+        assert not ok
+        assert "name=" in err
+        assert "ExposedNameWorkflow" in err
+
+    def test_unparseable_source_does_not_trip_consistency_check(self):
+        """Garbage source falls through to the structural validator — the
+        consistency check stays silent rather than masking the real issue."""
+        env = _good_envelope()
+        env["workflow_class_name"] = "AnythingWorkflow"
+        env["python_source"] = "def : :: not python at all"
+        ok, err = _validate_envelope(env)
+        # The envelope-shape rules pass; structural validation happens after.
+        assert ok, err
 
 
 # ---------------------------------------------------------------------------
@@ -1012,7 +1147,11 @@ class TestGeneratorReRollOnStaticValidation:
         """First _call_llm returns bad ordering → second returns good →
         generator returns the good one with attempts==2."""
         responses = [
-            _envelope(_bad_ordering_python_source()),
+            # GH #150 — keep envelope's workflow_class_name aligned with the
+            # class declared by the source so the new consistency check
+            # doesn't short-circuit before the import-ordering violation
+            # gets a chance to drive the re-roll.
+            _envelope(_bad_ordering_python_source(), cls="BadOrderingChoreWorkflow"),
             _envelope(_good_python_source(), module="good_chore", cls="GoodOrderingChoreWorkflow"),
         ]
         captured_prompts: list[str] = []
@@ -1058,7 +1197,12 @@ class TestGeneratorReRollOnStaticValidation:
         """If every attempt has bad ordering, the generator exhausts its
         budget and raises — caller in assign_chores then skips the
         opportunity instead of writing broken code to disk."""
-        bad_envelope = _envelope(_bad_ordering_python_source())
+        # GH #150 — align the envelope class name with the source's so the
+        # exhaustion is driven by the import-ordering violation (the bug
+        # this test is here to cover) rather than the new name-mismatch check.
+        bad_envelope = _envelope(
+            _bad_ordering_python_source(), cls="BadOrderingChoreWorkflow"
+        )
 
         async def fake_call_llm(prompt, max_tokens=8192, heartbeat_message=""):
             return bad_envelope
@@ -1209,9 +1353,11 @@ class TestChoreGenerationCronAutocorrect:
         The generator must auto-correct the DOW and return on attempt 1 with
         the corrected schedule — NOT re-roll the LLM into a timeout."""
         import json
+        # GH #150 — workflow_class_name has to match the class declared in
+        # python_source. `_good_python_source()` declares `GoodOrderingChoreWorkflow`.
         result, exc, n = _run_generation(json.dumps({
             "module_name": "weekday_digest",
-            "workflow_class_name": "WeekdayDigestWorkflow",
+            "workflow_class_name": "GoodOrderingChoreWorkflow",
             "user_facing_description": (
                 "Every weekday at 04:00 UTC, this chore assembles a single "
                 "morning digest summarising your day-ahead calendar and any "
@@ -1234,7 +1380,8 @@ class TestChoreGenerationCronAutocorrect:
         import json
         result, exc, n = _run_generation(json.dumps({
             "module_name": "wrong_time_chore",
-            "workflow_class_name": "WrongTimeChoreWorkflow",
+            # GH #150 — match the class declared by _good_python_source().
+            "workflow_class_name": "GoodOrderingChoreWorkflow",
             "user_facing_description": (
                 "Every day at 09:00 UTC, this chore drafts your day plan and "
                 "highlights anything that needs your attention this morning."
