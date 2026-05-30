@@ -5,6 +5,291 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the `alfred-vault` package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-05-30]
+
+Alfred Black becomes **budget-aware**. Before this release, every turn
+Alfred took on Voice PE / Telegram / Slack / SMS / Paperclip sent the
+full catalogue of every connected MCP server's tools to the model on
+every call — 42k input tokens of schemas before the user's question
+even got read, and a Composio call cost ~4.5 seconds of Python
+cold-start on top. A calendar query through Voice PE consistently hit
+~130 seconds and ended in "Alfred timed out". After this release the
+same query returns a real answer in under fifteen seconds, **and the
+principal can dial the tool catalogue Alfred carries on every turn with
+a single click per server.**
+
+The centrepiece is the **three-phase Composio latency program** that
+shipped end-to-end on `home.alfred.black` between 11:53 and 12:48 UTC,
+followed by a `/tools` UI cutover at 14:28 UTC.
+
+**Phase A — HTTP sidecar** (#177). alfred-learn now runs a FastAPI
+sidecar on port `:8788` (`packages/learn/src/composio_server.py`)
+listening for `POST /composio/execute`. ctrl-api's
+`/api/v1/integrations/execute` route (which every Composio action
+takes — Gmail label list, calendar event read, Notion page create,
+~300 actions total) switched from `docker exec alfred-learn python3 -c
+<script>` to a service-DNS HTTP call. Per-call latency drops from
+~4.5 s to ~500 ms — the SDK and Composio client now live as a
+singleton in module scope, no per-request init. A `COMPOSIO_EXECUTOR=docker|http`
+env flag preserves the old path for emergency rollback. The Composio
+fix is the single largest contributor to the wall-time win.
+
+**Phase B — runtime-flippable tool dispositions** (#178). A new
+`tool_disposition` table in state.db (migration `0014`) records, per
+MCP server, whether its tools are exposed inline (**DIRECT** — Alfred
+sees them every turn, fastest, costs tokens) or hidden behind a
+delegation gateway (**DELEGATED** — tools available only on the workers
+profile, accessed via `delegate_to_focused_agent`, cheaper model
++3–5 s per use). Defaults are all-`direct` so existing tenants
+behave unchanged on upgrade. Three new MCP tools on the `alfred`
+server give Alfred himself the lever: `list_tool_dispositions` (cached
+60s, read at session start so he knows whether to call native or
+delegate), `set_tool_disposition` (Sir says "demote sure to delegated"
+or "promote vault to direct"), and `delegate_to_focused_agent` (spawns
+an ephemeral focused subagent on the workers profile with the same
+identity + journal). Three servers are **self-protected** — `alfred`,
+`alfred-ctrl`, and `execute` — because delegating them would break
+Alfred's ability to reach his own ctrl-api, his own briefing/decision
+tools, or the Composio progressive-disclosure surface that Phase A
+optimised. The backend accepts a self-protected flip if Sir is
+deliberate (via the MCP tool); the UI surfaces it as `locked` so an
+accidental click doesn't cost a 10-second restart for nothing. Hermes
+init's `render_mcp_servers.py` reads the disposition table at boot and
+writes `tools.include: []` on delegated servers so the LLM never sees
+their schemas, while the spawned MCP process still serves the workers
+profile. A debounced restart cycle (10s window) coalesces a flurry of
+flips into one Hermes reload.
+
+**Phase C — primary-entity defaults cache** (#179, with hotfixes #180
+and #181). A second new state.db table (`composio_user_defaults`,
+migration `0015`) caches each user's "primary entity" per toolkit. At
+Composio OAuth-completion, ctrl-api fetches Sir's `primary === true`
+calendar from `GOOGLECALENDAR_LIST_CALENDARS` and persists `{calendarId:
+<id>}`. The Phase-A sidecar injects those defaults *under* the LLM's
+args before dispatching to Composio so an explicit calendarId still
+wins — the model can call `GOOGLECALENDAR_EVENTS_LIST` with empty
+`calendarId` and the primary fills in automatically. The new
+`generateComposioSkill()` call-out surfaces "Sir's primary calendar
+(`<id>`) is the default. Pass only `timeMin` + `timeMax` — calendarId
+fills in automatically." in `alfred-composio-googlecalendar/SKILL.md`
+once the cache is populated. Gmail primary inbox and Notion default
+workspace are TODOed with the same shape. Direct sidecar test of
+`GOOGLECALENDAR_EVENTS_LIST` with the defaults injected: **1.98
+seconds end-to-end.** The honest caveat: the end-to-end Voice PE
+calendar smoke still came in at 67s on first iteration because the
+LLM, by training-data bias, fans out across `LIST_CALENDARS` + 7
+per-calendar `EVENTS_LIST` calls before trusting the shortcut.
+Further prompt-side tuning (or a Phase-D forced-delegation gate) is
+left as follow-up; the architecture and the cache are in place and
+proven.
+
+**`/tools` becomes the disposition console** (#182). The page now
+groups MCP tools **by server** rather than as a flat list. Each
+server is a card showing its name, tool count, current
+DIRECT/DELEGATED state, audit trail (`last flipped <when> by <who>`),
+and a one-click "flip to delegated" / "flip to direct" button. After a
+flip the UI shows "hermes restarting…" for ~12 seconds then refetches
+the live row. The three self-protected servers (`alfred`,
+`alfred-ctrl`, `execute`) render with a `locked` chip instead of a
+toggle, with a tooltip explaining the self-protection. The lever moves
+across **every channel Alfred-main serves at once** — Telegram, Slack,
+SMS, Voice PE (via the HA conversation agent), Paperclip, OMI, and
+inbound email. The two channels that *don't* pick it up are
+voice-bridge (gpt-realtime-2 with its own curated `VOICE_BRIDGE_ALLOWLIST`)
+and `claude.ai/code` (which consumes Hermes' MCP tools directly without
+a Hermes LLM turn).
+
+**Around the latency program**, two HA-side guards landed:
+`ha__integration_remove` now requires the exact phrase `"yes, sever my
+own connection to Home Assistant"` before it'll act on the `alfred`
+domain (#173), after Alfred accidentally deleted his own HA integration
+during a 2026-05-29 session. The `/channels/ha/turn` route now
+short-circuits when alfred-ha sends the `__alfred_ha_preflight__`
+sentinel text (#174), avoiding the 30s Hermes cold-start that was
+firing false `cannot_connect` on the integration's connection test.
+The `alfred-ha` HACS custom_component bumped to v1.1.3 with
+`DEFAULT_TIMEOUT` 30 → 90s and a per-entry OptionsFlow so the timeout
+is tunable without re-installing.
+
+**Recall.ai in-meeting two-way voice goes live** (#113 PR5 / #171,
+with card polish in #170 and #172). Alfred can now talk back in a
+meeting bot's transcript, not just listen. The persona is locked: the
+bot speaks **as Alfred, never as the principal** — four guards
+enforce this from the prompt down through the Twilio Streams layer.
+
+**New fleet member: `rami.alfred.black`** provisioned to a fresh
+Hetzner cx53 in nbg1-dc3 (178.105.224.71) with the full 23/31 container
+stack healthy and all nine Let's Encrypt certs valid. Eight provider
+keys (Hetzner, Cloudflare Global API Key, OpenRouter, Composio, OpenAI,
+DockerHub, Recall.ai, Groq) were lifted out of conversation/.env
+plaintext and stored encrypted in `home.alfred.black`'s Vaultwarden
+under the new **"Provider API Keys"** folder
+(`aa794a95-fb7b-4889-a5a9-6dc34ecf70c2`) so future tenant
+provisioning runs read from there rather than from operator memory.
+
+This is the first release where Alfred's runtime model is *tunable by
+the principal at runtime*. The lever exists.
+
+### Added
+
+**Phase A — Composio HTTP sidecar (#177)**
+- `packages/learn/src/composio_server.py` — FastAPI app on `:8788`
+  with `POST /composio/execute {action, arguments, user_id,
+  connected_account_id} → result` and `GET /health`. Composio SDK
+  client is a module-scope singleton; no per-request init.
+- `packages/learn/entrypoint.sh` starts the sidecar in the background
+  before `exec python -m src.worker` so the Temporal worker stays
+  foreground and the sidecar restarts with the container.
+- `packages/ctrl/src/api/routes/integrations.ts:3055-3135` —
+  `executeComposioAction` now POSTs to `http://alfred-learn:8788/composio/execute`.
+  Behind `COMPOSIO_EXECUTOR=docker|http` (default `http`); the
+  dockerExec path stays as one-line emergency rollback.
+
+**Phase B — tool_disposition runtime model (#178)**
+- `state.db` migration `0014_tool_disposition.sql` — table seeded
+  with all 9 MCP servers (`alfred`, `alfred-ctrl`, `sure`, `plane`,
+  `vaultwarden`, `paperclip`, `execute`, `hass`, `files`) at
+  `disposition='direct'`, `updated_by='init'`. Backwards-compatible:
+  pre-existing tenants get the same behaviour as before until they
+  flip something.
+- `GET /api/v1/agents/tool-disposition` returns the 9-row map with
+  `{server, disposition, updated_at, updated_by}`.
+- `POST /api/v1/agents/tool-disposition` flips one row, queues a
+  debounced `docker compose restart hermes` (10s window so a flurry
+  coalesces), returns the new state + `restart_scheduled` boolean.
+- `POST /api/v1/agents/focused-subagent` — the focused-subagent
+  execution route. Session key `focus-<domain>-<short-hash>`, builds
+  a persona+task+context prompt, calls Hermes workers `:18790/v1/responses`
+  with that session key (mirrors the existing `_call_clerk` pattern),
+  returns the subagent's plain-text answer verbatim. 60s default
+  timeout.
+- Three new MCP tools on the `alfred` server (`packages/mcp-server/src/tools/alfred.ts`):
+  - `list_tool_dispositions` — live map, cached 60s.
+  - `set_tool_disposition` — `{server, disposition, updated_by='alfred'}`.
+    Self-protected `alfred-ctrl` / `alfred` / `execute` write a warning
+    note in the audit row but the backend accepts the flip if Sir is
+    deliberate.
+  - `delegate_to_focused_agent` — `{task, domain, context?}`. The
+    delegation gateway. Use when the target server is DELEGATED or
+    when fanning out across many calls (gmail batch, calendar
+    multi-account).
+- `packages/hermes/init/render_mcp_servers.py` reads
+  `tool_disposition` at render time and writes `tools.include: []` for
+  servers with `disposition='delegated'`, preserving operator-owned
+  blocks (same pattern as `migrate_main_profile_tool_trim.py` from
+  PR #176).
+- `packages/mcp-server/skills/alfred-mcp-skill.md` — new "How to use
+  the disposition map" section near the top: glance at
+  `list_tool_dispositions` at session start (cached 60s, cheap), pick
+  DIRECT or DELEGATED per server, relay subagent replies verbatim, ask
+  Sir before promoting a sensitive server.
+
+**Phase C — primary-entity defaults cache (#179, #180, #181)**
+- `state.db` migration `0015_composio_user_defaults.sql` — composite-PK
+  table on `(toolkit, user_id)`, JSON `default_args` payload, `source`
+  provenance (`oauth_completion` / `manual` / `backfill`),
+  `updated_at` index.
+- OAuth-completion hook in `auto-config` (`packages/ctrl/src/api/routes/integrations.ts`)
+  — on `googlecalendar` connection, fires `GOOGLECALENDAR_LIST_CALENDARS`
+  via the Phase A sidecar, picks `primary === true`, persists
+  `{calendarId: <id>}` with `source='oauth_completion'`. Gmail + Notion
+  TODOed with the same shape inside `cacheComposioPrimaryDefaults()`.
+- `GET /api/v1/integrations/defaults?toolkit=…&user_id=…` — lookup
+  surface for the sidecar.
+- `POST /api/v1/integrations/:toolkit/refresh-defaults` — manual
+  re-resolution / backfill.
+- Sidecar (`packages/learn/src/composio_server.py`) — 5-minute
+  in-process TTL cache on defaults; merges defaults *under* LLM args
+  so explicit `calendarId` still wins.
+- `generateComposioSkill()` — adds a "Primary calendar shortcut"
+  callout to `alfred-composio-googlecalendar/SKILL.md` when a cached
+  id exists, with a worked example.
+
+**`/tools` disposition console (#182)**
+- `packages/web/src/tools/operations.ts` — two new Wasp ops:
+  `getToolDispositions` (query) and `setToolDisposition` (action,
+  `updated_by='sir'`). Plain async-function shape with `Promise<any>`
+  return — the Wasp `Promise<T>` trap from PRs #139 and #145 caught
+  us a third time; the convention is documented in the file header
+  to prevent a fourth.
+- `packages/web/src/tools/ToolsPage2.tsx` — MCP section regrouped by
+  server. New `McpServerCard` component carries the disposition badge,
+  audit line, flip button (or `locked` chip for self-protected
+  servers), and a collapsible per-tool detail list (the previous flat
+  view, now expandable per server).
+- Live verified: home.alfred.black `/tools` returns HTTP 200 in 62 ms,
+  `setToolDisposition` round-trips through ctrl-api with debounced
+  Hermes restart firing as advertised.
+
+**Recall.ai in-meeting two-way voice (#171)**
+- Alfred speaks **as Alfred, never as the principal**. Persona
+  enforced at four points: the bot's input transcript prompt, the
+  realtime persona seed, the Streams layer's voice anchor, and the
+  reply post-processor.
+- `/channels` Recall card surfaces API key + webhook secret inputs
+  with correct status text (#170) and the real webhook event names
+  Recall publishes (`bot.in_call_recording`, `bot.done`,
+  `bot.fatal`) (#172).
+
+**Operational**
+- `rami.alfred.black` fleet tenant — full provisioning landed on
+  Hetzner cx53 nbg1-dc3 IPv4 178.105.224.71, 9 Cloudflare A-records,
+  all 9 LE certs valid, 23/31 healthy services.
+- 8 provider API keys lifted into `home.alfred.black` Vaultwarden
+  (folder `aa794a95-fb7b-4889-a5a9-6dc34ecf70c2`, "Provider API
+  Keys") with `david@sabo.tech` paired to the Cloudflare Global Key.
+  The plaintext-in-env era ends here for tenant provisioning.
+
+### Changed
+
+- `ha__integration_remove` requires the exact phrase `"yes, sever my
+  own connection to Home Assistant"` before acting on the `alfred`
+  domain (#173). Live-tested after a 2026-05-29 incident where Alfred
+  removed his own HA integration mid-session.
+- `/api/v1/channels/ha/turn` short-circuits the `__alfred_ha_preflight__`
+  sentinel text instantly instead of routing through Hermes — kills the
+  30-second `cannot_connect` false-positive during integration setup
+  (#174).
+- `alfred-ha` HACS custom_component v1.1.3 — `DEFAULT_TIMEOUT` 30 →
+  90 s + per-entry OptionsFlow so the timeout is tunable without
+  re-install. v1.1.2 was the docs-only follow-up.
+- Composio tool-catalogue trim (#176, retroactively rolled into Phase
+  A's input-token win). Per-profile `tools.include` whitelists:
+  `sure` 95 → 23, `hass` 85 → 28, `paperclip` 40 → 18. Trims ~40s
+  off LLM time-to-first-token per voice/chat turn before Phase A even
+  starts work.
+
+### Fixed
+
+- Phase C hotfix #180: `GOOGLECALENDAR_LIST_CALENDARS` response shape
+  is `data.calendars`, not `data.items` — the OAuth-completion cache
+  was silently writing nothing for the first hour of Phase C being live.
+- Phase C hotfix #181: the sidecar's defaults lookup was pointed at
+  `alfred-ctrl-api` (the legacy hostname); switched to `ctrl-api` via
+  the `ALFRED_CTRL_URL` env var so the cache hit on every call.
+
+### Build & CI
+
+- Three iterations to land PR #182 — the same Wasp `Promise<T>` trap
+  that bit #139 and #145 fires when an op's return type is a concrete
+  object literal (not assignable to Wasp's `Payload` constraint). The
+  fix is an explicit `Promise<any>` annotation on the function
+  signature; the file header now documents the rule so a fourth
+  occurrence is caught at review.
+
+### Memory
+
+- New `docker-cp-tmpfs-quirk` — `docker cp` into
+  `alfred-black-hermes-1:/tmp/...` silently fails (rc=0, file never
+  appears) because /tmp is a compose tmpfs. Use `docker exec -i ...
+  sh -c 'cat > /tmp/x'` instead.
+- New `never-env-dump` — Sir's standing rule: never `env` (full dump)
+  with a grep filter; name each var explicitly via `printenv VARNAME`
+  or strip values with `awk -F= '{print $1}'` for names-only.
+- New `hacs-restart-needed` — HACS-installed component upgrades need
+  a full HA Core restart, not just `config_entries/reload`. The
+  reload runs the old code from Python's `sys.modules` cache.
+
 ## [2026-05-29]
 
 Alfred Black becomes **the principal's house operator**. Before this
