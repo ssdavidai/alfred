@@ -109,6 +109,12 @@ _REQUIRED_MCP_SERVERS: dict[str, list[tuple[str, dict]]] = {
     #                 skips this profile entirely (see profile guard below).
 }
 
+# #120 Lane II — known reserved profile names. User-facing profiles (not in
+# this set) get the same MCP-server allowlist as `main` (they're
+# conversational Alfred variants). Heavy stays unaffected via the explicit
+# "unknown-profile" return path below.
+_RESERVED_PROFILES: frozenset[str] = frozenset({"main", "workers", "heavy", "codex-builder"})
+
 # codex-builder's whole identity is "no MCP catalogue". We must NEVER
 # graft `hass` or `files` into its sealed-runtime config — the egress
 # allowlist + UID isolation would let them spawn but the gateway agent
@@ -294,7 +300,16 @@ def ensure_mcp_servers(
 
     required = _REQUIRED_MCP_SERVERS.get(profile)
     if required is None:
-        return "unknown-profile"
+        # Heavy (a reserved profile with no allowlist entries) keeps the
+        # historical "unknown-profile" return — the test pins this exact
+        # outcome so heavy never picks up the principal-facing surfaces.
+        if profile in _RESERVED_PROFILES:
+            return "unknown-profile"
+        # #120 Lane II — user-facing profiles (created via ctrl-api's
+        # /api/v1/agent-profiles POST) fall here. Treat them like `main`:
+        # they're conversational Alfred variants and need the same baseline
+        # MCP catalogue.
+        required = _REQUIRED_MCP_SERVERS["main"]
 
     from ruamel.yaml import YAML
 
@@ -335,11 +350,18 @@ def ensure_mcp_servers(
         )
         added_any = True
 
-    # Phase B: apply DELEGATED disposition to main profile's mcp_servers.
+    # Phase B: apply DELEGATED disposition to main-like profiles' mcp_servers.
     # Workers/heavy stay full-catalogue — the focused-subagent path needs
     # them. codex-builder was sealed above so never lands here.
+    # #120 Lane II — user-facing profiles (anything not in the reserved
+    # workers/heavy/codex-builder set) inherit main's disposition behaviour.
     disposition_mutated = False
-    if profile == "main" and state_db_path is not None:
+    main_like = profile == "main" or profile not in {
+        "workers",
+        "heavy",
+        "codex-builder",
+    }
+    if main_like and state_db_path is not None:
         dispositions = _read_dispositions(state_db_path)
         if dispositions:
             disposition_mutated = _apply_dispositions_to_main(mcp_servers, dispositions)

@@ -33,7 +33,11 @@
               Same minimal-memory / no-channels / capped-concurrency posture
               as workers, but on an Opus-class model. API on :18791.
 #}
-{%- set is_main = (profile == "main") -%}
+{#- #120 Lane II — keep an external `is_main` override when the renderer
+    passed one (user-facing profiles render as main-like). Otherwise derive
+    from the slug for back-compat with anyone calling the template
+    directly. -#}
+{%- set is_main = is_main if is_main is defined else (profile == "main") -%}
 {%- set vault_path = vault_path | default("/vault") -%}
 {%- set ctrl_api_url = ctrl_api_url | default("http://ctrl-api:3100") -%}
 {%- set mcp_stdio_dir = mcp_stdio_dir | default("/opt/data/profiles/" + profile + "/mcp-stdio") -%}

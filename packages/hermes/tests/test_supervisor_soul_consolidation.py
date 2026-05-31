@@ -119,18 +119,25 @@ def test_soul_consolidation_runs_after_wait_for_profiles():
 
 
 def test_soul_consolidation_runs_before_main_gateway_launch():
-    """The consolidation must run BEFORE the main gateway boots."""
+    """The consolidation must run BEFORE the gateway launch loop.
+
+    #120 Lane II — anchor is the registry-driven launch loop's
+    `done < <(read_registry)` line.
+    """
     src = _read()
     cp_line = _line_index(
         src,
         'cp "$HERMES_HOME/profiles/main/SOUL.md" "$HERMES_HOME/SOUL.md"',
     )
-    launch_line = _line_index(src, "hermes -p main gateway run")
+    launch_line = _line_index(src, "ANCHOR: BOOT_LAUNCH_LOOP")
     assert cp_line >= 0, "expected SOUL consolidation cp line"
-    assert launch_line >= 0, "expected main gateway launch line"
+    assert launch_line >= 0, (
+        "expected the registry-driven launch loop's "
+        "`done < <(read_registry)` line — supervisor.sh was restructured"
+    )
     assert cp_line < launch_line, (
         f"SOUL consolidation `cp` (line {cp_line + 1}) must come BEFORE "
-        f"the `hermes -p main gateway run` launch (line {launch_line + 1}) — "
+        f"the registry launch loop (line {launch_line + 1}) — "
         f"Hermes reads $HERMES_HOME/SOUL.md at gateway boot, so the "
         f"persona must be in place beforehand."
     )

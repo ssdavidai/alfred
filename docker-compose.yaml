@@ -306,6 +306,16 @@ services:
   # Hermes /v1 API directly.
   hermes:
     image: ssdavidai00/alfred-black-hermes:latest
+    # No `ports:` — hermes binds 0.0.0.0 inside the container on the four
+    # reserved ports (18789/18790/18791/18793) PLUS any registry-allocated
+    # user-facing profile port (18794..18799 per #120 Lane II). All of
+    # these are reachable ONLY via the compose default network as
+    # `http://hermes:<port>` from sibling containers (ctrl-api, paperclip,
+    # alfred-learn, voice-bridge). They are intentionally NOT host-published
+    # so the only external surface is Caddy ingress on :443, which in turn
+    # routes through ctrl-api's auth-gated proxy. Adding user-facing profile
+    # ports to a `ports:` block would expose them on the VM's public IP
+    # without any TLS or auth wrapping.
     depends_on:
       init:
         condition: service_completed_successfully

@@ -78,6 +78,11 @@ RUN pip install --no-cache-dir "jinja2==3.1.6" "ruamel.yaml==0.18.6"
 # repo-relative.
 COPY packages/hermes/init/entrypoint.sh        ./entrypoint.sh
 COPY packages/hermes/init/render_hermes.py     ./render_hermes.py
+# render_registry.py — #120 Lane II. Enumerates the agent_profile registry
+# from ctrl-api's state.db (mounted RO at /ctrl-data/alfred-state.db) and
+# emits the slug:port:model list entrypoint.sh iterates over, plus writes
+# /hermes-state/profiles/_registry.json the supervisor reads at boot.
+COPY packages/hermes/init/render_registry.py   ./render_registry.py
 COPY packages/hermes/init/render_sms_gateway.py ./render_sms_gateway.py
 # render_mcp_servers.py — idempotent ADD-only mutator that backfills new
 # required MCP server entries (e.g. `hass` PR #128, `files` PR #130) into

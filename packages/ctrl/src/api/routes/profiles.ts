@@ -46,12 +46,15 @@ import {
   getProfile,
   createProfile,
   archiveProfile,
+  setProfileStatus,
   listBindingsForProfile,
   resolveProfileForChannel,
   bindChannel,
   unbindChannel,
+  buildSupervisorRegistry,
 } from "../../db/agentProfiles.js";
-import type { AgentProfile } from "../../db/agentProfiles.js";
+import type { AgentProfile, ProfileStatus } from "../../db/agentProfiles.js";
+import { writeSupervisorRegistry, nudgeHermesSupervisor } from "../../hermes/supervisor.js";
 
 function asObj(body: unknown): Record<string, unknown> {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
@@ -228,10 +231,26 @@ export function registerProfileRoutes(): void {
         persona_template,
         deployment_shape,
       });
+      // Lane II — write the supervisor registry + nudge Hermes so the new
+      // profile dir is rendered and a gateway is launched on the allocated
+      // port. Best-effort: if the registry write or the docker kill fails
+      // (e.g. test harness, hermes not running yet), the registry row is
+      // still durable and the next init/supervisor cycle will reconcile.
+      try {
+        const reg = buildSupervisorRegistry(db());
+        writeSupervisorRegistry(reg);
+        nudgeHermesSupervisor();
+      } catch (err) {
+        // Surface a warning, never block the registry write.
+        console.warn(
+          `[profiles] supervisor nudge after create('${slug}') failed:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
       sendJson(res, 202, {
         profile,
         note:
-          "Registry row written (status='pending'). Hermes-side activation lands in Lane II.",
+          "Registry row written (status='pending'). Supervisor nudged; gateway should respond on the allocated port within ~30s.",
       });
     } catch (err) {
       _classify(err);
@@ -239,18 +258,72 @@ export function registerProfileRoutes(): void {
   });
 
   // DELETE — archive. Idempotent on already-archived; refuses reserved.
+  // Cascades unbind for any non-default binding pointing at this profile
+  // (see agentProfiles.archiveProfile). Default bindings stay so the per-kind
+  // fallback never has a hole.
   addRoute("DELETE", "/api/v1/agent-profiles/:slug", async ({ res, params }) => {
     try {
       const profile = archiveProfile(db(), params.slug);
+      // Lane II — rewrite the supervisor registry without this profile and
+      // nudge Hermes to terminate the gateway. Best-effort like create.
+      try {
+        const reg = buildSupervisorRegistry(db());
+        writeSupervisorRegistry(reg);
+        nudgeHermesSupervisor();
+      } catch (err) {
+        console.warn(
+          `[profiles] supervisor nudge after archive('${params.slug}') failed:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
       sendJson(res, 200, {
         profile,
         note:
-          "Registry row archived. Hermes-side teardown + Vaultwarden tidy land in Lane II / Lane VI.",
+          "Registry row archived. Cascade-unbound non-default channel bindings. Supervisor nudged to stop the gateway.",
       });
     } catch (err) {
       _classify(err);
     }
   });
+
+  // POST :slug/status — supervisor callback. The Hermes supervisor calls
+  // this after each gateway start/stop to flip the registry row's status
+  // ('pending' → 'running' on /health success; 'running' → 'stopped' on a
+  // clean stop). Same auth as the rest of /api/v1/agent-profiles/*.
+  //
+  // Status transitions are NOT validated against the current value — the
+  // supervisor is the authority for whether a process is live, and a stale
+  // ctrl-api write would otherwise pin a stuck status. Archived status is
+  // routed through archiveProfile via the lib so archived_at gets stamped;
+  // it's an error to flip an already-archived profile to a live status.
+  addRoute(
+    "POST",
+    "/api/v1/agent-profiles/:slug/status",
+    async ({ res, params, body }) => {
+      try {
+        const b = asObj(body);
+        const status = reqStr(b, "status");
+        if (
+          status !== "pending" &&
+          status !== "running" &&
+          status !== "stopped" &&
+          status !== "archived"
+        ) {
+          throw new ValidationError(
+            "status must be one of: pending | running | stopped | archived",
+          );
+        }
+        const profile = setProfileStatus(
+          db(),
+          params.slug,
+          status as ProfileStatus,
+        );
+        sendJson(res, 200, { profile });
+      } catch (err) {
+        _classify(err);
+      }
+    },
+  );
 
   // ─────────────────────────────────────────────────────────────
   // Channel bindings

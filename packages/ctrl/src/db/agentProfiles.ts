@@ -167,6 +167,44 @@ export function validateSlug(slug: unknown): string {
   return slug;
 }
 
+// Supervisor registry shape — written to /hermes-state/profiles/_registry.json.
+//
+// The Hermes supervisor reads this file on boot (and on every SIGUSR1) to
+// decide which gateway processes to keep alive. Ports + slugs are the
+// load-bearing fields; everything else is informational. We intentionally
+// emit a single `profiles` array (not a map keyed by slug) so the
+// supervisor can iterate deterministically.
+export interface SupervisorRegistryEntry {
+  slug: string;
+  api_server_port: number;
+  model: string;
+  status: ProfileStatus;
+  is_reserved: boolean;
+  is_user_facing: boolean;
+}
+export interface SupervisorRegistry {
+  profiles: SupervisorRegistryEntry[];
+  generated_at: number;
+}
+
+// Build the registry payload the supervisor reads. Excludes archived rows —
+// an archived profile has no live gateway and would only cause a doomed
+// launch attempt in the supervisor's start_proc loop.
+export function buildSupervisorRegistry(db: DatabaseSync): SupervisorRegistry {
+  const all = listAllProfiles(db);
+  const profiles: SupervisorRegistryEntry[] = all
+    .filter((p) => p.archived_at == null && p.status !== "archived")
+    .map((p) => ({
+      slug: p.slug,
+      api_server_port: p.api_server_port,
+      model: p.model,
+      status: p.status,
+      is_reserved: p.is_reserved,
+      is_user_facing: p.is_user_facing,
+    }));
+  return { profiles, generated_at: Date.now() };
+}
+
 export function listAllProfiles(db: DatabaseSync): AgentProfile[] {
   const rows = db
     .prepare(
@@ -305,6 +343,22 @@ export function archiveProfile(db: DatabaseSync, slug: string): AgentProfile {
     return p;
   }
   const now = Date.now();
+  // Cascade-unbind every non-default channel binding pointing at this profile.
+  //
+  // Lane II observation (#120): when a profile is archived, its custom
+  // channel_profile_binding rows still resolve to the archived slug. The
+  // default `(channel_kind, NULL, 'main')` bindings (id prefix
+  // 'binding-default-') are protected by unbindChannel's guard so the
+  // per-kind fallback never has a hole. Any OTHER binding that pointed at
+  // this slug is now stale and gets removed so resolveProfileForChannel
+  // falls back to the default 'main' immediately. We do not retarget to
+  // 'main' explicitly — deleting the row achieves the same end state via
+  // the existing precedence chain (Contract 5 in agentProfiles.ts).
+  db.prepare(
+    `DELETE FROM channel_profile_binding
+     WHERE profile_slug = ?
+       AND id NOT LIKE 'binding-default-%'`,
+  ).run(slug);
   db.prepare(
     `UPDATE agent_profile
        SET status = 'archived', archived_at = ?, updated_at = ?
