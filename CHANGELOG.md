@@ -7,6 +7,51 @@ and the `alfred-vault` package adheres to [Semantic Versioning](https://semver.o
 
 ## [2026-05-31]
 
+**Lane Vb** (this release) makes **voice (Twilio phone)** per-profile.
+Lane V's earlier punt — "voice-bridge is a single compose sibling per
+VM, not a Hermes profile" — was a punt, not a constraint. The container
+stays singular but its routing becomes multi-tenant: the Twilio webhook
+URL the principal pastes into the Twilio Console for a profile-specific
+number is now `https://voice.<domain>/twiml/inbound?profile=<slug>`, and
+voice-bridge resolves the slug at TwiML-emission time. The WSS endpoint
+`/voice/<slug>` carries the routing key downstream into VoiceCall;
+`fetchTenantContext` queries ctrl-api's per-profile voice status to
+learn the calling number, and a new scoped-bearer endpoint
+`GET /api/v1/channels/voice/internal/openai-key?profile=<slug>` returns
+the profile's OPENAI key (when set) so the Realtime session bills
+against the right account. Falls back to main's instance-shared
+`OPENAI_API_KEY` when a non-main profile leaves the key blank. Sir's
+spec: *"voice MUST be per profile. it isn't realistic that I would
+interact with multiple profiles and want them in separate channels."*
+
+Per-profile credentials in the profile's `.env`: `TWILIO_ACCOUNT_SID`,
+`TWILIO_AUTH_TOKEN`, `TWILIO_VOICE_FROM_NUMBER`, optional
+`OPENAI_API_KEY`, plus the existing `VOICE_ALLOWED_CALLERS` /
+`VOICE_ALLOW_ALL_CALLERS` allowlist toggles. Five new ctrl-api routes
+under `/api/v1/channels/voice/*` — `status` / `credentials` (PUT/DELETE)
+/ `test` / `allowlist` / `inbound` / `internal/openai-key` — all accept
+`?profile=<slug>`, all run through `assertWritableProfile`, all append
+`channel_token_set` / `channel_token_cleared` audit rows with
+`profile_slug` in the payload (matching Lane V's Telegram / Slack / SMS
+shape verbatim). voice-bridge does NOT need a restart on credential
+rotation: it reads per-call. The `restart_scope: "per-profile"` shape
+on the response is honest about that — the next inbound call picks up
+the new creds. The `/profiles/:slug/channels` Voice card is now a real
+configuration form (matching the SMS card's Twilio triple + an optional
+OpenAI override) with the per-profile webhook URL displayed for the
+operator to paste into Twilio. Two new explicit Wasp ops
+(`setProfileVoiceCredentials` / `clearProfileVoiceCredentials`) layer on
+top of Lane V's `setProfileChannelToken` consolidator so call sites that
+only need voice have a named entry point. References #120; closes the
+Lane V voice honest-partial. 10 new ctrl-api unit tests (PUT validation,
+DELETE wipe, audit-row shape, TwiML routing, internal-key fallback) all
+green.
+
+The operator step Sir owns: in the Twilio Console, set each profile's
+phone number's "A call comes in" webhook to that profile's URL surfaced
+on its `/profiles/:slug/channels` Voice card (copy-button included).
+That's the routing key — voice-bridge reads it off the URL query.
+
 **Lane Vb2** (follow-on to Lane V) closes the email half of the
 per-profile-channels promise. Lane V shipped the FULL per-profile
 channels page but explicitly punted **Email (AgentMail)** with the note

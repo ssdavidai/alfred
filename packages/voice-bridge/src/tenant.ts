@@ -56,6 +56,16 @@ export interface TenantContext {
   tailscaleHost: string;
   aasApiKey: string;
   phoneNumber: string | null;
+  /** #120 Lane Vb — resolved profile slug for this call. The TwiML responder
+   *  passes the profile through in the WSS path; voice-call.ts surfaces it
+   *  here so downstream code (instruction builder, MCP allowlist, transcript
+   *  ingest) knows which profile to scope to. */
+  profileSlug?: string;
+  /** #120 Lane Vb — per-profile OPENAI_API_KEY override. When set, this
+   *  takes precedence over the boot-time OPENAI_API_KEY in voice-bridge's
+   *  env. When null/undefined we fall back to the boot-time key (main's
+   *  instance-shared key, the pre-Vb behaviour). */
+  openaiApiKey?: string | null;
 }
 
 export interface VoiceContextBundle {
@@ -79,6 +89,32 @@ export interface VoiceContextBundle {
   generatedAt: string;
 }
 
+/**
+ * #120 Lane Vb — fetch the per-profile OPENAI_API_KEY from ctrl-api's
+ * scoped internal endpoint. The voice-bridge bearer is the only caller
+ * that can read this surface (auth.ts allowlist). Returns null on any
+ * failure or when the profile has no key of its own — the caller falls
+ * back to the boot-time `config.openaiApiKey`.
+ */
+async function _fetchProfileOpenaiKey(
+  slug: string,
+): Promise<string | null> {
+  try {
+    const url = `${config.saasInternalUrl}/api/v1/channels/voice/internal/openai-key?profile=${encodeURIComponent(slug)}`;
+    const r = await fetch(url, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${config.internalToken}` },
+      signal: AbortSignal.timeout(2_000),
+    });
+    if (!r.ok) return null;
+    const body = (await r.json()) as { openai_api_key?: string | null };
+    const key = typeof body.openai_api_key === "string" ? body.openai_api_key.trim() : "";
+    return key || null;
+  } catch {
+    return null;
+  }
+}
+
 export async function fetchTenantContext(
   tenantId: string,
 ): Promise<TenantContext> {
@@ -89,11 +125,49 @@ export async function fetchTenantContext(
   // hold the ctrl-api master key on the monorepo build — ctrlApiAuthToken()
   // routes through internalToken instead (see auth.ts allowlist).
   if (singleVmMode()) {
-    return {
+    // #120 Lane Vb — the tenantId is the resolved profile slug coming out
+    // of the TwiML responder. For the pre-Vb "owner" default we treat it
+    // as main and leave profileSlug undefined (back-compat); for an
+    // explicit slug we fetch the per-profile voice config from ctrl-api
+    // so the OpenAI key + phone number can override the boot-time defaults.
+    const ctx: TenantContext = {
       tailscaleHost: "local",
       aasApiKey: "",
       phoneNumber: config.ownerPhoneNumber || null,
     };
+    if (tenantId && tenantId !== "owner") {
+      // Best-effort. Failures fall back to the instance-shared config
+      // so a momentary ctrl-api hiccup doesn't drop the call.
+      try {
+        const url = `${config.saasInternalUrl}/api/v1/channels/voice/status?profile=${encodeURIComponent(tenantId)}`;
+        const r = await fetch(url, {
+          method: "GET",
+          headers: { Authorization: `Bearer ${config.internalToken}` },
+          signal: AbortSignal.timeout(2_500),
+        });
+        if (r.ok) {
+          const body = (await r.json()) as {
+            calling_number?: string | null;
+            openai_key_set?: boolean;
+            profile_slug?: string;
+          };
+          ctx.profileSlug = body.profile_slug ?? tenantId;
+          if (body.calling_number) ctx.phoneNumber = body.calling_number;
+          // The status route does NOT return the OpenAI key value (that
+          // would be a leak). voice-bridge's adapter reads the key out of
+          // the per-profile .env directly via the internal helper below.
+          ctx.openaiApiKey = body.openai_key_set
+            ? await _fetchProfileOpenaiKey(tenantId)
+            : null;
+        }
+      } catch {
+        // logged loudly so a regression doesn't go unnoticed
+        console.warn(
+          `[tenant] per-profile voice config lookup failed for slug=${tenantId} — falling back to main`,
+        );
+      }
+    }
+    return ctx;
   }
 
   const url = `${config.saasInternalUrl}/api/internal/voice-bridge/tenant/${encodeURIComponent(tenantId)}`;

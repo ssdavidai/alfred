@@ -156,6 +156,20 @@ const VOICE_BRIDGE_ALLOWLIST: ReadonlySet<string> = new Set([
   // speaks AS ALFRED (the RP butler persona enforced in voice-bridge's
   // buildMeetingPrefix), never as the principal.
   "POST:/api/v1/voice-bridge/recall-turn",
+  // ── #120 Lane Vb: per-profile voice routing ─────────────────────────
+  // voice-bridge fetches the resolved profile's calling number + key set
+  // via /status?profile=<slug> on every inbound call so a creds rotation
+  // applies without a container restart. The status route does NOT return
+  // the OpenAI key value; the internal helper below does. Both queries
+  // include ?profile=<slug>; auth.ts compares against the pathname only,
+  // and the query is matched in the route handler.
+  "GET:/api/v1/channels/voice/status",
+  // The bridge needs the per-profile OPENAI_API_KEY value to open the
+  // Realtime socket against the right account. ctrl-api exposes this only
+  // to the voice-bridge bearer; the route reads the per-profile .env via
+  // dockerExec. Allowed paths return the raw value; non-voice-bridge
+  // callers 401.
+  "GET:/api/v1/channels/voice/internal/openai-key",
 ]);
 
 /**

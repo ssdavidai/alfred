@@ -3616,14 +3616,19 @@ export const unbindChannelFromProfile = async (
 //   * paperclip — api-key (POST), status (GET — main-only, see note)
 //
 // Channels intentionally NOT per-profile in this lane (instance-level):
-//   * voice / omi / ha / recall / tailscale / terminal / email
+//   * omi / ha / recall / tailscale / terminal
 //   The honest reasons are documented inline on /profiles/:slug/channels.
+// (voice → per-profile in Lane Vb; email → per-profile in Lane Vb2.)
 
 const PROFILE_AWARE_CHANNEL_KINDS = [
   "telegram",
   "slack",
   "sms",
   "paperclip",
+  // #120 Lane Vb — voice is now per-profile (see channels/voice/credentials).
+  // Each profile owns its own Twilio number + creds; voice-bridge routes the
+  // inbound call to the resolved profile's persona + OPENAI key.
+  "voice",
 ] as const;
 type ProfileAwareChannelKind = (typeof PROFILE_AWARE_CHANNEL_KINDS)[number];
 
@@ -3662,6 +3667,7 @@ const _CHANNEL_TOKEN_ROUTE: Record<
   slack: { method: "PUT", path: "/api/v1/channels/slack/tokens" },
   sms: { method: "PUT", path: "/api/v1/channels/sms/credentials" },
   paperclip: { method: "POST", path: "/api/v1/channels/paperclip/api-key" },
+  voice: { method: "PUT", path: "/api/v1/channels/voice/credentials" },
 };
 
 const _CHANNEL_CLEAR_ROUTE: Record<
@@ -3675,6 +3681,7 @@ const _CHANNEL_CLEAR_ROUTE: Record<
   // now (the operator can paste a different key over the top). Returns
   // { ok: true, noop: true } to keep the UI's branchless call shape.
   paperclip: null,
+  voice: { method: "DELETE", path: "/api/v1/channels/voice/credentials" },
 };
 
 const _CHANNEL_STATUS_ROUTE: Record<ProfileAwareChannelKind, string> = {
@@ -3682,6 +3689,7 @@ const _CHANNEL_STATUS_ROUTE: Record<ProfileAwareChannelKind, string> = {
   slack: "/api/v1/channels/slack/status",
   sms: "/api/v1/channels/sms/status",
   paperclip: "/api/v1/channels/paperclip/status",
+  voice: "/api/v1/channels/voice/status",
 };
 
 /**
@@ -3879,6 +3887,80 @@ export const sendProfileEmailTest = async (
     body,
   });
 };
+
+// ── #120 Lane Vb — explicit voice-credentials wrappers ──────────────────
+//
+// The generic setProfileChannelToken/clearProfileChannelToken ops above
+// already cover voice (kind="voice" maps to /api/v1/channels/voice/
+// credentials in the route tables). These two explicit wrappers exist so
+// that (a) Sir's spec mention of `setProfileVoiceCredentials` / `clear
+// ProfileVoiceCredentials` lands as named ops in main.wasp, and (b) call
+// sites that only need voice don't need to remember the channel-kind
+// string. Both delegate to the generic op so there's a single ctrl-api
+// route in play.
+//
+// `Promise<any>` annotation is load-bearing — see the Wasp Promise<T>
+// trap note above.
+
+export const setProfileVoiceCredentials = async (
+  args: {
+    slug: string;
+    twilio_sid: string;
+    twilio_auth_token: string;
+    twilio_from_number: string;
+    openai_key?: string;
+  },
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const slug = _validateSlugArg(args?.slug);
+  const sid = typeof args?.twilio_sid === "string" ? args.twilio_sid.trim() : "";
+  const token =
+    typeof args?.twilio_auth_token === "string" ? args.twilio_auth_token.trim() : "";
+  const from =
+    typeof args?.twilio_from_number === "string"
+      ? args.twilio_from_number.trim()
+      : "";
+  if (!/^AC[a-f0-9]{32}$/.test(sid)) {
+    throw new HttpError(400, "twilio_sid must be a Twilio Account SID");
+  }
+  if (!/^[a-f0-9]{32}$/.test(token)) {
+    throw new HttpError(400, "twilio_auth_token must be 32 lowercase hex chars");
+  }
+  if (!/^\+[1-9]\d{1,14}$/.test(from)) {
+    throw new HttpError(400, "twilio_from_number must be E.164");
+  }
+  const payload: Record<string, string> = {
+    account_sid: sid,
+    auth_token: token,
+    from_number: from,
+  };
+  if (typeof args?.openai_key === "string" && args.openai_key.trim()) {
+    payload.openai_key = args.openai_key.trim();
+  }
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "PUT",
+    path: "/api/v1/channels/voice/credentials",
+    query: { profile: slug },
+    body: payload,
+  });
+};
+
+export const clearProfileVoiceCredentials = async (
+  args: { slug: string },
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const slug = _validateSlugArg(args?.slug);
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "DELETE",
+    path: "/api/v1/channels/voice/credentials",
+    query: { profile: slug },
+  });
+};
+
 
 // ── decision_ref minter ──────────────────────────────────────────────────
 //

@@ -314,8 +314,15 @@ describe("GET /api/v1/channels/voice/status", () => {
 
   it("reports state=error with a non-null error string when the service is unhealthy", async () => {
     fake.composeService = "unhealthy";
-    fake.envText = "TWILIO_PHONE_NUMBER=+15550100\n";
-    // PR #42: OPENAI_API_KEY required for state="error" too (otherwise the
+    // #120 Lane Vb: voice is now per-profile and `configured=true` requires
+    // SID + TOKEN + phone, mirroring the SMS card. The test seeds all three
+    // so the resolution falls through to the health probe (which the test
+    // controls via `fake.composeService`).
+    fake.envText =
+      "TWILIO_ACCOUNT_SID=AC00000000000000000000000000000000\n" +
+      "TWILIO_AUTH_TOKEN=00000000000000000000000000000000\n" +
+      "TWILIO_PHONE_NUMBER=+15550100\n";
+    // OPENAI_API_KEY required for state="error" too (otherwise the
     // openai-key-missing path swallows it as state="unconfigured").
     fake.composeEnvText = "OPENAI_API_KEY=sk-test-dummy\n";
     fake.logsTail =

@@ -1296,6 +1296,20 @@ action sendProfileEmailTest {
   entities: []
 }
 
+// #120 Lane Vb — explicit voice-credentials wrappers. Delegate to
+// setProfileChannelToken / clearProfileChannelToken under the hood; named
+// here so call sites that only handle voice don't have to remember the
+// channel-kind string.
+action setProfileVoiceCredentials {
+  fn: import { setProfileVoiceCredentials } from "@src/dashboard/operations",
+  entities: []
+}
+
+action clearProfileVoiceCredentials {
+  fn: import { clearProfileVoiceCredentials } from "@src/dashboard/operations",
+  entities: []
+}
+
 query getAgentConfig {
   fn: import { getAgentConfig } from "@src/dashboard/operations",
   entities: []

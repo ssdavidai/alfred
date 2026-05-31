@@ -5,12 +5,15 @@
 // profile slug, side-by-side with a clear back-link to the main /channels
 // page.
 //
-// What this page CAN configure per profile (Lane IV + Lane V + Lane Vb2 on ctrl-api):
+// What this page CAN configure per profile (Lane IV + Lane V + Lane Vb + Lane Vb2 on ctrl-api):
 //
 //   * Telegram   — token (PUT), status (GET), revoke chat
 //   * Slack      — bot/app tokens (PUT), status (GET)
 //   * SMS        — Twilio creds (PUT), status (GET)
 //   * Paperclip  — API key (POST), status (GET)
+//   * Voice      — Twilio voice creds + (optional) OpenAI key per profile
+//                  (#120 Lane Vb). voice-bridge resolves the profile on every
+//                  inbound call via ?profile=<slug> in the Twilio webhook URL.
 //   * Email      — Lane Vb2; provision (POST), status (GET), disconnect
 //                  (DELETE), send-test (POST). AgentMail's API is called
 //                  on the tenant: a fresh inbox is minted per profile + a
@@ -18,10 +21,6 @@
 //                  so inbound mail routes to the right profile.
 //
 // What this page CANNOT configure per profile and why (honest partial):
-//
-//   * Voice (voice-bridge sibling) — one Twilio number + one OPENAI key per
-//     VM. Voice-bridge isn't a Hermes profile; it's a separate compose
-//     service. Configure on /channels.
 //   * OMI — one device, one Groq key consumed by alfred-learn (not Hermes).
 //     The Vault item is global. Configure on /channels.
 //   * Home Assistant — one household, one HA URL + LLAT. Single-instance
@@ -66,6 +65,10 @@ import {
   derivePaperclipCardState,
   type PaperclipStatus,
 } from "./paperclipCardCore";
+import {
+  deriveVoiceCardState,
+  type VoiceStatus,
+} from "./voiceCardCore";
 
 interface ProfileRow {
   slug: string;
@@ -80,7 +83,7 @@ interface ProfileRow {
 }
 
 interface ChannelStatusEntry<TStatus = unknown> {
-  kind: "telegram" | "slack" | "sms" | "paperclip";
+  kind: "telegram" | "slack" | "sms" | "paperclip" | "voice";
   ok: boolean;
   status: TStatus | null;
   error?: string;
@@ -890,14 +893,241 @@ function ProfileEmailSection({ slug }: { slug: string }) {
           </p>
         )}
       </div>
+    </ChannelCard>
+  );
+}
+
+// --------------------------------------------------------------------------
+// VoiceSection — #120 Lane Vb. Per-profile Twilio + (optional) OpenAI creds.
+//
+// Each profile owns its own Twilio number; the webhook URL the principal
+// pastes into the Twilio Console is profile-specific, surfaced here with a
+// copy button. OpenAI key is optional — when blank, voice-bridge falls back
+// to main's instance-shared key.
+// --------------------------------------------------------------------------
+function ProfileVoiceSection({
+  slug,
+  entry,
+  refetch,
+}: {
+  slug: string;
+  entry: ChannelStatusEntry<VoiceStatus> | null;
+  refetch: () => void;
+}) {
+  const status = entry?.ok ? (entry.status as VoiceStatus | null) : null;
+  const card = deriveVoiceCardState({ status });
+  const [sid, setSid] = useState("");
+  const [authToken, setAuthToken] = useState("");
+  const [from, setFrom] = useState("");
+  const [openaiKey, setOpenaiKey] = useState("");
+  const [show, setShow] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [lastResp, setLastResp] = useState<any>(null);
+  const [copyOk, setCopyOk] = useState(false);
+
+  // Surface the per-profile webhook URL directly off the status payload (set
+  // by ctrl-api). When DOMAIN isn't set yet the field is null and we hide
+  // the row rather than emit a half-baked URL.
+  const webhookUrl = (status as any)?.webhook_url ?? null;
+
+  const validRequired =
+    /^AC[a-f0-9]{32}$/.test(sid.trim()) &&
+    /^[a-f0-9]{32}$/.test(authToken.trim()) &&
+    /^\+[1-9]\d{1,14}$/.test(from.trim());
+  const validOptional =
+    !openaiKey.trim() || /^sk-[A-Za-z0-9_-]{20,}$/.test(openaiKey.trim());
+  const valid = validRequired && validOptional;
+
+  async function save() {
+    if (!valid || busy) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      const payload: Record<string, string> = {
+        account_sid: sid.trim(),
+        auth_token: authToken.trim(),
+        from_number: from.trim(),
+      };
+      if (openaiKey.trim()) payload.openai_key = openaiKey.trim();
+      const resp = await setProfileChannelToken({
+        slug,
+        channel_kind: "voice",
+        payload,
+      });
+      setLastResp(resp);
+      setSid("");
+      setAuthToken("");
+      setFrom("");
+      setOpenaiKey("");
+      refetch();
+    } catch (e: any) {
+      setErr(e?.message ?? "Couldn't save the credentials.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function disconnect() {
+    if (busy) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      const resp = await clearProfileChannelToken({
+        slug,
+        channel_kind: "voice",
+      });
+      setLastResp(resp);
+      refetch();
+    } catch (e: any) {
+      setErr(e?.message ?? "Couldn't disconnect.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function copyWebhook() {
+    if (!webhookUrl) return;
+    try {
+      await navigator.clipboard.writeText(webhookUrl);
+      setCopyOk(true);
+      setTimeout(() => setCopyOk(false), 1500);
+    } catch {
+      /* clipboard denied — user can select-and-copy manually */
+    }
+  }
+
+  const address =
+    card.state === "configured_running"
+      ? card.callingNumber ?? card.heading
+      : card.state === "configured_starting"
+        ? "Restarting…"
+        : card.state === "error"
+          ? "Voice bridge needs attention"
+          : "Not yet configured";
+
+  return (
+    <ChannelCard
+      name="Voice"
+      address={address}
+      note={`Twilio number + OpenAI key scoped to '${slug}'.`}
+      status={card.pill}
+    >
+      {webhookUrl && (
+        <div className="mt-4 space-y-1">
+          <div
+            className="font-mono text-[10px] uppercase tracking-[0.22em]"
+            style={{ color: "var(--marginalia)" }}
+          >
+            Twilio webhook · paste this into the number's "A call comes in"
+          </div>
+          <div className="flex gap-2 items-center">
+            <code
+              className="flex-1 font-mono text-[11px] px-2 py-1 border border-rule overflow-x-auto"
+              style={{ color: "var(--marginalia)" }}
+            >
+              {webhookUrl}
+            </code>
+            <button onClick={copyWebhook} className="btn-link">
+              {copyOk ? "Copied!" : "Copy"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {card.state === "unconfigured" && (
+        <div className="mt-5 space-y-3">
+          <div
+            className="font-mono text-[10px] uppercase tracking-[0.22em]"
+            style={{ color: "var(--marginalia)" }}
+          >
+            Twilio · for {slug}
+          </div>
+          <input
+            type={show ? "text" : "password"}
+            value={sid}
+            onChange={(e) => setSid(e.target.value)}
+            placeholder="Account SID (AC…)"
+            className="w-full bg-transparent border border-rule px-2 py-1 font-mono text-[12px]"
+          />
+          <input
+            type={show ? "text" : "password"}
+            value={authToken}
+            onChange={(e) => setAuthToken(e.target.value)}
+            placeholder="Auth token (32 hex)"
+            className="w-full bg-transparent border border-rule px-2 py-1 font-mono text-[12px]"
+          />
+          <input
+            type="text"
+            value={from}
+            onChange={(e) => setFrom(e.target.value)}
+            placeholder="+15551234567 (this profile's voice number)"
+            className="w-full bg-transparent border border-rule px-2 py-1 font-mono text-[12px]"
+          />
+          <div
+            className="font-mono text-[10px] uppercase tracking-[0.22em] pt-2"
+            style={{ color: "var(--marginalia)" }}
+          >
+            OpenAI key · optional · falls back to main's if blank
+          </div>
+          <input
+            type={show ? "text" : "password"}
+            value={openaiKey}
+            onChange={(e) => setOpenaiKey(e.target.value)}
+            placeholder="sk-… (optional)"
+            className="w-full bg-transparent border border-rule px-2 py-1 font-mono text-[12px]"
+          />
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={() => setShow((s) => !s)}
+              className="btn-link"
+            >
+              {show ? "Hide" : "Show"}
+            </button>
+            <button
+              onClick={save}
+              disabled={busy || !valid}
+              className="btn-ghost"
+            >
+              {busy ? "…" : "Save"}
+            </button>
+          </div>
+          {err && (
+            <p
+              className="font-body italic text-[13px]"
+              style={{ color: "var(--brass)" }}
+            >
+              {err}
+            </p>
+          )}
+        </div>
+      )}
+      {(card.state === "configured_running" ||
+        card.state === "configured_starting" ||
+        card.state === "error") && (
+        <div className="mt-5 space-y-2">
+          <button onClick={disconnect} disabled={busy} className="btn-ghost">
+            {busy ? "…" : "Disconnect"}
+          </button>
+          {err && (
+            <p
+              className="font-body italic text-[13px]"
+              style={{ color: "var(--brass)" }}
+            >
+              {err}
+            </p>
+          )}
+        </div>
+      )}
       <RestartScopeWarning scope={lastResp?.restart_scope} warning={lastResp?.restart_warning} />
     </ChannelCard>
   );
 }
 
 // --------------------------------------------------------------------------
-// InstanceLevelNotice. For voice / OMI / HA / Recall / Tailscale /
-// Terminal we render a small read-only card pointing at /channels.
+// InstanceLevelNotice. For OMI / HA / Recall / Tailscale / Terminal we
+// render a small read-only card pointing at /channels.
 // --------------------------------------------------------------------------
 function InstanceLevelNotice({
   name,
@@ -1076,12 +1306,9 @@ export default function ProfileChannelsPage() {
           <ProfileSmsSection slug={slug} entry={entryFor<SmsStatus>("sms")} refetch={refetch} />
           <ProfilePaperclipSection slug={slug} entry={entryFor<PaperclipStatus>("paperclip")} refetch={refetch} />
           <ProfileEmailSection slug={slug} />
+          <ProfileVoiceSection slug={slug} entry={entryFor<VoiceStatus>("voice")} refetch={refetch} />
 
           {/* Honest partials — these channels are instance-level by design. */}
-          <InstanceLevelNotice
-            name="Voice"
-            reason="Voice-bridge is a single compose sibling. One Twilio number + one OPENAI key per VM."
-          />
           <InstanceLevelNotice
             name="Home Assistant"
             reason="One household, one HA URL + LLAT. Configure once."
