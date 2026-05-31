@@ -91,12 +91,14 @@ def _read_profiles_from_state_db(state_db_path: Path) -> list[dict] | None:
     if not state_db_path.exists():
         return None
     try:
-        # mode=ro&immutable=1 — open the file read-only, refuse to apply
-        # any WAL recovery, and never touch the journal. This is the same
-        # posture render_mcp_servers.py uses against the same file (the
-        # mount is :ro so a write would EROFS anyway, but the pragma
-        # cleans up the failure-mode surface).
-        uri = f"file:{state_db_path}?mode=ro&immutable=1"
+        # mode=ro — open the file read-only but ALLOW the WAL to be
+        # consulted. immutable=1 would tell SQLite "ignore the WAL", which
+        # silently misses recently-committed rows (live-observed 2026-05-31
+        # on home: a profile created via POST 30s before init ran was in
+        # state.db but invisible to render_registry because the row was
+        # still in the WAL when init's query ran). The mount is :ro so
+        # write attempts EROFS regardless of this flag.
+        uri = f"file:{state_db_path}?mode=ro"
         conn = sqlite3.connect(uri, uri=True, timeout=5)
         conn.row_factory = sqlite3.Row
         cur = conn.execute(
