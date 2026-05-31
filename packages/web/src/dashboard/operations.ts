@@ -3683,6 +3683,59 @@ export const removeProfileMcp = async (
   });
 };
 
+// ── #205 Lane III — per-profile skill catalogue (C-1.1 / C-1.2 contract) ──
+//
+// Two thin proxies to ctrl-api /api/v1/admin/profiles/:slug/skills.
+// GET     → { slug, reserved, skills: [{ name, description, enabled, last_invoked_at }] }
+// PUT /:name → 200 { ok, name, enabled }   body: { enabled }
+//
+// Reserved profiles (main|workers|heavy|codex-builder): mutations return
+// 409 from ctrl-api; the UI layer renders the catalogue read-only and
+// suppresses the toggle controls.
+//
+// `Promise<any>` annotation is REQUIRED — Wasp Payload trap (PRs #139 #145
+// #182 #184 #186 #214). Never replace with a typed return.
+
+// Skill directory names are slug-ish: lowercase, hyphen/underscore allowed,
+// longer cap than MCP server names (skill slugs run long — see C-1.2).
+const SKILL_NAME_RE = /^[a-z][a-z0-9_-]{0,80}$/;
+
+export const getProfileSkills = async (
+  args: { slug: string },
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const slug = String(args?.slug ?? "").trim();
+  if (!slug) throw new HttpError(400, "slug required");
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    path: `/api/v1/admin/profiles/${encodeURIComponent(slug)}/skills`,
+  });
+};
+
+export const setProfileSkillEnabled = async (
+  args: { slug: string; name: string; enabled: boolean },
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const slug = String(args?.slug ?? "").trim();
+  const name = String(args?.name ?? "").trim();
+  if (!slug) throw new HttpError(400, "slug required");
+  if (!name) throw new HttpError(400, "name required");
+  if (!SKILL_NAME_RE.test(name)) {
+    throw new HttpError(400, "name must match ^[a-z][a-z0-9_-]{0,80}$");
+  }
+  if (typeof args?.enabled !== "boolean") {
+    throw new HttpError(400, "enabled (boolean) required");
+  }
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "PUT",
+    path: `/api/v1/admin/profiles/${encodeURIComponent(slug)}/skills/${encodeURIComponent(name)}`,
+    body: { enabled: args.enabled },
+  });
+};
+
 // ── #120 Lane V — per-profile FULL channels surface ──────────────────────
 //
 // Three consolidator ops that route through Lane IV's ?profile=<slug> shape

@@ -1,14 +1,17 @@
 // ProfileDetailPage — single profile + its channel bindings + lifecycle.
-// (#120 Lane III, #204 Lane III MCP section)
+// (#120 Lane III, #204 Lane III MCP section, #205 Lane III Skills section)
 //
 // Backend wire shape from ctrl-api (Lane I):
 //   GET /api/v1/agent-profiles/:slug → { profile: {...}, bindings: [...] }
 //   GET /api/v1/admin/profiles/:slug/mcp → { slug, reserved, servers: [...] }
+//   GET /api/v1/admin/profiles/:slug/skills → { slug, reserved, skills: [...] }
+//   PUT /api/v1/admin/profiles/:slug/skills/:name { enabled }
 //
 // Sections:
 //   * Header     — label · status pill · port · model · last-active
 //   * Channels   — list bindings (kind + identity) + a "Bind channel" form
 //   * MCP        — list registered MCP servers + add/remove (non-reserved only)
+//   * Skills     — list installed skill catalogue + enable/disable toggles
 //   * Persona    — read-only persona_template (edit lives in a follow-up)
 //   * Lifecycle  — Archive (user-facing non-reserved) or Restore (archived)
 //
@@ -22,12 +25,14 @@ import {
   useQuery,
   getAgentProfile,
   getProfileMcp,
+  getProfileSkills,
   archiveAgentProfile,
   restoreAgentProfile,
   bindChannelToProfile,
   unbindChannelFromProfile,
   addProfileMcp,
   removeProfileMcp,
+  setProfileSkillEnabled,
 } from "wasp/client/operations";
 import { Frame, PageHeading } from "../client/components/ab/Frame";
 
@@ -153,6 +158,43 @@ export default function ProfileDetailPage() {
 
   // MCP remove confirm state: holds the server name to confirm removal
   const [confirmRemoveMcp, setConfirmRemoveMcp] = useState<string | null>(null);
+
+  // Skills section state — #205 Lane III
+  const {
+    data: skillsData,
+    refetch: refetchSkills,
+  } = useQuery(getProfileSkills, { slug }, { enabled: !!slug });
+
+  const skills = ((skillsData as any)?.skills ?? []) as Array<{
+    name: string;
+    description: string | null;
+    enabled: boolean;
+    last_invoked_at: number | null;
+  }>;
+  const skillsReserved = (skillsData as any)?.reserved === true;
+
+  // Per-row toggle state — name of the skill currently being toggled,
+  // plus a per-row error (so a failed PUT shows under the row that failed
+  // rather than at the top of the section).
+  const [skillBusyName, setSkillBusyName] = useState<string | null>(null);
+  const [skillError, setSkillError] = useState<{ name: string; message: string } | null>(null);
+
+  async function onToggleSkill(name: string, currentEnabled: boolean) {
+    if (!slug || skillBusyName) return;
+    setSkillBusyName(name);
+    setSkillError(null);
+    try {
+      await setProfileSkillEnabled({ slug, name, enabled: !currentEnabled });
+      await refetchSkills();
+    } catch (e: any) {
+      setSkillError({
+        name,
+        message: String(e?.message || e || "Couldn't toggle the skill."),
+      });
+    } finally {
+      setSkillBusyName(null);
+    }
+  }
 
   async function onAddMcp() {
     if (mcpBusy || !slug) return;
@@ -750,6 +792,113 @@ export default function ProfileDetailPage() {
                   {mcpError}
                 </div>
               )}
+            </div>
+          )}
+        </section>
+
+        {/* Skills — #205 Lane III */}
+        <section className="mb-16">
+          <div
+            className="font-mono text-[10px] uppercase tracking-[0.28em] mb-3"
+            style={{ color: "var(--brass)" }}
+          >
+            Skills
+          </div>
+          <h2 className="font-display text-3xl tracking-tight mb-6">
+            The skill catalogue installed for this profile.
+          </h2>
+
+          {(skillsReserved || profile.is_reserved) && (
+            <p
+              className="font-body italic mb-4"
+              style={{ color: "var(--marginalia)" }}
+            >
+              Reserved profile — skills managed by operators.
+            </p>
+          )}
+
+          {skills.length === 0 && (
+            <p
+              className="font-body italic mb-6"
+              style={{ color: "var(--marginalia)" }}
+            >
+              No skills installed for this profile yet.
+            </p>
+          )}
+
+          {skills.length > 0 && (
+            <div className="border-t border-rule mb-6">
+              {skills.map((sk) => {
+                const isReserved = skillsReserved || profile.is_reserved;
+                const isBusy = skillBusyName === sk.name;
+                const rowErr = skillError?.name === sk.name ? skillError.message : null;
+                return (
+                  <div
+                    key={sk.name}
+                    className="py-4 border-b border-rule"
+                  >
+                    <div className="grid grid-cols-[1fr_auto] items-start gap-4">
+                      <div className="min-w-0">
+                        <div
+                          className="font-mono text-[12px] font-medium truncate"
+                          style={{ color: "var(--ink)" }}
+                        >
+                          {sk.name}
+                        </div>
+                        <div
+                          className="font-body italic text-[12px] mt-1"
+                          style={{ color: "var(--marginalia)" }}
+                        >
+                          {sk.description || "—"}
+                        </div>
+                        <div
+                          className="font-mono text-[10px] uppercase tracking-[0.18em] mt-2"
+                          style={{ color: "var(--marginalia)" }}
+                        >
+                          last invoked: {fmtRelative(sk.last_invoked_at)}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-3 shrink-0">
+                        <span
+                          className="font-mono text-[10px] uppercase tracking-[0.18em]"
+                          style={{
+                            color: sk.enabled ? "#3D7B4F" : "var(--marginalia)",
+                          }}
+                        >
+                          {sk.enabled ? "on" : "off"}
+                        </span>
+                        {!isReserved && (
+                          <button
+                            onClick={() => onToggleSkill(sk.name, sk.enabled)}
+                            disabled={isBusy}
+                            className="font-mono text-[10px] uppercase tracking-[0.18em]"
+                            style={{
+                              color: sk.enabled ? "#B85C5C" : "var(--brass)",
+                              opacity: isBusy ? 0.5 : 1,
+                            }}
+                          >
+                            {isBusy
+                              ? sk.enabled
+                                ? "Disabling…"
+                                : "Enabling…"
+                              : sk.enabled
+                                ? "Disable"
+                                : "Enable"}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                    {rowErr && (
+                      <div
+                        className="mt-2 font-body italic text-sm"
+                        style={{ color: "#B85C5C" }}
+                      >
+                        {rowErr}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
         </section>

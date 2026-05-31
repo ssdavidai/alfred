@@ -1271,6 +1271,21 @@ action removeProfileMcp {
   entities: []
 }
 
+// #205 Lane III — per-profile skill catalogue (Q4 from #120). Mirrors the
+// Q3 MCP-ops shape; GET is a query (read), PUT is an action (toggle).
+// `entities: []` for the same reason as the MCP ops above — the source of
+// truth is the Hermes profile's filesystem catalogue + config.yaml read and
+// written via the ctrl-api.
+query getProfileSkills {
+  fn: import { getProfileSkills } from "@src/dashboard/operations",
+  entities: []
+}
+
+action setProfileSkillEnabled {
+  fn: import { setProfileSkillEnabled } from "@src/dashboard/operations",
+  entities: []
+}
+
 // #120 Lane V — per-profile FULL channels surface ops.
 //
 // The three consolidator ops the /profiles/:slug/channels page wires up. They
