@@ -1251,6 +1251,26 @@ action unbindChannelFromProfile {
   entities: []
 }
 
+// #204 Lane III — per-profile MCP catalog ops.
+// GET list, POST add, DELETE remove — all thin proxies to ctrl-api C1 routes.
+// `entities: []` because there is no Prisma entity backing these; the source of
+// truth is the Hermes profile config read/written via the ctrl-api.
+
+query getProfileMcp {
+  fn: import { getProfileMcp } from "@src/dashboard/operations",
+  entities: []
+}
+
+action addProfileMcp {
+  fn: import { addProfileMcp } from "@src/dashboard/operations",
+  entities: []
+}
+
+action removeProfileMcp {
+  fn: import { removeProfileMcp } from "@src/dashboard/operations",
+  entities: []
+}
+
 // #120 Lane V — per-profile FULL channels surface ops.
 //
 // The three consolidator ops the /profiles/:slug/channels page wires up. They
