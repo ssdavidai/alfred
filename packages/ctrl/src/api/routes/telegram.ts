@@ -53,6 +53,30 @@ import {
 import { appendAudit } from "./state.js";
 import { restartProfile } from "../../hermes/supervisor.js";
 
+// ── #206 Lane IV — per-(profile, channel_kind) identity override ──────────
+//
+// Lane I owns `packages/ctrl/src/db/channelIdentity.ts` and the helper
+// `resolveChannelIdentity(db, profile_slug, channel_kind)`. When Lane I's
+// PR lands, replace this stub block with:
+//
+//   import { resolveChannelIdentity } from "../../db/channelIdentity.js";
+//
+// Until then this typed stub returns null so the adapter no-ops on
+// identity overrides — preserving pre-#206 behaviour exactly.
+type ResolvedChannelIdentity = {
+  display_name: string | null;
+  avatar_path: string | null;
+  avatar_mime: string | null;
+};
+function resolveChannelIdentity(
+  _db: unknown,
+  _slug: string,
+  _kind: string,
+): ResolvedChannelIdentity | null {
+  // TODO(#206 Lane I): replace with real import once Lane I merges.
+  return null;
+}
+
 const VAULT_CLI_URL = process.env.VAULT_CLI_URL || "http://vault-cli:8087";
 // Path INSIDE the hermes runtime container. HERMES_HOME=/hermes-state in
 // docker-compose; profiles live at $HERMES_HOME/profiles/<name>/.
@@ -524,6 +548,158 @@ async function revokeChatFromDirectory(
   }
 }
 
+// ── #206 Lane IV — apply identity override on Telegram bot ────────────────
+//
+// Telegram exposes two relevant Bot API methods we honour at outbound time:
+//   * setMyName?name=<display>            — global bot display name
+//   * setMyPhoto + setUserProfilePhotos   — bot's avatar (multipart upload)
+//
+// Both are global per bot (not per-message), so we cache the last-applied
+// override per profile slug in process memory and only push to Telegram
+// when the override actually changed. Sending a message to Telegram does
+// NOT re-apply identity by itself — that's a separate API call we issue
+// here BEFORE the outbound message.
+//
+// Reserved profiles (`main`, `workers`, `heavy`, `codex-builder`) are
+// out of scope for #206; Lane I refuses to write the row, but as a
+// defensive belt-and-braces the helper short-circuits on null override
+// anyway.
+
+const RESERVED_PROFILES_FOR_IDENTITY: ReadonlySet<string> = new Set([
+  "main",
+  "workers",
+  "heavy",
+  "codex-builder",
+]);
+
+interface TelegramAppliedIdentity {
+  display_name: string | null;
+  avatar_path: string | null;
+}
+
+// Process-memory cache of the last-applied (display_name, avatar_path) per
+// profile so we don't hammer api.telegram.org on every message. Cleared on
+// ctrl-api restart, which is fine — Telegram's setMyName is idempotent.
+const _telegramIdentityCache = new Map<string, TelegramAppliedIdentity>();
+
+/**
+ * Build the set of Telegram Bot API calls needed to apply this identity
+ * override. Returns an array of {url, method, multipart?} so it's
+ * testable without firing real fetches. The caller (`applyTelegramIdentity`)
+ * actually issues the calls.
+ *
+ * Exported for the unit test — the test asserts the URL/method shape
+ * without mocking `fetch`.
+ */
+export function buildTelegramIdentityCalls(
+  token: string,
+  override: ResolvedChannelIdentity,
+  last: TelegramAppliedIdentity | null,
+): Array<{ kind: "setMyName" | "setUserProfilePhotos"; url: string; avatar_path?: string }> {
+  const calls: Array<{ kind: "setMyName" | "setUserProfilePhotos"; url: string; avatar_path?: string }> = [];
+  const nameChanged =
+    override.display_name != null &&
+    override.display_name !== (last?.display_name ?? null);
+  if (nameChanged && override.display_name) {
+    calls.push({
+      kind: "setMyName",
+      url:
+        `https://api.telegram.org/bot${token}/setMyName?name=` +
+        encodeURIComponent(override.display_name),
+    });
+  }
+  const avatarChanged =
+    override.avatar_path != null &&
+    override.avatar_path !== (last?.avatar_path ?? null);
+  if (avatarChanged && override.avatar_path) {
+    calls.push({
+      kind: "setUserProfilePhotos",
+      url: `https://api.telegram.org/bot${token}/setUserProfilePhotos`,
+      avatar_path: override.avatar_path,
+    });
+  }
+  return calls;
+}
+
+/**
+ * Resolve + apply the identity override for a profile's Telegram bot.
+ * Fire-and-forget — if Telegram returns an error we log and proceed so
+ * the actual outbound message still goes through.
+ */
+async function applyTelegramIdentity(
+  profileSlug: string,
+  botToken: string,
+): Promise<void> {
+  if (RESERVED_PROFILES_FOR_IDENTITY.has(profileSlug)) return;
+  const override = resolveChannelIdentity(
+    getStateDb(),
+    profileSlug,
+    "telegram",
+  );
+  if (!override) return;
+  const last = _telegramIdentityCache.get(profileSlug) ?? null;
+  const calls = buildTelegramIdentityCalls(botToken, override, last);
+  if (calls.length === 0) return;
+  for (const c of calls) {
+    try {
+      if (c.kind === "setMyName") {
+        await fetch(c.url, {
+          method: "POST",
+          signal: AbortSignal.timeout(5_000),
+        });
+      } else if (c.kind === "setUserProfilePhotos" && c.avatar_path) {
+        // Telegram setUserProfilePhotos expects multipart/form-data with
+        // `photo=@<file>`. We use the Node 22 native fetch + Blob path so
+        // there's no extra dep. Skipped if the file doesn't exist (the DB
+        // can hold a stale path; we don't want to crash the send).
+        const fs = await import("node:fs/promises");
+        let buf: Buffer;
+        try {
+          buf = await fs.readFile(c.avatar_path);
+        } catch {
+          console.warn(
+            `[telegram] avatar file missing for profile '${profileSlug}': ${c.avatar_path}`,
+          );
+          continue;
+        }
+        const form = new FormData();
+        // Node's Buffer<ArrayBufferLike> is structurally compatible with
+        // the lib.dom Blob constructor at runtime, but @types/node's
+        // tsbuffer typing produces an ArrayBuffer/SharedArrayBuffer union
+        // the dom typings reject. Cast through `BlobPart` to match the
+        // pre-existing pattern in voice_esphome.ts at the same boundary.
+        form.append(
+          "photo",
+          new Blob([buf as unknown as BlobPart], {
+            type: override.avatar_mime ?? "image/png",
+          }),
+          c.avatar_path.split("/").pop() ?? "avatar",
+        );
+        await fetch(c.url, {
+          method: "POST",
+          body: form,
+          signal: AbortSignal.timeout(10_000),
+        });
+      }
+    } catch (e) {
+      console.warn(
+        `[telegram] identity apply failed for profile '${profileSlug}' (${c.kind}):`,
+        e instanceof Error ? e.message : String(e),
+      );
+    }
+  }
+  _telegramIdentityCache.set(profileSlug, {
+    display_name: override.display_name,
+    avatar_path: override.avatar_path,
+  });
+}
+
+// Test-only hook: clear the in-memory cache so unit tests don't bleed
+// state across cases. Not part of the public surface.
+export function _resetTelegramIdentityCacheForTests(): void {
+  _telegramIdentityCache.clear();
+}
+
 // ── Routes ────────────────────────────────────────────────────────────────
 
 export function registerTelegramRoutes(): void {
@@ -770,6 +946,10 @@ export function registerTelegramRoutes(): void {
         minute: "2-digit",
         second: "2-digit",
       });
+      // #206 Lane IV — push per-profile display_name/avatar to Telegram
+      // before the test send, so the recipient sees this profile's
+      // identity. Fire-and-forget: never block the outbound on it.
+      await applyTelegramIdentity(paths.profileSlug, token);
       const result = await sendTelegramMessage(
         token,
         chatId,

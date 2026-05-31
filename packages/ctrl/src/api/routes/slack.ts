@@ -54,6 +54,37 @@ import {
 import { appendAudit } from "./state.js";
 import { restartProfile } from "../../hermes/supervisor.js";
 
+// ── #206 Lane IV — per-(profile, channel_kind) identity override ──────────
+//
+// Lane I owns `packages/ctrl/src/db/channelIdentity.ts` and the helper
+// `resolveChannelIdentity(db, profile_slug, channel_kind)`. When Lane I's
+// PR lands, replace this stub block with:
+//
+//   import { resolveChannelIdentity } from "../../db/channelIdentity.js";
+//
+// Until then this typed stub returns null so the adapter no-ops on
+// identity overrides — preserving pre-#206 behaviour exactly.
+type ResolvedChannelIdentity = {
+  display_name: string | null;
+  avatar_path: string | null;
+  avatar_mime: string | null;
+};
+function resolveChannelIdentity(
+  _db: unknown,
+  _slug: string,
+  _kind: string,
+): ResolvedChannelIdentity | null {
+  // TODO(#206 Lane I): replace with real import once Lane I merges.
+  return null;
+}
+
+const RESERVED_PROFILES_FOR_IDENTITY: ReadonlySet<string> = new Set([
+  "main",
+  "workers",
+  "heavy",
+  "codex-builder",
+]);
+
 const VAULT_CLI_URL = process.env.VAULT_CLI_URL || "http://vault-cli:8087";
 const HERMES_HOME =
   process.env.HERMES_HOME_IN_CONTAINER || "/hermes-state";
@@ -410,12 +441,75 @@ async function slackAuthTest(botToken: string): Promise<AuthTestResult> {
   }
 }
 
+/**
+ * Build the chat.postMessage payload, applying the per-profile identity
+ * override (#206 Lane IV) when one is present.
+ *
+ * Slack honours two override fields on chat.postMessage:
+ *   - `username` — overrides the bot's display name PER MESSAGE
+ *   - `icon_url` — public HTTPS URL of an avatar image
+ *
+ * `icon_url` requires Slack's CDN to fetch the file, so we only set it
+ * when `SLACK_AVATAR_BASE_URL` is configured (the tenant's public
+ * hostname plus the static-avatar path). If the override has an
+ * avatar_path but no public base URL, the avatar is silently dropped
+ * and a log line names the limitation — Sir's PR body documents this.
+ *
+ * Exported for the unit test — the test asserts the payload shape
+ * without firing a real fetch.
+ */
+export function buildSlackPostMessagePayload(
+  channel: string,
+  text: string,
+  override: ResolvedChannelIdentity | null,
+  profileSlug?: string,
+): Record<string, unknown> {
+  const payload: Record<string, unknown> = { channel, text, mrkdwn: true };
+  if (override?.display_name) {
+    payload.username = override.display_name;
+  }
+  if (override?.avatar_path) {
+    const base = (process.env.SLACK_AVATAR_BASE_URL ?? "").trim();
+    if (base && profileSlug) {
+      const fname = override.avatar_path.split("/").pop() ?? "avatar";
+      payload.icon_url = `${base.replace(/\/$/, "")}/${encodeURIComponent(
+        profileSlug,
+      )}/${encodeURIComponent(fname)}`;
+    } else {
+      console.warn(
+        `[slack] avatar override skipped for profile '${profileSlug ?? "?"}': SLACK_AVATAR_BASE_URL not set`,
+      );
+    }
+  }
+  return payload;
+}
+
+/**
+ * Resolve the identity override for `profileSlug` on Slack. Returns null
+ * for reserved profiles or when no override is set.
+ */
+export function resolveSlackIdentity(
+  profileSlug: string,
+): ResolvedChannelIdentity | null {
+  if (RESERVED_PROFILES_FOR_IDENTITY.has(profileSlug)) return null;
+  return resolveChannelIdentity(getStateDb(), profileSlug, "slack");
+}
+
 /** Send a chat message via Slack Web API. Used by /test + alfred-deliver. */
 export async function slackPostMessage(
   botToken: string,
   channel: string,
   text: string,
+  profileSlug?: string,
 ): Promise<{ ok: true; ts: string } | { ok: false; error: string }> {
+  // #206 Lane IV — pick up the per-profile override at send time.
+  const override = profileSlug ? resolveSlackIdentity(profileSlug) : null;
+  const payload = buildSlackPostMessagePayload(
+    channel,
+    text,
+    override,
+    profileSlug,
+  );
   try {
     const r = await fetch("https://slack.com/api/chat.postMessage", {
       method: "POST",
@@ -423,7 +517,7 @@ export async function slackPostMessage(
         Authorization: `Bearer ${botToken}`,
         "Content-Type": "application/json; charset=utf-8",
       },
-      body: JSON.stringify({ channel, text, mrkdwn: true }),
+      body: JSON.stringify(payload),
       signal: AbortSignal.timeout(10_000),
     });
     const j = (await r.json().catch(() => ({}))) as {
@@ -797,6 +891,7 @@ export function registerSlackRoutes(): void {
       botToken,
       channel,
       `🤵 Test message from your Alfred dashboard · ${stamp}`,
+      paths.profileSlug,
     );
     if (result.ok) {
       sendJson(res, 200, {
