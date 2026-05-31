@@ -7,6 +7,46 @@ and the `alfred-vault` package adheres to [Semantic Versioning](https://semver.o
 
 ## [2026-05-31]
 
+**Lane Vb2** (follow-on to Lane V) closes the email half of the
+per-profile-channels promise. Lane V shipped the FULL per-profile
+channels page but explicitly punted **Email (AgentMail)** with the note
+"AgentMail provisions one inbox per VM today; per-profile addressing is
+a follow-up." Sir's clarification — *"email MUST be per profile.
+AgentMail's API provisions inboxes; that's an API call, not a manual
+provisioning step. Just call it."* — is exactly the work this lane does.
+ctrl-api now exposes four new routes (`GET /channels/email/status`,
+`POST /channels/email/provision`, `DELETE /channels/email/inbox`, `POST
+/channels/email/test`), all scoped by `?profile=<slug>`. The provision
+route calls AgentMail's real API (`POST /pods/<pod>/inboxes` then `POST
+/inboxes/<id>/api-keys`) using `AGENTMAIL_MASTER_API_KEY` from the
+tenant `.env`; on success the inbox creds (`AGENTMAIL_INBOX_ID`,
+`AGENTMAIL_INBOX_ADDRESS`, `AGENTMAIL_API_KEY`) land in the profile's
+`/hermes-state/profiles/<slug>/.env` and a
+`(channel_kind=email, channel_identity=<address>, profile=<slug>)` row
+is written to `channel_profile_binding`. Inbound mail to that address
+arrives at the existing AgentMail webhook → the recipient-based
+resolver picks the right profile; the only thing that was missing was
+the binding row. Outbound `/api/v1/email/{send,reply,forward,…}` now
+honour `?profile=<slug>` and pull credentials from the profile's `.env`
+rather than the tenant-wide env — so Sentinel's replies go from
+Sentinel's "From:" address with Sentinel's inbox-scoped key. DELETE
+releases the inbox at AgentMail (best-effort upstream delete; binding +
+.env keys wiped unconditionally so routing falls back to main cleanly).
+The `/profiles/:slug/channels` Email card flips from the Lane V
+"instance-level notice" to a real provision / test / disconnect form. A
+new `getProfileEmailStatus` query plus three new actions
+(`provisionProfileEmailInbox`, `clearProfileEmailInbox`,
+`sendProfileEmailTest`) wire the UI to the routes. 14 new helper +
+route unit tests covering the happy path, the no-master-key honest
+failure, the archived-profile guard, idempotent DELETE, and the
+inbound-routing decision (provisioned address → sentinel, unbound
+address → main fallback). **Operator step**: tenants that want
+per-profile email must set `AGENTMAIL_MASTER_API_KEY` +
+`AGENTMAIL_SHARED_POD_ID` in `/opt/alfred/.env` and restart ctrl-api;
+without the master key the route returns a clean 400 with code
+`master_key_missing` and the UI shows the operator hint instead of the
+provision button.
+
 **Lane V** (this release) lands the per-profile FULL channels surface.
 Until tonight, the new `/profiles/:slug` page from Lane III could bind a
 channel to a profile (the inbound side — "this Telegram chat speaks to

@@ -1272,6 +1272,30 @@ action clearProfileChannelToken {
   entities: []
 }
 
+// #120 Lane Vb2 — per-profile AgentMail inbox provisioning. Sir's
+// clarification: "email MUST be per profile." These ops wire the
+// /profiles/:slug/channels Email card to ctrl-api's
+// /api/v1/channels/email/{status,provision,inbox,test}?profile=<slug>.
+query getProfileEmailStatus {
+  fn: import { getProfileEmailStatus } from "@src/dashboard/operations",
+  entities: []
+}
+
+action provisionProfileEmailInbox {
+  fn: import { provisionProfileEmailInbox } from "@src/dashboard/operations",
+  entities: []
+}
+
+action clearProfileEmailInbox {
+  fn: import { clearProfileEmailInbox } from "@src/dashboard/operations",
+  entities: []
+}
+
+action sendProfileEmailTest {
+  fn: import { sendProfileEmailTest } from "@src/dashboard/operations",
+  entities: []
+}
+
 query getAgentConfig {
   fn: import { getAgentConfig } from "@src/dashboard/operations",
   entities: []

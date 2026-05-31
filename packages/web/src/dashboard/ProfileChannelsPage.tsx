@@ -5,12 +5,17 @@
 // profile slug, side-by-side with a clear back-link to the main /channels
 // page.
 //
-// What this page CAN configure per profile (Lane IV + Lane V on ctrl-api):
+// What this page CAN configure per profile (Lane IV + Lane V + Lane Vb2 on ctrl-api):
 //
 //   * Telegram   — token (PUT), status (GET), revoke chat
 //   * Slack      — bot/app tokens (PUT), status (GET)
 //   * SMS        — Twilio creds (PUT), status (GET)
 //   * Paperclip  — API key (POST), status (GET)
+//   * Email      — Lane Vb2; provision (POST), status (GET), disconnect
+//                  (DELETE), send-test (POST). AgentMail's API is called
+//                  on the tenant: a fresh inbox is minted per profile + a
+//                  channel binding (email, <address>) → <slug> is written
+//                  so inbound mail routes to the right profile.
 //
 // What this page CANNOT configure per profile and why (honest partial):
 //
@@ -23,9 +28,6 @@
 //     integration. Configure on /channels.
 //   * Recall.ai — one calendar bot account. Single-instance integration.
 //     Configure on /channels.
-//   * Email (AgentMail) — provisioning a per-profile address requires an
-//     external provider call we don't make automatically here. Configure
-//     on /channels.
 //   * Tailscale / Terminal — instance-level (single VM ↔ single tailnet ↔
 //     single SSH host). NOT a channel in the per-profile sense.
 //
@@ -40,6 +42,10 @@ import {
   getProfileChannelStatuses,
   setProfileChannelToken,
   clearProfileChannelToken,
+  getProfileEmailStatus,
+  provisionProfileEmailInbox,
+  clearProfileEmailInbox,
+  sendProfileEmailTest,
 } from "wasp/client/operations";
 import { Frame, PageHeading } from "../client/components/ab/Frame";
 import { ChannelCard, type ChannelStatus } from "./ChannelsPage";
@@ -670,7 +676,227 @@ function ProfilePaperclipSection({
 }
 
 // --------------------------------------------------------------------------
-// InstanceLevelNotice. For voice / email / OMI / HA / Recall / Tailscale /
+// #120 Lane Vb2 — per-profile Email (AgentMail) section. Reads
+// /api/v1/channels/email/status?profile=<slug>; renders provision /
+// disconnect / send-test as a single ChannelCard. Lives in its own query
+// (getProfileEmailStatus) rather than the consolidator so the operator
+// can independently refetch after a provision.
+// --------------------------------------------------------------------------
+interface ProfileEmailStatus {
+  configured: boolean;
+  profile: string;
+  inbox_address: string | null;
+  inbox_id: string | null;
+  binding_id: string | null;
+  provision_available: boolean;
+  provision_unavailable_reason: string | null;
+  env_error: string | null;
+}
+
+function ProfileEmailSection({ slug }: { slug: string }) {
+  const statusQ = useQuery(getProfileEmailStatus, { slug });
+  const status = (statusQ.data as ProfileEmailStatus | undefined) ?? null;
+  const [prefix, setPrefix] = useState("");
+  const [testTo, setTestTo] = useState("");
+  const [busy, setBusy] = useState<null | "provision" | "disconnect" | "test">(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [lastResp, setLastResp] = useState<any>(null);
+
+  const configured = Boolean(status?.configured);
+  const provisionAvailable = status?.provision_available !== false;
+
+  async function doProvision() {
+    if (busy) return;
+    setBusy("provision");
+    setErr(null);
+    try {
+      const resp = await provisionProfileEmailInbox({
+        slug,
+        prefix: prefix.trim() || undefined,
+      });
+      setLastResp(resp);
+      setPrefix("");
+      statusQ.refetch();
+    } catch (e: any) {
+      setErr(e?.message ?? "Couldn't provision the inbox.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function doDisconnect() {
+    if (busy) return;
+    if (
+      !window.confirm(
+        `Release ${status?.inbox_address ?? "this inbox"}? Inbound emails to that address will stop being delivered to ${slug}.`,
+      )
+    ) {
+      return;
+    }
+    setBusy("disconnect");
+    setErr(null);
+    try {
+      const resp = await clearProfileEmailInbox({ slug });
+      setLastResp(resp);
+      statusQ.refetch();
+    } catch (e: any) {
+      setErr(e?.message ?? "Couldn't release the inbox.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function doTest() {
+    if (busy || !testTo.trim()) return;
+    setBusy("test");
+    setErr(null);
+    try {
+      const resp = await sendProfileEmailTest({ slug, to: testTo.trim() });
+      setLastResp(resp);
+      setTestTo("");
+    } catch (e: any) {
+      setErr(e?.message ?? "Test send failed.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  const address = configured
+    ? (status?.inbox_address as string)
+    : "Not yet provisioned";
+  const note = configured
+    ? `Inbox '${status?.inbox_address}' is bound to '${slug}'. Inbound mail routes here; outbound replies use this inbox's credentials.`
+    : provisionAvailable
+      ? `No inbox yet. Provision one and AgentMail mints a fresh address scoped to '${slug}'.`
+      : "Per-profile inbox provisioning is unavailable on this tenant — see the operator hint below.";
+  const cardStatus: ChannelStatus = configured
+    ? "connected"
+    : provisionAvailable
+      ? "available"
+      : "unavailable";
+
+  return (
+    <ChannelCard
+      name="Email"
+      address={address}
+      note={note}
+      status={cardStatus}
+    >
+      <div className="mt-5 space-y-3">
+        {status?.env_error && (
+          <p
+            className="font-body italic text-[13px]"
+            style={{ color: "var(--brass)" }}
+          >
+            Could not read the profile's .env: {status.env_error}
+          </p>
+        )}
+        {!configured && (
+          <>
+            <div
+              className="font-mono text-[10px] uppercase tracking-[0.22em]"
+              style={{ color: "var(--marginalia)" }}
+            >
+              Provision new inbox · for {slug}
+            </div>
+            {!provisionAvailable && status?.provision_unavailable_reason && (
+              <p
+                className="font-body italic text-[13px]"
+                style={{ color: "var(--marginalia)" }}
+              >
+                {status.provision_unavailable_reason}
+              </p>
+            )}
+            <div className="flex gap-2 items-baseline">
+              <input
+                type="text"
+                value={prefix}
+                onChange={(e) => setPrefix(e.target.value)}
+                placeholder={`alfred.${slug} (default)`}
+                disabled={!provisionAvailable || busy === "provision"}
+                className="flex-1 bg-transparent border border-rule px-2 py-1 font-mono text-[12px]"
+              />
+              <button
+                onClick={doProvision}
+                disabled={!provisionAvailable || busy === "provision"}
+                className="btn-ghost"
+              >
+                {busy === "provision" ? "…" : "Provision"}
+              </button>
+            </div>
+          </>
+        )}
+        {configured && (
+          <>
+            <div
+              className="font-mono text-[10px] uppercase tracking-[0.22em]"
+              style={{ color: "var(--marginalia)" }}
+            >
+              Send a test email
+            </div>
+            <div className="flex gap-2 items-baseline">
+              <input
+                type="email"
+                value={testTo}
+                onChange={(e) => setTestTo(e.target.value)}
+                placeholder="recipient@example.com"
+                disabled={busy === "test"}
+                className="flex-1 bg-transparent border border-rule px-2 py-1 font-mono text-[12px]"
+              />
+              <button
+                onClick={doTest}
+                disabled={busy === "test" || !testTo.trim()}
+                className="btn-ghost"
+              >
+                {busy === "test" ? "…" : "Send"}
+              </button>
+            </div>
+            <div className="pt-2">
+              <button
+                onClick={doDisconnect}
+                disabled={busy === "disconnect"}
+                className="btn-link"
+                style={{ color: "var(--brass)" }}
+              >
+                {busy === "disconnect" ? "…" : "Disconnect inbox"}
+              </button>
+            </div>
+          </>
+        )}
+        {err && (
+          <p
+            className="font-body italic text-[13px]"
+            style={{ color: "var(--brass)" }}
+          >
+            {err}
+          </p>
+        )}
+        {lastResp?.ok && lastResp.address && (
+          <p
+            className="font-body italic text-[13px]"
+            style={{ color: "var(--marginalia)" }}
+          >
+            Provisioned {lastResp.address}.
+            {lastResp.webhook_registered === false &&
+              " AgentMail webhook registration failed — inbound may need a manual hook."}
+          </p>
+        )}
+        {lastResp?.message_id && (
+          <p
+            className="font-body italic text-[13px]"
+            style={{ color: "var(--marginalia)" }}
+          >
+            Test sent (message_id: {String(lastResp.message_id).slice(0, 12)}…).
+          </p>
+        )}
+      </div>
+      <RestartScopeWarning scope={lastResp?.restart_scope} warning={lastResp?.restart_warning} />
+    </ChannelCard>
+  );
+}
+
+// --------------------------------------------------------------------------
+// InstanceLevelNotice. For voice / OMI / HA / Recall / Tailscale /
 // Terminal we render a small read-only card pointing at /channels.
 // --------------------------------------------------------------------------
 function InstanceLevelNotice({
@@ -849,15 +1075,12 @@ export default function ProfileChannelsPage() {
           <ProfileSlackSection slug={slug} entry={entryFor<SlackStatus>("slack")} refetch={refetch} />
           <ProfileSmsSection slug={slug} entry={entryFor<SmsStatus>("sms")} refetch={refetch} />
           <ProfilePaperclipSection slug={slug} entry={entryFor<PaperclipStatus>("paperclip")} refetch={refetch} />
+          <ProfileEmailSection slug={slug} />
 
           {/* Honest partials — these channels are instance-level by design. */}
           <InstanceLevelNotice
             name="Voice"
             reason="Voice-bridge is a single compose sibling. One Twilio number + one OPENAI key per VM."
-          />
-          <InstanceLevelNotice
-            name="Email"
-            reason="AgentMail provisions one inbox per VM today. Per-profile addressing is a follow-up."
           />
           <InstanceLevelNotice
             name="Home Assistant"

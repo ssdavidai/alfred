@@ -3779,6 +3779,107 @@ export const getProfileChannelStatuses = async (
   };
 };
 
+// ── #120 Lane Vb2 — per-profile AgentMail inbox provisioning ─────────────
+//
+// Sir's clarification: "email MUST be per profile." These three ops thin-
+// proxy to the ctrl-api /api/v1/channels/email/{status,provision,inbox}
+// routes Lane Vb2 added. The shape matches the other Lane V channel ops
+// (slug → ctrl-api ?profile=<slug>). entities: []; uses the same
+// `Promise<any>` plain-async shape per the Wasp `Promise<T>` trap memory.
+
+/** Fetch the per-profile email-inbox status. */
+export const getProfileEmailStatus = async (
+  args: { slug: string },
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const slug = _validateSlugArg(args?.slug);
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    path: "/api/v1/channels/email/status",
+    query: { profile: slug },
+  });
+};
+
+/**
+ * Provision a fresh AgentMail inbox for the given profile. Calls AgentMail's
+ * real API (POST /pods/<id>/inboxes + POST /inboxes/<id>/api-keys) on the
+ * tenant; the inbox creds land in the profile's .env and a channel binding
+ * (email, <address>) → <slug> is written so inbound mail routes to it.
+ *
+ * `prefix` is optional — defaults to `alfred.<slug>` on the ctrl-api side.
+ */
+export const provisionProfileEmailInbox = async (
+  args: { slug: string; prefix?: string; display_name?: string },
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const slug = _validateSlugArg(args?.slug);
+  const body: Record<string, unknown> = {};
+  if (typeof args?.prefix === "string" && args.prefix.trim()) {
+    body.prefix = args.prefix.trim();
+  }
+  if (typeof args?.display_name === "string" && args.display_name.trim()) {
+    body.display_name = args.display_name.trim();
+  }
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/channels/email/provision",
+    query: { profile: slug },
+    body,
+  });
+};
+
+/**
+ * Release the AgentMail inbox bound to the profile. Best-effort upstream
+ * delete (the ctrl-api side falls through to "binding-removed only" when
+ * AGENTMAIL_MASTER_API_KEY is missing or the upstream call fails); always
+ * wipes the .env keys + drops the channel binding row.
+ */
+export const clearProfileEmailInbox = async (
+  args: { slug: string },
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const slug = _validateSlugArg(args?.slug);
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "DELETE",
+    path: "/api/v1/channels/email/inbox",
+    query: { profile: slug },
+  });
+};
+
+/**
+ * Send a test email from this profile's inbox to verify outbound auth
+ * end-to-end. The recipient is mandatory (operator's address, typically).
+ */
+export const sendProfileEmailTest = async (
+  args: { slug: string; to: string; subject?: string; text?: string },
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const slug = _validateSlugArg(args?.slug);
+  if (typeof args?.to !== "string" || !args.to.trim()) {
+    throw new HttpError(400, "`to` recipient is required");
+  }
+  const body: Record<string, unknown> = { to: args.to.trim() };
+  if (typeof args?.subject === "string" && args.subject.trim()) {
+    body.subject = args.subject.trim();
+  }
+  if (typeof args?.text === "string" && args.text.trim()) {
+    body.text = args.text.trim();
+  }
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/channels/email/test",
+    query: { profile: slug },
+    body,
+  });
+};
+
 // ── decision_ref minter ──────────────────────────────────────────────────
 //
 // Crockford base32, 26 chars — the ULID shape PR4's
