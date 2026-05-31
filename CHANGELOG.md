@@ -5,6 +5,160 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the `alfred-vault` package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-05-31]
+
+Alfred Black becomes a **household of personas**, not just one butler.
+Until tonight, Hermes ran exactly four sealed profiles that the
+principal could neither name nor manage from the dashboard — `main`
+(the conversational butler), `workers` (the background sub-agents),
+`heavy` (Opus when Sonnet wasn't enough), and `codex-builder`
+(the isolated PR-author runtime). If Sir wanted a second persona — a
+`cratchit` bookkeeper, a `field-foreman` site lead, an evening reading
+companion — the only path was the same one Joe took on
+`joe.alfred.black`: ssh in, write a sibling container into
+`/opt/alfred/docker-compose.override.yaml` by hand, and live with the
+fact that `docker compose pull` could overwrite the persona file on
+the next image refresh. After this release the principal can spin up a
+new persona from `/profiles` in 30 seconds, bind a Telegram chat or a
+phone number directly to it, archive it when its season is done, and
+restore it later without losing the slug — and every gateway sits in
+the same supervised Hermes process so a `compose pull` no longer touches
+the persona dir.
+
+The cutover landed across four lanes over two days. **Lane I** (PR
+#196) added the `agent_profile` + `channel_profile_binding` registry
+to `state.db` (migration `0017`) and the eight `/api/v1/agent-profiles`
+CRUD routes — slug regex `^[a-z][a-z0-9-]{1,30}$`, port allocator
+pinned to `18794..18799` for six user-facing slots, the four reserved
+infra profiles seeded with the right port and the right
+`is_user_facing=0` flag so they stay invisible to the manager UI.
+**Lane II** (PR #198, with hotfixes in #199 / #200 / #201) hooked the
+registry to the Hermes side: a new
+`/hermes-state/profiles/_registry.json` is written atomically by
+ctrl-api on every create/archive/restore, `supervisor.sh` reads it on
+boot + `SIGUSR1` to decide which gateway processes to keep alive, and
+the supervisor self-renders any profile dir that's in the registry
+but missing on disk so a fresh tenant's first POST lands on a real
+gateway in ~17s rather than `docker compose down/up`-cycling.
+**Lane IV** (PR #197) rewired every channel route — Telegram, Slack,
+SMS, voice, email, Paperclip, Omi, HA, Recall, Terminal, Tailscale —
+to resolve the target profile via `resolveProfileForChannel(kind,
+identity)` instead of the hard-coded `"main"` literal that lived in
+each of them, with a graceful archived-target cascade so a stale
+binding to a deleted profile still answers via `main` rather than
+404'ing on inbound.
+
+**Lane III** (PR #202, this release) is the principal-visible
+surface. Three new pages live at `/profiles`, `/profiles/new`,
+`/profiles/:slug` — the list with initials avatars, status pills,
+port + model + free-slots meter and a "show archived" toggle; the
+wizard with auto-derived slug, model dropdown, and an optional persona
+seed for SOUL.md; the detail page with grouped channel bindings, an
+inline bind/unbind form, a read-only persona preview, and the
+lifecycle controls (archive with a confirmation modal that explains
+the port will go quiet, restore that brings the gateway back on the
+same port). Seven new Wasp ops (`getAgentProfiles`, `getAgentProfile`,
+`createAgentProfile`, `archiveAgentProfile`, `restoreAgentProfile`,
+`bindChannelToProfile`, `unbindChannelFromProfile`) proxy through
+ctrl-api with the plain-async `Promise<any>` shape the dashboard
+requires — the Wasp Payload-trap from PRs #139/#145/#182/#184/#186
+catches a typed return at the SDK-compile step and kills the
+build-web cycle, and the rule is now load-bearing enough to belong in
+the lane comment header. A new
+`POST /api/v1/agent-profiles/:slug/restore` route closes the namespace
+UX bug Lane IIb flagged: an archived slug no longer stays reserved
+forever, and the same supervisor nudge that brought the profile up the
+first time re-renders the dir and relaunches the gateway in ~30s.
+The detail page polls `getAgentProfile` every 3 s while
+`status='pending'` so the wizard's "Sentinel coming up" promise lands
+without a manual refresh. A small "Profiles" link in the More menu of
+the Frame nav makes the manager one click away from every dashboard
+page. Five Lane-III-shaped questions Sir flagged on the issue (cost
+surface per profile, per-profile MCP catalog UI, per-profile skill
+catalog UI, per-profile bootstrap form with RULES.md seeding,
+per-channel avatar / @handle picker) are deferred to follow-up issues
+filed against #120 — the lane that closed #120 ships the registry, the
+gateway, the channel routing and the manager; the polish lives in its
+own queue.
+
+### Added
+
+**Lane III — UI surface (#202)**
+- `packages/web/src/dashboard/ProfilesPage.tsx` — list page at
+  `/profiles`. Reads `getAgentProfiles`; renders one row per
+  user-facing non-archived profile (initials avatar, label, slug
+  marginalia, model + port, status pill, reserved chip on `main`);
+  a "show archived" toggle that flips the client-side filter; a
+  free-slots meter ("N of 6 user-profile slots free"); empty-state copy
+  pointing at `/profiles/new`.
+- `packages/web/src/dashboard/ProfileNewPage.tsx` — single-form wizard
+  at `/profiles/new`. Label auto-derives the slug
+  (`/[^a-z0-9]+/` → `-`, trimmed to 31 chars); the slug is editable
+  but client-side validated against the server's
+  `^[a-z][a-z0-9-]{1,30}$`. Model dropdown is a six-entry whitelist
+  matching what Hermes' OpenRouter resolver accepts. Optional
+  description + persona template (textarea seeds SOUL.md). On Save
+  posts `createAgentProfile` and routes to `/profiles/<slug>` with the
+  detail page's polling kicking in.
+- `packages/web/src/dashboard/ProfileDetailPage.tsx` — single page
+  at `/profiles/:slug`. Header strip (status pill, port, model,
+  updated-relative). Channels section groups bindings by kind, shows
+  the per-kind defaults as a locked "default" chip (Lane I's protected
+  `binding-default-*` ids), inline bind form with channel-kind dropdown
+  + identity input (placeholder per kind: `chat_id`, `workspace:channel`,
+  E.164, etc.), unbind on every non-default row. Persona section renders
+  `persona_template` read-only when non-empty. Lifecycle section
+  surfaces Archive (with a confirmation modal that names the port that
+  will go quiet) for user-facing non-reserved live profiles, and
+  Restore for archived non-reserved ones. Status polling: ticks
+  `getAgentProfile` every 3 s for up to 90 s while `status='pending'`.
+- `packages/web/src/client/components/ab/Frame.tsx` — adds "Profiles"
+  to the More menu so the manager is one click away from every
+  dashboard page.
+- `packages/web/main.wasp` — three new routes (`ProfilesRoute`,
+  `ProfileNewRoute`, `ProfileDetailRoute`), two new queries, five new
+  actions wired through `@src/dashboard/operations`.
+
+**Lane III — Wasp ops (#202)**
+- `packages/web/src/dashboard/operations.ts` — seven plain-async
+  `Promise<any>` operations: `getAgentProfiles`, `getAgentProfile`,
+  `createAgentProfile`, `archiveAgentProfile`, `restoreAgentProfile`,
+  `bindChannelToProfile`, `unbindChannelFromProfile`. Each proxies to
+  ctrl-api's `/api/v1/agent-profiles*` surface. Header comment names
+  the Wasp Payload-trap explicitly so the next author doesn't add a
+  typed return.
+
+**Lane III — ctrl-api restore route (#202)**
+- `POST /api/v1/agent-profiles/:slug/restore` — bring an archived
+  profile back. 404 on unknown slug; 400 on "is not archived" so the
+  UI distinguishes "already live" from "restored"; 409 on the
+  defensive reserved-row branch. On success the supervisor registry
+  is rewritten and a SIGUSR1 nudge re-renders the profile dir +
+  relaunches the gateway on the original port. Lib-side helper
+  `restoreProfile(db, slug)` covers the same contract for callers
+  outside the route layer; 5 new unit tests in
+  `packages/ctrl/tests/agent-profiles.test.ts` (39 pass total).
+
+### Changed
+
+- The Frame nav's More menu now lists "Apps, Profiles, Settings" (was
+  "Apps, Settings"). The primary nav is unchanged so the dashboard's
+  habitual surface stays the same.
+
+### Deferred to follow-up issues
+
+The five "Q-deferred" items Sir flagged on #120 are filed as separate
+issues against the multi-profile epic:
+
+- Cost surface per profile (Q2)
+- Per-profile MCP catalog UI (Q3)
+- Per-profile skill catalog UI (Q4)
+- Per-profile bootstrap form + RULES.md seeding (Q5) + per-channel
+  avatar / @handle picker (Q6)
+
+Each follow-up has its own acceptance criteria; this CHANGELOG entry
+intentionally doesn't promise them in v2026.05.31.
+
 ## [2026-05-30]
 
 Alfred Black becomes **budget-aware**. Before this release, every turn
