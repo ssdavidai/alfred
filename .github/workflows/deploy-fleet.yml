@@ -1,0 +1,128 @@
+# Roll new images to every tenant in the fleet on every push to main that
+# touches a buildable package.
+#
+# Required repo secrets:
+#   FLEET_SSH_KEY            — private key matching ~/.ssh/alfred-black-verify
+#                              on each tenant. (You already have this; memory
+#                              `harden-vm-deploy-state` references it.)
+#   ALFRED_CODE_BOT_TOKEN    — Telegram bot for rollout summary
+#   ALFRED_CODE_CHAT_ID      — Sir's Telegram chat_id
+#
+# Required repo variables:
+#   ALFRED_FLEET_HOSTS       — newline-separated list of tenant hosts
+#                              (default below if unset)
+#
+# Per-tenant ordering: serial, not parallel. One failure shouldn't take down
+# the whole rollout, and serial makes the log easy to read.
+
+name: deploy-fleet
+
+on:
+  workflow_run:
+    # Fire after one of the build pipelines successfully published :latest.
+    workflows:
+      - build-ctrl-api
+      - build-web
+      - build-learn
+      - build-mcp-server
+      - build-hermes
+      - build-init
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      services:
+        description: 'Comma-separated services to pull (default: all six)'
+        default: 'ctrl-api,alfred-learn,web,web-client,mcp-server,hermes'
+        required: false
+      hosts:
+        description: 'Comma-separated hosts (default: full fleet)'
+        default: 'home,rj,joe,zsolt,miguel,rami'
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  rollout:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          echo "${{ secrets.FLEET_SSH_KEY }}" > ~/.ssh/alfred-black-verify
+          chmod 600 ~/.ssh/alfred-black-verify
+          cat <<'EOF' > ~/.ssh/config
+          Host *.alfred.black
+            IdentityFile ~/.ssh/alfred-black-verify
+            IdentityAgent none
+            BatchMode yes
+            StrictHostKeyChecking no
+            UserKnownHostsFile /dev/null
+            LogLevel ERROR
+          EOF
+          chmod 600 ~/.ssh/config
+
+      - name: Determine services + hosts
+        id: target
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            services="${{ github.event.inputs.services }}"
+            hosts="${{ github.event.inputs.hosts }}"
+          else
+            # Infer the service from the triggering workflow name.
+            wf="${{ github.event.workflow_run.name }}"
+            case "$wf" in
+              build-ctrl-api)   services="ctrl-api" ;;
+              build-web)        services="web,web-client" ;;
+              build-learn)      services="alfred-learn" ;;
+              build-mcp-server) services="mcp-server" ;;
+              build-hermes)     services="hermes" ;;
+              build-init)       services="init" ;;
+              *) echo "::error::unknown trigger workflow: $wf"; exit 1 ;;
+            esac
+            hosts="${{ vars.ALFRED_FLEET_HOSTS || 'home,rj,joe,zsolt,miguel,rami' }}"
+          fi
+          services_space="${services//,/ }"
+          hosts_space="${hosts//,/ }"
+          echo "services=$services_space" >> "$GITHUB_OUTPUT"
+          echo "hosts=$hosts_space" >> "$GITHUB_OUTPUT"
+          echo "  services: $services_space"
+          echo "  hosts:    $hosts_space"
+
+      - name: Pull + restart on each host (serial)
+        id: rollout
+        env:
+          SERVICES: ${{ steps.target.outputs.services }}
+          HOSTS:    ${{ steps.target.outputs.hosts }}
+        run: |
+          set -uo pipefail
+          declare -a RESULTS=()
+          for host in $HOSTS; do
+            echo "═══ $host.alfred.black ═══"
+            if ssh "root@$host.alfred.black" \
+              "cd /opt/alfred && docker compose -p alfred-black pull $SERVICES 2>&1 | grep -E 'Pulled|up to date' | head ; docker compose -p alfred-black up -d $SERVICES 2>&1 | tail -5" ; then
+              RESULTS+=("$host:OK")
+              echo "  ✓ $host"
+            else
+              RESULTS+=("$host:FAIL")
+              echo "  ✗ $host"
+            fi
+          done
+          # Emit a comma-separated summary so the next step can post it.
+          summary=$(IFS=, ; echo "${RESULTS[*]}")
+          echo "summary=$summary" >> "$GITHUB_OUTPUT"
+
+      - name: Notify Sir on Telegram
+        env:
+          BOT_TOKEN: ${{ secrets.ALFRED_CODE_BOT_TOKEN }}
+          CHAT_ID:   ${{ secrets.ALFRED_CODE_CHAT_ID }}
+          SERVICES:  ${{ steps.target.outputs.services }}
+          SUMMARY:   ${{ steps.rollout.outputs.summary }}
+        if: env.BOT_TOKEN != '' && env.CHAT_ID != ''
+        run: |
+          msg=$(printf "🚀 *Fleet rollout*: %s\n%s" "$SERVICES" "$SUMMARY" | sed 's/,/\n  /g')
+          curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${CHAT_ID}" \
+            --data-urlencode "text=${msg}" \
+            --data-urlencode "parse_mode=Markdown" >/dev/null

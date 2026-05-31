@@ -1,0 +1,119 @@
+# Notify Sir on Telegram when notable repo events happen.
+#
+# Trigger menu:
+#   - pull_request: opened, closed, reopened, ready_for_review
+#   - issues:       opened, closed, reopened
+#   - workflow_run: any workflow that finished (we filter to failures + the
+#                   build pipelines worth knowing about)
+#
+# Required repo secrets:
+#   ALFRED_CODE_BOT_TOKEN   — the BotFather token for @alfred_code_bot
+#   ALFRED_CODE_CHAT_ID     — Sir's Telegram chat_id with the bot
+#
+# Optional repo variables:
+#   ALFRED_CODE_QUIET       — set to "true" to skip notifications temporarily
+#
+# Drop this file into `.github/workflows/notify-telegram.yml` in your alfred
+# (or any other) monorepo and add the two secrets via:
+#   gh secret set ALFRED_CODE_BOT_TOKEN
+#   gh secret set ALFRED_CODE_CHAT_ID
+#
+# Cost: $0. Uses Telegram's free Bot API. Latency: ~1-3 seconds from event
+# to message landing on your phone.
+
+name: notify-telegram
+
+on:
+  pull_request:
+    types: [opened, closed, reopened, ready_for_review]
+  issues:
+    types: [opened, closed, reopened]
+  workflow_run:
+    workflows: ['*']
+    types: [completed]
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+  actions: read
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    if: vars.ALFRED_CODE_QUIET != 'true'
+    steps:
+      - name: Compose + send
+        env:
+          BOT_TOKEN: ${{ secrets.ALFRED_CODE_BOT_TOKEN }}
+          CHAT_ID:   ${{ secrets.ALFRED_CODE_CHAT_ID }}
+          EVENT:     ${{ toJSON(github.event) }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPO:      ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$BOT_TOKEN" || -z "$CHAT_ID" ]]; then
+            echo "::warning::ALFRED_CODE_BOT_TOKEN or ALFRED_CODE_CHAT_ID missing; skipping notify."
+            exit 0
+          fi
+          case "$EVENT_NAME" in
+            pull_request)
+              action=$(echo "$EVENT" | jq -r '.action')
+              num=$(echo "$EVENT" | jq -r '.pull_request.number')
+              title=$(echo "$EVENT" | jq -r '.pull_request.title')
+              url=$(echo "$EVENT" | jq -r '.pull_request.html_url')
+              merged=$(echo "$EVENT" | jq -r '.pull_request.merged // false')
+              actor=$(echo "$EVENT" | jq -r '.sender.login')
+              icon="📥"
+              [[ "$action" == "opened" ]] && icon="🟢"
+              if [[ "$action" == "closed" && "$merged" == "true" ]]; then
+                icon="✅"; action="merged"
+              elif [[ "$action" == "closed" && "$merged" == "false" ]]; then
+                icon="⚪️"; action="closed (unmerged)"
+              fi
+              [[ "$action" == "reopened" ]] && icon="🔄"
+              [[ "$action" == "ready_for_review" ]] && icon="👀"
+              MESSAGE=$(printf '%s *PR #%s* %s by %s\n%s\n%s' "$icon" "$num" "$action" "$actor" "$title" "$url")
+              ;;
+            issues)
+              action=$(echo "$EVENT" | jq -r '.action')
+              num=$(echo "$EVENT" | jq -r '.issue.number')
+              title=$(echo "$EVENT" | jq -r '.issue.title')
+              url=$(echo "$EVENT" | jq -r '.issue.html_url')
+              actor=$(echo "$EVENT" | jq -r '.sender.login')
+              icon="📋"
+              [[ "$action" == "opened" ]] && icon="🆕"
+              [[ "$action" == "closed" ]] && icon="🏁"
+              [[ "$action" == "reopened" ]] && icon="🔄"
+              MESSAGE=$(printf '%s *Issue #%s* %s by %s\n%s\n%s' "$icon" "$num" "$action" "$actor" "$title" "$url")
+              ;;
+            workflow_run)
+              conclusion=$(echo "$EVENT" | jq -r '.workflow_run.conclusion // "in_progress"')
+              wfname=$(echo "$EVENT" | jq -r '.workflow_run.name')
+              wfurl=$(echo "$EVENT" | jq -r '.workflow_run.html_url')
+              wfbranch=$(echo "$EVENT" | jq -r '.workflow_run.head_branch')
+              if [[ "$conclusion" == "failure" ]]; then
+                MESSAGE=$(printf '🔴 *%s* FAILED on `%s`\n%s' "$wfname" "$wfbranch" "$wfurl")
+              elif [[ "$conclusion" == "success" && ( "$wfname" == build-* || "$wfname" == deploy-* ) ]]; then
+                MESSAGE=$(printf '🟢 *%s* OK on `%s`' "$wfname" "$wfbranch")
+              else
+                echo "::notice::skipping notify for $wfname $conclusion"
+                exit 0
+              fi
+              ;;
+            *)
+              echo "::warning::unknown event: $EVENT_NAME"
+              exit 0
+              ;;
+          esac
+          response=$(curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${CHAT_ID}" \
+            --data-urlencode "text=${MESSAGE}" \
+            --data-urlencode "parse_mode=Markdown" \
+            --data-urlencode "disable_web_page_preview=false")
+          ok=$(echo "$response" | jq -r '.ok')
+          if [[ "$ok" != "true" ]]; then
+            echo "::error::Telegram sendMessage failed: $response"
+            exit 1
+          fi
+          echo "✓ notified Sir"
