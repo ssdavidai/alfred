@@ -72,6 +72,7 @@ import { registerAlfredDeliverRoutes } from "./routes/alfredDeliver.js";
 import { registerFilesRoutes } from "./routes/files.js";
 import { registerChannelsTailscaleRoutes } from "./routes/channels_tailscale.js";
 import { registerProfileRoutes } from "./routes/profiles.js";
+import { registerChannelIdentityRoutes } from "./routes/channel_identity.js";
 
 export interface RouteParams {
   [key: string]: string;
@@ -240,6 +241,10 @@ export function createApiServer(): http.Server {
   // Hermes-side activation yet (Lane II); no channel-route rewiring (Lane IV).
   // See packages/ctrl/src/db/migrations/0017_agent_profiles.sql.
   registerProfileRoutes();
+  // Per-(profile, channel_kind) display_name + avatar (#206 Q6 Lane I).
+  // Consumed by Lane IV adapters at send time via resolveChannelIdentity().
+  // See packages/ctrl/src/db/migrations/0018_channel_identity.sql.
+  registerChannelIdentityRoutes();
 
   const server = http.createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const start = Date.now();

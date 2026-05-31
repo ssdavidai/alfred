@@ -91,6 +91,187 @@ function optStr(o: Record<string, unknown>, key: string): string | null {
   return typeof v === "string" && v.trim() ? v.trim() : null;
 }
 
+// #206 Q5 — profile-bootstrap helpers.
+//
+// At profile-create time the principal can supply three optional fields:
+//   * role            — string ≤ 200, single line (no newlines)
+//   * tone            — string ≤ 64,  single line
+//   * first_actions   — string[] ≤ 10 items, each ≤ 200 chars
+//
+// If `role` OR `tone` is set, render RULES.md.
+// If `first_actions` is non-empty, render daybook.md.
+// If a file already exists at the destination path, SKIP — never clobber.
+//
+// SOUL.md continues to be written by the existing persona_template path
+// (Hermes supervisor consolidates it into HERMES_HOME on boot); these
+// helpers do NOT touch it.
+
+const ROLE_MAX = 200;
+const TONE_MAX = 64;
+const ACTION_MAX = 200;
+const FIRST_ACTIONS_MAX = 10;
+
+interface BootstrapFields {
+  role: string | null;
+  tone: string | null;
+  first_actions: string[];
+}
+
+function _validateLine(value: string, max: number, field: string): string {
+  if (value.includes("\n") || value.includes("\r")) {
+    throw new ApiError(
+      422,
+      "PROMOTION_FAIL",
+      `${field} must be a single line (no newlines)`,
+      { field },
+    );
+  }
+  if (value.length > max) {
+    throw new ApiError(
+      422,
+      "PROMOTION_FAIL",
+      `${field} exceeds ${max} characters`,
+      { field },
+    );
+  }
+  return value;
+}
+
+function _extractBootstrap(b: Record<string, unknown>): BootstrapFields {
+  const role_raw = b["role"];
+  const tone_raw = b["tone"];
+  const role =
+    typeof role_raw === "string" && role_raw.trim()
+      ? _validateLine(role_raw.trim(), ROLE_MAX, "role")
+      : null;
+  const tone =
+    typeof tone_raw === "string" && tone_raw.trim()
+      ? _validateLine(tone_raw.trim(), TONE_MAX, "tone")
+      : null;
+  const fa_raw = b["first_actions"];
+  let first_actions: string[] = [];
+  if (Array.isArray(fa_raw)) {
+    if (fa_raw.length > FIRST_ACTIONS_MAX) {
+      throw new ApiError(
+        422,
+        "PROMOTION_FAIL",
+        `first_actions exceeds ${FIRST_ACTIONS_MAX} items`,
+        { field: "first_actions" },
+      );
+    }
+    for (let i = 0; i < fa_raw.length; i++) {
+      const item = fa_raw[i];
+      if (typeof item !== "string") {
+        throw new ApiError(
+          422,
+          "PROMOTION_FAIL",
+          `first_actions[${i}] must be a string`,
+          { field: "first_actions" },
+        );
+      }
+      const trimmed = item.trim();
+      if (!trimmed) continue; // drop empty entries silently
+      _validateLine(trimmed, ACTION_MAX, `first_actions[${i}]`);
+      first_actions.push(trimmed);
+    }
+  } else if (fa_raw !== undefined && fa_raw !== null) {
+    throw new ApiError(
+      422,
+      "PROMOTION_FAIL",
+      "first_actions must be an array of strings",
+      { field: "first_actions" },
+    );
+  }
+  return { role, tone, first_actions };
+}
+
+function _renderRulesMd(label: string, role: string | null, tone: string | null): string {
+  return [
+    `# Rules for ${label}`,
+    "",
+    "## Role",
+    role ?? "",
+    "",
+    "## Tone",
+    tone ?? "",
+    "",
+    "<!-- Edit me. These are the standing rules the profile honours when it acts. -->",
+    "",
+  ].join("\n");
+}
+
+function _renderDaybookMd(label: string, first_actions: string[]): string {
+  const lines = [
+    `# Daybook — ${label}`,
+    "",
+    "## First actions",
+  ];
+  for (const a of first_actions) lines.push(`- [ ] ${a}`);
+  lines.push("");
+  lines.push("<!-- The day-one work this profile picks up. Tick as completed. -->");
+  lines.push("");
+  return lines.join("\n");
+}
+
+/**
+ * Write RULES.md / daybook.md into the per-profile dir. Idempotent: existing
+ * files are NOT clobbered. SOUL.md is left to the existing render flow.
+ *
+ * Best-effort writes — failures here do NOT block the registry insert (the
+ * profile dir might not exist yet, e.g. in test harnesses with a fake
+ * HERMES_CONFIG_DIR). We log + continue.
+ */
+function _writeBootstrapFiles(
+  slug: string,
+  label: string,
+  fields: BootstrapFields,
+): void {
+  const profileDir = path.join(HERMES_PROFILE_BASE_DIR(), slug);
+  try {
+    fs.mkdirSync(profileDir, { recursive: true });
+  } catch (err) {
+    console.warn(
+      `[profiles] bootstrap mkdir('${profileDir}') failed:`,
+      err instanceof Error ? err.message : err,
+    );
+    return;
+  }
+  // RULES.md — written iff role OR tone is present.
+  if (fields.role || fields.tone) {
+    const dest = path.join(profileDir, "RULES.md");
+    if (!fs.existsSync(dest)) {
+      try {
+        fs.writeFileSync(dest, _renderRulesMd(label, fields.role, fields.tone), {
+          encoding: "utf-8",
+          mode: 0o644,
+        });
+      } catch (err) {
+        console.warn(
+          `[profiles] bootstrap RULES.md write failed:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }
+  }
+  // daybook.md — written iff first_actions is non-empty.
+  if (fields.first_actions.length > 0) {
+    const dest = path.join(profileDir, "daybook.md");
+    if (!fs.existsSync(dest)) {
+      try {
+        fs.writeFileSync(dest, _renderDaybookMd(label, fields.first_actions), {
+          encoding: "utf-8",
+          mode: 0o644,
+        });
+      } catch (err) {
+        console.warn(
+          `[profiles] bootstrap daybook.md write failed:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }
+  }
+}
+
 // Map a lib-thrown Error to the right ApiError subclass.
 //
 // The library throws plain Error with stable message prefixes; we match on
@@ -242,6 +423,12 @@ export function registerProfileRoutes(): void {
         _classify(err);
       }
 
+      // #206 Q5 — extract + validate bootstrap fields BEFORE the registry
+      // insert. If validation throws 422, the row never lands. Validation
+      // happens here at the route layer (not the lib) because the contract
+      // is HTTP-shape, not DB-shape.
+      const bootstrap = _extractBootstrap(b);
+
       const profile = createProfile(db(), {
         slug,
         label,
@@ -250,6 +437,12 @@ export function registerProfileRoutes(): void {
         persona_template,
         deployment_shape,
       });
+
+      // #206 Q5 — render RULES.md / daybook.md into the profile dir. Best-
+      // effort and skip-if-exists. SOUL.md path is unchanged (Hermes
+      // supervisor consolidates persona_template).
+      _writeBootstrapFiles(slug, label, bootstrap);
+
       // Lane II — write the supervisor registry + nudge Hermes so the new
       // profile dir is rendered and a gateway is launched on the allocated
       // port. Best-effort: if the registry write or the docker kill fails
