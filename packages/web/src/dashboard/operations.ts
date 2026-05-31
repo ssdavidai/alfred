@@ -3499,6 +3499,12 @@ export const createAgentProfile = async (
     description?: string;
     model: string;
     persona_template?: string;
+    // #206 Q5 extension (FIX-CONTRACTS C3): three optional bootstrap
+    // questions that materialize RULES.md + daybook.md on the profile dir.
+    // Lane I owns the file writes server-side.
+    role?: string;
+    tone?: string;
+    first_actions?: string[];
   },
   context: any,
 ): Promise<any> => {
@@ -3509,7 +3515,7 @@ export const createAgentProfile = async (
   if (!slug) throw new HttpError(400, "slug required");
   if (!label) throw new HttpError(400, "label required");
   if (!model) throw new HttpError(400, "model required");
-  const body: Record<string, string> = { slug, label, model };
+  const body: Record<string, unknown> = { slug, label, model };
   if (typeof args?.description === "string" && args.description.trim()) {
     body.description = args.description.trim();
   }
@@ -3518,6 +3524,40 @@ export const createAgentProfile = async (
     args.persona_template.trim()
   ) {
     body.persona_template = args.persona_template;
+  }
+  // #206 Q5: role (≤200, single line), tone (≤64, single line),
+  // first_actions (≤10 items, each ≤200). The op trims + drops empties;
+  // ctrl-api re-validates and returns 422 on over-limit input with `field`.
+  if (typeof args?.role === "string") {
+    const role = args.role.trim().replace(/[\r\n]+/g, " ");
+    if (role.length > 200) {
+      throw new HttpError(422, "role must be 200 chars or fewer");
+    }
+    if (role) body.role = role;
+  }
+  if (typeof args?.tone === "string") {
+    const tone = args.tone.trim().replace(/[\r\n]+/g, " ");
+    if (tone.length > 64) {
+      throw new HttpError(422, "tone must be 64 chars or fewer");
+    }
+    if (tone) body.tone = tone;
+  }
+  if (Array.isArray(args?.first_actions)) {
+    const cleaned = args.first_actions
+      .map((s) => (typeof s === "string" ? s.trim() : ""))
+      .filter((s) => s.length > 0);
+    if (cleaned.length > 10) {
+      throw new HttpError(422, "first_actions must have 10 entries or fewer");
+    }
+    for (const entry of cleaned) {
+      if (entry.length > 200) {
+        throw new HttpError(
+          422,
+          "each first_actions entry must be 200 chars or fewer",
+        );
+      }
+    }
+    if (cleaned.length > 0) body.first_actions = cleaned;
   }
   const instance = await getUserInstance(context);
   return proxyToTenant(instance, {
@@ -4096,6 +4136,188 @@ export const clearProfileVoiceCredentials = async (
     method: "DELETE",
     path: "/api/v1/channels/voice/credentials",
     query: { profile: slug },
+  });
+};
+
+// ── #206 Lane III — per-(profile, channel_kind) display name + avatar ────
+//
+// Three thin ops backing /profiles/:slug Q6 "Avatar + handle" sub-panel
+// (one per binding row). They map onto Lane I's REST surface (C2):
+//
+//   GET    /api/v1/agent-profiles/:slug/channel-identities
+//   PUT    /api/v1/agent-profiles/:slug/channel-identities/:kind  (multipart)
+//   DELETE /api/v1/agent-profiles/:slug/channel-identities/:kind
+//
+// `proxyToTenant` only speaks JSON, so the PUT op assembles a multipart
+// FormData body in Node and hits ctrl-api with `fetch` directly. The
+// browser hands us the avatar as a base64 data URL + filename (Wasp
+// actions are JSON-only too — that's the contract the React layer
+// converts to before calling); we decode here, attach as a Blob, and
+// stream the multipart upstream.
+//
+// Reserved profiles (main|workers|heavy|codex-builder): ctrl-api returns
+// 409 on PUT/DELETE; we surface the message verbatim.
+//
+// `Promise<any>` annotation is REQUIRED — Wasp Payload trap (PRs #139
+// #145 #182 #184 #186 #214 #217). Never replace with a typed return.
+
+const _CHANNEL_KIND_RE = /^[a-z][a-z0-9_-]{0,30}$/;
+const _AVATAR_MAX_BYTES = 2 * 1024 * 1024;
+const _AVATAR_ALLOWED_MIMES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+]);
+
+export const getChannelIdentities = async (
+  args: { slug: string },
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const slug = String(args?.slug ?? "").trim();
+  if (!slug) throw new HttpError(400, "slug required");
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    path: `/api/v1/agent-profiles/${encodeURIComponent(slug)}/channel-identities`,
+  });
+};
+
+export const putChannelIdentity = async (
+  args: {
+    slug: string;
+    channel_kind: string;
+    display_name?: string;
+    // Avatar arrives base64-encoded (data-URL prefix stripped by the
+    // caller) with its filename + mime; the op constructs the
+    // multipart/form-data body. Omit all three to update display_name only.
+    avatar_base64?: string;
+    avatar_filename?: string;
+    avatar_mime?: string;
+  },
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const slug = String(args?.slug ?? "").trim();
+  const channel_kind = String(args?.channel_kind ?? "").trim();
+  if (!slug) throw new HttpError(400, "slug required");
+  if (!_CHANNEL_KIND_RE.test(channel_kind)) {
+    throw new HttpError(400, "channel_kind required");
+  }
+  const display_name =
+    typeof args?.display_name === "string" ? args.display_name : "";
+  const trimmedName = display_name.trim();
+  if (trimmedName.length > 64) {
+    throw new HttpError(422, "display_name must be 64 chars or fewer");
+  }
+  if (/[\r\n]/.test(trimmedName)) {
+    throw new HttpError(422, "display_name must not contain newlines");
+  }
+  const hasAvatar =
+    typeof args?.avatar_base64 === "string" && args.avatar_base64.length > 0;
+  if (!trimmedName && !hasAvatar) {
+    throw new HttpError(400, "display_name or avatar required");
+  }
+
+  // Build multipart/form-data body. The Web FormData API (Node 22's
+  // `globalThis.FormData`) handles the boundary + Content-Type for us
+  // when we hand it to fetch.
+  const form = new FormData();
+  if (trimmedName) form.append("display_name", trimmedName);
+  if (hasAvatar) {
+    const mime =
+      typeof args?.avatar_mime === "string" && args.avatar_mime
+        ? args.avatar_mime
+        : "application/octet-stream";
+    if (!_AVATAR_ALLOWED_MIMES.has(mime)) {
+      throw new HttpError(400, "avatar must be image/png, image/jpeg, or image/webp");
+    }
+    const filename =
+      typeof args?.avatar_filename === "string" && args.avatar_filename
+        ? args.avatar_filename
+        : `avatar.${mime.split("/")[1] || "bin"}`;
+    let buf: Buffer;
+    try {
+      buf = Buffer.from(args.avatar_base64!, "base64");
+    } catch {
+      throw new HttpError(400, "avatar_base64 not valid base64");
+    }
+    if (buf.length === 0) {
+      throw new HttpError(400, "avatar payload empty");
+    }
+    if (buf.length > _AVATAR_MAX_BYTES) {
+      throw new HttpError(400, "avatar exceeds 2 MB");
+    }
+    // Node 22 has Blob in globalThis; FormData copes with Buffer-backed Blobs.
+    const blob = new Blob([buf], { type: mime });
+    form.append("avatar", blob, filename);
+  }
+
+  const CTRL_API_URL =
+    process.env.CTRL_API_URL ?? "http://ctrl-api:3100";
+  const CTRL_API_KEY = process.env.AAS_API_KEY ?? "";
+  if (!CTRL_API_KEY) {
+    throw new HttpError(500, "AAS_API_KEY is not configured");
+  }
+  const url = `${CTRL_API_URL}/api/v1/agent-profiles/${encodeURIComponent(slug)}/channel-identities/${encodeURIComponent(channel_kind)}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 60_000);
+  try {
+    const response = await fetch(url, {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${CTRL_API_KEY}`,
+        // DO NOT set Content-Type — letting fetch derive the boundary from
+        // FormData is the only way the upstream's multipart parser sees a
+        // well-formed body.
+      },
+      body: form,
+      signal: controller.signal,
+    });
+    const ct = response.headers.get("content-type") || "";
+    const text = await response.text();
+    if (!response.ok) {
+      const msg =
+        response.status === 404
+          ? "Profile not found"
+          : response.status === 409
+            ? text?.slice(0, 200) || "Reserved or archived profile"
+            : text?.slice(0, 200) || response.statusText;
+      throw new HttpError(response.status, msg);
+    }
+    if (ct.includes("application/json") && text) {
+      try {
+        return JSON.parse(text);
+      } catch {
+        return { raw: text };
+      }
+    }
+    return text;
+  } catch (err: any) {
+    if (err instanceof HttpError) throw err;
+    if (err?.name === "AbortError") {
+      throw new HttpError(504, "ctrl-api request timed out");
+    }
+    throw new HttpError(502, "Failed to reach the local ctrl-api");
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+export const deleteChannelIdentity = async (
+  args: { slug: string; channel_kind: string },
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const slug = String(args?.slug ?? "").trim();
+  const channel_kind = String(args?.channel_kind ?? "").trim();
+  if (!slug) throw new HttpError(400, "slug required");
+  if (!_CHANNEL_KIND_RE.test(channel_kind)) {
+    throw new HttpError(400, "channel_kind required");
+  }
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "DELETE",
+    path: `/api/v1/agent-profiles/${encodeURIComponent(slug)}/channel-identities/${encodeURIComponent(channel_kind)}`,
   });
 };
 

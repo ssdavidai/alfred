@@ -43,6 +43,10 @@ function deriveSlug(label: string): string {
     .slice(0, 31);
 }
 
+// #206 Q5 — suggested tones (free-text, but show the principal the shapes
+// the team has converged on). The input still accepts anything.
+const TONE_SUGGESTIONS = ["formal", "dry", "warm", "clipped", "blunt"];
+
 export default function ProfileNewPage() {
   const navigate = useNavigate();
   const [label, setLabel] = useState("");
@@ -51,6 +55,12 @@ export default function ProfileNewPage() {
   const [description, setDescription] = useState("");
   const [model, setModel] = useState(MODEL_CHOICES[0].value);
   const [personaTemplate, setPersonaTemplate] = useState("");
+  // #206 Q5 — three optional bootstrap questions that materialize RULES.md
+  // and daybook.md on the profile dir. ctrl-api (Lane I) writes both files
+  // iff the relevant inputs are non-empty; otherwise it skips silently.
+  const [role, setRole] = useState("");
+  const [tone, setTone] = useState("");
+  const [firstActionsRaw, setFirstActionsRaw] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -70,12 +80,24 @@ export default function ProfileNewPage() {
     setSubmitting(true);
     setError(null);
     try {
+      // #206 Q5 — split first_actions on newlines, trim, drop empties.
+      // Cap at 10 lines client-side (server re-validates). Each line is
+      // ≤200 chars; we truncate visually but let ctrl-api be the source
+      // of truth on validation.
+      const firstActions = firstActionsRaw
+        .split(/\r?\n/)
+        .map((s: string) => s.trim())
+        .filter((s: string) => s.length > 0)
+        .slice(0, 10);
       const result = await createAgentProfile({
         slug,
         label: label.trim(),
         model,
         description: description.trim() || undefined,
         persona_template: personaTemplate.trim() || undefined,
+        role: role.trim() || undefined,
+        tone: tone.trim() || undefined,
+        first_actions: firstActions.length > 0 ? firstActions : undefined,
       });
       // ctrl-api returns { profile, note }; profile.slug is what we want.
       const created = (result as any)?.profile;
@@ -241,6 +263,113 @@ export default function ProfileNewPage() {
               className="w-full bg-transparent outline-none border p-3 font-body text-[14px] leading-6"
               style={{ borderColor: "var(--rule)" }}
             />
+          </div>
+
+          {/* #206 Q5: role (optional — seeds RULES.md) */}
+          <div>
+            <label
+              className="block font-mono text-[10px] uppercase tracking-[0.22em] mb-2"
+              style={{ color: "var(--brass)" }}
+            >
+              Role
+              <span
+                className="ml-2 font-body italic normal-case"
+                style={{ color: "var(--marginalia)", letterSpacing: 0 }}
+              >
+                (optional — what does this profile play?)
+              </span>
+            </label>
+            <input
+              value={role}
+              onChange={(e) => setRole(e.target.value)}
+              placeholder="e.g. household bookkeeper"
+              maxLength={200}
+              className="w-full bg-transparent outline-none border-b font-body text-[16px] pb-2"
+              style={{ borderColor: "var(--rule)" }}
+            />
+            <p
+              className="font-body italic text-sm mt-2"
+              style={{ color: "var(--marginalia)" }}
+            >
+              One line; up to 200 characters. Lands in RULES.md.
+            </p>
+          </div>
+
+          {/* #206 Q5: tone (optional — seeds RULES.md) */}
+          <div>
+            <label
+              className="block font-mono text-[10px] uppercase tracking-[0.22em] mb-2"
+              style={{ color: "var(--brass)" }}
+            >
+              Tone
+              <span
+                className="ml-2 font-body italic normal-case"
+                style={{ color: "var(--marginalia)", letterSpacing: 0 }}
+              >
+                (optional — how should it speak?)
+              </span>
+            </label>
+            <input
+              value={tone}
+              onChange={(e) => setTone(e.target.value)}
+              placeholder="e.g. dry"
+              maxLength={64}
+              className="w-full bg-transparent outline-none border-b font-body text-[16px] pb-2"
+              style={{ borderColor: "var(--rule)" }}
+            />
+            <p
+              className="font-body italic text-sm mt-2"
+              style={{ color: "var(--marginalia)" }}
+            >
+              Free text. Suggestions:{" "}
+              {TONE_SUGGESTIONS.map((s: string, i: number) => (
+                <span key={s}>
+                  <button
+                    type="button"
+                    onClick={() => setTone(s)}
+                    className="font-mono text-[12px] underline"
+                    style={{ color: "var(--brass)" }}
+                  >
+                    {s}
+                  </button>
+                  {i < TONE_SUGGESTIONS.length - 1 ? " · " : ""}
+                </span>
+              ))}
+              .
+            </p>
+          </div>
+
+          {/* #206 Q5: first_actions (optional — seeds daybook.md) */}
+          <div>
+            <label
+              className="block font-mono text-[10px] uppercase tracking-[0.22em] mb-2"
+              style={{ color: "var(--brass)" }}
+            >
+              First three things this profile should do
+              <span
+                className="ml-2 font-body italic normal-case"
+                style={{ color: "var(--marginalia)", letterSpacing: 0 }}
+              >
+                (optional — one per line, max 10)
+              </span>
+            </label>
+            <textarea
+              value={firstActionsRaw}
+              onChange={(e) => setFirstActionsRaw(e.target.value)}
+              placeholder={
+                "Reconcile Sunday's grocery receipts against Sure\nFlag any subscription that auto-renewed this week\nDraft the monthly household budget memo"
+              }
+              rows={5}
+              className="w-full bg-transparent outline-none border p-3 font-body text-[14px] leading-6"
+              style={{ borderColor: "var(--rule)" }}
+            />
+            <p
+              className="font-body italic text-sm mt-2"
+              style={{ color: "var(--marginalia)" }}
+            >
+              One per line. Up to 10 lines, 200 characters each. Lands in
+              daybook.md as a ticked checklist.
+            </p>
           </div>
 
           {error && (

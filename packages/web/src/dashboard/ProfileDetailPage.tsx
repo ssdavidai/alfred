@@ -26,6 +26,7 @@ import {
   getAgentProfile,
   getProfileMcp,
   getProfileSkills,
+  getChannelIdentities,
   archiveAgentProfile,
   restoreAgentProfile,
   bindChannelToProfile,
@@ -33,6 +34,8 @@ import {
   addProfileMcp,
   removeProfileMcp,
   setProfileSkillEnabled,
+  putChannelIdentity,
+  deleteChannelIdentity,
 } from "wasp/client/operations";
 import { Frame, PageHeading } from "../client/components/ab/Frame";
 
@@ -73,6 +76,55 @@ interface Binding {
   channel_identity: string | null;
   profile_slug: string;
   created_at: number;
+}
+
+// #206 Q6: existing identity-override row shape from ctrl-api (C2).
+interface ChannelIdentity {
+  channel_kind: string;
+  display_name: string | null;
+  avatar_path: string | null;
+  avatar_mime: string | null;
+  updated_at: string;
+}
+
+// #206 — avatar upload limits enforced client-side. The Wasp op also
+// re-validates after base64-decoding; ctrl-api re-validates once more.
+const AVATAR_MAX_BYTES = 2 * 1024 * 1024;
+const AVATAR_ALLOWED_MIMES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+]);
+
+// Reserved profiles: identity-override is managed by the runtime; the
+// sub-panel is rendered read-only with a note. Mirrors ctrl-api's
+// RESERVED_PROFILE_SLUGS in agentProfiles.ts.
+const RESERVED_PROFILE_SLUGS = new Set([
+  "main",
+  "workers",
+  "heavy",
+  "codex-builder",
+]);
+
+type IdentityDraftRow = { name: string; avatarFile: File | null };
+
+/** Read a File as base64 (no data-URL prefix). */
+function readAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const r = reader.result;
+      if (typeof r !== "string") {
+        reject(new Error("FileReader returned non-string"));
+        return;
+      }
+      // r is a data URL: "data:image/png;base64,…" — strip the prefix.
+      const comma = r.indexOf(",");
+      resolve(comma >= 0 ? r.slice(comma + 1) : r);
+    };
+    reader.onerror = () => reject(reader.error ?? new Error("FileReader failed"));
+    reader.readAsDataURL(file);
+  });
 }
 
 function StatusPill({ status }: { status: ProfileRow["status"] }) {
@@ -178,6 +230,126 @@ export default function ProfileDetailPage() {
   // rather than at the top of the section).
   const [skillBusyName, setSkillBusyName] = useState<string | null>(null);
   const [skillError, setSkillError] = useState<{ name: string; message: string } | null>(null);
+
+  // #206 Q6 — Channel identity overrides (per (profile, channel_kind)).
+  // Loaded once for the profile; pre-fills each sub-panel with any
+  // existing display_name + avatar.
+  const {
+    data: identitiesData,
+    refetch: refetchIdentities,
+  } = useQuery(getChannelIdentities, { slug }, { enabled: !!slug });
+
+  const identities = ((identitiesData as any)?.identities ?? []) as ChannelIdentity[];
+
+  // Per-kind sub-panel state. Edits stay local until Save fires.
+  const [identityDraft, setIdentityDraft] = useState<
+    Record<string, { name: string; avatarFile: File | null }>
+  >({});
+  const [identityBusyKind, setIdentityBusyKind] = useState<string | null>(null);
+  const [identityError, setIdentityError] = useState<{ kind: string; message: string } | null>(null);
+
+  function setKindName(kind: string, name: string) {
+    setIdentityDraft((d: Record<string, IdentityDraftRow>) => ({
+      ...d,
+      [kind]: { name, avatarFile: d[kind]?.avatarFile ?? null },
+    }));
+  }
+  function setKindFile(kind: string, file: File | null) {
+    setIdentityDraft((d: Record<string, IdentityDraftRow>) => ({
+      ...d,
+      [kind]: { name: d[kind]?.name ?? "", avatarFile: file },
+    }));
+  }
+
+  async function onSaveIdentity(kind: string) {
+    if (!slug || identityBusyKind) return;
+    const draft = identityDraft[kind];
+    const existing = identities.find((i) => i.channel_kind === kind);
+    // If user didn't touch the draft, fall back to existing display_name.
+    const name =
+      draft?.name !== undefined
+        ? draft.name
+        : (existing?.display_name ?? "");
+    const file = draft?.avatarFile ?? null;
+    const trimmed = name.trim();
+    if (!trimmed && !file) {
+      setIdentityError({
+        kind,
+        message: "Set a display name or upload an avatar.",
+      });
+      return;
+    }
+    if (trimmed.length > 64) {
+      setIdentityError({
+        kind,
+        message: "Display name must be 64 chars or fewer.",
+      });
+      return;
+    }
+    if (file) {
+      if (!AVATAR_ALLOWED_MIMES.has(file.type)) {
+        setIdentityError({
+          kind,
+          message: "Avatar must be PNG, JPEG, or WebP.",
+        });
+        return;
+      }
+      if (file.size > AVATAR_MAX_BYTES) {
+        setIdentityError({ kind, message: "Avatar exceeds 2 MB." });
+        return;
+      }
+    }
+    setIdentityBusyKind(kind);
+    setIdentityError(null);
+    try {
+      const payload: any = {
+        slug,
+        channel_kind: kind,
+      };
+      if (trimmed) payload.display_name = trimmed;
+      if (file) {
+        payload.avatar_base64 = await readAsBase64(file);
+        payload.avatar_filename = file.name;
+        payload.avatar_mime = file.type;
+      }
+      await putChannelIdentity(payload);
+      setIdentityDraft((d: Record<string, IdentityDraftRow>) => {
+        const next = { ...d };
+        delete next[kind];
+        return next;
+      });
+      await refetchIdentities();
+    } catch (e: any) {
+      setIdentityError({
+        kind,
+        message: String(e?.message || e || "Couldn't save the identity."),
+      });
+    } finally {
+      setIdentityBusyKind(null);
+    }
+  }
+
+  async function onRevertIdentity(kind: string) {
+    if (!slug || identityBusyKind) return;
+    setIdentityBusyKind(kind);
+    setIdentityError(null);
+    try {
+      await deleteChannelIdentity({ slug, channel_kind: kind });
+      setIdentityDraft((d: Record<string, IdentityDraftRow>) => {
+        const next = { ...d };
+        delete next[kind];
+        return next;
+      });
+      await refetchIdentities();
+    } catch (e: any) {
+      setIdentityError({
+        kind,
+        message: String(e?.message || e || "Couldn't revert the identity."),
+      });
+    } finally {
+      setIdentityBusyKind(null);
+    }
+  }
 
   async function onToggleSkill(name: string, currentEnabled: boolean) {
     if (!slug || skillBusyName) return;
@@ -456,55 +628,197 @@ export default function ProfileDetailPage() {
 
           {bindings.length > 0 && (
             <div className="border-t border-rule mb-6">
-              {Object.entries(groupedBindings).map(([kind, rows]) => (
-                <div
-                  key={kind}
-                  className="py-4 border-b border-rule grid grid-cols-[120px_1fr_auto] items-center gap-4"
-                >
-                  <div
-                    className="font-mono text-[10px] uppercase tracking-[0.22em]"
-                    style={{ color: "var(--brass)" }}
-                  >
-                    {kind}
-                  </div>
-                  <div className="space-y-1">
-                    {rows.map((b) => (
+              {Object.entries(groupedBindings).map(([kind, rows]) => {
+                // #206 Q6 — identity sub-panel state. The existing
+                // override (if any) pre-fills both inputs; the draft
+                // takes precedence once the principal types.
+                const existing = identities.find((i) => i.channel_kind === kind);
+                const draft = identityDraft[kind];
+                const isReserved = RESERVED_PROFILE_SLUGS.has(profile.slug);
+                const nameValue =
+                  draft?.name !== undefined
+                    ? draft.name
+                    : (existing?.display_name ?? "");
+                const isBusy = identityBusyKind === kind;
+                const rowErr =
+                  identityError?.kind === kind ? identityError.message : null;
+                const previewFile = draft?.avatarFile ?? null;
+                const previewUrl = previewFile
+                  ? URL.createObjectURL(previewFile)
+                  : null;
+                return (
+                  <div key={kind} className="py-4 border-b border-rule">
+                    <div className="grid grid-cols-[120px_1fr_auto] items-center gap-4">
                       <div
-                        key={b.id}
-                        className="flex items-center gap-3 font-mono text-[12px]"
+                        className="font-mono text-[10px] uppercase tracking-[0.22em]"
+                        style={{ color: "var(--brass)" }}
                       >
-                        <span>
-                          {b.channel_identity || (
-                            <em style={{ color: "var(--marginalia)" }}>
-                              default (every {kind})
-                            </em>
-                          )}
-                        </span>
-                        {b.id.startsWith("binding-default-") ? (
-                          <span
-                            className="font-mono text-[10px] uppercase tracking-[0.18em] px-1.5"
-                            style={{
-                              color: "var(--marginalia)",
-                              border: "1px solid var(--rule)",
-                            }}
+                        {kind}
+                      </div>
+                      <div className="space-y-1">
+                        {rows.map((b) => (
+                          <div
+                            key={b.id}
+                            className="flex items-center gap-3 font-mono text-[12px]"
                           >
-                            default
-                          </span>
-                        ) : (
-                          <button
-                            onClick={() => onUnbind(b.id)}
-                            className="font-mono text-[10px] uppercase tracking-[0.18em]"
+                            <span>
+                              {b.channel_identity || (
+                                <em style={{ color: "var(--marginalia)" }}>
+                                  default (every {kind})
+                                </em>
+                              )}
+                            </span>
+                            {b.id.startsWith("binding-default-") ? (
+                              <span
+                                className="font-mono text-[10px] uppercase tracking-[0.18em] px-1.5"
+                                style={{
+                                  color: "var(--marginalia)",
+                                  border: "1px solid var(--rule)",
+                                }}
+                              >
+                                default
+                              </span>
+                            ) : (
+                              <button
+                                onClick={() => onUnbind(b.id)}
+                                className="font-mono text-[10px] uppercase tracking-[0.18em]"
+                                style={{ color: "#B85C5C" }}
+                              >
+                                Unbind
+                              </button>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                      <div />
+                    </div>
+
+                    {/* #206 Q6 — Avatar + handle sub-panel */}
+                    {isReserved ? (
+                      <div
+                        className="mt-3 ml-[120px] font-body italic text-sm"
+                        style={{ color: "var(--marginalia)" }}
+                      >
+                        Reserved profile — identity managed by the runtime.
+                      </div>
+                    ) : (
+                      <div
+                        className="mt-3 ml-[120px] border-l-2 pl-4 py-2"
+                        style={{ borderColor: "var(--rule)" }}
+                      >
+                        <div
+                          className="font-mono text-[10px] uppercase tracking-[0.18em] mb-2"
+                          style={{ color: "var(--marginalia)" }}
+                        >
+                          Avatar + handle
+                          {existing && (
+                            <span className="ml-2 normal-case italic">
+                              · override active
+                            </span>
+                          )}
+                        </div>
+                        <div className="grid grid-cols-1 md:grid-cols-[1fr_1fr_auto] gap-3 items-end">
+                          <div>
+                            <label
+                              className="font-mono text-[10px] uppercase tracking-[0.18em] block mb-1"
+                              style={{ color: "var(--marginalia)" }}
+                            >
+                              Display name
+                            </label>
+                            <input
+                              value={nameValue}
+                              maxLength={64}
+                              onChange={(e) => setKindName(kind, e.target.value)}
+                              placeholder="e.g. Cratchit"
+                              className="w-full bg-transparent outline-none border-b font-body text-[14px] pb-1"
+                              style={{ borderColor: "var(--brass)" }}
+                            />
+                          </div>
+                          <div>
+                            <label
+                              className="font-mono text-[10px] uppercase tracking-[0.18em] block mb-1"
+                              style={{ color: "var(--marginalia)" }}
+                            >
+                              Avatar (≤2 MB · png/jpeg/webp)
+                            </label>
+                            <div className="flex items-center gap-2">
+                              {previewUrl && (
+                                <img
+                                  src={previewUrl}
+                                  alt=""
+                                  className="w-8 h-8 object-cover border"
+                                  style={{ borderColor: "var(--rule)" }}
+                                />
+                              )}
+                              {!previewUrl && existing?.avatar_path && (
+                                <span
+                                  className="font-mono text-[10px]"
+                                  style={{ color: "var(--marginalia)" }}
+                                  title={existing.avatar_path}
+                                >
+                                  current: {existing.avatar_mime || "image"}
+                                </span>
+                              )}
+                              <input
+                                type="file"
+                                accept="image/png,image/jpeg,image/webp"
+                                onChange={(e) => {
+                                  const f = e.target.files?.[0] ?? null;
+                                  setKindFile(kind, f);
+                                }}
+                                className="font-mono text-[11px]"
+                              />
+                            </div>
+                            {previewFile && (
+                              <div
+                                className="font-mono text-[10px] mt-1"
+                                style={{ color: "var(--marginalia)" }}
+                              >
+                                {previewFile.name} · {Math.round(previewFile.size / 1024)} KB
+                              </div>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={() => onSaveIdentity(kind)}
+                              disabled={isBusy}
+                              className="btn-brass"
+                              style={{
+                                opacity: isBusy ? 0.5 : 1,
+                                padding: "4px 10px",
+                                fontSize: 11,
+                              }}
+                            >
+                              {isBusy ? "Saving…" : "Save"}
+                            </button>
+                            {existing && (
+                              <button
+                                onClick={() => onRevertIdentity(kind)}
+                                disabled={isBusy}
+                                className="font-mono text-[10px] uppercase tracking-[0.18em]"
+                                style={{
+                                  color: "#B85C5C",
+                                  opacity: isBusy ? 0.5 : 1,
+                                }}
+                              >
+                                Revert to default
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                        {rowErr && (
+                          <div
+                            className="mt-2 font-body italic text-sm"
                             style={{ color: "#B85C5C" }}
                           >
-                            Unbind
-                          </button>
+                            {rowErr}
+                          </div>
                         )}
                       </div>
-                    ))}
+                    )}
                   </div>
-                  <div />
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
 

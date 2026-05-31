@@ -1286,6 +1286,28 @@ action setProfileSkillEnabled {
   entities: []
 }
 
+// #206 Lane III — per-(profile, channel_kind) display name + avatar overrides.
+// One query + two actions. The PUT action carries an avatar payload as
+// base64 + filename + mime (Wasp args are JSON-only); the operation
+// constructs multipart/form-data server-side before forwarding to
+// ctrl-api. `entities: []` — the canonical row is `channel_identity` in
+// ctrl-api's state.db (C1 contract); the SaaS layer never reads it
+// directly, only via these ops.
+query getChannelIdentities {
+  fn: import { getChannelIdentities } from "@src/dashboard/operations",
+  entities: []
+}
+
+action putChannelIdentity {
+  fn: import { putChannelIdentity } from "@src/dashboard/operations",
+  entities: []
+}
+
+action deleteChannelIdentity {
+  fn: import { deleteChannelIdentity } from "@src/dashboard/operations",
+  entities: []
+}
+
 // #120 Lane V — per-profile FULL channels surface ops.
 //
 // The three consolidator ops the /profiles/:slug/channels page wires up. They
