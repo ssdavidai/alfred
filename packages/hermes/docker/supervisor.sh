@@ -550,9 +550,16 @@ probe_and_notify() {
     while (( waited < 60 )); do
         if curl -fsS --max-time 2 "http://127.0.0.1:${port}/health" >/dev/null 2>&1; then
             log "probe: '${slug}' /health OK on :${port} after ${waited}s"
+            # ctrl-api authenticates with AAS_API_KEY (64-char value), NOT
+            # the gateway token (/alfred-data/.gateway-token is the 43-char
+            # API_SERVER_KEY for the Hermes gateways themselves, a different
+            # surface). The init container renders AAS_API_KEY into each
+            # profile's .env (hermes-profile.env.njk). Read main's copy so
+            # the supervisor can talk to ctrl-api without taking a dep on
+            # the gateway-token surface.
             local token=""
-            if [[ -r /alfred-data/.gateway-token ]]; then
-                token="$(tr -d '[:space:]' < /alfred-data/.gateway-token)"
+            if [[ -r "${PROFILES_DIR}/main/.env" ]]; then
+                token="$(grep -E '^AAS_API_KEY=' "${PROFILES_DIR}/main/.env" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '[:space:]' | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")"
             fi
             if [[ -n "$token" ]]; then
                 if curl -fsS --max-time 5 \
@@ -567,7 +574,7 @@ probe_and_notify() {
                     log "probe: WARN ctrl-api status notify failed for '${slug}' — registry row stays at last value"
                 fi
             else
-                log "probe: WARN /alfred-data/.gateway-token unreadable — skipping ctrl-api notify for '${slug}'"
+                log "probe: WARN AAS_API_KEY not in main/.env — skipping ctrl-api notify for '${slug}'"
             fi
             return 0
         fi
