@@ -17,6 +17,10 @@
 //   POST   /api/v1/agent-profiles/:slug/bindings
 //   DELETE /api/v1/agent-profiles/:slug/bindings/:binding_id
 //
+//   GET    /api/v1/admin/profiles/:slug/mcp                (#204 Lane I)
+//   POST   /api/v1/admin/profiles/:slug/mcp                (#204 Lane I)
+//   DELETE /api/v1/admin/profiles/:slug/mcp/:name          (#204 Lane I)
+//
 // POST returns 202 Accepted (not 201) because the Hermes-side activation is
 // deferred to Lane II — the registry row writes immediately but no gateway
 // is started yet. Lane II flips status from 'pending' to 'running'.
@@ -29,6 +33,9 @@
 // (not in the lib) means Lane II/IV callers can catch and inspect the raw
 // helper errors without a `statusCode` shim.
 
+import fs from "node:fs";
+import path from "node:path";
+import yaml from "js-yaml";
 import { addRoute } from "../server.js";
 import {
   sendJson,
@@ -42,6 +49,8 @@ import {
   PORT_RANGE_USER_LO,
   PORT_RANGE_USER_HI,
   KNOWN_CHANNEL_KINDS,
+  RESERVED_SLUGS,
+  HERMES_PROFILE_BASE_DIR,
   validateSlug,
   listAllProfiles,
   listUserProfiles,
@@ -440,6 +449,250 @@ export function registerProfileRoutes(): void {
         if (!profile) throw new NotFoundError(`profile '${slug}' not found`);
         unbindChannel(db(), params.binding_id);
         sendJson(res, 200, { ok: true, binding_id: params.binding_id });
+      } catch (err) {
+        _classify(err);
+      }
+    },
+  );
+
+  // ─────────────────────────────────────────────────────────────
+  // Per-profile MCP catalog (#204 Lane I — C1 contract)
+  //
+  // Source of truth: each profile's config.yaml `mcp_servers` block
+  // (same volume the hermes runtime reads). We read/write directly via
+  // the filesystem rather than the CLI because `hermes mcp` has no
+  // `-p <slug>` flag and `hermes mcp add` is interactive (prompts).
+  //
+  // Reserved profiles: GET is read-only and works on all slugs.
+  //                    POST and DELETE refuse reserved slugs → 409.
+  // ─────────────────────────────────────────────────────────────
+
+  /** Resolved path to a profile's config.yaml (via the ctrl-api volume view). */
+  function profileConfigPath(slug: string): string {
+    return path.join(HERMES_PROFILE_BASE_DIR(), slug, "config.yaml");
+  }
+
+  /** Load + parse a profile config.yaml. Returns {} if unreadable. */
+  function loadProfileConfig(slug: string): Record<string, unknown> {
+    try {
+      const raw = fs.readFileSync(profileConfigPath(slug), "utf-8");
+      const parsed = yaml.load(raw);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      /* unreadable / unparseable — caller handles {} */
+    }
+    return {};
+  }
+
+  /**
+   * Derive the canonical wire shape for one mcp_servers entry.
+   * The config.yaml block can be null (disabled), or an object with
+   * optional `command`/`args`/`url`/`enabled` fields — we normalise to
+   * the C1 contract shape.
+   */
+  function _mcpServerShape(
+    name: string,
+    block: unknown,
+  ): { name: string; type: "stdio" | "http"; command_or_url: string; enabled: boolean } {
+    if (!block || typeof block !== "object" || Array.isArray(block)) {
+      // null / disabled block — show as stdio placeholder
+      return { name, type: "stdio", command_or_url: "", enabled: false };
+    }
+    const b = block as Record<string, unknown>;
+    const hasUrl = typeof b["url"] === "string" && (b["url"] as string).trim();
+    const type: "stdio" | "http" = hasUrl ? "http" : "stdio";
+    let command_or_url = "";
+    if (hasUrl) {
+      command_or_url = (b["url"] as string).trim();
+    } else if (typeof b["command"] === "string") {
+      const args =
+        Array.isArray(b["args"])
+          ? (b["args"] as string[]).join(" ")
+          : "";
+      command_or_url = args
+        ? `${(b["command"] as string).trim()} ${args}`.trimEnd()
+        : (b["command"] as string).trim();
+    }
+    // `enabled` is true by default; null block or explicit `enabled: false` disables.
+    const enabled = b["enabled"] !== false;
+    return { name, type, command_or_url, enabled };
+  }
+
+  /** MCP server name must be a safe identifier (no shell injection). */
+  const MCP_NAME_RE = /^[a-z][a-z0-9_-]{0,40}$/;
+
+  // GET /api/v1/admin/profiles/:slug/mcp
+  addRoute(
+    "GET",
+    "/api/v1/admin/profiles/:slug/mcp",
+    async ({ res, params }) => {
+      try {
+        const slug = params.slug;
+        const profile = getProfile(db(), slug);
+        if (!profile) throw new NotFoundError(`profile '${slug}' not found`);
+
+        const cfg = loadProfileConfig(slug);
+        const rawServers = (cfg["mcp_servers"] ?? {}) as Record<string, unknown>;
+        const servers = Object.entries(rawServers).map(([name, block]) =>
+          _mcpServerShape(name, block),
+        );
+
+        sendJson(res, 200, {
+          slug,
+          reserved: RESERVED_SLUGS.has(slug),
+          servers,
+        });
+      } catch (err) {
+        _classify(err);
+      }
+    },
+  );
+
+  // POST /api/v1/admin/profiles/:slug/mcp
+  addRoute(
+    "POST",
+    "/api/v1/admin/profiles/:slug/mcp",
+    async ({ res, params, body }) => {
+      try {
+        const slug = params.slug;
+        if (RESERVED_SLUGS.has(slug)) {
+          throw new ConflictError("reserved_profile");
+        }
+        const profile = getProfile(db(), slug);
+        if (!profile) throw new NotFoundError(`profile '${slug}' not found`);
+
+        const b = asObj(body);
+        const name = reqStr(b, "name");
+        if (!MCP_NAME_RE.test(name)) {
+          throw new ValidationError(
+            "name must match ^[a-z][a-z0-9_-]{0,40}$ (lowercase, start with letter)",
+          );
+        }
+        const url = optStr(b, "url");
+        const command = optStr(b, "command");
+        if (url && command) {
+          throw new ValidationError("provide url OR command, not both");
+        }
+        if (!url && !command) {
+          throw new ValidationError("one of url or command is required");
+        }
+        const auth_header = optStr(b, "auth_header");
+        const auth_value = optStr(b, "auth_value");
+
+        // Load existing config and add / replace the server entry.
+        const cfgPath = profileConfigPath(slug);
+        let cfg: Record<string, unknown> = {};
+        let rawYaml = "";
+        try {
+          rawYaml = fs.readFileSync(cfgPath, "utf-8");
+          const parsed = yaml.load(rawYaml);
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            cfg = parsed as Record<string, unknown>;
+          }
+        } catch {
+          /* config doesn't exist yet — start fresh */
+        }
+
+        // Build the new server block.
+        const newBlock: Record<string, unknown> = {};
+        if (url) {
+          newBlock["url"] = url;
+          if (auth_header && auth_value) {
+            newBlock["auth"] = {
+              type: "header",
+              header: auth_header,
+              value: auth_value,
+            };
+          }
+        } else {
+          // stdio: split command string on spaces for args
+          const parts = (command as string).trim().split(/\s+/);
+          newBlock["command"] = parts[0];
+          if (parts.length > 1) {
+            newBlock["args"] = parts.slice(1);
+          }
+        }
+
+        if (!cfg["mcp_servers"] || typeof cfg["mcp_servers"] !== "object") {
+          cfg["mcp_servers"] = {};
+        }
+        (cfg["mcp_servers"] as Record<string, unknown>)[name] = newBlock;
+
+        // Atomic write — yaml.dump + rename.
+        const newYaml = yaml.dump(cfg, { lineWidth: 120, quotingType: '"' });
+        const tmpPath = cfgPath + ".tmp";
+        fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
+        fs.writeFileSync(tmpPath, newYaml, { encoding: "utf-8", mode: 0o644 });
+        fs.renameSync(tmpPath, cfgPath);
+
+        // Nudge the supervisor so the profile's gateway picks up the new server.
+        try {
+          nudgeHermesSupervisor();
+        } catch (err) {
+          console.warn(
+            `[profiles/mcp] supervisor nudge after add('${slug}/${name}') failed:`,
+            err instanceof Error ? err.message : err,
+          );
+        }
+
+        sendJson(res, 201, { ok: true, name });
+      } catch (err) {
+        _classify(err);
+      }
+    },
+  );
+
+  // DELETE /api/v1/admin/profiles/:slug/mcp/:name
+  addRoute(
+    "DELETE",
+    "/api/v1/admin/profiles/:slug/mcp/:name",
+    async ({ res, params }) => {
+      try {
+        const slug = params.slug;
+        if (RESERVED_SLUGS.has(slug)) {
+          throw new ConflictError("reserved_profile");
+        }
+        const profile = getProfile(db(), slug);
+        if (!profile) throw new NotFoundError(`profile '${slug}' not found`);
+
+        const name = params.name;
+        const cfgPath = profileConfigPath(slug);
+        let cfg: Record<string, unknown> = {};
+        try {
+          const raw = fs.readFileSync(cfgPath, "utf-8");
+          const parsed = yaml.load(raw);
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            cfg = parsed as Record<string, unknown>;
+          }
+        } catch {
+          throw new NotFoundError(`profile '${slug}' has no config (config.yaml unreadable)`);
+        }
+
+        const servers = cfg["mcp_servers"] as Record<string, unknown> | undefined;
+        if (!servers || !(name in servers)) {
+          throw new NotFoundError(`MCP server '${name}' not found in profile '${slug}'`);
+        }
+        delete servers[name];
+        cfg["mcp_servers"] = servers;
+
+        const newYaml = yaml.dump(cfg, { lineWidth: 120, quotingType: '"' });
+        const tmpPath = cfgPath + ".tmp";
+        fs.writeFileSync(tmpPath, newYaml, { encoding: "utf-8", mode: 0o644 });
+        fs.renameSync(tmpPath, cfgPath);
+
+        // Nudge supervisor.
+        try {
+          nudgeHermesSupervisor();
+        } catch (err) {
+          console.warn(
+            `[profiles/mcp] supervisor nudge after remove('${slug}/${name}') failed:`,
+            err instanceof Error ? err.message : err,
+          );
+        }
+
+        sendJson(res, 200, { ok: true });
       } catch (err) {
         _classify(err);
       }
