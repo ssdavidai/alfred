@@ -71,6 +71,7 @@ import { registerAlfredJournalRoutes } from "./routes/alfredJournal.js";
 import { registerAlfredDeliverRoutes } from "./routes/alfredDeliver.js";
 import { registerFilesRoutes } from "./routes/files.js";
 import { registerChannelsTailscaleRoutes } from "./routes/channels_tailscale.js";
+import { registerProfileRoutes } from "./routes/profiles.js";
 
 export interface RouteParams {
   [key: string]: string;
@@ -235,6 +236,10 @@ export function createApiServer(): http.Server {
   // PR 3 wires the /connections web card; PR 4 the Caddy + Serve story.
   // See docs/specs/issue-109-tailscale-via-ui.md.
   registerChannelsTailscaleRoutes();
+  // Multi-profile Hermes registry (#120 Lane I). Registry-only — no
+  // Hermes-side activation yet (Lane II); no channel-route rewiring (Lane IV).
+  // See packages/ctrl/src/db/migrations/0017_agent_profiles.sql.
+  registerProfileRoutes();
 
   const server = http.createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const start = Date.now();

@@ -1,0 +1,491 @@
+// agentProfiles — multi-profile Hermes registry helpers (#120 Lane I).
+//
+// Backed by the `agent_profile` + `channel_profile_binding` tables added in
+// 0017_agent_profiles.sql. Pure DB lib — no HTTP, no fs, no docker exec. The
+// HTTP surface (routes/profiles.ts) is the only place that translates these
+// helper errors into ApiError statuses; everything else (Lane II supervisor,
+// Lane IV channel routes) calls these helpers directly.
+//
+// Port-allocation rule (Contract 2 in /tmp/orchestrator-120-contracts.md):
+//   * 18789..18793 are RESERVED for the four infra profiles (seeded in the
+//     migration; allocator never touches them).
+//   * 18794..18799 (six slots) are user-facing. allocateUserPort returns the
+//     lowest free port; createProfile rejects when the range is exhausted.
+//
+// Slug rule:
+//   * `^[a-z][a-z0-9-]{1,30}$` — kebab-case, 2..31 chars.
+//   * Reserved set rejects 'main' / 'workers' / 'heavy' / 'codex-builder'
+//     (the seeded infra rows; user must rename to override) plus operational
+//     hot-words ('init', 'system', 'admin', 'root', 'default') so a future
+//     surface that takes a slug as a path segment cannot collide.
+//
+// Reserved-profile guard:
+//   * is_reserved=1 rows cannot be archived. The DB schema does not enforce
+//     this (a stray UPDATE could still flip archived_at); the contract is
+//     "all writes go through archiveProfile / setProfileStatus".
+//
+// Default-binding guard:
+//   * Binding ids starting with 'binding-default-' are the per-kind defaults
+//     seeded by the migration. unbindChannel refuses to delete them so the
+//     fallback table never has a hole. The principal CAN rebind the default
+//     (via bindChannel with channel_identity=null and the same kind), which
+//     UPSERTs the existing row rather than inserting a new one.
+import type { DatabaseSync } from "node:sqlite";
+import { ulid } from "./ulid.js";
+
+export const PORT_RANGE_USER_LO = 18794;
+export const PORT_RANGE_USER_HI = 18799;
+
+export const RESERVED_SLUGS: ReadonlySet<string> = new Set([
+  "main",
+  "workers",
+  "heavy",
+  "codex-builder",
+  "init",
+  "system",
+  "admin",
+  "root",
+  "default",
+]);
+
+export const KNOWN_CHANNEL_KINDS: ReadonlySet<string> = new Set([
+  "telegram",
+  "slack",
+  "sms",
+  "email",
+  "paperclip",
+  "terminal",
+  "voice",
+  "ha",
+  "omi",
+  "recall",
+  "tailscale",
+]);
+
+export type ProfileStatus = "pending" | "running" | "stopped" | "archived";
+export type DeploymentShape = "supervised" | "sibling";
+
+export interface AgentProfile {
+  slug: string;
+  label: string;
+  description: string | null;
+  model: string;
+  deployment_shape: DeploymentShape;
+  api_server_port: number;
+  persona_template: string | null;
+  status: ProfileStatus;
+  is_user_facing: boolean;
+  is_reserved: boolean;
+  created_at: number;
+  updated_at: number;
+  archived_at: number | null;
+}
+
+export interface ChannelProfileBinding {
+  id: string;
+  channel_kind: string;
+  channel_identity: string | null;
+  profile_slug: string;
+  created_at: number;
+}
+
+export interface CreateProfileInput {
+  slug: string;
+  label: string;
+  description?: string | null;
+  model: string;
+  persona_template?: string | null;
+  deployment_shape?: DeploymentShape;
+}
+
+const _SLUG_RE = /^[a-z][a-z0-9-]{1,30}$/;
+
+interface ProfileRow {
+  slug: string;
+  label: string;
+  description: string | null;
+  model: string;
+  deployment_shape: string;
+  api_server_port: number;
+  persona_template: string | null;
+  status: string;
+  is_user_facing: number;
+  is_reserved: number;
+  created_at: number;
+  updated_at: number;
+  archived_at: number | null;
+}
+
+interface BindingRow {
+  id: string;
+  channel_kind: string;
+  channel_identity: string | null;
+  profile_slug: string;
+  created_at: number;
+}
+
+function _row2profile(r: ProfileRow): AgentProfile {
+  return {
+    slug: r.slug,
+    label: r.label,
+    description: r.description,
+    model: r.model,
+    deployment_shape: r.deployment_shape as DeploymentShape,
+    api_server_port: r.api_server_port,
+    persona_template: r.persona_template,
+    status: r.status as ProfileStatus,
+    is_user_facing: r.is_user_facing === 1,
+    is_reserved: r.is_reserved === 1,
+    created_at: r.created_at,
+    updated_at: r.updated_at,
+    archived_at: r.archived_at,
+  };
+}
+
+function _row2binding(r: BindingRow): ChannelProfileBinding {
+  return {
+    id: r.id,
+    channel_kind: r.channel_kind,
+    channel_identity: r.channel_identity,
+    profile_slug: r.profile_slug,
+    created_at: r.created_at,
+  };
+}
+
+export function validateSlug(slug: unknown): string {
+  if (typeof slug !== "string") {
+    throw new Error("slug must be a string");
+  }
+  if (!_SLUG_RE.test(slug)) {
+    throw new Error(
+      `slug must match ${_SLUG_RE.source} (lowercase alnum + hyphens; 2..31 chars; must start with a letter)`,
+    );
+  }
+  if (RESERVED_SLUGS.has(slug)) {
+    throw new Error(`slug '${slug}' is reserved`);
+  }
+  return slug;
+}
+
+export function listAllProfiles(db: DatabaseSync): AgentProfile[] {
+  const rows = db
+    .prepare(
+      `SELECT slug, label, description, model, deployment_shape,
+              api_server_port, persona_template, status,
+              is_user_facing, is_reserved,
+              created_at, updated_at, archived_at
+       FROM agent_profile
+       ORDER BY is_reserved DESC, api_server_port ASC`,
+    )
+    .all() as ProfileRow[];
+  return rows.map(_row2profile);
+}
+
+export function listUserProfiles(db: DatabaseSync): AgentProfile[] {
+  const rows = db
+    .prepare(
+      `SELECT slug, label, description, model, deployment_shape,
+              api_server_port, persona_template, status,
+              is_user_facing, is_reserved,
+              created_at, updated_at, archived_at
+       FROM agent_profile
+       WHERE is_user_facing = 1 AND archived_at IS NULL
+       ORDER BY is_reserved DESC, api_server_port ASC`,
+    )
+    .all() as ProfileRow[];
+  return rows.map(_row2profile);
+}
+
+export function getProfile(db: DatabaseSync, slug: string): AgentProfile | null {
+  const row = db
+    .prepare(
+      `SELECT slug, label, description, model, deployment_shape,
+              api_server_port, persona_template, status,
+              is_user_facing, is_reserved,
+              created_at, updated_at, archived_at
+       FROM agent_profile
+       WHERE slug = ?`,
+    )
+    .get(slug) as ProfileRow | undefined;
+  return row ? _row2profile(row) : null;
+}
+
+// Lowest unused port in 18794..18799 among rows where archived_at IS NULL.
+// Returns null when the range is exhausted.
+export function allocateUserPort(db: DatabaseSync): number | null {
+  const used = new Set<number>(
+    (db
+      .prepare(
+        `SELECT api_server_port FROM agent_profile
+         WHERE archived_at IS NULL
+           AND api_server_port BETWEEN ? AND ?`,
+      )
+      .all(PORT_RANGE_USER_LO, PORT_RANGE_USER_HI) as { api_server_port: number }[]).map(
+      (r) => r.api_server_port,
+    ),
+  );
+  for (let p = PORT_RANGE_USER_LO; p <= PORT_RANGE_USER_HI; p++) {
+    if (!used.has(p)) return p;
+  }
+  return null;
+}
+
+export function createProfile(db: DatabaseSync, input: CreateProfileInput): AgentProfile {
+  // Slug + reserved-set check.
+  const slug = validateSlug(input.slug);
+
+  if (typeof input.label !== "string" || !input.label.trim()) {
+    throw new Error("label (non-empty string) is required");
+  }
+  if (typeof input.model !== "string" || !input.model.trim()) {
+    throw new Error("model (non-empty string) is required");
+  }
+  const shape: DeploymentShape = input.deployment_shape ?? "supervised";
+  if (shape !== "supervised") {
+    // v1 only writes 'supervised'. Sibling-container profiles are registered
+    // out-of-band in Lane VI (Joe's pre-existing cratchit) and the registry
+    // row is inserted there directly, not via this API.
+    throw new Error(
+      `deployment_shape '${shape}' not supported in v1 (sibling-container profiles must be registered via Lane VI's tooling)`,
+    );
+  }
+
+  // Duplicate slug — explicit check beats catching the SQLite UNIQUE error
+  // because we want the message to be route-classifiable as a 409.
+  const existing = db
+    .prepare("SELECT slug FROM agent_profile WHERE slug = ?")
+    .get(slug);
+  if (existing) {
+    throw new Error(`slug '${slug}' already exists`);
+  }
+
+  const port = allocateUserPort(db);
+  if (port == null) {
+    throw new Error(
+      `no free user-facing port (range ${PORT_RANGE_USER_LO}..${PORT_RANGE_USER_HI} exhausted; max 6 user profiles per tenant)`,
+    );
+  }
+
+  const now = Date.now();
+  db.prepare(
+    `INSERT INTO agent_profile
+       (slug, label, description, model, deployment_shape,
+        api_server_port, persona_template, status,
+        is_user_facing, is_reserved,
+        created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 1, 0, ?, ?)`,
+  ).run(
+    slug,
+    input.label.trim(),
+    input.description?.trim() || null,
+    input.model.trim(),
+    shape,
+    port,
+    input.persona_template ?? null,
+    now,
+    now,
+  );
+
+  const created = getProfile(db, slug);
+  if (!created) {
+    // The INSERT above just succeeded; this branch is "should never happen".
+    throw new Error(`profile '${slug}' not found after insert`);
+  }
+  return created;
+}
+
+export function archiveProfile(db: DatabaseSync, slug: string): AgentProfile {
+  const p = getProfile(db, slug);
+  if (!p) throw new Error(`profile '${slug}' not found`);
+  if (p.is_reserved) {
+    throw new Error(`profile '${slug}' is reserved and cannot be archived`);
+  }
+  if (p.archived_at != null) {
+    // Idempotent — already archived.
+    return p;
+  }
+  const now = Date.now();
+  db.prepare(
+    `UPDATE agent_profile
+       SET status = 'archived', archived_at = ?, updated_at = ?
+     WHERE slug = ?`,
+  ).run(now, now, slug);
+  const after = getProfile(db, slug);
+  if (!after) throw new Error(`profile '${slug}' not found after archive`);
+  return after;
+}
+
+export function setProfileStatus(
+  db: DatabaseSync,
+  slug: string,
+  status: ProfileStatus,
+): AgentProfile {
+  const p = getProfile(db, slug);
+  if (!p) throw new Error(`profile '${slug}' not found`);
+  if (status === "archived") {
+    // Channel through archiveProfile so archived_at gets stamped too.
+    return archiveProfile(db, slug);
+  }
+  const now = Date.now();
+  db.prepare(
+    `UPDATE agent_profile
+       SET status = ?, updated_at = ?
+     WHERE slug = ?`,
+  ).run(status, now, slug);
+  const after = getProfile(db, slug);
+  if (!after) throw new Error(`profile '${slug}' not found after status flip`);
+  return after;
+}
+
+export function listBindingsForProfile(
+  db: DatabaseSync,
+  slug: string,
+): ChannelProfileBinding[] {
+  const rows = db
+    .prepare(
+      `SELECT id, channel_kind, channel_identity, profile_slug, created_at
+       FROM channel_profile_binding
+       WHERE profile_slug = ?
+       ORDER BY channel_kind, channel_identity NULLS FIRST`,
+    )
+    .all(slug) as BindingRow[];
+  return rows.map(_row2binding);
+}
+
+export function listAllBindings(db: DatabaseSync): ChannelProfileBinding[] {
+  const rows = db
+    .prepare(
+      `SELECT id, channel_kind, channel_identity, profile_slug, created_at
+       FROM channel_profile_binding
+       ORDER BY channel_kind, channel_identity NULLS FIRST`,
+    )
+    .all() as BindingRow[];
+  return rows.map(_row2binding);
+}
+
+// Resolve precedence (the runtime read every Lane IV route will use):
+//   1. exact match on (channel_kind, channel_identity) — operator-set binding.
+//   2. default (channel_kind, NULL) — the per-kind fallback seeded by the
+//      migration; can be rebound but never deleted.
+//   3. 'main' — hard fallback. The migration seeds a default for every
+//      KNOWN_CHANNEL_KIND, so this branch is only hit for unknown kinds.
+export function resolveProfileForChannel(
+  db: DatabaseSync,
+  channel_kind: string,
+  channel_identity: string | null,
+): string {
+  if (channel_identity != null) {
+    const exact = db
+      .prepare(
+        `SELECT profile_slug FROM channel_profile_binding
+         WHERE channel_kind = ? AND channel_identity = ?`,
+      )
+      .get(channel_kind, channel_identity) as { profile_slug: string } | undefined;
+    if (exact) return exact.profile_slug;
+  }
+  const def = db
+    .prepare(
+      `SELECT profile_slug FROM channel_profile_binding
+       WHERE channel_kind = ? AND channel_identity IS NULL`,
+    )
+    .get(channel_kind) as { profile_slug: string } | undefined;
+  if (def) return def.profile_slug;
+  return "main";
+}
+
+export function bindChannel(
+  db: DatabaseSync,
+  args: {
+    channel_kind: string;
+    channel_identity: string | null;
+    profile_slug: string;
+  },
+): ChannelProfileBinding {
+  if (typeof args.channel_kind !== "string" || !args.channel_kind.trim()) {
+    throw new Error("channel_kind (non-empty string) is required");
+  }
+  if (!KNOWN_CHANNEL_KINDS.has(args.channel_kind)) {
+    throw new Error(
+      `channel_kind '${args.channel_kind}' is not a known channel (allowed: ${[...KNOWN_CHANNEL_KINDS].join(", ")})`,
+    );
+  }
+  if (typeof args.profile_slug !== "string" || !args.profile_slug.trim()) {
+    throw new Error("profile_slug (non-empty string) is required");
+  }
+  const target = getProfile(db, args.profile_slug);
+  if (!target) {
+    throw new Error(`profile '${args.profile_slug}' not found`);
+  }
+  if (target.archived_at != null) {
+    throw new Error(
+      `profile '${args.profile_slug}' is archived and cannot accept new bindings`,
+    );
+  }
+
+  const identity = args.channel_identity?.trim() || null;
+  const now = Date.now();
+
+  // UPSERT on (channel_kind, channel_identity). NULL is "default" so the
+  // ON CONFLICT clause hits the (kind, NULL) unique index just like a real
+  // identity would. We reuse the existing id (including the
+  // 'binding-default-*' ids the migration seeded) so the unbind guard
+  // keeps working after a rebind.
+  const existing = db
+    .prepare(
+      `SELECT id FROM channel_profile_binding
+       WHERE channel_kind = ? AND ((? IS NULL AND channel_identity IS NULL) OR channel_identity = ?)`,
+    )
+    .get(args.channel_kind, identity, identity) as { id: string } | undefined;
+
+  if (existing) {
+    db.prepare(
+      `UPDATE channel_profile_binding
+         SET profile_slug = ?
+       WHERE id = ?`,
+    ).run(args.profile_slug, existing.id);
+    const row = db
+      .prepare(
+        `SELECT id, channel_kind, channel_identity, profile_slug, created_at
+         FROM channel_profile_binding
+         WHERE id = ?`,
+      )
+      .get(existing.id) as BindingRow;
+    return _row2binding(row);
+  }
+
+  const id = ulid();
+  db.prepare(
+    `INSERT INTO channel_profile_binding
+       (id, channel_kind, channel_identity, profile_slug, created_at)
+     VALUES (?, ?, ?, ?, ?)`,
+  ).run(id, args.channel_kind, identity, args.profile_slug, now);
+
+  const row = db
+    .prepare(
+      `SELECT id, channel_kind, channel_identity, profile_slug, created_at
+       FROM channel_profile_binding
+       WHERE id = ?`,
+    )
+    .get(id) as BindingRow;
+  return _row2binding(row);
+}
+
+export function unbindChannel(db: DatabaseSync, id: string): void {
+  if (typeof id !== "string" || !id.trim()) {
+    throw new Error("binding id (non-empty string) is required");
+  }
+  if (id.startsWith("binding-default-")) {
+    // The per-kind defaults must always exist so resolveProfileForChannel
+    // never falls off the end. Rebind them via bindChannel instead.
+    throw new Error(
+      `binding '${id}' is a default and cannot be unbound (rebind it via POST /:slug/bindings instead)`,
+    );
+  }
+  const row = db
+    .prepare("SELECT id FROM channel_profile_binding WHERE id = ?")
+    .get(id);
+  if (!row) {
+    throw new Error(`binding '${id}' not found`);
+  }
+  db.prepare("DELETE FROM channel_profile_binding WHERE id = ?").run(id);
+}

@@ -36,16 +36,17 @@ describe("state.db migration runner", () => {
     const db = new DatabaseSync(":memory:");
     db.exec(schema);
     const v = runMigrations(db);
-    // Latest version moves as new migrations land. Today: 16
+    // Latest version moves as new migrations land. Today: 17
     // (0001_fix_pack + 0002_alfred_journal + 0003_tailscale_connection
     // + 0004_channel_tokens + 0005_ha_channel + 0006_files_table
     // + 0007_recall + 0008_ha_event_subscription
     // + 0009_ha_registry_vanished + 0010_files_cold_archive
     // + 0011_ha_tier4 + 0012_ha_integration_ref_removed_at
     // + 0013_recall_realtime + 0014_tool_disposition
-    // + 0015_composio_user_defaults + 0016_files_extraction).
-    assert.equal(v, 16, "migrated to latest version");
-    assert.equal(userVersion(db), 16);
+    // + 0015_composio_user_defaults + 0016_files_extraction
+    // + 0017_agent_profiles).
+    assert.equal(v, 17, "migrated to latest version");
+    assert.equal(userVersion(db), 17);
     assert.ok(cols(db, "observation").includes("processed_at"), "0001: processed_at present after migrate");
     // 0002: alfred_journal + alfred_principal tables present.
     const tables = (
@@ -262,6 +263,59 @@ describe("state.db migration runner", () => {
       );
     }
 
+    // 0017: agent_profile + channel_profile_binding tables present, the
+    // four reserved infra rows seeded, the per-channel-kind default
+    // bindings seeded, and channel_tokens.profile_slug column added
+    // (#120 Lane I).
+    assert.ok(
+      tables.includes("agent_profile"),
+      "0017: agent_profile table created",
+    );
+    assert.ok(
+      tables.includes("channel_profile_binding"),
+      "0017: channel_profile_binding table created",
+    );
+    const reservedSlugs = (
+      db
+        .prepare(
+          "SELECT slug FROM agent_profile WHERE is_reserved = 1 ORDER BY slug",
+        )
+        .all() as { slug: string }[]
+    ).map((r) => r.slug);
+    assert.deepEqual(
+      reservedSlugs,
+      ["codex-builder", "heavy", "main", "workers"],
+      "0017: four reserved infra profiles seeded",
+    );
+    const defaultBindingKinds = (
+      db
+        .prepare(
+          "SELECT channel_kind FROM channel_profile_binding WHERE id LIKE 'binding-default-%' ORDER BY channel_kind",
+        )
+        .all() as { channel_kind: string }[]
+    ).map((r) => r.channel_kind);
+    assert.deepEqual(
+      defaultBindingKinds,
+      [
+        "email",
+        "ha",
+        "omi",
+        "paperclip",
+        "recall",
+        "slack",
+        "sms",
+        "tailscale",
+        "telegram",
+        "terminal",
+        "voice",
+      ],
+      "0017: per-channel-kind default bindings seeded",
+    );
+    assert.ok(
+      cols(db, "channel_tokens").includes("profile_slug"),
+      "0017: channel_tokens.profile_slug column added",
+    );
+
     db.close();
   });
 
@@ -270,7 +324,7 @@ describe("state.db migration runner", () => {
     db.exec(schema);
     runMigrations(db);
     const v2 = runMigrations(db);
-    assert.equal(v2, 16);
+    assert.equal(v2, 17);
     assert.equal(
       cols(db, "observation").filter((c) => c === "processed_at").length,
       1,
