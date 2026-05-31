@@ -17,6 +17,11 @@
 //   POST   /api/v1/agent-profiles/:slug/bindings
 //   DELETE /api/v1/agent-profiles/:slug/bindings/:binding_id
 //
+// Per-profile MCP catalog (#204 Lane I):
+//   GET    /api/v1/admin/profiles/:slug/mcp
+//   POST   /api/v1/admin/profiles/:slug/mcp
+//   DELETE /api/v1/admin/profiles/:slug/mcp/:name
+//
 // POST returns 202 Accepted (not 201) because the Hermes-side activation is
 // deferred to Lane II — the registry row writes immediately but no gateway
 // is started yet. Lane II flips status from 'pending' to 'running'.
@@ -29,6 +34,8 @@
 // (not in the lib) means Lane II/IV callers can catch and inspect the raw
 // helper errors without a `statusCode` shim.
 
+import fs from "node:fs";
+import yaml from "js-yaml";
 import { addRoute } from "../server.js";
 import {
   sendJson,
@@ -38,6 +45,12 @@ import {
   ApiError,
 } from "../errors.js";
 import { getStateDb } from "../../db/state.js";
+import {
+  dockerExec,
+  dockerExecWithStdin,
+  HERMES_CMD,
+  HERMES_CONTAINER,
+} from "../helpers.js";
 import {
   PORT_RANGE_USER_LO,
   PORT_RANGE_USER_HI,
@@ -445,4 +458,244 @@ export function registerProfileRoutes(): void {
       }
     },
   );
+
+  // ─────────────────────────────────────────────────────────────
+  // Per-profile MCP catalog (#204 Lane I)
+  //
+  // Reserved profiles (main/workers/heavy/codex-builder) → 409 on mutations.
+  // Source of truth for list: the profile's config.yaml under
+  // /hermes-state/profiles/<slug>/config.yaml (same volume mount the hermes
+  // route already reads for main). The CLI path (`hermes mcp list -p <slug>`)
+  // is tried first; config.yaml is the fallback when hermes is not reachable.
+  // ─────────────────────────────────────────────────────────────
+
+  // GET /api/v1/admin/profiles/:slug/mcp
+  // Returns the MCP server list for the profile. Shape:
+  //   { slug, reserved, servers: [{name, type, command_or_url, enabled}] }
+  addRoute(
+    "GET",
+    "/api/v1/admin/profiles/:slug/mcp",
+    async ({ res, params }) => {
+      try {
+        const slug = params.slug;
+        const profile = getProfile(db(), slug);
+        if (!profile) {
+          throw new NotFoundError(`profile '${slug}' not found`);
+        }
+        const reserved = profile.is_reserved;
+
+        // Try hermes mcp list -p <slug> --json. Parse JSON if it works.
+        // Fall back to reading config.yaml from the shared hermes_data volume.
+        let servers: McpServer[] = [];
+        let source: "cli" | "config" = "cli";
+        try {
+          const stdout = await dockerExec(HERMES_CONTAINER, [
+            ...HERMES_CMD,
+            "mcp",
+            "list",
+            "-p",
+            slug,
+            "--json",
+          ]);
+          servers = _parseMcpListJson(stdout);
+        } catch {
+          // CLI unavailable or flag unsupported — read config.yaml directly.
+          source = "config";
+          servers = _readMcpFromConfig(slug);
+        }
+
+        sendJson(res, 200, { slug, reserved, servers, source });
+      } catch (err) {
+        _classify(err);
+      }
+    },
+  );
+
+  // POST /api/v1/admin/profiles/:slug/mcp
+  // Body: { name, url?, command?, auth_header?, auth_value? }
+  // Adds via `hermes mcp add -p <slug> …` + gateway reload.
+  // Reserved profiles → 409.
+  addRoute(
+    "POST",
+    "/api/v1/admin/profiles/:slug/mcp",
+    async ({ res, params, body }) => {
+      try {
+        const slug = params.slug;
+        const profile = getProfile(db(), slug);
+        if (!profile) throw new NotFoundError(`profile '${slug}' not found`);
+        if (profile.is_reserved) {
+          throw new ConflictError("reserved_profile");
+        }
+
+        const b = asObj(body);
+        const name = reqStr(b, "name");
+        const url = optStr(b, "url");
+        const command = optStr(b, "command");
+
+        if (!url && !command) {
+          throw new ValidationError("url or command is required");
+        }
+        if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
+          throw new ValidationError("name must be alphanumeric/dash/underscore");
+        }
+
+        // Build the `hermes mcp add -p <slug> <name> <url|command> [args]` call.
+        // hermes mcp add prompts "Enable all tools? [y/N]" — pipe "y\ny\n" via stdin.
+        const addArgs: string[] = [
+          ...HERMES_CMD,
+          "mcp",
+          "add",
+          "-p",
+          slug,
+          name,
+        ];
+        if (url) {
+          addArgs.push("--transport", "http", url);
+          const authHeader = optStr(b, "auth_header");
+          const authValue = optStr(b, "auth_value");
+          if (authHeader && authValue) {
+            addArgs.push("--header", `${authHeader}: ${authValue}`);
+          }
+        } else if (command) {
+          // stdio: hermes mcp add -p <slug> <name> --transport stdio <command>
+          addArgs.push("--transport", "stdio", command);
+        }
+
+        await dockerExecWithStdin(
+          HERMES_CONTAINER,
+          addArgs,
+          "y\ny\n",
+          30_000,
+        );
+
+        // Reload the gateway for this profile. nudgeHermesSupervisor sends
+        // SIGUSR1 which causes the supervisor to reconcile — the profile's
+        // hermes gateway picks up the updated config.yaml within ~30s.
+        try {
+          nudgeHermesSupervisor();
+        } catch {
+          // best-effort — the mcp add already landed in config.yaml
+        }
+
+        sendJson(res, 201, { ok: true, name });
+      } catch (err) {
+        _classify(err);
+      }
+    },
+  );
+
+  // DELETE /api/v1/admin/profiles/:slug/mcp/:name
+  // Removes via `hermes mcp remove -p <slug> <name>` + gateway reload.
+  // Reserved profiles → 409.
+  addRoute(
+    "DELETE",
+    "/api/v1/admin/profiles/:slug/mcp/:name",
+    async ({ res, params }) => {
+      try {
+        const slug = params.slug;
+        const name = params.name;
+        const profile = getProfile(db(), slug);
+        if (!profile) throw new NotFoundError(`profile '${slug}' not found`);
+        if (profile.is_reserved) {
+          throw new ConflictError("reserved_profile");
+        }
+
+        await dockerExec(HERMES_CONTAINER, [
+          ...HERMES_CMD,
+          "mcp",
+          "remove",
+          "-p",
+          slug,
+          name,
+        ]);
+
+        // Reload gateway.
+        try {
+          nudgeHermesSupervisor();
+        } catch {
+          // best-effort
+        }
+
+        sendJson(res, 200, { ok: true });
+      } catch (err) {
+        _classify(err);
+      }
+    },
+  );
+}
+
+// ── MCP catalog helpers ─────────────────────────────────────────────────────
+
+export interface McpServer {
+  name: string;
+  type: "stdio" | "http" | "unknown";
+  command_or_url: string;
+  enabled: boolean;
+}
+
+// Parse `hermes mcp list -p <slug> --json` output.
+// The CLI either returns a JSON array of server objects, or a single JSON
+// object. Defensively fall back to empty on any parse error.
+export function _parseMcpListJson(raw: string): McpServer[] {
+  const trimmed = raw.trim();
+  if (!trimmed) return [];
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (Array.isArray(parsed)) {
+      // CLI returns [{name, transport, command, ...}, ...]
+      return parsed.map((item: any) => ({
+        name: String(item.name ?? item.id ?? "unknown"),
+        type: _normalizeType(item.type ?? item.transport),
+        command_or_url: String(
+          item.command ?? item.url ?? item.command_or_url ?? "",
+        ),
+        enabled: item.enabled !== false,
+      }));
+    } else if (parsed && typeof parsed === "object") {
+      // CLI returns {"sure": {transport, command, ...}, ...} — key is the name
+      return Object.entries(parsed).map(([name, def]: [string, any]) => ({
+        name,
+        type: _normalizeType(def?.type ?? def?.transport),
+        command_or_url: String(def?.command ?? def?.url ?? def?.command_or_url ?? ""),
+        enabled: def?.enabled !== false,
+      }));
+    }
+    return [];
+  } catch {
+    return [];
+  }
+}
+
+// Read MCP servers from the profile's config.yaml in the hermes_data volume.
+// Path: /hermes-state/profiles/<slug>/config.yaml (same as the main-profile
+// path the hermes route reads; controlled by HERMES_CONFIG_DIR env override
+// for tests).
+const HERMES_PROFILE_CONFIG_DIR =
+  process.env.HERMES_CONFIG_DIR ?? "/hermes-state/profiles";
+
+export function _readMcpFromConfig(slug: string): McpServer[] {
+  const configPath = `${HERMES_PROFILE_CONFIG_DIR}/${slug}/config.yaml`;
+  try {
+    const parsed = yaml.load(fs.readFileSync(configPath, "utf-8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return [];
+    }
+    const cfg = parsed as Record<string, any>;
+    const mcpServers = cfg["mcp_servers"];
+    if (!mcpServers || typeof mcpServers !== "object") return [];
+    return Object.entries(mcpServers).map(([name, def]: [string, any]) => ({
+      name,
+      type: _normalizeType(def?.transport ?? def?.type),
+      command_or_url: String(def?.command ?? def?.url ?? ""),
+      enabled: def?.enabled !== false,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+function _normalizeType(raw: unknown): "stdio" | "http" | "unknown" {
+  if (raw === "stdio") return "stdio";
+  if (raw === "http" || raw === "https") return "http";
+  return "unknown";
 }
