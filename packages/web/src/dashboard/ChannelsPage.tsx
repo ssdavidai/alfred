@@ -861,9 +861,10 @@ function GeneratedKeyReveal({
   );
 }
 
-type ChannelStatus = "active" | "available" | "soon" | "starting" | "error";
+// Exported for re-use in /profiles/:slug/channels (#120 Lane V).
+export type ChannelStatus = "active" | "available" | "soon" | "starting" | "error";
 
-function ChannelCard({
+export function ChannelCard({
   name,
   address,
   note,

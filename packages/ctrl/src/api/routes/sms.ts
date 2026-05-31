@@ -43,7 +43,12 @@ import {
   HERMES_CONTAINER,
 } from "../helpers.js";
 import { getStateDb } from "../../db/state.js";
-import { resolveProfileForChannel } from "../../db/agentProfiles.js";
+import {
+  resolveProfileForChannel,
+  assertWritableProfile,
+} from "../../db/agentProfiles.js";
+import { appendAudit } from "./state.js";
+import { restartProfile } from "../../hermes/supervisor.js";
 
 const VAULT_CLI_URL = process.env.VAULT_CLI_URL || "http://vault-cli:8087";
 const HERMES_HOME =
@@ -76,6 +81,24 @@ function resolveSmsProfile(query?: URLSearchParams): SmsProfilePaths {
 const VAULT_SID_ITEM_NAME = "Twilio Account SID";
 const VAULT_TOKEN_ITEM_NAME = "Twilio Auth Token";
 const VAULT_PHONE_ITEM_NAME = "Twilio Phone Number";
+
+// #120 Lane V — per-profile vault item naming. Main keeps the bare names
+// for back-compat; non-main profiles use the suffix shape so each profile's
+// Twilio creds are distinct Vaultwarden records.
+function smsVaultItemNames(slug: string): { sid: string; token: string; phone: string } {
+  if (slug === "main") {
+    return {
+      sid: VAULT_SID_ITEM_NAME,
+      token: VAULT_TOKEN_ITEM_NAME,
+      phone: VAULT_PHONE_ITEM_NAME,
+    };
+  }
+  return {
+    sid: `${VAULT_SID_ITEM_NAME} · ${slug}`,
+    token: `${VAULT_TOKEN_ITEM_NAME} · ${slug}`,
+    phone: `${VAULT_PHONE_ITEM_NAME} · ${slug}`,
+  };
+}
 
 // Twilio canonical shapes:
 //   Account SID: "AC" + 32 lowercase hex chars (Twilio's docs are explicit).
@@ -686,6 +709,11 @@ export function registerSmsRoutes(): void {
     "/api/v1/channels/sms/credentials",
     async ({ res, body, query }) => {
       const paths = resolveSmsProfile(query);
+      try {
+        assertWritableProfile(getStateDb(), paths.profileSlug);
+      } catch (e) {
+        throw new ValidationError(e instanceof Error ? e.message : String(e));
+      }
     const b = (body ?? {}) as Record<string, unknown>;
 
     const sid = typeof b.account_sid === "string" ? b.account_sid.trim() : "";
@@ -737,9 +765,10 @@ export function registerSmsRoutes(): void {
 
     // Vaultwarden = canonical store. All three items must succeed before we
     // touch the .env so a vault outage doesn't leave the .env half-saved.
-    await upsertVaultItem(VAULT_SID_ITEM_NAME, sid);
-    await upsertVaultItem(VAULT_TOKEN_ITEM_NAME, token);
-    await upsertVaultItem(VAULT_PHONE_ITEM_NAME, phone);
+    const itemNames = smsVaultItemNames(paths.profileSlug);
+    await upsertVaultItem(itemNames.sid, sid);
+    await upsertVaultItem(itemNames.token, token);
+    await upsertVaultItem(itemNames.phone, phone);
 
     const updates: Partial<Record<SmsEnvKey, string | null>> = {
       TWILIO_ACCOUNT_SID: sid,
@@ -758,10 +787,28 @@ export function registerSmsRoutes(): void {
       updates.SMS_ALLOWED_USERS = allowedUsers;
     }
       await writeProfileEnvKeys(paths, updates);
+      appendAudit({
+        action_type: "channel_token_set",
+        actor: "principal",
+        source: "channels/sms/credentials",
+        target_path: "channels/sms/credentials",
+        target_kind: "channel",
+        subject_ref: paths.profileSlug,
+        summary: `SMS credentials set on profile '${paths.profileSlug}'`,
+        payload: { profile_slug: paths.profileSlug, channel_kind: "sms" },
+      });
       // Drop the probe cache so /status reflects the new creds immediately.
       _accountProbeCache = null;
-      restartHermes();
-      sendJson(res, 200, { ok: true, state: "configured_starting" });
+      const restart = restartProfile(paths.profileSlug, {
+        allowComposeFallback: true,
+      });
+      sendJson(res, 200, {
+        ok: true,
+        state: "configured_starting",
+        profile: paths.profileSlug,
+        restart_scope: restart.scope,
+        restart_warning: restart.warning,
+      });
     },
   );
 
@@ -771,18 +818,42 @@ export function registerSmsRoutes(): void {
     "/api/v1/channels/sms/credentials",
     async ({ res, query }) => {
       const paths = resolveSmsProfile(query);
-      await deleteVaultItem(VAULT_SID_ITEM_NAME);
-      await deleteVaultItem(VAULT_TOKEN_ITEM_NAME);
-      await deleteVaultItem(VAULT_PHONE_ITEM_NAME);
+      try {
+        assertWritableProfile(getStateDb(), paths.profileSlug);
+      } catch (e) {
+        throw new ValidationError(e instanceof Error ? e.message : String(e));
+      }
+      const itemNames = smsVaultItemNames(paths.profileSlug);
+      await deleteVaultItem(itemNames.sid);
+      await deleteVaultItem(itemNames.token);
+      await deleteVaultItem(itemNames.phone);
       await writeProfileEnvKeys(paths, {
         TWILIO_ACCOUNT_SID: null,
         TWILIO_AUTH_TOKEN: null,
         TWILIO_PHONE_NUMBER: null,
         SMS_ALLOWED_USERS: null,
       });
+      appendAudit({
+        action_type: "channel_token_cleared",
+        actor: "principal",
+        source: "channels/sms/credentials",
+        target_path: "channels/sms/credentials",
+        target_kind: "channel",
+        subject_ref: paths.profileSlug,
+        summary: `SMS credentials cleared on profile '${paths.profileSlug}'`,
+        payload: { profile_slug: paths.profileSlug, channel_kind: "sms" },
+      });
       _accountProbeCache = null;
-      restartHermes();
-      sendJson(res, 200, { ok: true, state: "unconfigured" });
+      const restart = restartProfile(paths.profileSlug, {
+        allowComposeFallback: true,
+      });
+      sendJson(res, 200, {
+        ok: true,
+        state: "unconfigured",
+        profile: paths.profileSlug,
+        restart_scope: restart.scope,
+        restart_warning: restart.warning,
+      });
     },
   );
 

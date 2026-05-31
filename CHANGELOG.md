@@ -7,6 +7,32 @@ and the `alfred-vault` package adheres to [Semantic Versioning](https://semver.o
 
 ## [2026-05-31]
 
+**Lane V** (this release) lands the per-profile FULL channels surface.
+Until tonight, the new `/profiles/:slug` page from Lane III could bind a
+channel to a profile (the inbound side — "this Telegram chat speaks to
+Sentinel") but had no way to configure the OUTBOUND credentials per
+profile. The bot token, Slack workspace, Twilio creds and Paperclip key
+all lived in main's `.env`; a second profile spoke to its own channels
+through main's tokens. Lane V closes the loop: every per-profile-aware
+channel route on ctrl-api now writes to `/hermes-state/profiles/<slug>/
+.env` (Lane IV gave the routes the `?profile=<slug>` query, this lane
+adds `assertWritableProfile` validation + per-profile Vaultwarden item
+names + scoped restarts + audit-row mirroring), and a new
+`/profiles/:slug/channels` page renders one card per per-profile
+channel with explicit "for <slug>" copy, plus an honest "configured on
+/channels" notice for the five channels that are still single-instance
+by design (voice-bridge sibling, OMI device, HA household, Recall
+account, AgentMail inbox). One new ctrl-api helper —
+`restartProfile(slug)` — drops a per-profile flag-file under the
+profile's dir so the supervisor can scope its respawn to one gateway; on
+fallback it logs the wider scope via `restart_scope: 'compose-restart'`
+in the API response so the UI surfaces the warning. Three new Wasp ops
+(`getProfileChannelStatuses`, `setProfileChannelToken`,
+`clearProfileChannelToken`) consolidate the per-kind operations so the
+page can fetch all four in one round-trip. References #120 (which Lane
+III closed). 9 new helper unit tests; existing telegram/slack/sms/
+paperclip route tests still green.
+
 Alfred Black becomes a **household of personas**, not just one butler.
 Until tonight, Hermes ran exactly four sealed profiles that the
 principal could neither name nor manage from the dashboard — `main`

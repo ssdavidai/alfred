@@ -323,6 +323,18 @@ page ProfileDetailPage {
   component: import ProfileDetailPage from "@src/dashboard/ProfileDetailPage"
 }
 
+// /profiles/:slug/channels — per-profile FULL channels surface (#120 Lane V).
+// Renders every profile-aware channel card (Telegram / Slack / SMS /
+// Paperclip) scoped to one profile slug. Instance-level channels (Voice /
+// OMI / HA / Recall / Email / Tailscale / Terminal) render an honest
+// "configured on /channels" notice — see ProfileChannelsPage.tsx for the
+// reasons.
+route ProfileChannelsRoute { path: "/profiles/:slug/channels", to: ProfileChannelsPage }
+page ProfileChannelsPage {
+  authRequired: true,
+  component: import ProfileChannelsPage from "@src/dashboard/ProfileChannelsPage"
+}
+
 // /chat — the dashboard chat surface (#29). Replaces the OpenClaw raw
 // WebSocket widget; talks to the Hermes runtime over HTTP/SSE via the
 // chat proxy registered in src/server/setup.ts.
@@ -1236,6 +1248,27 @@ action bindChannelToProfile {
 
 action unbindChannelFromProfile {
   fn: import { unbindChannelFromProfile } from "@src/dashboard/operations",
+  entities: []
+}
+
+// #120 Lane V — per-profile FULL channels surface ops.
+//
+// The three consolidator ops the /profiles/:slug/channels page wires up. They
+// route through Lane IV's ?profile=<slug> shape on ctrl-api so each profile
+// has its own Telegram / Slack / SMS / Paperclip credentials.
+
+query getProfileChannelStatuses {
+  fn: import { getProfileChannelStatuses } from "@src/dashboard/operations",
+  entities: []
+}
+
+action setProfileChannelToken {
+  fn: import { setProfileChannelToken } from "@src/dashboard/operations",
+  entities: []
+}
+
+action clearProfileChannelToken {
+  fn: import { clearProfileChannelToken } from "@src/dashboard/operations",
   entities: []
 }
 

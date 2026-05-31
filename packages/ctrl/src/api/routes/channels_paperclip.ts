@@ -58,8 +58,11 @@ import { getStateDb } from "../../db/state.js";
 import { appendJournal } from "../../db/alfredJournal.js";
 import {
   resolveProfileContextForChannel,
+  resolveProfileForChannel,
   type ProfileChannelContext,
 } from "../../db/agentProfiles.js";
+import { appendAudit } from "./state.js";
+import { restartProfile } from "../../hermes/supervisor.js";
 
 // Legacy default base URL for the main profile. Used as a fallback when the
 // profile registry hasn't been seeded (should not happen post-Lane-I) and
@@ -998,12 +1001,25 @@ export function registerPaperclipChannelRoutes(): void {
   addRoute(
     "POST",
     "/api/v1/channels/paperclip/api-key",
-    async ({ res, body }) => {
+    async ({ res, body, query }) => {
       const b = (body ?? {}) as { api_key?: unknown };
       if (typeof b.api_key !== "string" || !b.api_key.trim()) {
         throw new ValidationError("api_key (string) is required");
       }
       const key = b.api_key.trim();
+      // #120 Lane V — per-profile binding. ?profile=<slug> targets that
+      // profile's .env; default = main (back-compat with existing UI).
+      const profileSlug =
+        query?.get("profile")?.trim() ||
+        resolveProfileForChannel(getStateDb(), "paperclip", null);
+      try {
+        const { assertWritableProfile: assertWritable } = await import(
+          "../../db/agentProfiles.js"
+        );
+        assertWritable(getStateDb(), profileSlug);
+      } catch (e) {
+        throw new ValidationError(e instanceof Error ? e.message : String(e));
+      }
       // Validate by round-tripping against Paperclip /api/companies.
       const host = `paperclip.${
         process.env.DOMAIN ?? process.env.TENANT_DOMAIN ?? "alfred.black"
@@ -1071,33 +1087,60 @@ export function registerPaperclipChannelRoutes(): void {
           mode: 0o600,
         });
       }
-      // 1. /opt/alfred/.env (durable)
-      upsertEnvKey("/srv/alfred-black/.env", "PAPERCLIP_API_KEY", key);
-      // 2. /hermes-state/profiles/main/.env (immediate)
+      // 1. /opt/alfred/.env (durable) — only for main, so the compose env
+      //    keeps a single PAPERCLIP_API_KEY when only main is configured.
+      //    Non-main profiles only write their per-profile .env so they
+      //    don't clobber Main's durable value.
+      if (profileSlug === "main") {
+        upsertEnvKey("/srv/alfred-black/.env", "PAPERCLIP_API_KEY", key);
+      }
+      // 2. /hermes-state/profiles/<slug>/.env (immediate)
       upsertEnvKey(
-        `${process.env.HERMES_CONFIG_DIR ?? "/hermes-state/profiles"}/main/.env`,
+        `${process.env.HERMES_CONFIG_DIR ?? "/hermes-state/profiles"}/${profileSlug}/.env`,
         "PAPERCLIP_API_KEY",
         key,
       );
-      // 3. process.env in this container so subsequent /status calls see
-      //    the new key without a restart.
-      process.env.PAPERCLIP_API_KEY = key;
-      // 4. Kick hermes-main's gateway process so the paperclip MCP server
-      //    re-spawns with the new key. Best-effort — if docker exec fails
-      //    (e.g. socket unmounted in dev), the principal can restart hermes
-      //    manually. We do not block on this.
-      try {
-        const { execSync } = await import("node:child_process");
-        execSync(
-          `docker exec alfred-black-hermes-1 pkill -f "main gateway run" || true`,
-          { stdio: "ignore", timeout: 5000 },
-        );
-      } catch {
-        /* best-effort */
+      // 3. process.env in this container — only for main; non-main
+      //    profiles have their own per-profile .env that the gateway reads
+      //    at boot. Updating process.env here would falsely report the
+      //    secondary profile's key on /status?profile=main.
+      if (profileSlug === "main") {
+        process.env.PAPERCLIP_API_KEY = key;
+      }
+      // 4. Audit row.
+      appendAudit({
+        action_type: "channel_token_set",
+        actor: "principal",
+        source: "channels/paperclip/api-key",
+        target_path: "channels/paperclip/api-key",
+        target_kind: "channel",
+        subject_ref: profileSlug,
+        summary: `Paperclip API key set on profile '${profileSlug}'`,
+        payload: { profile_slug: profileSlug, channel_kind: "paperclip" },
+      });
+      // 5. Scoped restart for the target profile.
+      const restart = restartProfile(profileSlug, {
+        allowComposeFallback: true,
+      });
+      // Best-effort kick of the gateway process (back-compat path used by
+      // existing main-profile tenants — same shape Lane III used).
+      if (profileSlug === "main") {
+        try {
+          const { execSync } = await import("node:child_process");
+          execSync(
+            `docker exec alfred-black-hermes-1 pkill -f "main gateway run" || true`,
+            { stdio: "ignore", timeout: 5000 },
+          );
+        } catch {
+          /* best-effort */
+        }
       }
       sendJson(res, 200, {
         ok: true,
         setup_state: "configured" as PaperclipSetupState,
+        profile: profileSlug,
+        restart_scope: restart.scope,
+        restart_warning: restart.warning,
       });
     },
   );

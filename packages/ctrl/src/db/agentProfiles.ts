@@ -689,6 +689,54 @@ export function resolveProfileContextForChannel(
   };
 }
 
+// #120 Lane V — channel-route helpers.
+//
+// `resolveProfileEnvPath(slug)` returns the per-profile .env path that channel
+// routes write to. ALWAYS goes through HERMES_PROFILE_BASE_DIR() so the env
+// override (HERMES_CONFIG_DIR) tests use applies here too.
+//
+// `assertWritableProfile(db, slug)` validates that a channel-route write is
+// allowed to target this profile:
+//   * the profile must exist
+//   * the profile must NOT be archived
+//   * the profile must be user-facing OR exactly 'main'
+//     (the reserved 'workers' / 'heavy' / 'codex-builder' rows are infra and
+//      have NO channels — a token write to them is a misconfigure, not a
+//      legitimate operation. Throw rather than silently writing into a dir
+//      no gateway reads.)
+//
+// Throws on any failure; the HTTP layer catches and translates to 400/404.
+export function resolveProfileEnvPath(slug: string): string {
+  return `${HERMES_PROFILE_BASE_DIR()}/${slug}/.env`;
+}
+
+export function assertWritableProfile(
+  db: DatabaseSync,
+  slug: string,
+): AgentProfile {
+  if (typeof slug !== "string" || !slug.trim()) {
+    throw new Error("profile slug is required");
+  }
+  const row = getProfile(db, slug);
+  if (!row) {
+    throw new Error(`profile '${slug}' not found`);
+  }
+  if (row.archived_at != null || row.status === "archived") {
+    throw new Error(
+      `profile '${slug}' is archived — restore it before changing channel tokens`,
+    );
+  }
+  // main is always writable (even though it isn't user-facing in the wizard
+  // sense). Other reserved rows (workers/heavy/codex-builder) have no
+  // channels — refuse the write.
+  if (!row.is_user_facing && slug !== "main") {
+    throw new Error(
+      `profile '${slug}' is an infrastructure profile and cannot host channels`,
+    );
+  }
+  return row;
+}
+
 export function unbindChannel(db: DatabaseSync, id: string): void {
   if (typeof id !== "string" || !id.trim()) {
     throw new Error("binding id (non-empty string) is required");

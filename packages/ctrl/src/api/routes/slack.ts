@@ -47,13 +47,31 @@ import {
   HERMES_CONTAINER,
 } from "../helpers.js";
 import { getStateDb } from "../../db/state.js";
-import { resolveProfileForChannel } from "../../db/agentProfiles.js";
+import {
+  resolveProfileForChannel,
+  assertWritableProfile,
+} from "../../db/agentProfiles.js";
+import { appendAudit } from "./state.js";
+import { restartProfile } from "../../hermes/supervisor.js";
 
 const VAULT_CLI_URL = process.env.VAULT_CLI_URL || "http://vault-cli:8087";
 const HERMES_HOME =
   process.env.HERMES_HOME_IN_CONTAINER || "/hermes-state";
 const VAULT_BOT_ITEM_NAME = "Slack Bot Token";
 const VAULT_APP_ITEM_NAME = "Slack App Token";
+
+// #120 Lane V — per-profile vault item naming. Main keeps the bare names
+// for back-compat; non-main profiles use the suffix shape so each profile's
+// Slack tokens are distinct Vaultwarden records.
+function slackVaultItemNames(slug: string): { bot: string; app: string } {
+  if (slug === "main") {
+    return { bot: VAULT_BOT_ITEM_NAME, app: VAULT_APP_ITEM_NAME };
+  }
+  return {
+    bot: `${VAULT_BOT_ITEM_NAME} · ${slug}`,
+    app: `${VAULT_APP_ITEM_NAME} · ${slug}`,
+  };
+}
 
 // Lane IV — per-profile paths. The legacy MAIN_PROFILE_DIR / PROFILE_ENV_PATH
 // constants were the only thing keeping every slack route pointed at main.
@@ -630,6 +648,11 @@ export function registerSlackRoutes(): void {
     "/api/v1/channels/slack/tokens",
     async ({ res, body, query }) => {
       const paths = resolveSlackProfile(query);
+      try {
+        assertWritableProfile(getStateDb(), paths.profileSlug);
+      } catch (e) {
+        throw new ValidationError(e instanceof Error ? e.message : String(e));
+      }
       const b = (body ?? {}) as Record<string, unknown>;
 
     const botToken =
@@ -664,16 +687,35 @@ export function registerSlackRoutes(): void {
         updates.SLACK_ALLOWED_CHANNELS = b.allowed_channels.trim() || null;
       }
 
-      // Vaultwarden = canonical store. Two items (bot + app). Both must succeed
-      // before we touch the .env so a vault outage doesn't leave us with the
-      // tokens half-saved (.env set, vault missing).
-      await upsertVaultItem(VAULT_BOT_ITEM_NAME, botToken);
-      await upsertVaultItem(VAULT_APP_ITEM_NAME, appToken);
+      // Vaultwarden = canonical store. Two items (bot + app), per profile.
+      // Both must succeed before we touch the .env so a vault outage doesn't
+      // leave us with the tokens half-saved (.env set, vault missing).
+      const itemNames = slackVaultItemNames(paths.profileSlug);
+      await upsertVaultItem(itemNames.bot, botToken);
+      await upsertVaultItem(itemNames.app, appToken);
       await writeProfileEnvKeys(paths, updates);
+      appendAudit({
+        action_type: "channel_token_set",
+        actor: "principal",
+        source: "channels/slack/tokens",
+        target_path: "channels/slack/tokens",
+        target_kind: "channel",
+        subject_ref: paths.profileSlug,
+        summary: `Slack tokens set on profile '${paths.profileSlug}'`,
+        payload: { profile_slug: paths.profileSlug, channel_kind: "slack" },
+      });
       // Drop the auth.test cache so /status reflects the new token immediately.
       _authTestCache = null;
-      restartHermes();
-      sendJson(res, 200, { ok: true, state: "configured_starting" });
+      const restart = restartProfile(paths.profileSlug, {
+        allowComposeFallback: true,
+      });
+      sendJson(res, 200, {
+        ok: true,
+        state: "configured_starting",
+        profile: paths.profileSlug,
+        restart_scope: restart.scope,
+        restart_warning: restart.warning,
+      });
     },
   );
 
@@ -683,8 +725,14 @@ export function registerSlackRoutes(): void {
     "/api/v1/channels/slack/tokens",
     async ({ res, query }) => {
       const paths = resolveSlackProfile(query);
-      await deleteVaultItem(VAULT_BOT_ITEM_NAME);
-      await deleteVaultItem(VAULT_APP_ITEM_NAME);
+      try {
+        assertWritableProfile(getStateDb(), paths.profileSlug);
+      } catch (e) {
+        throw new ValidationError(e instanceof Error ? e.message : String(e));
+      }
+      const itemNames = slackVaultItemNames(paths.profileSlug);
+      await deleteVaultItem(itemNames.bot);
+      await deleteVaultItem(itemNames.app);
       await writeProfileEnvKeys(paths, {
         SLACK_BOT_TOKEN: null,
         SLACK_APP_TOKEN: null,
@@ -692,9 +740,27 @@ export function registerSlackRoutes(): void {
         SLACK_HOME_CHANNEL: null,
         SLACK_ALLOWED_CHANNELS: null,
       });
+      appendAudit({
+        action_type: "channel_token_cleared",
+        actor: "principal",
+        source: "channels/slack/tokens",
+        target_path: "channels/slack/tokens",
+        target_kind: "channel",
+        subject_ref: paths.profileSlug,
+        summary: `Slack tokens cleared on profile '${paths.profileSlug}'`,
+        payload: { profile_slug: paths.profileSlug, channel_kind: "slack" },
+      });
       _authTestCache = null;
-      restartHermes();
-      sendJson(res, 200, { ok: true, state: "unconfigured" });
+      const restart = restartProfile(paths.profileSlug, {
+        allowComposeFallback: true,
+      });
+      sendJson(res, 200, {
+        ok: true,
+        state: "unconfigured",
+        profile: paths.profileSlug,
+        restart_scope: restart.scope,
+        restart_warning: restart.warning,
+      });
     },
   );
 

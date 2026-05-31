@@ -46,7 +46,12 @@ import {
   HERMES_CONTAINER,
 } from "../helpers.js";
 import { getStateDb } from "../../db/state.js";
-import { resolveProfileForChannel } from "../../db/agentProfiles.js";
+import {
+  resolveProfileForChannel,
+  assertWritableProfile,
+} from "../../db/agentProfiles.js";
+import { appendAudit } from "./state.js";
+import { restartProfile } from "../../hermes/supervisor.js";
 
 const VAULT_CLI_URL = process.env.VAULT_CLI_URL || "http://vault-cli:8087";
 // Path INSIDE the hermes runtime container. HERMES_HOME=/hermes-state in
@@ -87,6 +92,15 @@ function resolveTelegramProfile(query?: URLSearchParams): TelegramProfilePaths {
   return pathsForProfile(slug);
 }
 const VAULT_ITEM_NAME = "Telegram Bot Token";
+
+// #120 Lane V — vault item name per profile. Main keeps the original
+// "Telegram Bot Token" name for back-compat (existing tenants have items
+// under that name already); non-main profiles use the suffix shape
+// "Telegram Bot Token · <slug>" so each profile's token is a distinct
+// Vaultwarden record and Sentinel doesn't clobber Main's stored token.
+function vaultItemNameForProfile(slug: string): string {
+  return slug === "main" ? VAULT_ITEM_NAME : `${VAULT_ITEM_NAME} · ${slug}`;
+}
 // BotFather token shape: <bot_id digits>:<secret>. The original BotFather
 // format was 8-12 digits + exactly 35 char secret; Telegram has since
 // expanded both halves over time and modern tokens commonly exceed 35
@@ -150,8 +164,8 @@ function unwrap(body: unknown): { ok: true; data: unknown } | { ok: false; messa
   return { ok: true, data: body };
 }
 
-async function findTelegramVaultItem(): Promise<{ id: string; password: string | null } | null> {
-  const r = await bwFetch(`/list/object/items?search=${encodeURIComponent(VAULT_ITEM_NAME)}`);
+async function findTelegramVaultItem(itemName: string = VAULT_ITEM_NAME): Promise<{ id: string; password: string | null } | null> {
+  const r = await bwFetch(`/list/object/items?search=${encodeURIComponent(itemName)}`);
   if (r.status >= 500) throw new Error(`vault-cli unreachable (HTTP ${r.status})`);
   const u = unwrap(r.body);
   if (!u.ok) throw new Error(u.message);
@@ -165,7 +179,7 @@ async function findTelegramVaultItem(): Promise<{ id: string; password: string |
     if (typeof raw !== "object" || raw === null) continue;
     const it = raw as Record<string, unknown>;
     if (typeof it.name !== "string") continue;
-    if (it.name.toLowerCase() !== VAULT_ITEM_NAME.toLowerCase()) continue;
+    if (it.name.toLowerCase() !== itemName.toLowerCase()) continue;
     const login = typeof it.login === "object" && it.login !== null
       ? (it.login as Record<string, unknown>) : null;
     const password = login && typeof login.password === "string" ? login.password : null;
@@ -174,8 +188,8 @@ async function findTelegramVaultItem(): Promise<{ id: string; password: string |
   return null;
 }
 
-async function upsertTelegramVaultItem(token: string): Promise<void> {
-  const existing = await findTelegramVaultItem();
+async function upsertTelegramVaultItem(token: string, itemName: string = VAULT_ITEM_NAME): Promise<void> {
+  const existing = await findTelegramVaultItem(itemName);
   if (existing && existing.id) {
     const cur = await bwFetch(`/object/item/${existing.id}`);
     const curU = unwrap(cur.body);
@@ -186,7 +200,7 @@ async function upsertTelegramVaultItem(token: string): Promise<void> {
       ? ({ ...(e.login as Record<string, unknown>) } as Record<string, unknown>)
       : { username: null, password: null, uris: [] };
     existingLogin.password = token;
-    const merged = { ...e, name: VAULT_ITEM_NAME, login: existingLogin };
+    const merged = { ...e, name: itemName, login: existingLogin };
     const r = await bwFetch(`/object/item/${existing.id}`, { method: "PUT", body: JSON.stringify(merged) });
     const u = unwrap(r.body);
     if (!u.ok) throw new Error(u.message);
@@ -194,7 +208,7 @@ async function upsertTelegramVaultItem(token: string): Promise<void> {
   }
   const payload = {
     type: 1,
-    name: VAULT_ITEM_NAME,
+    name: itemName,
     notes: "Bot token for Hermes Telegram channel (Alfred Black). Source of truth.",
     folderId: null,
     favorite: false,
@@ -206,8 +220,8 @@ async function upsertTelegramVaultItem(token: string): Promise<void> {
   if (!u.ok) throw new Error(u.message);
 }
 
-async function deleteTelegramVaultItem(): Promise<void> {
-  const existing = await findTelegramVaultItem();
+async function deleteTelegramVaultItem(itemName: string = VAULT_ITEM_NAME): Promise<void> {
+  const existing = await findTelegramVaultItem(itemName);
   if (!existing || !existing.id) return; // idempotent
   const r = await bwFetch(`/object/item/${existing.id}`, { method: "DELETE" });
   const u = unwrap(r.body);
@@ -617,6 +631,14 @@ export function registerTelegramRoutes(): void {
     "/api/v1/channels/telegram/token",
     async ({ res, body, query }) => {
       const paths = resolveTelegramProfile(query);
+      // #120 Lane V — validate the profile is writable before any side
+      // effect. Throws a ValidationError-ish "profile X is archived" when
+      // the explicit ?profile= points at an archived row.
+      try {
+        assertWritableProfile(getStateDb(), paths.profileSlug);
+      } catch (e) {
+        throw new ValidationError(e instanceof Error ? e.message : String(e));
+      }
       const b = (body ?? {}) as {
         token?: unknown;
         allowed_users?: unknown;
@@ -638,10 +660,33 @@ export function registerTelegramRoutes(): void {
         updates.TELEGRAM_HOME_CHANNEL = b.home_channel;
       }
 
-      await upsertTelegramVaultItem(token);    // canonical store
+      const itemName = vaultItemNameForProfile(paths.profileSlug);
+      await upsertTelegramVaultItem(token, itemName);    // canonical store
       await writeProfileEnvKeys(paths, updates); // the file Hermes actually reads
-      restartHermes();                         // background
-      sendJson(res, 200, { ok: true, state: "configured_starting" });
+      // #120 Lane V — audit row. action_type uses canonical underscore.
+      appendAudit({
+        action_type: "channel_token_set",
+        actor: "principal",
+        source: "channels/telegram/token",
+        target_path: "channels/telegram/token",
+        target_kind: "channel",
+        subject_ref: paths.profileSlug,
+        summary: `Telegram token set on profile '${paths.profileSlug}'`,
+        payload: { profile_slug: paths.profileSlug, channel_kind: "telegram" },
+      });
+      // #120 Lane V — scoped restart for THIS profile only. The fallback
+      // to a whole-container reload is wider than ideal — flag it via
+      // restart_scope so the UI can warn.
+      const restart = restartProfile(paths.profileSlug, {
+        allowComposeFallback: true,
+      });
+      sendJson(res, 200, {
+        ok: true,
+        state: "configured_starting",
+        profile: paths.profileSlug,
+        restart_scope: restart.scope,
+        restart_warning: restart.warning,
+      });
     },
   );
 
@@ -651,14 +696,38 @@ export function registerTelegramRoutes(): void {
     "/api/v1/channels/telegram/token",
     async ({ res, query }) => {
       const paths = resolveTelegramProfile(query);
-      await deleteTelegramVaultItem(); // idempotent
+      try {
+        assertWritableProfile(getStateDb(), paths.profileSlug);
+      } catch (e) {
+        throw new ValidationError(e instanceof Error ? e.message : String(e));
+      }
+      const itemName = vaultItemNameForProfile(paths.profileSlug);
+      await deleteTelegramVaultItem(itemName); // idempotent
       await writeProfileEnvKeys(paths, {
         TELEGRAM_BOT_TOKEN: null,
         TELEGRAM_ALLOWED_USERS: null,
         TELEGRAM_HOME_CHANNEL: null,
       });
-      restartHermes();
-      sendJson(res, 200, { ok: true, state: "unconfigured" });
+      appendAudit({
+        action_type: "channel_token_cleared",
+        actor: "principal",
+        source: "channels/telegram/token",
+        target_path: "channels/telegram/token",
+        target_kind: "channel",
+        subject_ref: paths.profileSlug,
+        summary: `Telegram token cleared on profile '${paths.profileSlug}'`,
+        payload: { profile_slug: paths.profileSlug, channel_kind: "telegram" },
+      });
+      const restart = restartProfile(paths.profileSlug, {
+        allowComposeFallback: true,
+      });
+      sendJson(res, 200, {
+        ok: true,
+        state: "unconfigured",
+        profile: paths.profileSlug,
+        restart_scope: restart.scope,
+        restart_warning: restart.warning,
+      });
     },
   );
 

@@ -3598,6 +3598,187 @@ export const unbindChannelFromProfile = async (
   });
 };
 
+// ── #120 Lane V — per-profile FULL channels surface ──────────────────────
+//
+// Three consolidator ops that route through Lane IV's ?profile=<slug> shape
+// on ctrl-api. Each op validates the slug client-side then proxies the call
+// with the query attached. The existing main-profile ops above continue to
+// work unchanged (back-compat — no ?profile= means "default binding").
+//
+// `Promise<any>` annotation is load-bearing — Wasp's RPC layer narrows
+// concrete return types and silently swaps the codepath under us. See
+// the Sir-away memory note "Wasp Promise<T> trap".
+//
+// Channels we support per-profile in this lane:
+//   * telegram  — token (PUT/DELETE), status (GET), test (POST)
+//   * slack     — tokens (PUT/DELETE), status (GET), test (POST)
+//   * sms       — credentials (PUT/DELETE), status (GET), test (POST)
+//   * paperclip — api-key (POST), status (GET — main-only, see note)
+//
+// Channels intentionally NOT per-profile in this lane (instance-level):
+//   * voice / omi / ha / recall / tailscale / terminal / email
+//   The honest reasons are documented inline on /profiles/:slug/channels.
+
+const PROFILE_AWARE_CHANNEL_KINDS = [
+  "telegram",
+  "slack",
+  "sms",
+  "paperclip",
+] as const;
+type ProfileAwareChannelKind = (typeof PROFILE_AWARE_CHANNEL_KINDS)[number];
+
+function _validateSlugArg(slug: unknown): string {
+  if (typeof slug !== "string" || !slug.trim()) {
+    throw new HttpError(400, "slug required");
+  }
+  // Mirrors the server-side regex in agentProfiles.ts validateSlug.
+  if (!/^[a-z][a-z0-9-]{1,30}$/.test(slug)) {
+    throw new HttpError(400, "slug must be lowercase kebab-case (2..31 chars)");
+  }
+  return slug;
+}
+
+function _validateKindArg(kind: unknown): ProfileAwareChannelKind {
+  if (
+    typeof kind !== "string" ||
+    !PROFILE_AWARE_CHANNEL_KINDS.includes(kind as ProfileAwareChannelKind)
+  ) {
+    throw new HttpError(
+      400,
+      `channel_kind must be one of ${PROFILE_AWARE_CHANNEL_KINDS.join(", ")}`,
+    );
+  }
+  return kind as ProfileAwareChannelKind;
+}
+
+// Map (kind → token-write route + method + body-shape) so the ops below
+// don't carry a switch each. Each ctrl-api route already accepts
+// ?profile=<slug> per Lane IV + Lane V.
+const _CHANNEL_TOKEN_ROUTE: Record<
+  ProfileAwareChannelKind,
+  { method: string; path: string }
+> = {
+  telegram: { method: "PUT", path: "/api/v1/channels/telegram/token" },
+  slack: { method: "PUT", path: "/api/v1/channels/slack/tokens" },
+  sms: { method: "PUT", path: "/api/v1/channels/sms/credentials" },
+  paperclip: { method: "POST", path: "/api/v1/channels/paperclip/api-key" },
+};
+
+const _CHANNEL_CLEAR_ROUTE: Record<
+  ProfileAwareChannelKind,
+  { method: string; path: string } | null
+> = {
+  telegram: { method: "DELETE", path: "/api/v1/channels/telegram/token" },
+  slack: { method: "DELETE", path: "/api/v1/channels/slack/tokens" },
+  sms: { method: "DELETE", path: "/api/v1/channels/sms/credentials" },
+  // Paperclip: no DELETE on the api-key route yet — wiping is a no-op for
+  // now (the operator can paste a different key over the top). Returns
+  // { ok: true, noop: true } to keep the UI's branchless call shape.
+  paperclip: null,
+};
+
+const _CHANNEL_STATUS_ROUTE: Record<ProfileAwareChannelKind, string> = {
+  telegram: "/api/v1/channels/telegram/status",
+  slack: "/api/v1/channels/slack/status",
+  sms: "/api/v1/channels/sms/status",
+  paperclip: "/api/v1/channels/paperclip/status",
+};
+
+/**
+ * Set a profile-scoped channel token (PUT/POST). The body shape is the
+ * channel's existing shape — telegram=`{token}`, slack=`{bot_token, app_token,
+ * signing_secret?}`, sms=`{account_sid, auth_token, from_number?}`,
+ * paperclip=`{api_key}`. We pass it through verbatim so the ctrl-api side's
+ * validation (and error messages) remain the source of truth.
+ */
+export const setProfileChannelToken = async (
+  args: {
+    slug: string;
+    channel_kind: string;
+    payload: Record<string, unknown>;
+  },
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const slug = _validateSlugArg(args?.slug);
+  const kind = _validateKindArg(args?.channel_kind);
+  if (
+    !args?.payload ||
+    typeof args.payload !== "object" ||
+    Array.isArray(args.payload)
+  ) {
+    throw new HttpError(400, "payload (object) is required");
+  }
+  const route = _CHANNEL_TOKEN_ROUTE[kind];
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: route.method,
+    path: route.path,
+    query: { profile: slug },
+    body: args.payload,
+  });
+};
+
+export const clearProfileChannelToken = async (
+  args: { slug: string; channel_kind: string },
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const slug = _validateSlugArg(args?.slug);
+  const kind = _validateKindArg(args?.channel_kind);
+  const route = _CHANNEL_CLEAR_ROUTE[kind];
+  if (!route) {
+    // Paperclip — no clear surface yet. Return a benign no-op so the UI
+    // can call this op uniformly.
+    return { ok: true, noop: true, reason: "no clear route for this channel" };
+  }
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: route.method,
+    path: route.path,
+    query: { profile: slug },
+  });
+};
+
+/**
+ * Batch fetch every profile-aware channel's status for one profile slug, so
+ * the /profiles/:slug/channels page lands in one round-trip. Each entry has
+ * the kind, the raw status shape, and a flag indicating fetch success.
+ *
+ * Fail-soft: a single channel's status failing does not abort the others —
+ * the page can still render the cards that work.
+ */
+export const getProfileChannelStatuses = async (
+  args: { slug: string },
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const slug = _validateSlugArg(args?.slug);
+  const instance = await getUserInstance(context);
+  const results = await Promise.all(
+    PROFILE_AWARE_CHANNEL_KINDS.map(async (kind) => {
+      try {
+        const status = await proxyToTenant(instance, {
+          path: _CHANNEL_STATUS_ROUTE[kind],
+          query: { profile: slug },
+        });
+        return { kind, ok: true, status };
+      } catch (e: any) {
+        return {
+          kind,
+          ok: false,
+          status: null,
+          error: String(e?.message ?? e ?? "fetch failed"),
+        };
+      }
+    }),
+  );
+  return {
+    slug,
+    channels: results,
+  };
+};
+
 // ── decision_ref minter ──────────────────────────────────────────────────
 //
 // Crockford base32, 26 chars — the ULID shape PR4's
