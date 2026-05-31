@@ -93,11 +93,17 @@ interface ProfileChannelStatuses {
 // muted hint after a write if the scope is anything but 'per-profile'.
 // --------------------------------------------------------------------------
 function RestartScopeWarning({ scope, warning }: { scope?: string; warning?: string | null }) {
-  if (!scope || scope === "per-profile") return null;
+  if (!scope) return null;
+  // Lane V's honest semantics: even on the "per-profile" happy path, the
+  // gateway doesn't bounce immediately (the SIGUSR1 broadcast would knock
+  // main offline too — tini's -g mode), so we surface the deferred-restart
+  // warning the route attached. compose-restart is a wider blast; noop is
+  // even wider deferral.
   const msg =
     scope === "compose-restart"
       ? "Heads up: the whole Hermes container restarted (per-profile signal couldn't be sent). All profiles bounced briefly."
-      : warning ?? "Restart could not be scheduled; new tokens will apply on the next supervisor tick.";
+      : warning ?? null;
+  if (!msg) return null;
   return (
     <p
       className="font-body italic text-[12px] mt-2"

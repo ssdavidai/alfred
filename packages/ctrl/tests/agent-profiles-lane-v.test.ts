@@ -110,7 +110,9 @@ describe("#120 Lane V — restartProfile", () => {
     const result = restartProfile("main");
     assert.equal(result.scope, "per-profile");
     assert.equal(result.attempted, true);
-    assert.equal(result.warning, null);
+    // Warning surfaces the deferred-restart honest semantics — see the
+    // comment in restartProfile() about tini's SIGUSR1 broadcast.
+    assert.match(result.warning ?? "", /deferred|next supervisor reconcile/i);
     // Flag-file landed under HERMES_STATE_DIR/profiles/main.
     const slugDir = path.join(
       process.env.HERMES_STATE_DIR_CTRL_VIEW!,

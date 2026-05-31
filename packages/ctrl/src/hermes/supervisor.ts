@@ -152,16 +152,25 @@ export function restartProfile(
     // below is what matters.
   }
 
-  // Nudge the supervisor so it re-reads its registry and notices the flag
-  // file we just wrote. This is the same signal Lane II uses for
-  // add/archive reconciliation — it's idempotent.
-  nudgeHermesSupervisor();
-
+  // DO NOT nudge the supervisor with SIGUSR1 here. tini's `-g` mode
+  // broadcasts SIGUSR1 to the entire process group — every gateway
+  // process (including main) treats SIGUSR1 as shutdown and bounces.
+  // Lane II's add/archive flow accepts that blast radius because every
+  // gateway needs to re-check the registry; Lane V's token-rotation
+  // flow MUST NOT cause main to bounce when only sentinel's .env
+  // changed. Until the supervisor exposes a per-profile signal, the
+  // flag-file is a durable breadcrumb; new env applies on the next
+  // natural supervisor reconcile (e.g. another profile create/archive)
+  // or operator-initiated restart.
+  //
+  // The honest status to surface: 'per-profile' scope, but warning
+  // includes "gateway will pick up the new env on next supervisor tick".
   if (flagWritten) {
     return {
       scope: "per-profile",
       attempted: true,
-      warning: null,
+      warning:
+        "per-profile restart deferred — gateway will pick up the new env on the next supervisor reconcile (SIGUSR1 broadcast would bounce all profiles).",
     };
   }
 
