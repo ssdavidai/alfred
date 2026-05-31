@@ -306,7 +306,17 @@ export function createApiServer(): http.Server {
         // keyed on RECALL_WEBHOOK_SECRET). Same posture as the Composio
         // entry above — the HMAC validator lives in
         // routes/channels_recall.ts and needs the exact bytes.
-        pathname === "/api/v1/webhooks/recall";
+        pathname === "/api/v1/webhooks/recall" ||
+        // #120 Lane Vb — ctrl-api's voice-inbound TwiML landing pad. The
+        // principal can configure Twilio to point at this URL (alongside
+        // the more-direct voice-bridge /twiml/inbound). The route only
+        // emits routing-decision TwiML — no secrets read, no profile
+        // mutation. In production Sir should still set TWILIO_AUTH_TOKEN
+        // per profile so the receiving side (voice-bridge) validates
+        // X-Twilio-Signature on the same body. Smoke endpoints accept the
+        // ?format=json shape so the routing decision can be asserted
+        // without going through Twilio.
+        pathname === "/api/v1/channels/voice/inbound";
       if (!isPublic) {
         // Pass method+pathname so the scoped-token path can check the
         // route allowlist (see auth.ts VOICE_BRIDGE_ALLOWLIST). The master

@@ -661,15 +661,21 @@ export function registerVoiceRoutes(): void {
         );
       }
 
-      // OPTIONAL Twilio probe — confirm the creds are valid before writing.
-      // Anything other than 200 = 400 from us.
-      const probe = await probeTwilioAccount(sid, token);
-      if (!probe.ok) {
-        sendJson(res, 400, {
-          ok: false,
-          error: probe.error ?? "Twilio rejected the credentials",
-        });
-        return;
+      // Twilio probe — confirm the creds are valid before writing. Skip
+      // when ?skip_validate=true is set (smoke + ops dry-run path; the
+      // operator takes responsibility for the creds in that case). Default
+      // is probe-on so a typo doesn't silently land a broken cred in the
+      // profile's .env.
+      const skipValidate = query.get("skip_validate") === "true";
+      if (!skipValidate) {
+        const probe = await probeTwilioAccount(sid, token);
+        if (!probe.ok) {
+          sendJson(res, 400, {
+            ok: false,
+            error: probe.error ?? "Twilio rejected the credentials",
+          });
+          return;
+        }
       }
 
       const updates: Partial<Record<VoiceEnvKey, string | null>> = {
