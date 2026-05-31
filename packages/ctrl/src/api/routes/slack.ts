@@ -46,14 +46,40 @@ import {
   dockerComposeCmd,
   HERMES_CONTAINER,
 } from "../helpers.js";
+import { getStateDb } from "../../db/state.js";
+import { resolveProfileForChannel } from "../../db/agentProfiles.js";
 
 const VAULT_CLI_URL = process.env.VAULT_CLI_URL || "http://vault-cli:8087";
 const HERMES_HOME =
   process.env.HERMES_HOME_IN_CONTAINER || "/hermes-state";
-const MAIN_PROFILE_DIR = `${HERMES_HOME}/profiles/main`;
-const PROFILE_ENV_PATH = `${MAIN_PROFILE_DIR}/.env`;
 const VAULT_BOT_ITEM_NAME = "Slack Bot Token";
 const VAULT_APP_ITEM_NAME = "Slack App Token";
+
+// Lane IV — per-profile paths. The legacy MAIN_PROFILE_DIR / PROFILE_ENV_PATH
+// constants were the only thing keeping every slack route pointed at main.
+// Each route now resolves a profile per request (?profile=<slug> or fallback
+// to the channel-default binding).
+interface SlackProfilePaths {
+  profileSlug: string;
+  profileDir: string;
+  envPath: string;
+}
+
+function pathsForProfile(slug: string): SlackProfilePaths {
+  const profileDir = `${HERMES_HOME}/profiles/${slug}`;
+  return {
+    profileSlug: slug,
+    profileDir,
+    envPath: `${profileDir}/.env`,
+  };
+}
+
+function resolveSlackProfile(query?: URLSearchParams): SlackProfilePaths {
+  const explicit = query?.get("profile")?.trim() || null;
+  if (explicit) return pathsForProfile(explicit);
+  const slug = resolveProfileForChannel(getStateDb(), "slack", null);
+  return pathsForProfile(slug);
+}
 
 // Slack token shapes (canonical):
 //   Bot User OAuth Token:  xoxb-<team_id>-<bot_id>-<secret>
@@ -221,11 +247,13 @@ const SLACK_ENV_KEYS = [
 ] as const;
 type SlackEnvKey = (typeof SLACK_ENV_KEYS)[number];
 
-async function readProfileEnv(): Promise<Record<string, string>> {
+async function readProfileEnv(
+  paths: SlackProfilePaths,
+): Promise<Record<string, string>> {
   const raw = await dockerExec(HERMES_CONTAINER, [
     "sh",
     "-c",
-    `cat ${PROFILE_ENV_PATH} 2>/dev/null || true`,
+    `cat ${paths.envPath} 2>/dev/null || true`,
   ]);
   const out: Record<string, string> = {};
   for (const line of raw.split("\n")) {
@@ -248,12 +276,13 @@ async function readProfileEnv(): Promise<Record<string, string>> {
 }
 
 async function writeProfileEnvKeys(
+  paths: SlackProfilePaths,
   updates: Partial<Record<SlackEnvKey, string | null>>,
 ): Promise<void> {
   const raw = await dockerExec(HERMES_CONTAINER, [
     "sh",
     "-c",
-    `cat ${PROFILE_ENV_PATH} 2>/dev/null || true`,
+    `cat ${paths.envPath} 2>/dev/null || true`,
   ]);
   const lines = raw === "" ? [] : raw.split("\n");
   if (lines.length && lines[lines.length - 1] === "") lines.pop();
@@ -282,13 +311,13 @@ async function writeProfileEnvKeys(
   }
   const content = out.join("\n") + "\n";
 
-  const tmp = `${PROFILE_ENV_PATH}.tmp.${process.pid}.${Date.now()}`;
+  const tmp = `${paths.envPath}.tmp.${process.pid}.${Date.now()}`;
   await dockerExecWithStdin(
     HERMES_CONTAINER,
     [
       "sh",
       "-c",
-      `mkdir -p ${MAIN_PROFILE_DIR} && cat > ${tmp} && mv ${tmp} ${PROFILE_ENV_PATH}`,
+      `mkdir -p ${paths.profileDir} && cat > ${tmp} && mv ${tmp} ${paths.envPath}`,
     ],
     content,
     30_000,
@@ -465,12 +494,37 @@ async function getSlackManifest(): Promise<string> {
 // ── Routes ────────────────────────────────────────────────────────────────
 
 export function registerSlackRoutes(): void {
+  // GET /resolve?channel_id=<id> — Lane IV debug surface.
+  addRoute("GET", "/api/v1/channels/slack/resolve", async ({ res, query }) => {
+    const channelId = query.get("channel_id")?.trim() || null;
+    const { resolveProfileContextForChannel } = await import(
+      "../../db/agentProfiles.js"
+    );
+    const ctx = resolveProfileContextForChannel(
+      getStateDb(),
+      "slack",
+      channelId,
+    );
+    sendJson(res, 200, {
+      channel_kind: "slack",
+      channel_identity: channelId,
+      profile: ctx.slug,
+      bound_profile: ctx.bound_slug,
+      cascaded: ctx.cascaded,
+      api_server_port: ctx.api_server_port,
+      api_server_key_present: ctx.api_server_key != null,
+      profile_dir: ctx.profile_dir,
+      journal_scope: ctx.journal_scope_key,
+    });
+  });
+
   // GET /status — fail-soft. NEVER 5xx (dashboard polls it).
-  addRoute("GET", "/api/v1/channels/slack/status", async ({ res }) => {
+  addRoute("GET", "/api/v1/channels/slack/status", async ({ res, query }) => {
+    const paths = resolveSlackProfile(query);
     let envMap: Record<string, string> = {};
     let envErr: string | null = null;
     try {
-      envMap = await readProfileEnv();
+      envMap = await readProfileEnv(paths);
     } catch (e) {
       envErr = e instanceof Error ? e.message : String(e);
     }
@@ -571,8 +625,12 @@ export function registerSlackRoutes(): void {
   });
 
   // PUT /tokens — write bot + app tokens + opts to .env + vault, restart hermes.
-  addRoute("PUT", "/api/v1/channels/slack/tokens", async ({ res, body }) => {
-    const b = (body ?? {}) as Record<string, unknown>;
+  addRoute(
+    "PUT",
+    "/api/v1/channels/slack/tokens",
+    async ({ res, body, query }) => {
+      const paths = resolveSlackProfile(query);
+      const b = (body ?? {}) as Record<string, unknown>;
 
     const botToken =
       typeof b.bot_token === "string" ? b.bot_token.trim() : "";
@@ -591,53 +649,60 @@ export function registerSlackRoutes(): void {
       );
     }
 
-    // Optional Phase-2 fields.
-    const updates: Partial<Record<SlackEnvKey, string | null>> = {
-      SLACK_BOT_TOKEN: botToken,
-      SLACK_APP_TOKEN: appToken,
-    };
-    if (typeof b.allowed_users === "string") {
-      updates.SLACK_ALLOWED_USERS = b.allowed_users.trim() || null;
-    }
-    if (typeof b.home_channel === "string") {
-      updates.SLACK_HOME_CHANNEL = b.home_channel.trim() || null;
-    }
-    if (typeof b.allowed_channels === "string") {
-      updates.SLACK_ALLOWED_CHANNELS = b.allowed_channels.trim() || null;
-    }
+      // Optional Phase-2 fields.
+      const updates: Partial<Record<SlackEnvKey, string | null>> = {
+        SLACK_BOT_TOKEN: botToken,
+        SLACK_APP_TOKEN: appToken,
+      };
+      if (typeof b.allowed_users === "string") {
+        updates.SLACK_ALLOWED_USERS = b.allowed_users.trim() || null;
+      }
+      if (typeof b.home_channel === "string") {
+        updates.SLACK_HOME_CHANNEL = b.home_channel.trim() || null;
+      }
+      if (typeof b.allowed_channels === "string") {
+        updates.SLACK_ALLOWED_CHANNELS = b.allowed_channels.trim() || null;
+      }
 
-    // Vaultwarden = canonical store. Two items (bot + app). Both must succeed
-    // before we touch the .env so a vault outage doesn't leave us with the
-    // tokens half-saved (.env set, vault missing).
-    await upsertVaultItem(VAULT_BOT_ITEM_NAME, botToken);
-    await upsertVaultItem(VAULT_APP_ITEM_NAME, appToken);
-    await writeProfileEnvKeys(updates);
-    // Drop the auth.test cache so /status reflects the new token immediately.
-    _authTestCache = null;
-    restartHermes();
-    sendJson(res, 200, { ok: true, state: "configured_starting" });
-  });
+      // Vaultwarden = canonical store. Two items (bot + app). Both must succeed
+      // before we touch the .env so a vault outage doesn't leave us with the
+      // tokens half-saved (.env set, vault missing).
+      await upsertVaultItem(VAULT_BOT_ITEM_NAME, botToken);
+      await upsertVaultItem(VAULT_APP_ITEM_NAME, appToken);
+      await writeProfileEnvKeys(paths, updates);
+      // Drop the auth.test cache so /status reflects the new token immediately.
+      _authTestCache = null;
+      restartHermes();
+      sendJson(res, 200, { ok: true, state: "configured_starting" });
+    },
+  );
 
   // DELETE /tokens — wipe vault items + drop all SLACK_* env keys + restart.
-  addRoute("DELETE", "/api/v1/channels/slack/tokens", async ({ res }) => {
-    await deleteVaultItem(VAULT_BOT_ITEM_NAME);
-    await deleteVaultItem(VAULT_APP_ITEM_NAME);
-    await writeProfileEnvKeys({
-      SLACK_BOT_TOKEN: null,
-      SLACK_APP_TOKEN: null,
-      SLACK_ALLOWED_USERS: null,
-      SLACK_HOME_CHANNEL: null,
-      SLACK_ALLOWED_CHANNELS: null,
-    });
-    _authTestCache = null;
-    restartHermes();
-    sendJson(res, 200, { ok: true, state: "unconfigured" });
-  });
+  addRoute(
+    "DELETE",
+    "/api/v1/channels/slack/tokens",
+    async ({ res, query }) => {
+      const paths = resolveSlackProfile(query);
+      await deleteVaultItem(VAULT_BOT_ITEM_NAME);
+      await deleteVaultItem(VAULT_APP_ITEM_NAME);
+      await writeProfileEnvKeys(paths, {
+        SLACK_BOT_TOKEN: null,
+        SLACK_APP_TOKEN: null,
+        SLACK_ALLOWED_USERS: null,
+        SLACK_HOME_CHANNEL: null,
+        SLACK_ALLOWED_CHANNELS: null,
+      });
+      _authTestCache = null;
+      restartHermes();
+      sendJson(res, 200, { ok: true, state: "unconfigured" });
+    },
+  );
 
   // POST /test — send a real test message via Slack Web API.
   // Target: SLACK_HOME_CHANNEL if set, else the bot's own user_id (DM-to-self).
-  addRoute("POST", "/api/v1/channels/slack/test", async ({ res }) => {
-    const envMap = await readProfileEnv().catch(() => ({}) as Record<string, string>);
+  addRoute("POST", "/api/v1/channels/slack/test", async ({ res, query }) => {
+    const paths = resolveSlackProfile(query);
+    const envMap = await readProfileEnv(paths).catch(() => ({}) as Record<string, string>);
     const botToken = envMap.SLACK_BOT_TOKEN ?? "";
     if (!botToken) {
       throw new ValidationError(

@@ -294,4 +294,125 @@ describe("queryRecentJournal", () => {
     );
     db.close();
   });
+
+  // ── Lane IV: hermes_profile filter ────────────────────────────────────
+  it("filters by hermes_profile when set (Lane IV plugin scoping)", () => {
+    const db = makeDb();
+    // Three rows: two with hermes_profile='main', one with 'sentinel'.
+    appendJournal(db, {
+      channel: "telegram",
+      chat_id: "100",
+      direction: "outbound",
+      message: "main 1",
+      hermes_profile: "main",
+    });
+    appendJournal(db, {
+      channel: "telegram",
+      chat_id: "100",
+      direction: "outbound",
+      message: "main 2",
+      hermes_profile: "main",
+    });
+    appendJournal(db, {
+      channel: "telegram",
+      chat_id: "100",
+      direction: "outbound",
+      message: "sentinel 1",
+      hermes_profile: "sentinel",
+    });
+
+    // No filter → all 3.
+    const all = queryRecentJournal(db, {
+      channel: "telegram",
+      chat_id: "100",
+    });
+    assert.equal(all.length, 3);
+
+    // hermes_profile=main → 2.
+    const main = queryRecentJournal(
+      db,
+      { channel: "telegram", chat_id: "100" },
+      { hermes_profile: "main" },
+    );
+    assert.equal(main.length, 2);
+    assert.ok(main.every((e) => e.hermes_profile === "main"));
+
+    // hermes_profile=sentinel → 1.
+    const sentinel = queryRecentJournal(
+      db,
+      { channel: "telegram", chat_id: "100" },
+      { hermes_profile: "sentinel" },
+    );
+    assert.equal(sentinel.length, 1);
+    assert.equal(sentinel[0].message, "sentinel 1");
+
+    db.close();
+  });
+
+  it("hermes_profile=null returns only pre-Lane-IV rows (IS NULL)", () => {
+    const db = makeDb();
+    appendJournal(db, {
+      channel: "slack",
+      chat_id: "U1",
+      direction: "outbound",
+      message: "untagged (pre-Lane-IV)",
+      // hermes_profile omitted → NULL.
+    });
+    appendJournal(db, {
+      channel: "slack",
+      chat_id: "U1",
+      direction: "outbound",
+      message: "main-tagged",
+      hermes_profile: "main",
+    });
+
+    const untagged = queryRecentJournal(
+      db,
+      { channel: "slack", chat_id: "U1" },
+      { hermes_profile: null },
+    );
+    assert.equal(untagged.length, 1);
+    assert.equal(untagged[0].message, "untagged (pre-Lane-IV)");
+    assert.equal(untagged[0].hermes_profile, null);
+
+    db.close();
+  });
+
+  it("hermes_profile filter combines with principal_id scope", () => {
+    const db = makeDb();
+    bindPrincipalChannel(db, "telegram", "100", "owner");
+    bindPrincipalChannel(db, "slack", "U1", "owner");
+    appendJournal(db, {
+      channel: "telegram",
+      chat_id: "100",
+      direction: "outbound",
+      message: "tg main",
+      hermes_profile: "main",
+    });
+    appendJournal(db, {
+      channel: "slack",
+      chat_id: "U1",
+      direction: "outbound",
+      message: "slack sentinel",
+      hermes_profile: "sentinel",
+    });
+
+    const main = queryRecentJournal(
+      db,
+      { principal_id: "owner" },
+      { hermes_profile: "main" },
+    );
+    assert.equal(main.length, 1);
+    assert.equal(main[0].message, "tg main");
+
+    const sentinel = queryRecentJournal(
+      db,
+      { principal_id: "owner" },
+      { hermes_profile: "sentinel" },
+    );
+    assert.equal(sentinel.length, 1);
+    assert.equal(sentinel[0].message, "slack sentinel");
+
+    db.close();
+  });
 });

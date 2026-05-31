@@ -42,12 +42,36 @@ import {
   dockerComposeCmd,
   HERMES_CONTAINER,
 } from "../helpers.js";
+import { getStateDb } from "../../db/state.js";
+import { resolveProfileForChannel } from "../../db/agentProfiles.js";
 
 const VAULT_CLI_URL = process.env.VAULT_CLI_URL || "http://vault-cli:8087";
 const HERMES_HOME =
   process.env.HERMES_HOME_IN_CONTAINER || "/hermes-state";
-const MAIN_PROFILE_DIR = `${HERMES_HOME}/profiles/main`;
-const PROFILE_ENV_PATH = `${MAIN_PROFILE_DIR}/.env`;
+
+// Lane IV — per-profile paths. Each request resolves which profile owns the
+// SMS channel (?profile=<slug> or the channel-default binding).
+interface SmsProfilePaths {
+  profileSlug: string;
+  profileDir: string;
+  envPath: string;
+}
+
+function pathsForProfile(slug: string): SmsProfilePaths {
+  const profileDir = `${HERMES_HOME}/profiles/${slug}`;
+  return {
+    profileSlug: slug,
+    profileDir,
+    envPath: `${profileDir}/.env`,
+  };
+}
+
+function resolveSmsProfile(query?: URLSearchParams): SmsProfilePaths {
+  const explicit = query?.get("profile")?.trim() || null;
+  if (explicit) return pathsForProfile(explicit);
+  const slug = resolveProfileForChannel(getStateDb(), "sms", null);
+  return pathsForProfile(slug);
+}
 
 const VAULT_SID_ITEM_NAME = "Twilio Account SID";
 const VAULT_TOKEN_ITEM_NAME = "Twilio Auth Token";
@@ -230,11 +254,13 @@ function smsWebhookUrl(): string {
   return dom ? `https://sms.${dom}/webhooks/twilio` : "";
 }
 
-async function readProfileEnv(): Promise<Record<string, string>> {
+async function readProfileEnv(
+  paths: SmsProfilePaths,
+): Promise<Record<string, string>> {
   const raw = await dockerExec(HERMES_CONTAINER, [
     "sh",
     "-c",
-    `cat ${PROFILE_ENV_PATH} 2>/dev/null || true`,
+    `cat ${paths.envPath} 2>/dev/null || true`,
   ]);
   const out: Record<string, string> = {};
   for (const line of raw.split("\n")) {
@@ -257,12 +283,13 @@ async function readProfileEnv(): Promise<Record<string, string>> {
 }
 
 async function writeProfileEnvKeys(
+  paths: SmsProfilePaths,
   updates: Partial<Record<SmsEnvKey, string | null>>,
 ): Promise<void> {
   const raw = await dockerExec(HERMES_CONTAINER, [
     "sh",
     "-c",
-    `cat ${PROFILE_ENV_PATH} 2>/dev/null || true`,
+    `cat ${paths.envPath} 2>/dev/null || true`,
   ]);
   const lines = raw === "" ? [] : raw.split("\n");
   if (lines.length && lines[lines.length - 1] === "") lines.pop();
@@ -291,13 +318,13 @@ async function writeProfileEnvKeys(
   }
   const content = out.join("\n") + "\n";
 
-  const tmp = `${PROFILE_ENV_PATH}.tmp.${process.pid}.${Date.now()}`;
+  const tmp = `${paths.envPath}.tmp.${process.pid}.${Date.now()}`;
   await dockerExecWithStdin(
     HERMES_CONTAINER,
     [
       "sh",
       "-c",
-      `mkdir -p ${MAIN_PROFILE_DIR} && cat > ${tmp} && mv ${tmp} ${PROFILE_ENV_PATH}`,
+      `mkdir -p ${paths.profileDir} && cat > ${tmp} && mv ${tmp} ${paths.envPath}`,
     ],
     content,
     30_000,
@@ -452,10 +479,18 @@ async function twilioSendMessage(
 export async function smsSend(
   text: string,
   to?: string,
+  profileSlug?: string,
 ): Promise<{ ok: true; sid: string } | { ok: false; error: string }> {
+  // Lane IV — resolve which profile's Twilio creds to use. The caller can
+  // pin a profile explicitly; otherwise we read the SMS channel's default
+  // binding (`main` until Lane III rebinds).
+  const slug =
+    profileSlug?.trim() ||
+    resolveProfileForChannel(getStateDb(), "sms", to ?? null);
+  const paths = pathsForProfile(slug);
   let env: Record<string, string>;
   try {
-    env = await readProfileEnv();
+    env = await readProfileEnv(paths);
   } catch (e) {
     return {
       ok: false,
@@ -516,12 +551,37 @@ function maskAccountSid(sid: string): string {
 // ── Routes ────────────────────────────────────────────────────────────────
 
 export function registerSmsRoutes(): void {
+  // GET /resolve?phone=<E.164> — Lane IV debug surface.
+  addRoute("GET", "/api/v1/channels/sms/resolve", async ({ res, query }) => {
+    const phone = query.get("phone")?.trim() || null;
+    const { resolveProfileContextForChannel } = await import(
+      "../../db/agentProfiles.js"
+    );
+    const ctx = resolveProfileContextForChannel(
+      getStateDb(),
+      "sms",
+      phone,
+    );
+    sendJson(res, 200, {
+      channel_kind: "sms",
+      channel_identity: phone,
+      profile: ctx.slug,
+      bound_profile: ctx.bound_slug,
+      cascaded: ctx.cascaded,
+      api_server_port: ctx.api_server_port,
+      api_server_key_present: ctx.api_server_key != null,
+      profile_dir: ctx.profile_dir,
+      journal_scope: ctx.journal_scope_key,
+    });
+  });
+
   // GET /status — fail-soft. NEVER 5xx (dashboard polls it).
-  addRoute("GET", "/api/v1/channels/sms/status", async ({ res }) => {
+  addRoute("GET", "/api/v1/channels/sms/status", async ({ res, query }) => {
+    const paths = resolveSmsProfile(query);
     let envMap: Record<string, string> = {};
     let envErr: string | null = null;
     try {
-      envMap = await readProfileEnv();
+      envMap = await readProfileEnv(paths);
     } catch (e) {
       envErr = e instanceof Error ? e.message : String(e);
     }
@@ -588,35 +648,44 @@ export function registerSmsRoutes(): void {
   // PUT /allowlist — set SMS_ALLOWED_USERS + SMS_ALLOW_ALL_USERS without
   // re-validating credentials. Lets the UI toggle inbound-sender policy
   // independently from a credential rotation.
-  addRoute("PUT", "/api/v1/channels/sms/allowlist", async ({ res, body }) => {
-    const b = (body ?? {}) as Record<string, unknown>;
-    const allowAll = b.allow_all === true;
-    let allowedUsers: string | null = null;
-    if (!allowAll) {
-      const raw = typeof b.allowed_users === "string" ? b.allowed_users.trim() : "";
-      if (raw) {
-        const parts = raw.split(",").map((s) => s.trim()).filter(Boolean);
-        for (const p of parts) {
-          if (!E164_RE.test(p)) {
-            throw new ValidationError(
-              `allowed_users must be comma-separated E.164 numbers — "${p}" is not`,
-            );
+  addRoute(
+    "PUT",
+    "/api/v1/channels/sms/allowlist",
+    async ({ res, body, query }) => {
+      const paths = resolveSmsProfile(query);
+      const b = (body ?? {}) as Record<string, unknown>;
+      const allowAll = b.allow_all === true;
+      let allowedUsers: string | null = null;
+      if (!allowAll) {
+        const raw = typeof b.allowed_users === "string" ? b.allowed_users.trim() : "";
+        if (raw) {
+          const parts = raw.split(",").map((s) => s.trim()).filter(Boolean);
+          for (const p of parts) {
+            if (!E164_RE.test(p)) {
+              throw new ValidationError(
+                `allowed_users must be comma-separated E.164 numbers — "${p}" is not`,
+              );
+            }
           }
+          allowedUsers = parts.join(",");
         }
-        allowedUsers = parts.join(",");
       }
-    }
-    await writeProfileEnvKeys({
-      SMS_ALLOWED_USERS: allowedUsers,
-      SMS_ALLOW_ALL_USERS: allowAll ? "true" : null,
-    });
-    restartHermes();
-    sendJson(res, 200, { ok: true, allow_all: allowAll, allowed_users: allowedUsers ?? "" });
-  });
+      await writeProfileEnvKeys(paths, {
+        SMS_ALLOWED_USERS: allowedUsers,
+        SMS_ALLOW_ALL_USERS: allowAll ? "true" : null,
+      });
+      restartHermes();
+      sendJson(res, 200, { ok: true, allow_all: allowAll, allowed_users: allowedUsers ?? "" });
+    },
+  );
 
   // PUT /credentials — validate against Twilio + vault upsert (3 items) +
   // .env upsert (4 keys) + debounced hermes restart.
-  addRoute("PUT", "/api/v1/channels/sms/credentials", async ({ res, body }) => {
+  addRoute(
+    "PUT",
+    "/api/v1/channels/sms/credentials",
+    async ({ res, body, query }) => {
+      const paths = resolveSmsProfile(query);
     const b = (body ?? {}) as Record<string, unknown>;
 
     const sid = typeof b.account_sid === "string" ? b.account_sid.trim() : "";
@@ -688,33 +757,40 @@ export function registerSmsRoutes(): void {
     if (typeof b.allowed_users === "string") {
       updates.SMS_ALLOWED_USERS = allowedUsers;
     }
-    await writeProfileEnvKeys(updates);
-    // Drop the probe cache so /status reflects the new creds immediately.
-    _accountProbeCache = null;
-    restartHermes();
-    sendJson(res, 200, { ok: true, state: "configured_starting" });
-  });
+      await writeProfileEnvKeys(paths, updates);
+      // Drop the probe cache so /status reflects the new creds immediately.
+      _accountProbeCache = null;
+      restartHermes();
+      sendJson(res, 200, { ok: true, state: "configured_starting" });
+    },
+  );
 
   // DELETE /credentials — wipe all 3 vault items, drop all 4 env keys, restart.
-  addRoute("DELETE", "/api/v1/channels/sms/credentials", async ({ res }) => {
-    await deleteVaultItem(VAULT_SID_ITEM_NAME);
-    await deleteVaultItem(VAULT_TOKEN_ITEM_NAME);
-    await deleteVaultItem(VAULT_PHONE_ITEM_NAME);
-    await writeProfileEnvKeys({
-      TWILIO_ACCOUNT_SID: null,
-      TWILIO_AUTH_TOKEN: null,
-      TWILIO_PHONE_NUMBER: null,
-      SMS_ALLOWED_USERS: null,
-    });
-    _accountProbeCache = null;
-    restartHermes();
-    sendJson(res, 200, { ok: true, state: "unconfigured" });
-  });
+  addRoute(
+    "DELETE",
+    "/api/v1/channels/sms/credentials",
+    async ({ res, query }) => {
+      const paths = resolveSmsProfile(query);
+      await deleteVaultItem(VAULT_SID_ITEM_NAME);
+      await deleteVaultItem(VAULT_TOKEN_ITEM_NAME);
+      await deleteVaultItem(VAULT_PHONE_ITEM_NAME);
+      await writeProfileEnvKeys(paths, {
+        TWILIO_ACCOUNT_SID: null,
+        TWILIO_AUTH_TOKEN: null,
+        TWILIO_PHONE_NUMBER: null,
+        SMS_ALLOWED_USERS: null,
+      });
+      _accountProbeCache = null;
+      restartHermes();
+      sendJson(res, 200, { ok: true, state: "unconfigured" });
+    },
+  );
 
   // POST /test — send a real test message via Twilio. Target: the first
   // entry in SMS_ALLOWED_USERS, mirroring smsSend()'s default recipient.
-  addRoute("POST", "/api/v1/channels/sms/test", async ({ res }) => {
-    const env = await readProfileEnv().catch(
+  addRoute("POST", "/api/v1/channels/sms/test", async ({ res, query }) => {
+    const paths = resolveSmsProfile(query);
+    const env = await readProfileEnv(paths).catch(
       () => ({}) as Record<string, string>,
     );
     const sid = env.TWILIO_ACCOUNT_SID ?? "";

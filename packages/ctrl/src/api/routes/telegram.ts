@@ -45,15 +45,47 @@ import {
   HERMES_CMD,
   HERMES_CONTAINER,
 } from "../helpers.js";
+import { getStateDb } from "../../db/state.js";
+import { resolveProfileForChannel } from "../../db/agentProfiles.js";
 
 const VAULT_CLI_URL = process.env.VAULT_CLI_URL || "http://vault-cli:8087";
 // Path INSIDE the hermes runtime container. HERMES_HOME=/hermes-state in
 // docker-compose; profiles live at $HERMES_HOME/profiles/<name>/.
 const HERMES_HOME = process.env.HERMES_HOME_IN_CONTAINER || "/hermes-state";
-const MAIN_PROFILE_DIR = `${HERMES_HOME}/profiles/main`;
-const PROFILE_ENV_PATH = `${MAIN_PROFILE_DIR}/.env`;
-const GATEWAY_STATE_PATH = `${MAIN_PROFILE_DIR}/gateway_state.json`;
-const CHANNEL_DIR_PATH = `${MAIN_PROFILE_DIR}/channel_directory.json`;
+
+// Lane IV — per-profile file paths. The legacy MAIN_PROFILE_DIR etc. used
+// to be module-level constants pointing at .../profiles/main; they're now
+// derived per-request from the channel→profile binding.
+interface TelegramProfilePaths {
+  profileSlug: string;
+  profileDir: string;
+  envPath: string;
+  gatewayStatePath: string;
+  channelDirPath: string;
+}
+
+function pathsForProfile(slug: string): TelegramProfilePaths {
+  const profileDir = `${HERMES_HOME}/profiles/${slug}`;
+  return {
+    profileSlug: slug,
+    profileDir,
+    envPath: `${profileDir}/.env`,
+    gatewayStatePath: `${profileDir}/gateway_state.json`,
+    channelDirPath: `${profileDir}/channel_directory.json`,
+  };
+}
+
+/**
+ * Resolve which profile this telegram request targets. The principal can
+ * pin a specific profile via `?profile=<slug>`; otherwise we fall back to
+ * the channel's default binding (`telegram` → main by Lane I seed).
+ */
+function resolveTelegramProfile(query?: URLSearchParams): TelegramProfilePaths {
+  const explicit = query?.get("profile")?.trim() ?? null;
+  if (explicit) return pathsForProfile(explicit);
+  const slug = resolveProfileForChannel(getStateDb(), "telegram", null);
+  return pathsForProfile(slug);
+}
 const VAULT_ITEM_NAME = "Telegram Bot Token";
 // BotFather token shape: <bot_id digits>:<secret>. The original BotFather
 // format was 8-12 digits + exactly 35 char secret; Telegram has since
@@ -195,11 +227,13 @@ const TELEGRAM_ENV_KEYS = [
 ] as const;
 type TelegramEnvKey = (typeof TELEGRAM_ENV_KEYS)[number];
 
-async function readProfileEnv(): Promise<Record<string, string>> {
+async function readProfileEnv(
+  paths: TelegramProfilePaths,
+): Promise<Record<string, string>> {
   // `cat` returns non-zero if the file is missing; tolerate that by reading
   // through `sh -c` and forcing exit 0 on ENOENT — an absent file = no keys.
   const raw = await dockerExec(HERMES_CONTAINER, [
-    "sh", "-c", `cat ${PROFILE_ENV_PATH} 2>/dev/null || true`,
+    "sh", "-c", `cat ${paths.envPath} 2>/dev/null || true`,
   ]);
   const out: Record<string, string> = {};
   for (const line of raw.split("\n")) {
@@ -228,11 +262,12 @@ async function readProfileEnv(): Promise<Record<string, string>> {
  * file appears atomically to anyone reading it (the gateway's reload path).
  */
 async function writeProfileEnvKeys(
+  paths: TelegramProfilePaths,
   updates: Partial<Record<TelegramEnvKey, string | null>>,
 ): Promise<void> {
   // Read existing content as TEXT, so we preserve comments / ordering.
   const raw = await dockerExec(HERMES_CONTAINER, [
-    "sh", "-c", `cat ${PROFILE_ENV_PATH} 2>/dev/null || true`,
+    "sh", "-c", `cat ${paths.envPath} 2>/dev/null || true`,
   ]);
   const lines = raw === "" ? [] : raw.split("\n");
   // Drop a trailing empty token that comes from a final newline so we don't
@@ -263,14 +298,14 @@ async function writeProfileEnvKeys(
   }
   const content = out.join("\n") + "\n";
 
-  const tmp = `${PROFILE_ENV_PATH}.tmp.${process.pid}.${Date.now()}`;
+  const tmp = `${paths.envPath}.tmp.${process.pid}.${Date.now()}`;
   // `mkdir -p` the profile dir so a brand-new profile (no .env yet) still
   // accepts the write — `tee` would otherwise fail on the missing parent.
   await dockerExecWithStdin(
     HERMES_CONTAINER,
     [
       "sh", "-c",
-      `mkdir -p ${MAIN_PROFILE_DIR} && cat > ${tmp} && mv ${tmp} ${PROFILE_ENV_PATH}`,
+      `mkdir -p ${paths.profileDir} && cat > ${tmp} && mv ${tmp} ${paths.envPath}`,
     ],
     content,
     30_000,
@@ -426,9 +461,12 @@ async function sendTelegramMessage(
 // .env is the allowlist the gateway enforces on incoming messages. To
 // actually revoke someone we strip them from BOTH and bounce Hermes so the
 // next message from that chat is rejected.
-async function revokeChatFromDirectory(userId: string): Promise<void> {
+async function revokeChatFromDirectory(
+  paths: TelegramProfilePaths,
+  userId: string,
+): Promise<void> {
   // 1) drop from channel_directory.json
-  const dirBlob = await readJsonFromContainer(CHANNEL_DIR_PATH);
+  const dirBlob = await readJsonFromContainer(paths.channelDirPath);
   if (dirBlob && typeof dirBlob === "object") {
     const root = dirBlob as Record<string, unknown>;
     const platforms = root.platforms as Record<string, unknown> | undefined;
@@ -443,10 +481,10 @@ async function revokeChatFromDirectory(userId: string): Promise<void> {
       if (platforms && filtered.length !== list.length) {
         platforms.telegram = filtered;
         (root as Record<string, unknown>).updated_at = new Date().toISOString();
-        const tmp = `${CHANNEL_DIR_PATH}.tmp.${process.pid}.${Date.now()}`;
+        const tmp = `${paths.channelDirPath}.tmp.${process.pid}.${Date.now()}`;
         await dockerExecWithStdin(
           HERMES_CONTAINER,
-          ["sh", "-c", `cat > ${tmp} && mv ${tmp} ${CHANNEL_DIR_PATH}`],
+          ["sh", "-c", `cat > ${tmp} && mv ${tmp} ${paths.channelDirPath}`],
           JSON.stringify(root, null, 2) + "\n",
           15_000,
         );
@@ -454,7 +492,7 @@ async function revokeChatFromDirectory(userId: string): Promise<void> {
     }
   }
   // 2) drop from the .env allowlist (TELEGRAM_ALLOWED_USERS is comma-separated)
-  const envMap: Record<string, string> = await readProfileEnv().catch(
+  const envMap: Record<string, string> = await readProfileEnv(paths).catch(
     () => ({}) as Record<string, string>,
   );
   const current = envMap.TELEGRAM_ALLOWED_USERS ?? "";
@@ -465,7 +503,7 @@ async function revokeChatFromDirectory(userId: string): Promise<void> {
       .filter((s: string) => s && s !== userId)
       .join(",");
     if (next !== current) {
-      await writeProfileEnvKeys({
+      await writeProfileEnvKeys(paths, {
         TELEGRAM_ALLOWED_USERS: next || null,
       });
     }
@@ -475,12 +513,41 @@ async function revokeChatFromDirectory(userId: string): Promise<void> {
 // ── Routes ────────────────────────────────────────────────────────────────
 
 export function registerTelegramRoutes(): void {
+  // GET /resolve?chat_id=<id> — Lane IV debug surface. Returns the resolved
+  // profile context for a given chat_id without side effects. Used by the
+  // smoke runbook to prove channel→profile binding works end-to-end.
+  addRoute("GET", "/api/v1/channels/telegram/resolve", async ({ res, query }) => {
+    const chatId = query.get("chat_id")?.trim() || null;
+    // Import lazily to avoid a circular dep with state.js at module init.
+    const { resolveProfileContextForChannel } = await import(
+      "../../db/agentProfiles.js"
+    );
+    const ctx = resolveProfileContextForChannel(
+      getStateDb(),
+      "telegram",
+      chatId,
+    );
+    sendJson(res, 200, {
+      channel_kind: "telegram",
+      channel_identity: chatId,
+      profile: ctx.slug,
+      bound_profile: ctx.bound_slug,
+      cascaded: ctx.cascaded,
+      api_server_port: ctx.api_server_port,
+      api_server_key_present: ctx.api_server_key != null,
+      profile_dir: ctx.profile_dir,
+      journal_scope: ctx.journal_scope_key,
+    });
+  });
+
   // GET /status — fail-soft. NEVER 5xx (dashboard polls it).
-  addRoute("GET", "/api/v1/channels/telegram/status", async ({ res }) => {
+  // Accepts ?profile=<slug>; defaults to the default binding for telegram.
+  addRoute("GET", "/api/v1/channels/telegram/status", async ({ res, query }) => {
+    const paths = resolveTelegramProfile(query);
     let envMap: Record<string, string> = {};
     let envErr: string | null = null;
     try {
-      envMap = await readProfileEnv();
+      envMap = await readProfileEnv(paths);
     } catch (e) {
       envErr = e instanceof Error ? e.message : String(e);
     }
@@ -505,8 +572,8 @@ export function registerTelegramRoutes(): void {
 
     // Configured — pull live state + directory + resolve handle (best effort).
     const [stateBlob, dirBlob, handle] = await Promise.all([
-      readJsonFromContainer(GATEWAY_STATE_PATH),
-      readJsonFromContainer(CHANNEL_DIR_PATH),
+      readJsonFromContainer(paths.gatewayStatePath),
+      readJsonFromContainer(paths.channelDirPath),
       resolveBotHandle(token),
     ]);
     const tg = parseGatewayState(stateBlob);
@@ -545,97 +612,112 @@ export function registerTelegramRoutes(): void {
   });
 
   // PUT /token — write to vault + per-profile .env, restart hermes.
-  addRoute("PUT", "/api/v1/channels/telegram/token", async ({ res, body }) => {
-    const b = (body ?? {}) as {
-      token?: unknown;
-      allowed_users?: unknown;
-      home_channel?: unknown;
-    };
-    if (typeof b.token !== "string" || !BOT_TOKEN_RE.test(b.token.trim())) {
-      throw new ValidationError(
-        "token must match BotFather shape: <8-12 digits>:<35 chars [A-Za-z0-9_-]>",
-      );
-    }
-    const token = b.token.trim();
-    const updates: Partial<Record<TelegramEnvKey, string | null>> = {
-      TELEGRAM_BOT_TOKEN: token,
-    };
-    if (typeof b.allowed_users === "string") {
-      updates.TELEGRAM_ALLOWED_USERS = b.allowed_users;
-    }
-    if (typeof b.home_channel === "string") {
-      updates.TELEGRAM_HOME_CHANNEL = b.home_channel;
-    }
+  addRoute(
+    "PUT",
+    "/api/v1/channels/telegram/token",
+    async ({ res, body, query }) => {
+      const paths = resolveTelegramProfile(query);
+      const b = (body ?? {}) as {
+        token?: unknown;
+        allowed_users?: unknown;
+        home_channel?: unknown;
+      };
+      if (typeof b.token !== "string" || !BOT_TOKEN_RE.test(b.token.trim())) {
+        throw new ValidationError(
+          "token must match BotFather shape: <8-12 digits>:<35 chars [A-Za-z0-9_-]>",
+        );
+      }
+      const token = b.token.trim();
+      const updates: Partial<Record<TelegramEnvKey, string | null>> = {
+        TELEGRAM_BOT_TOKEN: token,
+      };
+      if (typeof b.allowed_users === "string") {
+        updates.TELEGRAM_ALLOWED_USERS = b.allowed_users;
+      }
+      if (typeof b.home_channel === "string") {
+        updates.TELEGRAM_HOME_CHANNEL = b.home_channel;
+      }
 
-    await upsertTelegramVaultItem(token);    // canonical store
-    await writeProfileEnvKeys(updates);      // the file Hermes actually reads
-    restartHermes();                         // background
-    sendJson(res, 200, { ok: true, state: "configured_starting" });
-  });
+      await upsertTelegramVaultItem(token);    // canonical store
+      await writeProfileEnvKeys(paths, updates); // the file Hermes actually reads
+      restartHermes();                         // background
+      sendJson(res, 200, { ok: true, state: "configured_starting" });
+    },
+  );
 
   // DELETE /token — wipe vault + drop the 3 .env keys + restart.
-  addRoute("DELETE", "/api/v1/channels/telegram/token", async ({ res }) => {
-    await deleteTelegramVaultItem(); // idempotent
-    await writeProfileEnvKeys({
-      TELEGRAM_BOT_TOKEN: null,
-      TELEGRAM_ALLOWED_USERS: null,
-      TELEGRAM_HOME_CHANNEL: null,
-    });
-    restartHermes();
-    sendJson(res, 200, { ok: true, state: "unconfigured" });
-  });
+  addRoute(
+    "DELETE",
+    "/api/v1/channels/telegram/token",
+    async ({ res, query }) => {
+      const paths = resolveTelegramProfile(query);
+      await deleteTelegramVaultItem(); // idempotent
+      await writeProfileEnvKeys(paths, {
+        TELEGRAM_BOT_TOKEN: null,
+        TELEGRAM_ALLOWED_USERS: null,
+        TELEGRAM_HOME_CHANNEL: null,
+      });
+      restartHermes();
+      sendJson(res, 200, { ok: true, state: "unconfigured" });
+    },
+  );
 
   // POST /test — send a one-shot test message to TELEGRAM_HOME_CHANNEL via
   // the Telegram bot API. Used by the /channels "Send test message" button so
   // the user can confirm the bot can actually deliver. We deliberately don't
   // route through Hermes — this is a pure liveness check.
-  addRoute("POST", "/api/v1/channels/telegram/test", async ({ res }) => {
-    const envMap: Record<string, string> = await readProfileEnv().catch(
-      () => ({}) as Record<string, string>,
-    );
-    const token = envMap.TELEGRAM_BOT_TOKEN ?? "";
-    if (!token) {
-      throw new ValidationError(
-        "telegram is not configured (no bot token in the hermes profile)",
+  addRoute(
+    "POST",
+    "/api/v1/channels/telegram/test",
+    async ({ res, query }) => {
+      const paths = resolveTelegramProfile(query);
+      const envMap: Record<string, string> = await readProfileEnv(paths).catch(
+        () => ({}) as Record<string, string>,
       );
-    }
-    // Prefer TELEGRAM_HOME_CHANNEL; fall back to the first paired chat we
-    // know about so a user who set up via DM-pairing alone still gets a test.
-    let chatId = envMap.TELEGRAM_HOME_CHANNEL ?? "";
-    if (!chatId) {
-      const dirBlob = await readJsonFromContainer(CHANNEL_DIR_PATH);
-      const paired = parseChannelDirectory(dirBlob);
-      if (paired.length > 0) chatId = String(paired[0].id);
-    }
-    if (!chatId) {
-      sendJson(res, 200, {
-        ok: false,
-        error:
-          "no chat to send to — DM the bot once from your phone so it knows your chat_id, then try again",
+      const token = envMap.TELEGRAM_BOT_TOKEN ?? "";
+      if (!token) {
+        throw new ValidationError(
+          "telegram is not configured (no bot token in the hermes profile)",
+        );
+      }
+      // Prefer TELEGRAM_HOME_CHANNEL; fall back to the first paired chat we
+      // know about so a user who set up via DM-pairing alone still gets a test.
+      let chatId = envMap.TELEGRAM_HOME_CHANNEL ?? "";
+      if (!chatId) {
+        const dirBlob = await readJsonFromContainer(paths.channelDirPath);
+        const paired = parseChannelDirectory(dirBlob);
+        if (paired.length > 0) chatId = String(paired[0].id);
+      }
+      if (!chatId) {
+        sendJson(res, 200, {
+          ok: false,
+          error:
+            "no chat to send to — DM the bot once from your phone so it knows your chat_id, then try again",
+        });
+        return;
+      }
+      const stamp = new Date().toLocaleTimeString("en-GB", {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
       });
-      return;
-    }
-    const stamp = new Date().toLocaleTimeString("en-GB", {
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-    });
-    const result = await sendTelegramMessage(
-      token,
-      chatId,
-      `🤵 Test message from your Alfred dashboard · ${stamp}`,
-    );
-    if (result.ok) {
-      sendJson(res, 200, {
-        ok: true,
-        chat_id: chatId,
-        message_id: result.message_id,
-        sent_at: new Date().toISOString(),
-      });
-    } else {
-      sendJson(res, 200, { ok: false, error: result.description });
-    }
-  });
+      const result = await sendTelegramMessage(
+        token,
+        chatId,
+        `🤵 Test message from your Alfred dashboard · ${stamp}`,
+      );
+      if (result.ok) {
+        sendJson(res, 200, {
+          ok: true,
+          chat_id: chatId,
+          message_id: result.message_id,
+          sent_at: new Date().toISOString(),
+        });
+      } else {
+        sendJson(res, 200, { ok: false, error: result.description });
+      }
+    },
+  );
 
   // DELETE /chats/:user_id — revoke a paired chat. Removes from
   // channel_directory.json AND from TELEGRAM_ALLOWED_USERS, then bounces
@@ -643,12 +725,13 @@ export function registerTelegramRoutes(): void {
   addRoute(
     "DELETE",
     "/api/v1/channels/telegram/chats/:user_id",
-    async ({ res, params }) => {
+    async ({ res, params, query }) => {
+      const paths = resolveTelegramProfile(query);
       const userId = String(params.user_id ?? "").trim();
       if (!userId || !/^[0-9-]{1,20}$/.test(userId)) {
         throw new ValidationError("user_id must be a numeric Telegram chat id");
       }
-      await revokeChatFromDirectory(userId);
+      await revokeChatFromDirectory(paths, userId);
       restartHermes();
       sendJson(res, 200, { ok: true, revoked: userId });
     },

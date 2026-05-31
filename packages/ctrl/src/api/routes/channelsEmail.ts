@@ -35,15 +35,44 @@ import fs from "node:fs";
 
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError } from "../errors.js";
+import { getStateDb } from "../../db/state.js";
+import {
+  resolveProfileContextForChannel,
+  type ProfileChannelContext,
+} from "../../db/agentProfiles.js";
 
 const HERMES_GATEWAY_URL =
   process.env.HERMES_GATEWAY_URL ||
   process.env.OPENCLAW_GATEWAY_URL ||
   "http://hermes:18789";
+const HERMES_HOST =
+  (() => {
+    try {
+      return new URL(HERMES_GATEWAY_URL).hostname;
+    } catch {
+      return "hermes";
+    }
+  })();
+const HERMES_PROTOCOL =
+  (() => {
+    try {
+      return new URL(HERMES_GATEWAY_URL).protocol;
+    } catch {
+      return "http:";
+    }
+  })();
 const GATEWAY_TOKEN_FILE =
   process.env.OPENCLAW_GATEWAY_TOKEN_FILE || "/alfred-data/.gateway-token";
 
-function getGatewayToken(): string {
+/**
+ * Resolve the Hermes token for a target profile. Precedence:
+ *   1. The profile's API_SERVER_KEY read from /hermes-state/profiles/<slug>/.env
+ *      (Lane IV — the only place Hermes' /v1 actually validates).
+ *   2. HERMES_API_KEY / OPENCLAW_GATEWAY_TOKEN env (legacy main-only fallback).
+ *   3. The gateway-token file (back-compat with openclaw-era deployments).
+ */
+function gatewayTokenFor(ctx: ProfileChannelContext): string {
+  if (ctx.api_server_key) return ctx.api_server_key;
   const envToken = (
     process.env.HERMES_API_KEY || process.env.OPENCLAW_GATEWAY_TOKEN || ""
   ).trim();
@@ -53,6 +82,23 @@ function getGatewayToken(): string {
   } catch {
     return "";
   }
+}
+
+function hermesBaseUrlFor(ctx: ProfileChannelContext): string {
+  return `${HERMES_PROTOCOL}//${HERMES_HOST}:${ctx.api_server_port}`;
+}
+
+/**
+ * Resolve the target profile for an inbound email. The channel identity is
+ * the principal-facing recipient address (the first entry in the AgentMail
+ * `to` array — that's the inbox the email was actually delivered to). If
+ * `to` is empty, falls back to the default email binding.
+ */
+function resolveEmailContext(message: any): ProfileChannelContext {
+  const to = Array.isArray(message?.to) ? message.to : [];
+  const identity =
+    (typeof to[0] === "string" && to[0].trim().toLowerCase()) || null;
+  return resolveProfileContextForChannel(getStateDb(), "email", identity);
 }
 
 function buildChannelPrompt(message: any): string {
@@ -222,7 +268,9 @@ export function registerChannelsEmailRoutes(): void {
       return;
     }
 
-    const token = getGatewayToken();
+    // Lane IV — resolve which profile owns this recipient address.
+    const profileCtx = resolveEmailContext(b.message);
+    const token = gatewayTokenFor(profileCtx);
     if (!token) {
       throw new ValidationError(
         "Hermes gateway token not available — cannot start run",
@@ -231,13 +279,15 @@ export function registerChannelsEmailRoutes(): void {
 
     const prompt = buildChannelPrompt(b.message);
 
-    // Fire-and-forget Hermes run on the main profile. We intentionally don't
-    // await the response — the run takes tens of seconds to minutes and
+    // Fire-and-forget Hermes run on the resolved profile. We intentionally
+    // don't await the response — the run takes tens of seconds to minutes and
     // AgentMail has a 5s webhook budget upstream. `session_id` correlates the
-    // run to the email thread so a follow-up reply on the same thread chains
-    // the conversation.
-    const sessionId = `email-${b.message?.thread_id ?? b.message?.message_id ?? b.event_id ?? Date.now()}`;
-    const run = fetch(`${HERMES_GATEWAY_URL}/v1/runs`, {
+    // run to the email thread + profile so cross-profile replies on the same
+    // thread don't accidentally collide (a Sentinel-bound recipient and a
+    // main-bound recipient on different inboxes get different sessions).
+    const sessionId =
+      `agent:${profileCtx.slug}:email-${b.message?.thread_id ?? b.message?.message_id ?? b.event_id ?? Date.now()}`;
+    const run = fetch(`${hermesBaseUrlFor(profileCtx)}/v1/runs`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${token}`,
@@ -260,6 +310,32 @@ export function registerChannelsEmailRoutes(): void {
     // Don't await — let it run in the background.
     void run;
 
-    sendJson(res, 202, { accepted: true, message_id: b.message?.message_id ?? null });
+    sendJson(res, 202, {
+      accepted: true,
+      message_id: b.message?.message_id ?? null,
+      profile: profileCtx.slug,
+    });
   });
+
+  // GET /resolve?to=<address> — Lane IV debug surface.
+  addRoute(
+    "GET",
+    "/api/v1/channels/email/resolve",
+    async ({ res, query }) => {
+      const to = query.get("to")?.trim().toLowerCase() || null;
+      const ctx = resolveProfileContextForChannel(getStateDb(), "email", to);
+      sendJson(res, 200, {
+        channel_kind: "email",
+        channel_identity: to,
+        profile: ctx.slug,
+        bound_profile: ctx.bound_slug,
+        cascaded: ctx.cascaded,
+        api_server_port: ctx.api_server_port,
+        api_server_key_present: ctx.api_server_key != null,
+        profile_dir: ctx.profile_dir,
+        journal_scope: ctx.journal_scope_key,
+        gateway_url: hermesBaseUrlFor(ctx),
+      });
+    },
+  );
 }

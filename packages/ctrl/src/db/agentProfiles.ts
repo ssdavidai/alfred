@@ -30,11 +30,23 @@
 //     fallback table never has a hole. The principal CAN rebind the default
 //     (via bindChannel with channel_identity=null and the same kind), which
 //     UPSERTs the existing row rather than inserting a new one.
+import fs from "node:fs";
 import type { DatabaseSync } from "node:sqlite";
 import { ulid } from "./ulid.js";
 
 export const PORT_RANGE_USER_LO = 18794;
 export const PORT_RANGE_USER_HI = 18799;
+
+// HERMES_HOME inside the runtime container is `/hermes-state`. ctrl-api has
+// the hermes_data volume bind-mounted at this path (see docker-compose.yaml
+// ctrl-api service). Channel routes use it both as the path they read the
+// per-profile .env from (via fs) and as the path they prefix in `docker exec
+// hermes …` commands (the same path is valid in both containers).
+//
+// `HERMES_CONFIG_DIR` is an override for tests so resolveProfileContextForChannel
+// can be exercised without touching the real /hermes-state.
+export const HERMES_PROFILE_BASE_DIR = (): string =>
+  process.env.HERMES_CONFIG_DIR ?? "/hermes-state/profiles";
 
 export const RESERVED_SLUGS: ReadonlySet<string> = new Set([
   "main",
@@ -468,6 +480,121 @@ export function bindChannel(
     )
     .get(id) as BindingRow;
   return _row2binding(row);
+}
+
+// ── Lane IV: channel-route context resolver ───────────────────────────────
+//
+// The full lookup chain every channel route needs. Single round-trip with
+// the registry — slug → profile row + port + api_server_key from disk.
+//
+// Archived-target cascade:
+//   * resolveProfileForChannel can return a slug that points at an archived
+//     profile (Lane III could archive a profile that still has explicit
+//     bindings; Lane II's cleanup may not have rebinded them yet). When the
+//     resolved profile is archived, we cascade to `main` so the channel
+//     stays alive rather than 404ing on dispatch.
+//   * If `main` itself is archived (shouldn't happen — it's reserved), we
+//     surface the original archived profile with `archived=true` and let
+//     the caller decide whether to 503.
+//
+// The api_server_key read can fail in legitimate ways: the profile dir
+// doesn't exist yet (Lane II hasn't activated the profile), or the .env is
+// missing API_SERVER_KEY (first-boot before render_hermes seeded it). Both
+// cases return `api_server_key=null`; the caller decides how to respond
+// (typically: 503 "profile not yet activated").
+
+export interface ProfileChannelContext {
+  /** Final resolved profile slug (after archived-target cascade). */
+  slug: string;
+  /** The profile slug the binding pointed at BEFORE the archived cascade.
+   *  Equal to `slug` on the happy path. Useful for diagnostics. */
+  bound_slug: string;
+  /** True iff `bound_slug !== slug` (we cascaded). */
+  cascaded: boolean;
+  /** Hermes /v1 port for the resolved profile. */
+  api_server_port: number;
+  /** API_SERVER_KEY read from <profile_dir>/.env; null if unreadable
+   *  (the profile dir doesn't exist yet, or .env lacks the key). */
+  api_server_key: string | null;
+  /** Absolute path of the profile dir (e.g. /hermes-state/profiles/sentinel).
+   *  Used by channel routes that read/write gateway_state.json,
+   *  channel_directory.json, and the per-profile .env. */
+  profile_dir: string;
+  /** alfred_journal.hermes_profile scoping key. Same as `slug` today; broken
+   *  out so future schemes (e.g. principal-scoped) can change one place. */
+  journal_scope_key: string;
+}
+
+/**
+ * Read `API_SERVER_KEY` from a per-profile .env. Extracted from the
+ * duplicated readers in agents.ts / hermes.ts / channels_paperclip.ts /
+ * channels_ha.ts so Lane IV's channel routes resolve through one path.
+ */
+export function readHermesProfileApiKey(profileDir: string): string | null {
+  const envPath = `${profileDir}/.env`;
+  let raw: string;
+  try {
+    raw = fs.readFileSync(envPath, "utf-8");
+  } catch {
+    return null;
+  }
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eq = trimmed.indexOf("=");
+    if (eq < 0) continue;
+    if (trimmed.slice(0, eq).trim() === "API_SERVER_KEY") {
+      return trimmed.slice(eq + 1).trim();
+    }
+  }
+  return null;
+}
+
+export function resolveProfileContextForChannel(
+  db: DatabaseSync,
+  channel_kind: string,
+  channel_identity: string | null,
+): ProfileChannelContext {
+  const boundSlug = resolveProfileForChannel(db, channel_kind, channel_identity);
+  const bound = getProfile(db, boundSlug);
+
+  // If the bound profile is archived, cascade to 'main' so the channel
+  // remains live. Lane III's UI is expected to rebind before archiving in
+  // the normal case; this cascade is a backstop, not the happy path.
+  let slug = boundSlug;
+  let row = bound;
+  let cascaded = false;
+  if (bound && bound.archived_at != null) {
+    cascaded = true;
+    slug = "main";
+    row = getProfile(db, "main");
+  }
+  // If the bound slug doesn't exist at all (stale binding pointing at a
+  // hard-deleted profile — shouldn't be possible because archive doesn't
+  // delete, but be defensive), also fall back to main.
+  if (!row) {
+    cascaded = boundSlug !== "main";
+    slug = "main";
+    row = getProfile(db, "main");
+  }
+
+  // If 'main' itself is missing (the migration would have failed; this is
+  // really "should never happen"), surface a synthetic 18789-on-main shape
+  // so the caller can fail honestly downstream rather than crashing here.
+  const port = row?.api_server_port ?? 18789;
+  const baseDir = HERMES_PROFILE_BASE_DIR();
+  const profileDir = `${baseDir}/${slug}`;
+  const apiKey = readHermesProfileApiKey(profileDir);
+
+  return {
+    slug,
+    bound_slug: boundSlug,
+    cascaded,
+    api_server_port: port,
+    api_server_key: apiKey,
+    profile_dir: profileDir,
+    journal_scope_key: slug,
+  };
 }
 
 export function unbindChannel(db: DatabaseSync, id: string): void {

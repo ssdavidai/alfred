@@ -56,9 +56,33 @@ import { addRoute } from "../server.js";
 import { sendJson, ValidationError, ApiError } from "../errors.js";
 import { getStateDb } from "../../db/state.js";
 import { appendJournal } from "../../db/alfredJournal.js";
+import {
+  resolveProfileContextForChannel,
+  type ProfileChannelContext,
+} from "../../db/agentProfiles.js";
 
-const HERMES_MAIN_URL =
+// Legacy default base URL for the main profile. Used as a fallback when the
+// profile registry hasn't been seeded (should not happen post-Lane-I) and
+// for build-time docs. Per-request URLs are derived from the resolved
+// profile's `api_server_port`.
+const HERMES_DEFAULT_BASE =
   process.env.HERMES_GATEWAY_URL ?? "http://hermes:18789";
+const HERMES_HOST =
+  (() => {
+    try {
+      return new URL(HERMES_DEFAULT_BASE).hostname;
+    } catch {
+      return "hermes";
+    }
+  })();
+const HERMES_PROTOCOL =
+  (() => {
+    try {
+      return new URL(HERMES_DEFAULT_BASE).protocol;
+    } catch {
+      return "http:";
+    }
+  })();
 const HERMES_TIMEOUT_MS = 90_000;
 const REPLAY_WINDOW_SECS = 300;
 const SELF_TEST_HEADER = "x-paperclip-test";
@@ -297,47 +321,39 @@ function extractHermesText(resp: unknown): string {
   return "";
 }
 
-/** Read API_SERVER_KEY for the main Hermes profile out of its rendered
- *  .env. Matches the pattern in hermes.ts `readHermesApiKey()` — the
- *  per-profile key is the one Hermes' gateway actually validates against;
- *  /opt/alfred/.env's HERMES_API_SERVER_KEY is a *seed* for first-boot
- *  but Hermes regenerates it per profile if absent (we observed a
- *  mismatch live: opt/.env=64 chars, profile/.env=43 chars). The .env
- *  file is the source of truth at runtime. ctrl-api has hermes_data
- *  bind-mounted at /hermes-state.
- *
- *  Override via HERMES_CONFIG_DIR for tests (mirrors hermes.ts:387). */
-function readHermesMainApiKey(): string | null {
-  const baseDir = process.env.HERMES_CONFIG_DIR ?? "/hermes-state/profiles";
-  const envPath = `${baseDir}/main/.env`;
-  let raw: string;
-  try {
-    raw = fs.readFileSync(envPath, "utf-8");
-  } catch {
-    return null;
-  }
-  for (const line of raw.split("\n")) {
-    const t = line.trim();
-    if (!t || t.startsWith("#")) continue;
-    const eq = t.indexOf("=");
-    if (eq < 0) continue;
-    if (t.slice(0, eq).trim() === "API_SERVER_KEY") {
-      return t.slice(eq + 1).trim();
-    }
-  }
-  return null;
+/**
+ * Resolve the target Hermes profile for a Paperclip heartbeat. Lane I keys
+ * paperclip bindings by `channel_identity = paperclipAgentId` (the same
+ * value Paperclip's HTTP adapter uses to identify the employee). Until a
+ * principal rebinds via Lane III's UI, every binding resolves to `main`.
+ */
+function resolvePaperclipContext(
+  paperclipAgentId: string | null,
+): ProfileChannelContext {
+  return resolveProfileContextForChannel(
+    getStateDb(),
+    "paperclip",
+    paperclipAgentId,
+  );
+}
+
+/** Build the Hermes /v1 base URL for a resolved profile. */
+function hermesBaseUrlFor(ctx: ProfileChannelContext): string {
+  return `${HERMES_PROTOCOL}//${HERMES_HOST}:${ctx.api_server_port}`;
 }
 
 async function callHermes(
+  ctx: ProfileChannelContext,
   sessionKey: string,
   input: string,
 ): Promise<HermesCallResult | HermesCallFailure> {
-  const url = `${HERMES_MAIN_URL}/v1/responses`;
+  const url = `${hermesBaseUrlFor(ctx)}/v1/responses`;
   // Hermes' /v1/responses validates the Bearer against
-  // /hermes-state/profiles/main/.env's API_SERVER_KEY — NOT /opt/alfred/
-  // .env's HERMES_API_SERVER_KEY. Same key-resolution pattern as
-  // hermes.ts `readHermesApiKey()`.
-  const apiKey = readHermesMainApiKey() ?? "";
+  // /hermes-state/profiles/<slug>/.env's API_SERVER_KEY — NOT /opt/alfred/
+  // .env's HERMES_API_SERVER_KEY (live-observed mismatch 64 vs 43 chars).
+  // The per-profile key is read in resolveProfileContextForChannel via
+  // readHermesProfileApiKey (src/db/agentProfiles.ts).
+  const apiKey = ctx.api_server_key ?? "";
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     "X-Hermes-Session-Key": sessionKey,
@@ -393,7 +409,14 @@ async function callHermes(
 // "in"/"out"). chat_id = paperclip-<paperclipAgentId>, matching the
 // X-Hermes-Session-Key so the journal pivots cleanly off the session.
 
+function paperclipSessionId(ctx: ProfileChannelContext, paperclipAgentId: string): string {
+  return ctx.slug === "main"
+    ? `paperclip-${paperclipAgentId}`
+    : `agent:${ctx.slug}:paperclip:${paperclipAgentId}`;
+}
+
 function journalIn(
+  ctx: ProfileChannelContext,
   paperclipAgentId: string,
   message: string,
   runId: string,
@@ -406,8 +429,8 @@ function journalIn(
       message,
       source_kind: "paperclip-heartbeat",
       source_ref: runId,
-      hermes_session_id: `paperclip-${paperclipAgentId}`,
-      hermes_profile: "main",
+      hermes_session_id: paperclipSessionId(ctx, paperclipAgentId),
+      hermes_profile: ctx.journal_scope_key,
       status: "received",
     });
   } catch (e) {
@@ -419,6 +442,7 @@ function journalIn(
 }
 
 function journalOut(
+  ctx: ProfileChannelContext,
   paperclipAgentId: string,
   message: string,
   runId: string,
@@ -433,8 +457,8 @@ function journalOut(
       message,
       source_kind: "paperclip-reply",
       source_ref: runId,
-      hermes_session_id: `paperclip-${paperclipAgentId}`,
-      hermes_profile: "main",
+      hermes_session_id: paperclipSessionId(ctx, paperclipAgentId),
+      hermes_profile: ctx.journal_scope_key,
       status,
       delivery_error: deliveryError,
     });
@@ -463,10 +487,19 @@ async function processHeartbeat(
   opts: { skipJournal: boolean },
 ): Promise<HeartbeatProcessOutcome> {
   const started = Date.now();
-  const sessionKey = `paperclip-${body.paperclip.paperclipAgentId}`;
+  // Lane IV — resolve which Hermes profile owns this paperclip agent. The
+  // session-key shape carries the profile slug ONLY when we're routing to a
+  // non-main profile, so an existing main-bound paperclip employee keeps
+  // its `paperclip-<id>` session (no Hermes session migration needed). A
+  // newly-bound Sentinel paperclip employee gets `agent:sentinel:paperclip:<id>`.
+  const ctx = resolvePaperclipContext(body.paperclip.paperclipAgentId);
+  const sessionKey =
+    ctx.slug === "main"
+      ? `paperclip-${body.paperclip.paperclipAgentId}`
+      : `agent:${ctx.slug}:paperclip:${body.paperclip.paperclipAgentId}`;
 
   if (!opts.skipJournal) {
-    journalIn(body.paperclip.paperclipAgentId, body.message, body.paperclip.runId);
+    journalIn(ctx, body.paperclip.paperclipAgentId, body.message, body.paperclip.runId);
   }
 
   if (!body.deliver) {
@@ -484,10 +517,11 @@ async function processHeartbeat(
     // Fire-and-forget Hermes call. We swallow errors here because the
     // caller has already been told the heartbeat was accepted (202).
     void (async () => {
-      const result = await callHermes(sessionKey, body.message);
+      const result = await callHermes(ctx, sessionKey, body.message);
       if (!opts.skipJournal) {
         if (result.ok) {
           journalOut(
+            ctx,
             body.paperclip.paperclipAgentId,
             result.text,
             body.paperclip.runId,
@@ -495,6 +529,7 @@ async function processHeartbeat(
           );
         } else {
           journalOut(
+            ctx,
             body.paperclip.paperclipAgentId,
             "",
             body.paperclip.runId,
@@ -512,7 +547,7 @@ async function processHeartbeat(
   }
 
   // Sync mode: await Hermes and ship its text back to Paperclip.
-  const result = await callHermes(sessionKey, body.message);
+  const result = await callHermes(ctx, sessionKey, body.message);
   if (!result.ok) {
     const status = result.code === "HERMES_TIMEOUT" ? 504 : 502;
     const recent: RecentRun = {
@@ -526,6 +561,7 @@ async function processHeartbeat(
     recordRun(recent);
     if (!opts.skipJournal) {
       journalOut(
+        ctx,
         body.paperclip.paperclipAgentId,
         "",
         body.paperclip.runId,
@@ -550,6 +586,7 @@ async function processHeartbeat(
 
   if (!opts.skipJournal) {
     journalOut(
+      ctx,
       body.paperclip.paperclipAgentId,
       result.text,
       body.paperclip.runId,
@@ -873,6 +910,32 @@ async function probeSetupState(): Promise<SetupProbeResult> {
 // ── Routes ────────────────────────────────────────────────────────────────
 
 export function registerPaperclipChannelRoutes(): void {
+  // GET /resolve?paperclip_agent_id=<id> — Lane IV debug surface.
+  addRoute(
+    "GET",
+    "/api/v1/channels/paperclip/resolve",
+    async ({ res, query }) => {
+      const id = query.get("paperclip_agent_id")?.trim() || null;
+      const ctx = resolvePaperclipContext(id);
+      sendJson(res, 200, {
+        channel_kind: "paperclip",
+        channel_identity: id,
+        profile: ctx.slug,
+        bound_profile: ctx.bound_slug,
+        cascaded: ctx.cascaded,
+        api_server_port: ctx.api_server_port,
+        api_server_key_present: ctx.api_server_key != null,
+        profile_dir: ctx.profile_dir,
+        journal_scope: ctx.journal_scope_key,
+        gateway_url: hermesBaseUrlFor(ctx),
+        session_key_prefix:
+          ctx.slug === "main"
+            ? "paperclip-"
+            : `agent:${ctx.slug}:paperclip:`,
+      });
+    },
+  );
+
   // GET /status — always 200; operator card needs every field populated.
   // setup_state extends the original P2 contract (configured/has_signing_secret
   // stay for back-compat); the card uses setup_state to drive the new
