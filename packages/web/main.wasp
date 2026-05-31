@@ -301,6 +301,28 @@ page ChannelsPage {
   component: import ChannelsPage from "@src/dashboard/ChannelsPage"
 }
 
+// /profiles — multi-profile Hermes manager (#120 Lane III).
+// One page lists user-facing personas; the New flow walks Sir through a
+// minimal wizard (slug, label, model, optional persona template); the
+// detail page surfaces channel bindings + archive/restore.
+route ProfilesRoute { path: "/profiles", to: ProfilesPage }
+page ProfilesPage {
+  authRequired: true,
+  component: import ProfilesPage from "@src/dashboard/ProfilesPage"
+}
+
+route ProfileNewRoute { path: "/profiles/new", to: ProfileNewPage }
+page ProfileNewPage {
+  authRequired: true,
+  component: import ProfileNewPage from "@src/dashboard/ProfileNewPage"
+}
+
+route ProfileDetailRoute { path: "/profiles/:slug", to: ProfileDetailPage }
+page ProfileDetailPage {
+  authRequired: true,
+  component: import ProfileDetailPage from "@src/dashboard/ProfileDetailPage"
+}
+
 // /chat — the dashboard chat surface (#29). Replaces the OpenClaw raw
 // WebSocket widget; talks to the Hermes runtime over HTTP/SSE via the
 // chat proxy registered in src/server/setup.ts.
@@ -1172,6 +1194,48 @@ action dismissHaGap {
 
 action rejectHaProposal {
   fn: import { rejectHaProposal } from "@src/dashboard/operations",
+  entities: []
+}
+
+// ============================================================
+// #120 Lane III — multi-profile Hermes
+// ============================================================
+// Thin proxies to ctrl-api's /api/v1/agent-profiles surface (Lane I).
+// The detail page reads `getAgentProfile` for the {profile, bindings}
+// shape that Lane IIb confirmed.
+
+query getAgentProfiles {
+  fn: import { getAgentProfiles } from "@src/dashboard/operations",
+  entities: []
+}
+
+query getAgentProfile {
+  fn: import { getAgentProfile } from "@src/dashboard/operations",
+  entities: []
+}
+
+action createAgentProfile {
+  fn: import { createAgentProfile } from "@src/dashboard/operations",
+  entities: []
+}
+
+action archiveAgentProfile {
+  fn: import { archiveAgentProfile } from "@src/dashboard/operations",
+  entities: []
+}
+
+action restoreAgentProfile {
+  fn: import { restoreAgentProfile } from "@src/dashboard/operations",
+  entities: []
+}
+
+action bindChannelToProfile {
+  fn: import { bindChannelToProfile } from "@src/dashboard/operations",
+  entities: []
+}
+
+action unbindChannelFromProfile {
+  fn: import { unbindChannelFromProfile } from "@src/dashboard/operations",
   entities: []
 }
 

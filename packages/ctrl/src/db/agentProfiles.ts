@@ -381,6 +381,44 @@ export function archiveProfile(db: DatabaseSync, slug: string): AgentProfile {
   return after;
 }
 
+// Restore an archived profile so the principal can bring it back without
+// re-typing the wizard. Lane III — closes the namespace UX bug Lane IIb
+// flagged where an archived slug stayed reserved. Rules:
+//   * Profile must exist (404 via "not found").
+//   * Profile must currently be archived (otherwise it's a no-op error so
+//     the UI can distinguish "already live" from "restored").
+//   * Reserved profiles can't be archived in the first place; the guard
+//     here is defensive in case a stray write flipped archived_at on a
+//     reserved row.
+//   * On restore: clear archived_at, set status='pending'. The supervisor
+//     nudge (in the route layer) re-renders the profile dir and relaunches
+//     the gateway just like the original create flow.
+//   * Cascade-restore of channel bindings is NOT attempted — archive
+//     deleted the non-default rows, so the principal re-binds via the UI
+//     if they want the channel back. The per-kind 'binding-default-*'
+//     rows still point at 'main', which is the safe default.
+export function restoreProfile(db: DatabaseSync, slug: string): AgentProfile {
+  const p = getProfile(db, slug);
+  if (!p) throw new Error(`profile '${slug}' not found`);
+  if (p.is_reserved) {
+    // Reserved rows are never archived in normal operation; reject so the
+    // route surfaces 409 rather than silently no-op'ing.
+    throw new Error(`profile '${slug}' is reserved and cannot be restored`);
+  }
+  if (p.archived_at == null) {
+    throw new Error(`profile '${slug}' is not archived`);
+  }
+  const now = Date.now();
+  db.prepare(
+    `UPDATE agent_profile
+       SET status = 'pending', archived_at = NULL, updated_at = ?
+     WHERE slug = ?`,
+  ).run(now, slug);
+  const after = getProfile(db, slug);
+  if (!after) throw new Error(`profile '${slug}' not found after restore`);
+  return after;
+}
+
 export function setProfileStatus(
   db: DatabaseSync,
   slug: string,

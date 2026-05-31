@@ -11,6 +11,8 @@
 //   GET    /api/v1/agent-profiles/:slug
 //   POST   /api/v1/agent-profiles                         (202)
 //   DELETE /api/v1/agent-profiles/:slug
+//   POST   /api/v1/agent-profiles/:slug/restore            (Lane III)
+//   POST   /api/v1/agent-profiles/:slug/status             (supervisor)
 //   GET    /api/v1/agent-profiles/:slug/bindings
 //   POST   /api/v1/agent-profiles/:slug/bindings
 //   DELETE /api/v1/agent-profiles/:slug/bindings/:binding_id
@@ -46,6 +48,7 @@ import {
   getProfile,
   createProfile,
   archiveProfile,
+  restoreProfile,
   setProfileStatus,
   listBindingsForProfile,
   resolveProfileForChannel,
@@ -98,6 +101,10 @@ function _classify(err: unknown): never {
     throw new ConflictError(m);
   }
   if (m.includes("not supported in v1")) throw new ConflictError(m);
+  // 400 — restore on a non-archived profile. Falls through to the generic
+  // "everything else" branch below; called out so the surface contract
+  // matches the UI's expectation: a Restore button click on a row that
+  // somehow isn't archived shows a 400, not a confusing 409.
   // 404 — missing rows.
   if (m.startsWith("profile '") && m.endsWith("not found")) {
     throw new NotFoundError(m);
@@ -285,6 +292,51 @@ export function registerProfileRoutes(): void {
       _classify(err);
     }
   });
+
+  // POST :slug/restore — bring an archived profile back. Lane III closes
+  // the namespace UX bug: an archived slug stayed reserved and the only
+  // way back was re-typing the wizard with a fresh slug. The lib's
+  // restoreProfile clears archived_at + sets status='pending'; the
+  // supervisor nudge below re-renders the profile dir and relaunches the
+  // gateway on the original port (same allocator rule applies — the port
+  // was freed at archive, restore re-uses whatever port allocateUserPort
+  // would have picked … but in practice the row still has the previous
+  // api_server_port set so the relaunch lands on the same port). Reserved
+  // profiles can't be archived in the first place, so the lib rejects a
+  // restore call on them as a 409.
+  //
+  // 400 path: profile is already live → "profile 'X' is not archived".
+  // 404 path: profile doesn't exist → "profile 'X' not found".
+  // 409 path: profile is reserved (defensive — shouldn't happen).
+  addRoute(
+    "POST",
+    "/api/v1/agent-profiles/:slug/restore",
+    async ({ res, params }) => {
+      try {
+        const profile = restoreProfile(db(), params.slug);
+        // Same best-effort supervisor pattern as create — write the
+        // registry first so a successful HTTP response means the row is
+        // durable, then nudge Hermes to re-render the profile dir.
+        try {
+          const reg = buildSupervisorRegistry(db());
+          writeSupervisorRegistry(reg);
+          nudgeHermesSupervisor();
+        } catch (err) {
+          console.warn(
+            `[profiles] supervisor nudge after restore('${params.slug}') failed:`,
+            err instanceof Error ? err.message : err,
+          );
+        }
+        sendJson(res, 200, {
+          profile,
+          note:
+            "Registry row restored (status='pending'). Supervisor nudged; gateway should respond on the allocated port within ~30s.",
+        });
+      } catch (err) {
+        _classify(err);
+      }
+    },
+  );
 
   // POST :slug/status — supervisor callback. The Hermes supervisor calls
   // this after each gateway start/stop to flip the registry row's status

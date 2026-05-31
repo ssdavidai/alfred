@@ -21,6 +21,7 @@ import {
   allocateUserPort,
   createProfile,
   archiveProfile,
+  restoreProfile,
   setProfileStatus,
   listBindingsForProfile,
   listAllBindings,
@@ -274,6 +275,53 @@ describe("agentProfiles — archive", () => {
   it("throws on unknown slug", () => {
     const db = freshDb();
     assert.throws(() => archiveProfile(db, "nope"), /not found/);
+    db.close();
+  });
+});
+
+describe("agentProfiles — restore (Lane III)", () => {
+  it("brings an archived profile back with status='pending'", () => {
+    const db = freshDb();
+    createProfile(db, { slug: "alpha", label: "A", model: "m" });
+    archiveProfile(db, "alpha");
+    const restored = restoreProfile(db, "alpha");
+    assert.equal(restored.status, "pending");
+    assert.equal(restored.archived_at, null);
+    db.close();
+  });
+
+  it("refuses to restore a profile that isn't archived", () => {
+    const db = freshDb();
+    createProfile(db, { slug: "alpha", label: "A", model: "m" });
+    assert.throws(() => restoreProfile(db, "alpha"), /not archived/);
+    db.close();
+  });
+
+  it("throws on unknown slug", () => {
+    const db = freshDb();
+    assert.throws(() => restoreProfile(db, "nope"), /not found/);
+    db.close();
+  });
+
+  it("refuses to restore a reserved profile (defensive)", () => {
+    const db = freshDb();
+    // main can't be archived in normal operation; the defensive guard
+    // catches the case where a stray write flipped archived_at on a
+    // reserved row.
+    assert.throws(() => restoreProfile(db, "main"), /reserved/);
+    db.close();
+  });
+
+  it("preserves the api_server_port across archive+restore", () => {
+    const db = freshDb();
+    const before = createProfile(db, {
+      slug: "alpha",
+      label: "A",
+      model: "m",
+    });
+    archiveProfile(db, "alpha");
+    const restored = restoreProfile(db, "alpha");
+    assert.equal(restored.api_server_port, before.api_server_port);
     db.close();
   });
 });

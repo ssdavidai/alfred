@@ -33,8 +33,12 @@ const PRIMARY: NavItem[] = [
 // Everything else, behind a "More" menu.
 // F84 — "Claude Setup" (/claude) folded into Settings → Agent Configuration;
 // its nav entry was removed (the /claude route now redirects to /settings#agent).
+// #120 Lane III — "Profiles" is the multi-profile Hermes manager; lives in
+// More for now so the primary nav stays short. Switching profiles is
+// UI-driven (navigate to /profiles/<slug>); per-page scoping is deferred.
 const MORE: NavItem[] = [
   { to: "/connections", label: "Apps", icon: "globe" },
+  { to: "/profiles", label: "Profiles", icon: "calling_card" },
   { to: "/settings", label: "Settings", icon: "settings" },
 ];
 

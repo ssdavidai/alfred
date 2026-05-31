@@ -3449,6 +3449,155 @@ export const rejectHaProposal = async (
   });
 };
 
+// ────────────────────────────────────────────────────────────────────────
+// #120 Lane III — multi-profile Hermes
+// ────────────────────────────────────────────────────────────────────────
+//
+// Seven thin proxies to ctrl-api's /api/v1/agent-profiles surface (Lane I).
+// All seven are plain async functions with `Promise<any>` return — the Wasp
+// Payload-trap rule from `packages/web/src/tools/operations.ts` header.
+//
+// The wire shape coming back from ctrl-api is:
+//   GET    /api/v1/agent-profiles                     → { profiles, port_range, free_slots }
+//   GET    /api/v1/agent-profiles/:slug               → { profile, bindings }   ← Lane IIb smoke confirms this shape
+//   POST   /api/v1/agent-profiles            (202)    → { profile, note }
+//   DELETE /api/v1/agent-profiles/:slug               → { profile, note }
+//   POST   /api/v1/agent-profiles/:slug/restore       → { profile, note }       ← new in this lane
+//   POST   /api/v1/agent-profiles/:slug/bindings      → { binding }
+//   DELETE /api/v1/agent-profiles/:slug/bindings/:id  → { ok, binding_id }
+//
+// We pass these through verbatim — the React pages do the rendering. The
+// `Promise<any>` annotation is load-bearing per memory/PRs #139/#145/#182/
+// #184/#186; do NOT add a typed return.
+
+export const getAgentProfiles = async (
+  _args: unknown,
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, { path: "/api/v1/agent-profiles" });
+};
+
+export const getAgentProfile = async (
+  args: { slug: string },
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const slug = String(args?.slug ?? "").trim();
+  if (!slug) throw new HttpError(400, "slug required");
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    path: `/api/v1/agent-profiles/${encodeURIComponent(slug)}`,
+  });
+};
+
+export const createAgentProfile = async (
+  args: {
+    slug: string;
+    label: string;
+    description?: string;
+    model: string;
+    persona_template?: string;
+  },
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const slug = String(args?.slug ?? "").trim();
+  const label = String(args?.label ?? "").trim();
+  const model = String(args?.model ?? "").trim();
+  if (!slug) throw new HttpError(400, "slug required");
+  if (!label) throw new HttpError(400, "label required");
+  if (!model) throw new HttpError(400, "model required");
+  const body: Record<string, string> = { slug, label, model };
+  if (typeof args?.description === "string" && args.description.trim()) {
+    body.description = args.description.trim();
+  }
+  if (
+    typeof args?.persona_template === "string" &&
+    args.persona_template.trim()
+  ) {
+    body.persona_template = args.persona_template;
+  }
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/agent-profiles",
+    body,
+  });
+};
+
+export const archiveAgentProfile = async (
+  args: { slug: string },
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const slug = String(args?.slug ?? "").trim();
+  if (!slug) throw new HttpError(400, "slug required");
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "DELETE",
+    path: `/api/v1/agent-profiles/${encodeURIComponent(slug)}`,
+  });
+};
+
+export const restoreAgentProfile = async (
+  args: { slug: string },
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const slug = String(args?.slug ?? "").trim();
+  if (!slug) throw new HttpError(400, "slug required");
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: `/api/v1/agent-profiles/${encodeURIComponent(slug)}/restore`,
+    body: {},
+  });
+};
+
+export const bindChannelToProfile = async (
+  args: { slug: string; channel_kind: string; channel_identity?: string },
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const slug = String(args?.slug ?? "").trim();
+  const channel_kind = String(args?.channel_kind ?? "").trim();
+  if (!slug) throw new HttpError(400, "slug required");
+  if (!channel_kind) throw new HttpError(400, "channel_kind required");
+  const body: Record<string, string> = { channel_kind };
+  if (
+    typeof args?.channel_identity === "string" &&
+    args.channel_identity.trim()
+  ) {
+    body.channel_identity = args.channel_identity.trim();
+  }
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: `/api/v1/agent-profiles/${encodeURIComponent(slug)}/bindings`,
+    body,
+  });
+};
+
+export const unbindChannelFromProfile = async (
+  args: { slug: string; binding_id: string },
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const slug = String(args?.slug ?? "").trim();
+  const binding_id = String(args?.binding_id ?? "").trim();
+  if (!slug) throw new HttpError(400, "slug required");
+  if (!binding_id) throw new HttpError(400, "binding_id required");
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "DELETE",
+    path: `/api/v1/agent-profiles/${encodeURIComponent(
+      slug,
+    )}/bindings/${encodeURIComponent(binding_id)}`,
+  });
+};
+
 // ── decision_ref minter ──────────────────────────────────────────────────
 //
 // Crockford base32, 26 chars — the ULID shape PR4's
