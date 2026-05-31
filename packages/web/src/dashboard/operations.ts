@@ -3598,6 +3598,93 @@ export const unbindChannelFromProfile = async (
   });
 };
 
+// ── #204 Lane III — per-profile MCP catalog ──────────────────────────────
+//
+// Three ops that proxy to Lane I's ctrl-api routes under
+// /api/v1/admin/profiles/:slug/mcp. Reserved profiles (main / workers /
+// heavy / codex-builder) return 409 on mutations; the UI enforces this
+// client-side too (no add form, no remove buttons on reserved profiles).
+//
+// Wire shapes (from FIX-CONTRACTS.md C1):
+//   GET    /api/v1/admin/profiles/:slug/mcp
+//     → { slug, reserved, servers: [{ name, type, command_or_url, enabled }] }
+//   POST   /api/v1/admin/profiles/:slug/mcp
+//     body: { name, url?, command?, auth_header?, auth_value? }
+//     → 201 { ok, name }
+//   DELETE /api/v1/admin/profiles/:slug/mcp/:name
+//     → 200 { ok }
+//
+// `Promise<any>` annotation is load-bearing — Wasp Payload trap.
+
+export const getProfileMcp = async (
+  args: { slug: string },
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const slug = String(args?.slug ?? "").trim();
+  if (!slug) throw new HttpError(400, "slug required");
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    path: `/api/v1/admin/profiles/${encodeURIComponent(slug)}/mcp`,
+  });
+};
+
+export const addProfileMcp = async (
+  args: {
+    slug: string;
+    name: string;
+    url?: string;
+    command?: string;
+    auth_header?: string;
+    auth_value?: string;
+  },
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const slug = String(args?.slug ?? "").trim();
+  const name = String(args?.name ?? "").trim();
+  if (!slug) throw new HttpError(400, "slug required");
+  if (!name) throw new HttpError(400, "name required");
+  const hasUrl =
+    typeof args?.url === "string" && args.url.trim().length > 0;
+  const hasCommand =
+    typeof args?.command === "string" && args.command.trim().length > 0;
+  if (!hasUrl && !hasCommand) {
+    throw new HttpError(400, "url or command required");
+  }
+  const body: Record<string, string> = { name };
+  if (hasUrl) body.url = args.url!.trim();
+  if (hasCommand) body.command = args.command!.trim();
+  if (typeof args?.auth_header === "string" && args.auth_header.trim()) {
+    body.auth_header = args.auth_header.trim();
+  }
+  if (typeof args?.auth_value === "string" && args.auth_value.trim()) {
+    body.auth_value = args.auth_value.trim();
+  }
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: `/api/v1/admin/profiles/${encodeURIComponent(slug)}/mcp`,
+    body,
+  });
+};
+
+export const removeProfileMcp = async (
+  args: { slug: string; name: string },
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const slug = String(args?.slug ?? "").trim();
+  const name = String(args?.name ?? "").trim();
+  if (!slug) throw new HttpError(400, "slug required");
+  if (!name) throw new HttpError(400, "name required");
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "DELETE",
+    path: `/api/v1/admin/profiles/${encodeURIComponent(slug)}/mcp/${encodeURIComponent(name)}`,
+  });
+};
+
 // ── #120 Lane V — per-profile FULL channels surface ──────────────────────
 //
 // Three consolidator ops that route through Lane IV's ?profile=<slug> shape

@@ -1251,6 +1251,25 @@ action unbindChannelFromProfile {
   entities: []
 }
 
+// #204 Lane III — per-profile MCP catalog (query + 2 mutations).
+// Reserved profiles (main/workers/heavy/codex-builder) return 409 on
+// mutations; the UI enforces this client-side (read-only on reserved).
+
+query getProfileMcp {
+  fn: import { getProfileMcp } from "@src/dashboard/operations",
+  entities: []
+}
+
+action addProfileMcp {
+  fn: import { addProfileMcp } from "@src/dashboard/operations",
+  entities: []
+}
+
+action removeProfileMcp {
+  fn: import { removeProfileMcp } from "@src/dashboard/operations",
+  entities: []
+}
+
 // #120 Lane V — per-profile FULL channels surface ops.
 //
 // The three consolidator ops the /profiles/:slug/channels page wires up. They

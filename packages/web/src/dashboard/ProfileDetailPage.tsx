@@ -23,6 +23,9 @@ import {
   restoreAgentProfile,
   bindChannelToProfile,
   unbindChannelFromProfile,
+  getProfileMcp,
+  addProfileMcp,
+  removeProfileMcp,
 } from "wasp/client/operations";
 import { Frame, PageHeading } from "../client/components/ab/Frame";
 
@@ -41,6 +44,14 @@ const CHANNEL_KINDS: { value: string; label: string; placeholder: string }[] = [
   { value: "terminal", label: "Terminal", placeholder: "session id" },
   { value: "tailscale", label: "Tailscale", placeholder: "node id" },
 ];
+
+// C1 JSON shape from FIX-CONTRACTS.md #204
+interface McpServer {
+  name: string;
+  type: "stdio" | "http";
+  command_or_url: string;
+  enabled: boolean;
+}
 
 interface ProfileRow {
   slug: string;
@@ -120,6 +131,23 @@ export default function ProfileDetailPage() {
   const [lifecycleBusy, setLifecycleBusy] = useState(false);
   const [lifecycleError, setLifecycleError] = useState<string | null>(null);
   const [confirmArchive, setConfirmArchive] = useState(false);
+
+  // MCP section state
+  const {
+    data: mcpData,
+    isLoading: mcpLoading,
+    refetch: refetchMcp,
+  } = useQuery(getProfileMcp, { slug }, { enabled: !!slug });
+  const mcpServers = ((mcpData as any)?.servers ?? []) as McpServer[];
+  const mcpReserved = (mcpData as any)?.reserved === true;
+
+  const [mcpName, setMcpName] = useState("");
+  const [mcpUrl, setMcpUrl] = useState("");
+  const [mcpAuthHeader, setMcpAuthHeader] = useState("");
+  const [mcpAuthValue, setMcpAuthValue] = useState("");
+  const [mcpAddBusy, setMcpAddBusy] = useState(false);
+  const [mcpError, setMcpError] = useState<string | null>(null);
+  const [mcpConfirmRemove, setMcpConfirmRemove] = useState<string | null>(null);
 
   // Poll status while pending; stop once we hit a terminal-for-display
   // status. The Lane IIb smoke shows ~17s to running on a fresh tenant,
@@ -204,6 +232,53 @@ export default function ProfileDetailPage() {
       );
     } finally {
       setLifecycleBusy(false);
+    }
+  }
+
+  async function onAddMcp() {
+    if (mcpAddBusy || !slug) return;
+    const name = mcpName.trim();
+    const url = mcpUrl.trim();
+    if (!name) {
+      setMcpError("Server name is required.");
+      return;
+    }
+    if (!url) {
+      setMcpError("URL is required.");
+      return;
+    }
+    setMcpAddBusy(true);
+    setMcpError(null);
+    try {
+      await addProfileMcp({
+        slug,
+        name,
+        url,
+        auth_header: mcpAuthHeader.trim() || undefined,
+        auth_value: mcpAuthValue.trim() || undefined,
+      });
+      setMcpName("");
+      setMcpUrl("");
+      setMcpAuthHeader("");
+      setMcpAuthValue("");
+      await refetchMcp();
+    } catch (e: any) {
+      setMcpError(String(e?.message || e || "Couldn't add the MCP server."));
+    } finally {
+      setMcpAddBusy(false);
+    }
+  }
+
+  async function onRemoveMcp(name: string) {
+    if (!slug) return;
+    setMcpError(null);
+    try {
+      await removeProfileMcp({ slug, name });
+      setMcpConfirmRemove(null);
+      await refetchMcp();
+    } catch (e: any) {
+      setMcpError(String(e?.message || e || "Couldn't remove the MCP server."));
+      setMcpConfirmRemove(null);
     }
   }
 
@@ -434,6 +509,162 @@ export default function ProfileDetailPage() {
                   style={{ color: "#B85C5C" }}
                 >
                   {bindError}
+                </div>
+              )}
+            </div>
+          )}
+        </section>
+
+        {/* MCP servers */}
+        <section className="mb-16">
+          <div
+            className="font-mono text-[10px] uppercase tracking-[0.28em] mb-3"
+            style={{ color: "var(--brass)" }}
+          >
+            MCP Servers
+          </div>
+          <h2 className="font-display text-3xl tracking-tight mb-6">
+            Tool providers registered for this persona.
+          </h2>
+
+          {mcpLoading && (
+            <p className="font-body italic" style={{ color: "var(--marginalia)" }}>
+              Reading MCP catalog…
+            </p>
+          )}
+
+          {!mcpLoading && mcpServers.length === 0 && (
+            <p className="font-body italic mb-6" style={{ color: "var(--marginalia)" }}>
+              No MCP servers are registered for this profile yet.
+            </p>
+          )}
+
+          {!mcpLoading && mcpServers.length > 0 && (
+            <div className="border-t border-rule mb-6">
+              {mcpServers.map((srv) => (
+                <div
+                  key={srv.name}
+                  className="py-4 border-b border-rule grid grid-cols-[1fr_auto] items-center gap-4"
+                >
+                  <div>
+                    <div className="flex items-center gap-3 mb-1">
+                      <span className="font-mono text-[13px]">{srv.name}</span>
+                      <span
+                        className="font-mono text-[10px] uppercase tracking-[0.18em] px-1.5"
+                        style={{ color: "var(--marginalia)", border: "1px solid var(--rule)" }}
+                      >
+                        {srv.type}
+                      </span>
+                      {!srv.enabled && (
+                        <span
+                          className="font-mono text-[10px] uppercase tracking-[0.18em] px-1.5"
+                          style={{ color: "#B85C5C", border: "1px solid #B85C5C" }}
+                        >
+                          disabled
+                        </span>
+                      )}
+                    </div>
+                    <div
+                      className="font-mono text-[11px] break-all"
+                      style={{ color: "var(--marginalia)" }}
+                    >
+                      {srv.command_or_url}
+                    </div>
+                  </div>
+                  {!mcpReserved && (
+                    <div>
+                      {mcpConfirmRemove === srv.name ? (
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => onRemoveMcp(srv.name)}
+                            className="font-mono text-[10px] uppercase tracking-[0.18em]"
+                            style={{ color: "#B85C5C" }}
+                          >
+                            Confirm
+                          </button>
+                          <button
+                            onClick={() => setMcpConfirmRemove(null)}
+                            className="font-mono text-[10px] uppercase tracking-[0.18em]"
+                            style={{ color: "var(--marginalia)" }}
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={() => setMcpConfirmRemove(srv.name)}
+                          className="font-mono text-[10px] uppercase tracking-[0.18em]"
+                          style={{ color: "#B85C5C" }}
+                        >
+                          Remove
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {mcpReserved && (
+            <p className="font-body italic mb-6" style={{ color: "var(--marginalia)" }}>
+              This is a reserved profile. MCP servers are managed by the system
+              and cannot be added or removed here.
+            </p>
+          )}
+
+          {!mcpReserved && !isArchived && (
+            <div className="border border-rule p-5">
+              <div
+                className="font-mono text-[10px] uppercase tracking-[0.22em] mb-3"
+                style={{ color: "var(--brass)" }}
+              >
+                Add MCP server
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
+                <input
+                  value={mcpName}
+                  onChange={(e) => setMcpName(e.target.value)}
+                  placeholder="Server name, e.g. my-tools"
+                  className="bg-transparent outline-none border-b font-mono text-[14px] pb-2"
+                  style={{ borderColor: "var(--brass)" }}
+                />
+                <input
+                  value={mcpUrl}
+                  onChange={(e) => setMcpUrl(e.target.value)}
+                  placeholder="URL, e.g. https://my-mcp.example.com"
+                  className="bg-transparent outline-none border-b font-mono text-[14px] pb-2"
+                  style={{ borderColor: "var(--brass)" }}
+                />
+                <input
+                  value={mcpAuthHeader}
+                  onChange={(e) => setMcpAuthHeader(e.target.value)}
+                  placeholder="Auth header (optional), e.g. Authorization"
+                  className="bg-transparent outline-none border-b font-mono text-[14px] pb-2"
+                  style={{ borderColor: "var(--brass)" }}
+                />
+                <input
+                  value={mcpAuthValue}
+                  onChange={(e) => setMcpAuthValue(e.target.value)}
+                  placeholder="Auth value (optional), e.g. Bearer …"
+                  className="bg-transparent outline-none border-b font-mono text-[14px] pb-2"
+                  style={{ borderColor: "var(--brass)" }}
+                />
+              </div>
+              <button
+                onClick={onAddMcp}
+                disabled={mcpAddBusy}
+                className="btn-brass"
+                style={{ opacity: mcpAddBusy ? 0.5 : 1 }}
+              >
+                {mcpAddBusy ? "Adding…" : "Add server"}
+              </button>
+              {mcpError && (
+                <div
+                  className="mt-3 font-body italic text-sm"
+                  style={{ color: "#B85C5C" }}
+                >
+                  {mcpError}
                 </div>
               )}
             </div>
