@@ -598,14 +598,156 @@ start_registered_profile() {
         return 0  # already running
     fi
     local profile_dir="${PROFILES_DIR}/${slug}"
+    # #120 Lane IIb — when ctrl-api registers a new profile at RUNTIME
+    # (after init exited), there's no operator step to fire a re-render.
+    # The supervisor self-renders the missing profile dir inline so the
+    # principal-creates-profile flow is end-to-end automatic.
+    #
+    # render_profile_dir is idempotent — calling it for an already-
+    # rendered profile is harmless (render_hermes.py preserves an existing
+    # operator-owned config.yaml; render_mcp_servers.py is ADD-only). On
+    # render failure we log loudly and skip launch; the next reconcile
+    # tick will retry without bringing down the live profiles.
     if [[ ! -f "${profile_dir}/.env" || ! -f "${profile_dir}/config.yaml" ]]; then
-        log "WARN: skipping launch of '${slug}' — profile dir not rendered (${profile_dir})"
-        return 0
+        log "INFO: profile dir missing for '${slug}' — rendering inline (port=${port})"
+        if ! render_profile_dir "$slug" "$port"; then
+            log "ERROR: inline render failed for '${slug}' — skipping launch (will retry on next reconcile)"
+            return 0
+        fi
+        if [[ ! -f "${profile_dir}/.env" || ! -f "${profile_dir}/config.yaml" ]]; then
+            log "ERROR: inline render of '${slug}' completed but config.yaml/.env still missing — skipping launch"
+            return 0
+        fi
     fi
     REGISTRY_PORT["$slug"]="$port"
     REGISTRY_LAUNCHED["$slug"]=1
     start_proc "hermes-${slug}" \
         "cd \"${profile_dir}\" && set -a && . \"${profile_dir}/.env\" && set +a && TERMINAL_CWD=${profile_dir} exec hermes -p ${slug} gateway run --replace"
+}
+
+# --- Runtime self-render (#120 Lane IIb) -------------------------------------
+# When ctrl-api registers a NEW profile after init has exited, the supervisor
+# is the only process around to render the profile dir. We invoke the SAME
+# two renderer scripts the init container runs, with the same env contract,
+# so a runtime-rendered profile is byte-identical to one rendered at boot.
+#
+# Inputs from the registry: slug + port. Model comes from the registry too;
+# look it up from REGISTRY_FILE in case the SIGUSR1 reconciler called us
+# without it. Renderer environment:
+#   * HERMES_VAULT_PATH        — same default as init (/vault)
+#   * HERMES_RUNTIME_PROFILE_DIR — bake the runtime view into config.yaml
+#                                  (matches init's HERMES_RUNTIME_HOME plumbing)
+#   * HERMES_RENDER_PORT       — registry-allocated port (18794..18799)
+#   * HERMES_RENDER_MODEL      — registry-allocated model
+#   * CTRL_API_URL             — http://ctrl-api:3100 (compose-network)
+#   * STATE_DB_PATH            — unset; supervisor has no /ctrl-data mount.
+#                                render_mcp_servers degrades gracefully to
+#                                "all servers direct" when the path is
+#                                missing — same as a fresh-tenant first boot.
+#
+# Provider keys, AAS_API_KEY, COMPOSIO_*: the hermes runtime container's
+# compose env carries OPENROUTER_API_KEY + ANTHROPIC_API_KEY directly; the
+# rest live in main/.env (rendered by init at boot). We source main/.env
+# into the renderer subshell BEFORE invoking render_hermes so the new
+# profile's .env carries the same AAS_API_KEY / OPENAI_API_KEY / COMPOSIO_*
+# values as main. Without this, the rendered .env would have those keys
+# blank and the new gateway would 401 on every ctrl-api call.
+#
+# Falls back to "render scripts not baked" (older image) by logging a clear
+# error and returning 1 — the caller skips launch; the operator can still
+# trigger init manually as the explicit-fallback path.
+render_profile_dir() {
+    local slug="$1"
+    local port="$2"
+    local render_dir="${HERMES_RENDER_DIR:-/opt/hermes-init}"
+    local hermes_template_dir="${HERMES_TEMPLATE_DIR:-/opt/hermes-init/templates}"
+    local gateway_token_file="${OPENCLAW_GATEWAY_TOKEN_FILE:-/alfred-data/.gateway-token}"
+    local profile_dir="${PROFILES_DIR}/${slug}"
+
+    if [[ ! -x "${render_dir}/render_hermes.py" ]]; then
+        log "render: missing ${render_dir}/render_hermes.py — older image?"
+        return 1
+    fi
+    if [[ ! -f "${hermes_template_dir}/hermes-config.yaml.njk" \
+       || ! -f "${hermes_template_dir}/hermes-profile.env.njk" ]]; then
+        log "render: missing .njk templates under ${hermes_template_dir}"
+        return 1
+    fi
+    if [[ ! -r "${gateway_token_file}" ]]; then
+        log "render: gateway token file ${gateway_token_file} unreadable"
+        return 1
+    fi
+    local gateway_token
+    gateway_token="$(tr -d '[:space:]' < "${gateway_token_file}")"
+    if [[ -z "${gateway_token}" ]]; then
+        log "render: gateway token file ${gateway_token_file} is empty"
+        return 1
+    fi
+
+    # Look up the model for this slug from the registry — supervisor only
+    # receives slug+port through the reconcile path; the model is in the
+    # registry JSON.
+    local model=""
+    if [[ -f "${REGISTRY_FILE}" ]]; then
+        model="$(python3 - "${REGISTRY_FILE}" "${slug}" <<'PY' || true
+import json, sys
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as f:
+        data = json.load(f)
+    target = sys.argv[2]
+    for p in data.get("profiles", []):
+        if str(p.get("slug", "")).strip() == target:
+            print(str(p.get("model", "")).strip())
+            break
+except Exception:
+    pass
+PY
+)"
+    fi
+
+    mkdir -p "${profile_dir}"
+    # Source main/.env so the renderer inherits AAS_API_KEY / OPENAI_API_KEY /
+    # COMPOSIO_* / ALFRED_PRIME / CROSS_TENANT_PEERS — same values as the
+    # principal-facing profile. The hermes container's compose env only
+    # carries OPENROUTER_API_KEY + ANTHROPIC_API_KEY directly; everything
+    # else propagates through main/.env at init time.
+    (
+        if [[ -r "${PROFILES_DIR}/main/.env" ]]; then
+            set -a
+            # shellcheck disable=SC1090,SC1091
+            . "${PROFILES_DIR}/main/.env" || true
+            set +a
+        fi
+        export HERMES_VAULT_PATH="${HERMES_VAULT_PATH:-/vault}"
+        export HERMES_RUNTIME_PROFILE_DIR="${profile_dir}"
+        export HERMES_RENDER_PORT="${port}"
+        export HERMES_RENDER_MODEL="${model}"
+        export CTRL_API_URL="${CTRL_API_URL:-http://ctrl-api:3100}"
+        if ! python3 "${render_dir}/render_hermes.py" \
+                "${slug}" \
+                "${profile_dir}" \
+                "${hermes_template_dir}" \
+                "${gateway_token}"; then
+            echo "render_hermes.py failed for ${slug}" >&2
+            exit 1
+        fi
+        # ADD-only mutator for the MCP server backfill, identical to init's
+        # call. STATE_DB_PATH is intentionally not set — supervisor has no
+        # /ctrl-data mount so render_mcp_servers degrades to "no disposition
+        # overrides" (same fallback as a fresh-tenant first boot).
+        PROFILE_DIR="${profile_dir}" \
+        HERMES_RUNTIME_PROFILE_DIR="${profile_dir}" \
+        CTRL_API_URL="${CTRL_API_URL:-http://ctrl-api:3100}" \
+            python3 "${render_dir}/render_mcp_servers.py" "${slug}" \
+            || echo "render_mcp_servers.py failed for ${slug} (non-fatal)" >&2
+    )
+    local rc=$?
+    if (( rc != 0 )); then
+        log "render: render_hermes.py exited ${rc} for '${slug}'"
+        return 1
+    fi
+    log "render: '${slug}' rendered into ${profile_dir} (port=${port}, model=${model:-<default>})"
+    return 0
 }
 
 # Initial launch — iterate the registry once.

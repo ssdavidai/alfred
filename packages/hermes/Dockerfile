@@ -343,6 +343,29 @@ RUN chmod +x /usr/local/bin/codex-builder-setup-egress.sh \
 COPY packages/hermes/SOUL.codex-builder.md /opt/hermes-assets/SOUL.codex-builder.md
 
 # =============================================================================
+# Self-render renderer scripts (#120 Lane IIb).
+# =============================================================================
+# When ctrl-api registers a new user-facing profile AFTER init has exited,
+# the supervisor's SIGUSR1 reconciler needs to render that profile dir
+# inline — no operator step, no init re-run. We bake the SAME two renderer
+# scripts the init container runs (render_hermes.py + render_mcp_servers.py)
+# plus the two .njk templates into the runtime image, so the runtime self-
+# render is byte-identical to a boot-time render.
+#
+# jinja2 + ruamel.yaml are required by render_hermes.py (template render)
+# and render_mcp_servers.py (round-trip YAML mutator). pinned to the same
+# versions the init image uses for byte-stable output across re-renders.
+#
+# render_registry.py is NOT baked here — supervisor reads the registry JSON
+# ctrl-api already wrote (no state.db mount in the hermes runtime).
+RUN pip install --no-cache-dir "jinja2==3.1.6" "ruamel.yaml==0.18.6"
+COPY packages/hermes/init/render_hermes.py       /opt/hermes-init/render_hermes.py
+COPY packages/hermes/init/render_mcp_servers.py  /opt/hermes-init/render_mcp_servers.py
+COPY packages/hermes/hermes-config.yaml.njk      /opt/hermes-init/templates/hermes-config.yaml.njk
+COPY packages/hermes/hermes-profile.env.njk      /opt/hermes-init/templates/hermes-profile.env.njk
+RUN chmod 0755 /opt/hermes-init/render_hermes.py /opt/hermes-init/render_mcp_servers.py
+
+# =============================================================================
 # Supervisor entrypoint.
 # =============================================================================
 COPY packages/hermes/docker/supervisor.sh /opt/hermes-supervisor/supervisor.sh
