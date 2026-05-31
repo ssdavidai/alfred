@@ -770,10 +770,10 @@ function ProfileEmailSection({ slug }: { slug: string }) {
       ? `No inbox yet. Provision one and AgentMail mints a fresh address scoped to '${slug}'.`
       : "Per-profile inbox provisioning is unavailable on this tenant — see the operator hint below.";
   const cardStatus: ChannelStatus = configured
-    ? "connected"
+    ? "active"
     : provisionAvailable
       ? "available"
-      : "unavailable";
+      : "error";
 
   return (
     <ChannelCard
