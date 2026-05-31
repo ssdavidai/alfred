@@ -21,6 +21,9 @@
 //   POST   /api/v1/admin/profiles/:slug/mcp                (#204 Lane I)
 //   DELETE /api/v1/admin/profiles/:slug/mcp/:name          (#204 Lane I)
 //
+//   GET    /api/v1/admin/profiles/:slug/skills             (#205 Lane I)
+//   PUT    /api/v1/admin/profiles/:slug/skills/:name       (#205 Lane I)
+//
 // POST returns 202 Accepted (not 201) because the Hermes-side activation is
 // deferred to Lane II — the registry row writes immediately but no gateway
 // is started yet. Lane II flips status from 'pending' to 'running'.
@@ -693,6 +696,227 @@ export function registerProfileRoutes(): void {
         }
 
         sendJson(res, 200, { ok: true });
+      } catch (err) {
+        _classify(err);
+      }
+    },
+  );
+
+  // ─────────────────────────────────────────────────────────────
+  // Per-profile skill catalogue (#205 Lane I — C-1 contract)
+  //
+  // Source of truth:
+  //   - Catalogue:   ${HERMES_HOME}/profiles/<slug>/skills/<name>/SKILL.md
+  //   - Enabled set: <slug>/config.yaml `skills.disabled` array (absent ≡ all on)
+  //
+  // GET works for any slug (incl. reserved). PUT refuses reserved slugs (409).
+  // Atomic write + best-effort supervisor nudge — same idiom as the MCP routes
+  // above; do NOT diverge from it.
+  // ─────────────────────────────────────────────────────────────
+
+  /** Resolved path to a profile's skills/ directory (via the ctrl-api volume view). */
+  function profileSkillsDir(slug: string): string {
+    return path.join(HERMES_PROFILE_BASE_DIR(), slug, "skills");
+  }
+
+  /** Skill name must be a safe identifier (no shell injection, matches C-1.2). */
+  const SKILL_NAME_RE = /^[a-z][a-z0-9_-]{0,80}$/;
+
+  /**
+   * Parse the leading `---\n…\n---` YAML frontmatter block from a SKILL.md.
+   * Returns {} if no frontmatter or unparseable. Scalar values only — same
+   * defensive stance as loadProfileConfig().
+   */
+  function _parseSkillFrontmatter(raw: string): Record<string, unknown> {
+    // Frontmatter must be the very first block; allow leading BOM/whitespace.
+    const m = raw.match(/^\s*---\r?\n([\s\S]*?)\r?\n---/);
+    if (!m) return {};
+    try {
+      const parsed = yaml.load(m[1]);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      /* unparseable frontmatter — skip */
+    }
+    return {};
+  }
+
+  // GET /api/v1/admin/profiles/:slug/skills
+  addRoute(
+    "GET",
+    "/api/v1/admin/profiles/:slug/skills",
+    async ({ res, params }) => {
+      try {
+        const slug = params.slug;
+        const profile = getProfile(db(), slug);
+        if (!profile) throw new NotFoundError(`profile '${slug}' not found`);
+
+        // Build the disabled set from config.yaml. Absence ≡ everything enabled.
+        const cfg = loadProfileConfig(slug);
+        const skillsBlock = cfg["skills"];
+        const disabled = new Set<string>();
+        if (skillsBlock && typeof skillsBlock === "object" && !Array.isArray(skillsBlock)) {
+          const raw = (skillsBlock as Record<string, unknown>)["disabled"];
+          if (Array.isArray(raw)) {
+            for (const n of raw) {
+              if (typeof n === "string") disabled.add(n);
+            }
+          }
+        }
+
+        // Enumerate skill dirs from the filesystem. Missing skills/ ≡ [].
+        const skillsDir = profileSkillsDir(slug);
+        const skills: Array<{
+          name: string;
+          description: string | null;
+          enabled: boolean;
+          last_invoked_at: number | null;
+        }> = [];
+        let entries: fs.Dirent[] = [];
+        try {
+          entries = fs.readdirSync(skillsDir, { withFileTypes: true });
+        } catch {
+          /* dir doesn't exist yet — treat as empty catalogue, NOT 500 */
+        }
+        for (const ent of entries) {
+          if (!ent.isDirectory()) continue;
+          const skillMdPath = path.join(skillsDir, ent.name, "SKILL.md");
+          let rawSkill: string;
+          try {
+            rawSkill = fs.readFileSync(skillMdPath, "utf-8");
+          } catch {
+            // No SKILL.md → not a skill (could be a workspace stash). Skip.
+            continue;
+          }
+          const fm = _parseSkillFrontmatter(rawSkill);
+          const description =
+            typeof fm["description"] === "string"
+              ? (fm["description"] as string)
+              : null;
+          skills.push({
+            name: ent.name,
+            description,
+            enabled: !disabled.has(ent.name),
+            last_invoked_at: null, // v1 — no telemetry source yet (see C-1.1)
+          });
+        }
+        // Deterministic order for the UI.
+        skills.sort((a, b) => a.name.localeCompare(b.name));
+
+        sendJson(res, 200, {
+          slug,
+          reserved: RESERVED_SLUGS.has(slug),
+          skills,
+        });
+      } catch (err) {
+        _classify(err);
+      }
+    },
+  );
+
+  // PUT /api/v1/admin/profiles/:slug/skills/:name
+  addRoute(
+    "PUT",
+    "/api/v1/admin/profiles/:slug/skills/:name",
+    async ({ res, params, body }) => {
+      try {
+        const slug = params.slug;
+        if (RESERVED_SLUGS.has(slug)) {
+          throw new ConflictError("reserved_profile");
+        }
+        const profile = getProfile(db(), slug);
+        if (!profile) throw new NotFoundError(`profile '${slug}' not found`);
+
+        const name = params.name;
+        if (!SKILL_NAME_RE.test(name)) {
+          throw new ValidationError("invalid_skill_name");
+        }
+
+        const b = asObj(body);
+        const enabledRaw = b["enabled"];
+        if (typeof enabledRaw !== "boolean") {
+          throw new ValidationError("enabled_required_boolean");
+        }
+
+        // Skill must exist on disk under this profile.
+        const skillDir = path.join(profileSkillsDir(slug), name);
+        try {
+          const stat = fs.statSync(skillDir);
+          if (!stat.isDirectory()) {
+            throw new NotFoundError(`skill '${name}' not found in profile '${slug}'`);
+          }
+        } catch (err: any) {
+          if (err && err.code === "ENOENT") {
+            throw new NotFoundError(`skill '${name}' not found in profile '${slug}'`);
+          }
+          throw err;
+        }
+
+        // Load existing config.yaml (preserve all other keys).
+        const cfgPath = profileConfigPath(slug);
+        let cfg: Record<string, unknown> = {};
+        try {
+          const rawYaml = fs.readFileSync(cfgPath, "utf-8");
+          const parsed = yaml.load(rawYaml);
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            cfg = parsed as Record<string, unknown>;
+          }
+        } catch {
+          /* fresh config */
+        }
+
+        // Ensure skills is an object (preserve siblings like creation_nudge_interval).
+        if (
+          !cfg["skills"] ||
+          typeof cfg["skills"] !== "object" ||
+          Array.isArray(cfg["skills"])
+        ) {
+          cfg["skills"] = {};
+        }
+        const skillsBlock = cfg["skills"] as Record<string, unknown>;
+
+        // Read existing disabled array (defensive: drop non-string entries).
+        const existing: string[] = Array.isArray(skillsBlock["disabled"])
+          ? (skillsBlock["disabled"] as unknown[]).filter(
+              (x): x is string => typeof x === "string",
+            )
+          : [];
+        const disabledSet = new Set<string>(existing);
+
+        if (enabledRaw) {
+          // enabling → remove from disabled set
+          disabledSet.delete(name);
+        } else {
+          // disabling → add to disabled set
+          disabledSet.add(name);
+        }
+
+        if (disabledSet.size === 0) {
+          // Tidy: drop the empty array entirely.
+          delete skillsBlock["disabled"];
+        } else {
+          skillsBlock["disabled"] = Array.from(disabledSet).sort();
+        }
+
+        // Atomic write — yaml.dump + rename. Mirror the MCP POST handler.
+        const newYaml = yaml.dump(cfg, { lineWidth: 120, quotingType: '"' });
+        const tmpPath = cfgPath + ".tmp";
+        fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
+        fs.writeFileSync(tmpPath, newYaml, { encoding: "utf-8", mode: 0o644 });
+        fs.renameSync(tmpPath, cfgPath);
+
+        // Best-effort supervisor nudge.
+        try {
+          nudgeHermesSupervisor();
+        } catch (err) {
+          console.warn(
+            `[profiles/skills] supervisor nudge after toggle('${slug}/${name}') failed:`,
+            err instanceof Error ? err.message : err,
+          );
+        }
+
+        sendJson(res, 200, { ok: true, name, enabled: enabledRaw });
       } catch (err) {
         _classify(err);
       }
