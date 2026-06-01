@@ -36,7 +36,7 @@ describe("state.db migration runner", () => {
     const db = new DatabaseSync(":memory:");
     db.exec(schema);
     const v = runMigrations(db);
-    // Latest version moves as new migrations land. Today: 17
+    // Latest version moves as new migrations land. Today: 18
     // (0001_fix_pack + 0002_alfred_journal + 0003_tailscale_connection
     // + 0004_channel_tokens + 0005_ha_channel + 0006_files_table
     // + 0007_recall + 0008_ha_event_subscription
@@ -44,9 +44,9 @@ describe("state.db migration runner", () => {
     // + 0011_ha_tier4 + 0012_ha_integration_ref_removed_at
     // + 0013_recall_realtime + 0014_tool_disposition
     // + 0015_composio_user_defaults + 0016_files_extraction
-    // + 0017_agent_profiles).
-    assert.equal(v, 17, "migrated to latest version");
-    assert.equal(userVersion(db), 17);
+    // + 0017_agent_profiles + 0018_channel_identity).
+    assert.equal(v, 18, "migrated to latest version");
+    assert.equal(userVersion(db), 18);
     assert.ok(cols(db, "observation").includes("processed_at"), "0001: processed_at present after migrate");
     // 0002: alfred_journal + alfred_principal tables present.
     const tables = (
@@ -316,6 +316,48 @@ describe("state.db migration runner", () => {
       "0017: channel_tokens.profile_slug column added",
     );
 
+    // 0018: channel_identity table present + (profile_slug, channel_kind) PK
+    // + the five expected columns. The table is empty at fresh-migrate time;
+    // the route layer (PUT /channel-identities/:kind) is the only writer.
+    assert.ok(
+      tables.includes("channel_identity"),
+      "0018: channel_identity table created",
+    );
+    const ciCols = cols(db, "channel_identity");
+    for (const required of [
+      "profile_slug",
+      "channel_kind",
+      "display_name",
+      "avatar_path",
+      "avatar_mime",
+      "updated_at",
+    ]) {
+      assert.ok(
+        ciCols.includes(required),
+        `0018: channel_identity.${required} present`,
+      );
+    }
+    // Composite PK enforces one row per (profile, channel_kind). Insert a
+    // sentinel via the seeded 'main' profile then prove a second insert at
+    // the same PK is rejected.
+    db.prepare(
+      `INSERT INTO channel_identity
+         (profile_slug, channel_kind, display_name, avatar_path, avatar_mime)
+       VALUES ('main', 'telegram', 'Alfred', NULL, NULL)`,
+    ).run();
+    assert.throws(
+      () =>
+        db
+          .prepare(
+            `INSERT INTO channel_identity
+               (profile_slug, channel_kind, display_name)
+             VALUES ('main', 'telegram', 'Alfred (dup)')`,
+          )
+          .run(),
+      /UNIQUE constraint failed|PRIMARY KEY/i,
+      "0018: composite PK rejects a second row for the same (profile, kind)",
+    );
+
     db.close();
   });
 
@@ -324,7 +366,7 @@ describe("state.db migration runner", () => {
     db.exec(schema);
     runMigrations(db);
     const v2 = runMigrations(db);
-    assert.equal(v2, 17);
+    assert.equal(v2, 18);
     assert.equal(
       cols(db, "observation").filter((c) => c === "processed_at").length,
       1,
