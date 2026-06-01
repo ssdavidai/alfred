@@ -55,35 +55,15 @@ import { appendAudit } from "./state.js";
 import { restartProfile } from "../../hermes/supervisor.js";
 
 // ── #206 Lane IV — per-(profile, channel_kind) identity override ──────────
-//
-// Lane I owns `packages/ctrl/src/db/channelIdentity.ts` and the helper
-// `resolveChannelIdentity(db, profile_slug, channel_kind)`. When Lane I's
-// PR lands, replace this stub block with:
-//
-//   import { resolveChannelIdentity } from "../../db/channelIdentity.js";
-//
-// Until then this typed stub returns null so the adapter no-ops on
-// identity overrides — preserving pre-#206 behaviour exactly.
-//
-// **Email**: the From-header display name flows via AgentMail's
-// `from_name` field on `/messages/send` (set when an override exists).
-// Avatar is informational only for outbound email — recipients see
-// whatever their mail client renders (Gmail / Outlook resolve avatars
-// via Gravatar / sender domain). We log the avatar limitation; we do
-// not attempt to upload anything to AgentMail.
-type ResolvedChannelIdentity = {
-  display_name: string | null;
-  avatar_path: string | null;
-  avatar_mime: string | null;
-};
-function resolveChannelIdentity(
-  _db: unknown,
-  _slug: string,
-  _kind: string,
-): ResolvedChannelIdentity | null {
-  // TODO(#206 Lane I): replace with real import once Lane I merges.
-  return null;
-}
+// Lane I's channel_identity table + resolver landed via #221; use the real
+// helper. **Email**: the From-header display name flows via AgentMail's
+// `from_name` on `/messages/send` (set when an override exists). Avatar is
+// informational only for outbound email (clients resolve via Gravatar /
+// sender domain) — we log that limitation, no upload to AgentMail.
+import {
+  resolveChannelIdentity,
+  type ResolvedChannelIdentity,
+} from "../../db/channelIdentity.js";
 
 const RESERVED_PROFILES_FOR_IDENTITY: ReadonlySet<string> = new Set([
   "main",

@@ -51,36 +51,16 @@ import { appendAudit } from "./state.js";
 import { restartProfile } from "../../hermes/supervisor.js";
 
 // ── #206 Lane IV — per-(profile, channel_kind) identity override ──────────
-//
-// Lane I owns `packages/ctrl/src/db/channelIdentity.ts` and the helper
-// `resolveChannelIdentity(db, profile_slug, channel_kind)`. When Lane I's
-// PR lands, replace this stub block with:
-//
-//   import { resolveChannelIdentity } from "../../db/channelIdentity.js";
-//
-// Until then this typed stub returns null so the adapter no-ops on
-// identity overrides — preserving pre-#206 behaviour exactly.
-//
-// **Twilio SMS** cannot override the From-side display name on a
-// per-message basis: the carrier shows the From number (purchased
-// phone) or the registered Alphanumeric Sender ID, both of which are
-// fixed at the account/phone-number level. The adapter therefore
-// reads the override (so we have one consistent code-path across
-// channels) but LOGS the limitation and proceeds without applying.
-// Sir's PR body documents this honestly.
-type ResolvedChannelIdentity = {
-  display_name: string | null;
-  avatar_path: string | null;
-  avatar_mime: string | null;
-};
-function resolveChannelIdentity(
-  _db: unknown,
-  _slug: string,
-  _kind: string,
-): ResolvedChannelIdentity | null {
-  // TODO(#206 Lane I): replace with real import once Lane I merges.
-  return null;
-}
+// Lane I's channel_identity table + resolver landed via #221; use the real
+// helper. NOTE: **Twilio SMS** cannot override the From-side display name on
+// a per-message basis — the carrier shows the fixed From number / registered
+// Alphanumeric Sender ID. This adapter READS the override (one consistent
+// code-path across channels) but LOGS the limitation and proceeds without
+// applying it (documented in the PR).
+import {
+  resolveChannelIdentity,
+  type ResolvedChannelIdentity,
+} from "../../db/channelIdentity.js";
 
 const RESERVED_PROFILES_FOR_IDENTITY: ReadonlySet<string> = new Set([
   "main",
