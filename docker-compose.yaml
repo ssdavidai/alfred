@@ -383,13 +383,42 @@ services:
       # gateway so the supervisor restarts and picks it up. Surfacing the
       # token as a compose env var here would be misleading dead config —
       # Hermes ignores it and the file in the hermes_data volume wins.
+    # #222 defense-in-depth (Lane V-b): raise the open-files ceiling well
+    # above the 1024 default soft limit. The codex-builder gateway leaks fds
+    # (root cause fixed at source by #222 Lane V-a); under the 1024 default
+    # the leak exhausts the table fast and EVERY subsequent socket/sqlite
+    # open fails with `[Errno 24] Too many open files` — Slack `auth.test`
+    # drops, kanban hits `unable to open database file`, the gateway wedges
+    # silently. A 65536 ceiling buys headroom and, paired with the fd-pressure
+    # healthcheck below, converts a silent wedge into an early UNhealthy.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     healthcheck:
       # the hermes image (python:3.12-slim base) ships curl, not wget.
       # Probe BOTH gateways: main :18789 (chat/onboarding) AND workers :18790
       # (clerk/background). alfred-learn depends_on hermes service_healthy, so a
       # dead workers gateway must keep the container UNhealthy — otherwise learn
       # boots against a dead clerk gateway (FAILURE-MODES §Hermes runtime).
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:18789/health >/dev/null 2>&1 && curl -fsS http://127.0.0.1:18790/health >/dev/null 2>&1 || exit 1"]
+      #
+      # #222 defense-in-depth (Lane V-b): the HTTP probes below only flip the
+      # container UNhealthy AFTER a gateway socket actually dies of fd
+      # starvation — by which point Slack `auth.test` has already dropped and
+      # kanban sqlite has hit `unable to open database file`. They are a
+      # LAGGING indicator. The fd-pressure gate that runs first is the LEADING
+      # one: it walks every running `… gateway run` process (procps `pgrep` is
+      # installed), reads each one's live open-fd count (`/proc/<pid>/fd`)
+      # against its own soft limit (`/proc/<pid>/limits` -> "Max open files"),
+      # and trips the container UNhealthy at >=90% utilisation — BEFORE the
+      # first `[Errno 24] Too many open files` surfaces downstream. Cheap (a
+      # /proc walk over ~2-4 pids, no forks beyond pgrep/awk/ls/wc), POSIX-sh,
+      # runs every interval. With the ulimits.nofile raise above the soft
+      # limit is 65536, so the trip point is ~58982 fds: the upstream leak's
+      # climb is now visible as an early UNhealthy instead of a silent wedge.
+      # Note: `$$` escapes `$` for compose interpolation -> the container sees
+      # a single `$` (real shell variables, not compose vars).
+      test: ["CMD-SHELL", "for p in $$(pgrep -f 'gateway run'); do l=$$(awk '/Max open files/{print $$4}' /proc/$$p/limits 2>/dev/null); [ -z \"$$l\" ] && continue; [ \"$$l\" = unlimited ] && continue; n=$$(ls /proc/$$p/fd 2>/dev/null | wc -l); [ \"$$n\" -ge $$((l * 9 / 10)) ] && exit 1; done; curl -fsS http://127.0.0.1:18789/health >/dev/null 2>&1 && curl -fsS http://127.0.0.1:18790/health >/dev/null 2>&1 || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 30
