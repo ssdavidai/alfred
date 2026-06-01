@@ -208,6 +208,41 @@ RUN python3 /tmp/patch_upstream_hermes_auth.py \
  && rm /tmp/patch_upstream_hermes_auth.py
 
 # =============================================================================
+# Patch: fd-safe atomic write in utils.py (GH #222).
+#
+# The codex-builder profile's gateway wedges with `[Errno 24] Too many open
+# files`, leaving leaked `.channel_directory_*.tmp` descriptors behind. Once
+# the soft nofile limit (1024) is exhausted, every socket/sqlite open fails —
+# Slack `auth.test` drops, the kanban sqlite store reports "unable to open
+# database file", and the gateway cascades into an unhealthy state.
+#
+# The leaked file name is produced by gateway/channel_directory.py's writer,
+# which calls `atomic_json_write(...)` (refreshed every 5 min). But that
+# function is leak-safe — the ACTUAL leak is in the shared helper
+# utils.py:atomic_json_write (and atomic_yaml_write +
+# atomic_roundtrip_yaml_update): `tempfile.mkstemp()` returns a *raw* fd that
+# is only adopted by `with os.fdopen(fd, ...) as f:`. If `os.fdopen` itself
+# raises (exactly the fd-pressure condition we hit), the raw fd leaks — the
+# `except` unlinks the `.tmp` file but never `os.close(fd)`. Each failed write
+# burns one more descriptor, accelerating exhaustion. The patch wraps the
+# fd-open in a guard that closes the raw fd on failure — a strict improvement
+# for every atomic-write consumer (auth.json, config.yaml, sessions.json),
+# not just codex-builder.
+#
+# See patch_upstream_hermes_channeldir.py for the full rationale. The patch is
+# idempotent + tripwire'd; a future HERMES_REF bump that rewrites the helper
+# fails the build loudly via the grep below.
+#
+# Sir 2026-06-01 — durable fix for GH #222.
+COPY packages/hermes/patch_upstream_hermes_channeldir.py /tmp/patch_upstream_hermes_channeldir.py
+RUN python3 /tmp/patch_upstream_hermes_channeldir.py \
+ && grep -q "alfred-black: fd-safe atomic write" \
+        /usr/local/lib/python3.12/site-packages/utils.py \
+ && grep -q "_alfred_fdopen_or_close" \
+        /usr/local/lib/python3.12/site-packages/utils.py \
+ && rm /tmp/patch_upstream_hermes_channeldir.py
+
+# =============================================================================
 # Bake the hermes-lcm plugin (lossless cross-session context engine).
 # =============================================================================
 # The `stephenschoettler/hermes-lcm` plugin enables Hermes' LCM context engine
