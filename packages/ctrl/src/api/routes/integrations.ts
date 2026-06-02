@@ -1535,9 +1535,16 @@ async function cacheComposioPrimaryDefaults(
         console.warn(`[composio-defaults] no primary calendar found for ${composioUserId}`);
         return null;
       }
-      const defaults = { calendarId: id };
+      const defaults: Record<string, unknown> = { calendarId: id };
+      if (typeof primary?.timeZone === "string" && primary.timeZone) {
+        defaults.timeZone = primary.timeZone;
+      }
       writeComposioUserDefaults("googlecalendar", composioUserId, defaults, "oauth_completion");
-      console.log(`[composio-defaults] cached googlecalendar primary=${id} for ${composioUserId}`);
+      console.log(
+        `[composio-defaults] cached googlecalendar primary=${id}` +
+        (defaults.timeZone ? ` tz=${defaults.timeZone}` : "") +
+        ` for ${composioUserId}`,
+      );
       return defaults;
     }
 

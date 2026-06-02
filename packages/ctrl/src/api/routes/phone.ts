@@ -85,6 +85,11 @@ interface VoiceContextBundle {
   openMatters: Array<{ name: string; summary?: string }>;
   openTasks: Array<{ name: string; due?: string; summary?: string }>;
   recentSessions: Array<{ at: string; channel: string; summary: string }>;
+  /** IANA timezone name sourced from the principal's primary Google Calendar
+   *  (cached in composio_user_defaults). Fallback: "UTC". Lane V voice-bridge
+   *  reads this to compute a per-call current-time anchor — it never reuses a
+   *  stale timestamp from the cached bundle (see issue #226). */
+  timeZone: string;
   /** Per-MCP-server skill cheatsheets. Replaces the v1 `composioToolkits`
    *  action-by-action dump: voice-bridge has 150 prefixed MCP tools
    *  (`alfred__*`, `sure__*`, `plane__*`, `vaultwarden__*`, `execute__*`)
@@ -245,6 +250,38 @@ function parseFrontmatter(raw: string): Record<string, unknown> {
   return out;
 }
 
+/** Read the principal's primary-calendar IANA timezone from the
+ *  composio_user_defaults cache (toolkit=googlecalendar, newest row).
+ *  Returns "UTC" on any miss, malformed JSON, or unexpected error. */
+function readCalendarTimeZone(): string {
+  try {
+    const db = getStateDb();
+    const row = db
+      .prepare(
+        `SELECT default_args_json
+           FROM composio_user_defaults
+          WHERE toolkit = 'googlecalendar'
+          ORDER BY updated_at DESC
+          LIMIT 1`,
+      )
+      .get() as { default_args_json: string } | undefined;
+    if (!row) return "UTC";
+    let parsed: unknown;
+    try { parsed = JSON.parse(row.default_args_json); } catch { return "UTC"; }
+    if (
+      parsed !== null &&
+      typeof parsed === "object" &&
+      typeof (parsed as Record<string, unknown>).timeZone === "string" &&
+      (parsed as Record<string, unknown>).timeZone
+    ) {
+      return (parsed as Record<string, unknown>).timeZone as string;
+    }
+    return "UTC";
+  } catch {
+    return "UTC";
+  }
+}
+
 function buildVoiceContext(): VoiceContextBundle {
   // MEMORY.md is shared with the text agents, where the full corpus matters.
   // For voice we truncate hard — the field is mostly principal-biography in
@@ -278,12 +315,19 @@ function buildVoiceContext(): VoiceContextBundle {
     if (s) skills.push({ name, ...s });
   }
 
+  // IANA timezone from the principal's primary Google Calendar defaults cache
+  // (#226). Fallback "UTC" on any miss or parse error — voice-bridge computes
+  // the current-time anchor per call using this string; we never bake a
+  // timestamp here (bundle is cached 60s).
+  const timeZone = readCalendarTimeZone();
+
   return {
     memoryMd,
     voiceSkill,
     openMatters,
     openTasks,
     recentSessions,
+    timeZone,
     skills,
     generatedAt: new Date().toISOString(),
   };
