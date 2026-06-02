@@ -185,28 +185,36 @@ jobs:
         # contract — if this assertion ever flips, every existing tenant
         # would silently start joining a tailnet on next deploy.
         #
-        # DETERMINISTIC CHECK (replaces the old `--profile tailscale config
-        # --services | grep` form, which flaked: whether profile-gated services
-        # appear in `config --services` output varies by the runner's bundled
-        # docker-compose version, so it intermittently reported "tailscale
-        # missing" on PRs that never touched compose — a false red the loop
-        # then had to hand-wave as a "flake"). Instead we read the fully
-        # resolved config as JSON and assert the actual contract: the tailscale
-        # service is DECLARED and is GATED behind the `tailscale` profile (a
-        # profile-gated service is off by default — that's the whole guarantee).
-        # No `--profile` flag, no `--services` quirk, no version sensitivity.
+        # DETERMINISTIC CHECK. The old form used `docker compose --profile
+        # tailscale config --services | grep`, which flaked: whether
+        # profile-gated services appear in `config` output varies by the
+        # runner's bundled docker-compose version (a `docker compose config`
+        # without the active profile OMITS profile-gated services entirely on
+        # recent versions). So it intermittently reported "tailscale missing"
+        # on PRs that never touched compose — a false red the loop then
+        # hand-waved as a "flake." Instead we parse the RAW docker-compose.yaml
+        # and assert the actual contract straight from source: the tailscale
+        # service is DECLARED and GATED behind the `tailscale` profile (a
+        # profile-gated service never starts on a bare `up -d` — that's the
+        # whole guarantee). No docker, no `config` resolution, no env
+        # interpolation, no version sensitivity → fully deterministic.
         run: |
-          set -euo pipefail
-          cfg=$(docker compose config --format json)
-          if ! echo "$cfg" | jq -e '.services.tailscale' >/dev/null; then
-            echo "FAIL: tailscale service is not declared in docker-compose.yaml." >&2
-            exit 1
-          fi
-          if ! echo "$cfg" | jq -e '(.services.tailscale.profiles // []) | index("tailscale")' >/dev/null; then
-            echo "FAIL: tailscale service is not gated behind the 'tailscale' profile — it would start on a bare \`docker compose up -d\`." >&2
-            exit 1
-          fi
-          echo "OK: tailscale is declared and profile-gated, off by default."
+          python3 -m pip install --quiet pyyaml || pip install --quiet pyyaml
+          python3 - <<'PY'
+          import sys, yaml
+          doc = yaml.safe_load(open("docker-compose.yaml"))
+          svcs = doc.get("services", {})
+          ts = svcs.get("tailscale")
+          if ts is None:
+              sys.exit("FAIL: tailscale service is not declared in docker-compose.yaml.")
+          profiles = ts.get("profiles") or []
+          if "tailscale" not in profiles:
+              sys.exit(f"FAIL: tailscale is not gated behind the 'tailscale' profile (profiles={profiles}) — it would start on a bare `docker compose up -d`.")
+          default_services = [n for n, s in svcs.items() if not (s or {}).get("profiles")]
+          if "tailscale" in default_services:
+              sys.exit("FAIL: tailscale appears in the default (profile-less) set — it would start by default.")
+          print(f"OK: tailscale declared + gated behind {profiles}, off by default ({len(default_services)} default services).")
+          PY
 
   bootstrap-lint:
     runs-on: ubuntu-latest
