@@ -58,6 +58,7 @@ import { registerVoiceRoutes } from "./routes/voice.js";
 import { registerVoiceEsphomeRoutes } from "./routes/voice_esphome.js";
 import { registerOmiChannelRoutes } from "./routes/channels_omi.js";
 import { registerPaperclipChannelRoutes } from "./routes/channels_paperclip.js";
+import { registerPaperclipEvidenceRoutes } from "./routes/paperclipEvidence.js";
 import {
   registerChannelsRecallRoutes,
   registerRecallWebhookRoute,
@@ -193,6 +194,7 @@ export function createApiServer(): http.Server {
   registerVoiceEsphomeRoutes();
   registerOmiChannelRoutes();
   registerPaperclipChannelRoutes();
+  registerPaperclipEvidenceRoutes();
   // /api/v1/channels/recall/* + /api/v1/webhooks/recall — Recall.ai
   // meeting-bot channel (#113 PR2). Card-driven config + inbound
   // Svix-signed webhook. The card UI lands in PR3a/3b; the alfred-learn
