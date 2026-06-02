@@ -32,6 +32,7 @@ import {
 import { buildInstructions } from "./instructions.js";
 import { config } from "./config.js";
 import { verifySig, bumpMetric } from "./server.js";
+import { applyOutboundCustomParameters } from "./outbound-metadata.js";
 import {
   ALL_TOOLS,
   dispatchComposioExecute,
@@ -227,6 +228,7 @@ export class VoiceCall {
         if (typeof params.from === "string") {
           this.callerNumber = params.from;
         }
+        this.opts = applyOutboundCustomParameters(this.opts, params);
         // Sig is valid → fetch tenant + connect OpenAI. Fire-and-forget; the
         // `start` handler itself returns synchronously.
         this.initialise().catch((err) => {
