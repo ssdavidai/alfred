@@ -766,8 +766,14 @@ async def fetch_unprocessed_observations() -> list[dict[str, Any]]:
         # list_observation_records doesn't expose it, so query directly.
         from src.utils.signal_state import StateClient, observation_row_to_record
 
+        # Batch capped at 75: clerk_reflect sends every fetched observation to
+        # the LLM in one prompt. At 200 the call blew past clerk_reflect's
+        # StartToClose timeout (the whole ReflectionWorkflow then failed and
+        # marked nothing processed — so a backlog could never drain). 75 keeps a
+        # single reflection comfortably inside the timeout; the backlog drains
+        # across successive runs instead of choking on one oversized batch.
         async with StateClient(config) as sc:
-            rows = await sc.list_observations(status="unprocessed", limit=200)
+            rows = await sc.list_observations(status="unprocessed", limit=75)
         return [observation_row_to_record(r) for r in rows]
     except Exception:  # noqa: BLE001
         return []

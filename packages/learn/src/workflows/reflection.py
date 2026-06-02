@@ -71,7 +71,11 @@ class ReflectionWorkflow:
         proposals = await workflow.execute_activity(
             clerk_reflect,
             args=[observations, instincts, distiller_learnings, janitor_flags],
-            start_to_close_timeout=timedelta(seconds=120),
+            # 300s (was 120s): one LLM pass over the observation batch + the full
+            # instinct set is slow; 120s timed out, failed the whole workflow, and
+            # left every observation unprocessed (a backlog could never drain).
+            # Paired with the batch cap of 75 in fetch_unprocessed_observations.
+            start_to_close_timeout=timedelta(seconds=300),
             retry_policy=RetryPolicy(maximum_attempts=2),
         )
 

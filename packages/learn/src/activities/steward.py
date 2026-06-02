@@ -2296,8 +2296,14 @@ async def _emit_source_pruned_audit(
             canonical_task_path, name, exc,
         )
         return None
-    finally:
-        await client.close()
+    # NOTE: intentionally NO finally-block closing a VaultClient here — this
+    # function never opens one (it writes the audit via
+    # `async with StateClient(cfg) as sc`, which closes itself). A leftover
+    # finally that closed an undefined `client` raised NameError on EVERY
+    # source-prune: the audit row landed, the activity then failed in the
+    # finally, Temporal retried, and a duplicate audit landed each retry — the
+    # cause of the steward NameError storm and the runaway steward-source-pruned
+    # audit-row count.
 
 
 def _get_no_signal_streak(fm: dict[str, Any]) -> int:
