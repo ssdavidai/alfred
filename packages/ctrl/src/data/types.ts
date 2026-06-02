@@ -37,7 +37,6 @@ export interface Instance {
   cf_vault_dns_record_id: string | null;
   cf_vault_access_app_id: string | null;
   cf_access_app_id: string | null;
-  cf_vexa_dns_record_id: string | null;
   server_type: string;
   location: string;
   current_image_sha: string | null;
@@ -86,18 +85,6 @@ export interface InstanceConfig {
    * See `setupVaultwarden` in `infra/provisioner.ts` for the full story.
    */
   vaultwardenEnabled?: boolean;
-  /**
-   * Deploy Vexa (self-hosted meeting transcription stack — postgres / redis /
-   * minio / admin-api / runtime-api / meeting-api / api-gateway / dashboard,
-   * all from vexaai/* + synapsr/vexa-dashboard, project name ``vexa``)
-   * alongside the Alfred stack. Lives in /opt/alfred/vexa/ as a SEPARATE
-   * compose project. Default-OFF — Vexa pulls a 2.5 GB resource floor on
-   * top of alfred so we only stand it up where Steward Phase 4 (#840) is
-   * actually wanted. Pass `true` explicitly to opt in.
-   * See `setupVexa` in `infra/provisioner.ts` and the canonical stack
-   * template at `templates/vexa-stack.yaml.njk`.
-   */
-  vexaEnabled?: boolean;
 }
 
 // --- Provisioning ---
@@ -122,7 +109,6 @@ export type ProvisioningStep =
   | "setup_plane"
   | "setup_sure"
   | "setup_vaultwarden"
-  | "setup_vexa"
   | "health_check"
   | "done";
 

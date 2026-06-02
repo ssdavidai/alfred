@@ -5,6 +5,660 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the `alfred-vault` package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-05-31]
+
+**Lane Vb** (this release) makes **voice (Twilio phone)** per-profile.
+Lane V's earlier punt — "voice-bridge is a single compose sibling per
+VM, not a Hermes profile" — was a punt, not a constraint. The container
+stays singular but its routing becomes multi-tenant: the Twilio webhook
+URL the principal pastes into the Twilio Console for a profile-specific
+number is now `https://voice.<domain>/twiml/inbound?profile=<slug>`, and
+voice-bridge resolves the slug at TwiML-emission time. The WSS endpoint
+`/voice/<slug>` carries the routing key downstream into VoiceCall;
+`fetchTenantContext` queries ctrl-api's per-profile voice status to
+learn the calling number, and a new scoped-bearer endpoint
+`GET /api/v1/channels/voice/internal/openai-key?profile=<slug>` returns
+the profile's OPENAI key (when set) so the Realtime session bills
+against the right account. Falls back to main's instance-shared
+`OPENAI_API_KEY` when a non-main profile leaves the key blank. Sir's
+spec: *"voice MUST be per profile. it isn't realistic that I would
+interact with multiple profiles and want them in separate channels."*
+
+Per-profile credentials in the profile's `.env`: `TWILIO_ACCOUNT_SID`,
+`TWILIO_AUTH_TOKEN`, `TWILIO_VOICE_FROM_NUMBER`, optional
+`OPENAI_API_KEY`, plus the existing `VOICE_ALLOWED_CALLERS` /
+`VOICE_ALLOW_ALL_CALLERS` allowlist toggles. Five new ctrl-api routes
+under `/api/v1/channels/voice/*` — `status` / `credentials` (PUT/DELETE)
+/ `test` / `allowlist` / `inbound` / `internal/openai-key` — all accept
+`?profile=<slug>`, all run through `assertWritableProfile`, all append
+`channel_token_set` / `channel_token_cleared` audit rows with
+`profile_slug` in the payload (matching Lane V's Telegram / Slack / SMS
+shape verbatim). voice-bridge does NOT need a restart on credential
+rotation: it reads per-call. The `restart_scope: "per-profile"` shape
+on the response is honest about that — the next inbound call picks up
+the new creds. The `/profiles/:slug/channels` Voice card is now a real
+configuration form (matching the SMS card's Twilio triple + an optional
+OpenAI override) with the per-profile webhook URL displayed for the
+operator to paste into Twilio. Two new explicit Wasp ops
+(`setProfileVoiceCredentials` / `clearProfileVoiceCredentials`) layer on
+top of Lane V's `setProfileChannelToken` consolidator so call sites that
+only need voice have a named entry point. References #120; closes the
+Lane V voice honest-partial. 10 new ctrl-api unit tests (PUT validation,
+DELETE wipe, audit-row shape, TwiML routing, internal-key fallback) all
+green.
+
+The operator step Sir owns: in the Twilio Console, set each profile's
+phone number's "A call comes in" webhook to that profile's URL surfaced
+on its `/profiles/:slug/channels` Voice card (copy-button included).
+That's the routing key — voice-bridge reads it off the URL query.
+
+**Lane Vb2** (follow-on to Lane V) closes the email half of the
+per-profile-channels promise. Lane V shipped the FULL per-profile
+channels page but explicitly punted **Email (AgentMail)** with the note
+"AgentMail provisions one inbox per VM today; per-profile addressing is
+a follow-up." Sir's clarification — *"email MUST be per profile.
+AgentMail's API provisions inboxes; that's an API call, not a manual
+provisioning step. Just call it."* — is exactly the work this lane does.
+ctrl-api now exposes four new routes (`GET /channels/email/status`,
+`POST /channels/email/provision`, `DELETE /channels/email/inbox`, `POST
+/channels/email/test`), all scoped by `?profile=<slug>`. The provision
+route calls AgentMail's real API (`POST /pods/<pod>/inboxes` then `POST
+/inboxes/<id>/api-keys`) using `AGENTMAIL_MASTER_API_KEY` from the
+tenant `.env`; on success the inbox creds (`AGENTMAIL_INBOX_ID`,
+`AGENTMAIL_INBOX_ADDRESS`, `AGENTMAIL_API_KEY`) land in the profile's
+`/hermes-state/profiles/<slug>/.env` and a
+`(channel_kind=email, channel_identity=<address>, profile=<slug>)` row
+is written to `channel_profile_binding`. Inbound mail to that address
+arrives at the existing AgentMail webhook → the recipient-based
+resolver picks the right profile; the only thing that was missing was
+the binding row. Outbound `/api/v1/email/{send,reply,forward,…}` now
+honour `?profile=<slug>` and pull credentials from the profile's `.env`
+rather than the tenant-wide env — so Sentinel's replies go from
+Sentinel's "From:" address with Sentinel's inbox-scoped key. DELETE
+releases the inbox at AgentMail (best-effort upstream delete; binding +
+.env keys wiped unconditionally so routing falls back to main cleanly).
+The `/profiles/:slug/channels` Email card flips from the Lane V
+"instance-level notice" to a real provision / test / disconnect form. A
+new `getProfileEmailStatus` query plus three new actions
+(`provisionProfileEmailInbox`, `clearProfileEmailInbox`,
+`sendProfileEmailTest`) wire the UI to the routes. 14 new helper +
+route unit tests covering the happy path, the no-master-key honest
+failure, the archived-profile guard, idempotent DELETE, and the
+inbound-routing decision (provisioned address → sentinel, unbound
+address → main fallback). **Operator step**: tenants that want
+per-profile email must set `AGENTMAIL_MASTER_API_KEY` +
+`AGENTMAIL_SHARED_POD_ID` in `/opt/alfred/.env` and restart ctrl-api;
+without the master key the route returns a clean 400 with code
+`master_key_missing` and the UI shows the operator hint instead of the
+provision button.
+
+**Lane V** (this release) lands the per-profile FULL channels surface.
+Until tonight, the new `/profiles/:slug` page from Lane III could bind a
+channel to a profile (the inbound side — "this Telegram chat speaks to
+Sentinel") but had no way to configure the OUTBOUND credentials per
+profile. The bot token, Slack workspace, Twilio creds and Paperclip key
+all lived in main's `.env`; a second profile spoke to its own channels
+through main's tokens. Lane V closes the loop: every per-profile-aware
+channel route on ctrl-api now writes to `/hermes-state/profiles/<slug>/
+.env` (Lane IV gave the routes the `?profile=<slug>` query, this lane
+adds `assertWritableProfile` validation + per-profile Vaultwarden item
+names + scoped restarts + audit-row mirroring), and a new
+`/profiles/:slug/channels` page renders one card per per-profile
+channel with explicit "for <slug>" copy, plus an honest "configured on
+/channels" notice for the five channels that are still single-instance
+by design (voice-bridge sibling, OMI device, HA household, Recall
+account, AgentMail inbox). One new ctrl-api helper —
+`restartProfile(slug)` — drops a per-profile flag-file under the
+profile's dir so the supervisor can scope its respawn to one gateway; on
+fallback it logs the wider scope via `restart_scope: 'compose-restart'`
+in the API response so the UI surfaces the warning. Three new Wasp ops
+(`getProfileChannelStatuses`, `setProfileChannelToken`,
+`clearProfileChannelToken`) consolidate the per-kind operations so the
+page can fetch all four in one round-trip. References #120 (which Lane
+III closed). 9 new helper unit tests; existing telegram/slack/sms/
+paperclip route tests still green.
+
+Alfred Black becomes a **household of personas**, not just one butler.
+Until tonight, Hermes ran exactly four sealed profiles that the
+principal could neither name nor manage from the dashboard — `main`
+(the conversational butler), `workers` (the background sub-agents),
+`heavy` (Opus when Sonnet wasn't enough), and `codex-builder`
+(the isolated PR-author runtime). If Sir wanted a second persona — a
+`cratchit` bookkeeper, a `field-foreman` site lead, an evening reading
+companion — the only path was the same one Joe took on
+`joe.alfred.black`: ssh in, write a sibling container into
+`/opt/alfred/docker-compose.override.yaml` by hand, and live with the
+fact that `docker compose pull` could overwrite the persona file on
+the next image refresh. After this release the principal can spin up a
+new persona from `/profiles` in 30 seconds, bind a Telegram chat or a
+phone number directly to it, archive it when its season is done, and
+restore it later without losing the slug — and every gateway sits in
+the same supervised Hermes process so a `compose pull` no longer touches
+the persona dir.
+
+The cutover landed across four lanes over two days. **Lane I** (PR
+#196) added the `agent_profile` + `channel_profile_binding` registry
+to `state.db` (migration `0017`) and the eight `/api/v1/agent-profiles`
+CRUD routes — slug regex `^[a-z][a-z0-9-]{1,30}$`, port allocator
+pinned to `18794..18799` for six user-facing slots, the four reserved
+infra profiles seeded with the right port and the right
+`is_user_facing=0` flag so they stay invisible to the manager UI.
+**Lane II** (PR #198, with hotfixes in #199 / #200 / #201) hooked the
+registry to the Hermes side: a new
+`/hermes-state/profiles/_registry.json` is written atomically by
+ctrl-api on every create/archive/restore, `supervisor.sh` reads it on
+boot + `SIGUSR1` to decide which gateway processes to keep alive, and
+the supervisor self-renders any profile dir that's in the registry
+but missing on disk so a fresh tenant's first POST lands on a real
+gateway in ~17s rather than `docker compose down/up`-cycling.
+**Lane IV** (PR #197) rewired every channel route — Telegram, Slack,
+SMS, voice, email, Paperclip, Omi, HA, Recall, Terminal, Tailscale —
+to resolve the target profile via `resolveProfileForChannel(kind,
+identity)` instead of the hard-coded `"main"` literal that lived in
+each of them, with a graceful archived-target cascade so a stale
+binding to a deleted profile still answers via `main` rather than
+404'ing on inbound.
+
+**Lane III** (PR #202, this release) is the principal-visible
+surface. Three new pages live at `/profiles`, `/profiles/new`,
+`/profiles/:slug` — the list with initials avatars, status pills,
+port + model + free-slots meter and a "show archived" toggle; the
+wizard with auto-derived slug, model dropdown, and an optional persona
+seed for SOUL.md; the detail page with grouped channel bindings, an
+inline bind/unbind form, a read-only persona preview, and the
+lifecycle controls (archive with a confirmation modal that explains
+the port will go quiet, restore that brings the gateway back on the
+same port). Seven new Wasp ops (`getAgentProfiles`, `getAgentProfile`,
+`createAgentProfile`, `archiveAgentProfile`, `restoreAgentProfile`,
+`bindChannelToProfile`, `unbindChannelFromProfile`) proxy through
+ctrl-api with the plain-async `Promise<any>` shape the dashboard
+requires — the Wasp Payload-trap from PRs #139/#145/#182/#184/#186
+catches a typed return at the SDK-compile step and kills the
+build-web cycle, and the rule is now load-bearing enough to belong in
+the lane comment header. A new
+`POST /api/v1/agent-profiles/:slug/restore` route closes the namespace
+UX bug Lane IIb flagged: an archived slug no longer stays reserved
+forever, and the same supervisor nudge that brought the profile up the
+first time re-renders the dir and relaunches the gateway in ~30s.
+The detail page polls `getAgentProfile` every 3 s while
+`status='pending'` so the wizard's "Sentinel coming up" promise lands
+without a manual refresh. A small "Profiles" link in the More menu of
+the Frame nav makes the manager one click away from every dashboard
+page. Five Lane-III-shaped questions Sir flagged on the issue (cost
+surface per profile, per-profile MCP catalog UI, per-profile skill
+catalog UI, per-profile bootstrap form with RULES.md seeding,
+per-channel avatar / @handle picker) are deferred to follow-up issues
+filed against #120 — the lane that closed #120 ships the registry, the
+gateway, the channel routing and the manager; the polish lives in its
+own queue.
+
+### Added
+
+**Lane III — UI surface (#202)**
+- `packages/web/src/dashboard/ProfilesPage.tsx` — list page at
+  `/profiles`. Reads `getAgentProfiles`; renders one row per
+  user-facing non-archived profile (initials avatar, label, slug
+  marginalia, model + port, status pill, reserved chip on `main`);
+  a "show archived" toggle that flips the client-side filter; a
+  free-slots meter ("N of 6 user-profile slots free"); empty-state copy
+  pointing at `/profiles/new`.
+- `packages/web/src/dashboard/ProfileNewPage.tsx` — single-form wizard
+  at `/profiles/new`. Label auto-derives the slug
+  (`/[^a-z0-9]+/` → `-`, trimmed to 31 chars); the slug is editable
+  but client-side validated against the server's
+  `^[a-z][a-z0-9-]{1,30}$`. Model dropdown is a six-entry whitelist
+  matching what Hermes' OpenRouter resolver accepts. Optional
+  description + persona template (textarea seeds SOUL.md). On Save
+  posts `createAgentProfile` and routes to `/profiles/<slug>` with the
+  detail page's polling kicking in.
+- `packages/web/src/dashboard/ProfileDetailPage.tsx` — single page
+  at `/profiles/:slug`. Header strip (status pill, port, model,
+  updated-relative). Channels section groups bindings by kind, shows
+  the per-kind defaults as a locked "default" chip (Lane I's protected
+  `binding-default-*` ids), inline bind form with channel-kind dropdown
+  + identity input (placeholder per kind: `chat_id`, `workspace:channel`,
+  E.164, etc.), unbind on every non-default row. Persona section renders
+  `persona_template` read-only when non-empty. Lifecycle section
+  surfaces Archive (with a confirmation modal that names the port that
+  will go quiet) for user-facing non-reserved live profiles, and
+  Restore for archived non-reserved ones. Status polling: ticks
+  `getAgentProfile` every 3 s for up to 90 s while `status='pending'`.
+- `packages/web/src/client/components/ab/Frame.tsx` — adds "Profiles"
+  to the More menu so the manager is one click away from every
+  dashboard page.
+- `packages/web/main.wasp` — three new routes (`ProfilesRoute`,
+  `ProfileNewRoute`, `ProfileDetailRoute`), two new queries, five new
+  actions wired through `@src/dashboard/operations`.
+
+**Lane III — Wasp ops (#202)**
+- `packages/web/src/dashboard/operations.ts` — seven plain-async
+  `Promise<any>` operations: `getAgentProfiles`, `getAgentProfile`,
+  `createAgentProfile`, `archiveAgentProfile`, `restoreAgentProfile`,
+  `bindChannelToProfile`, `unbindChannelFromProfile`. Each proxies to
+  ctrl-api's `/api/v1/agent-profiles*` surface. Header comment names
+  the Wasp Payload-trap explicitly so the next author doesn't add a
+  typed return.
+
+**Lane III — ctrl-api restore route (#202)**
+- `POST /api/v1/agent-profiles/:slug/restore` — bring an archived
+  profile back. 404 on unknown slug; 400 on "is not archived" so the
+  UI distinguishes "already live" from "restored"; 409 on the
+  defensive reserved-row branch. On success the supervisor registry
+  is rewritten and a SIGUSR1 nudge re-renders the profile dir +
+  relaunches the gateway on the original port. Lib-side helper
+  `restoreProfile(db, slug)` covers the same contract for callers
+  outside the route layer; 5 new unit tests in
+  `packages/ctrl/tests/agent-profiles.test.ts` (39 pass total).
+
+### Changed
+
+- The Frame nav's More menu now lists "Apps, Profiles, Settings" (was
+  "Apps, Settings"). The primary nav is unchanged so the dashboard's
+  habitual surface stays the same.
+
+### Deferred to follow-up issues
+
+The five "Q-deferred" items Sir flagged on #120 are filed as separate
+issues against the multi-profile epic:
+
+- Cost surface per profile (Q2)
+- Per-profile MCP catalog UI (Q3)
+- Per-profile skill catalog UI (Q4)
+- Per-profile bootstrap form + RULES.md seeding (Q5) + per-channel
+  avatar / @handle picker (Q6)
+
+Each follow-up has its own acceptance criteria; this CHANGELOG entry
+intentionally doesn't promise them in v2026.05.31.
+
+## [2026-05-30]
+
+Alfred Black becomes **budget-aware**. Before this release, every turn
+Alfred took on Voice PE / Telegram / Slack / SMS / Paperclip sent the
+full catalogue of every connected MCP server's tools to the model on
+every call — 42k input tokens of schemas before the user's question
+even got read, and a Composio call cost ~4.5 seconds of Python
+cold-start on top. A calendar query through Voice PE consistently hit
+~130 seconds and ended in "Alfred timed out". After this release the
+same query returns a real answer in under fifteen seconds, **and the
+principal can dial the tool catalogue Alfred carries on every turn with
+a single click per server.**
+
+The centrepiece is the **three-phase Composio latency program** that
+shipped end-to-end on `home.alfred.black` between 11:53 and 12:48 UTC,
+followed by a `/tools` UI cutover at 14:28 UTC.
+
+**Phase A — HTTP sidecar** (#177). alfred-learn now runs a FastAPI
+sidecar on port `:8788` (`packages/learn/src/composio_server.py`)
+listening for `POST /composio/execute`. ctrl-api's
+`/api/v1/integrations/execute` route (which every Composio action
+takes — Gmail label list, calendar event read, Notion page create,
+~300 actions total) switched from `docker exec alfred-learn python3 -c
+<script>` to a service-DNS HTTP call. Per-call latency drops from
+~4.5 s to ~500 ms — the SDK and Composio client now live as a
+singleton in module scope, no per-request init. A `COMPOSIO_EXECUTOR=docker|http`
+env flag preserves the old path for emergency rollback. The Composio
+fix is the single largest contributor to the wall-time win.
+
+**Phase B — runtime-flippable tool dispositions** (#178). A new
+`tool_disposition` table in state.db (migration `0014`) records, per
+MCP server, whether its tools are exposed inline (**DIRECT** — Alfred
+sees them every turn, fastest, costs tokens) or hidden behind a
+delegation gateway (**DELEGATED** — tools available only on the workers
+profile, accessed via `delegate_to_focused_agent`, cheaper model
++3–5 s per use). Defaults are all-`direct` so existing tenants
+behave unchanged on upgrade. Three new MCP tools on the `alfred`
+server give Alfred himself the lever: `list_tool_dispositions` (cached
+60s, read at session start so he knows whether to call native or
+delegate), `set_tool_disposition` (Sir says "demote sure to delegated"
+or "promote vault to direct"), and `delegate_to_focused_agent` (spawns
+an ephemeral focused subagent on the workers profile with the same
+identity + journal). Three servers are **self-protected** — `alfred`,
+`alfred-ctrl`, and `execute` — because delegating them would break
+Alfred's ability to reach his own ctrl-api, his own briefing/decision
+tools, or the Composio progressive-disclosure surface that Phase A
+optimised. The backend accepts a self-protected flip if Sir is
+deliberate (via the MCP tool); the UI surfaces it as `locked` so an
+accidental click doesn't cost a 10-second restart for nothing. Hermes
+init's `render_mcp_servers.py` reads the disposition table at boot and
+writes `tools.include: []` on delegated servers so the LLM never sees
+their schemas, while the spawned MCP process still serves the workers
+profile. A debounced restart cycle (10s window) coalesces a flurry of
+flips into one Hermes reload.
+
+**Phase C — primary-entity defaults cache** (#179, with hotfixes #180
+and #181). A second new state.db table (`composio_user_defaults`,
+migration `0015`) caches each user's "primary entity" per toolkit. At
+Composio OAuth-completion, ctrl-api fetches Sir's `primary === true`
+calendar from `GOOGLECALENDAR_LIST_CALENDARS` and persists `{calendarId:
+<id>}`. The Phase-A sidecar injects those defaults *under* the LLM's
+args before dispatching to Composio so an explicit calendarId still
+wins — the model can call `GOOGLECALENDAR_EVENTS_LIST` with empty
+`calendarId` and the primary fills in automatically. The new
+`generateComposioSkill()` call-out surfaces "Sir's primary calendar
+(`<id>`) is the default. Pass only `timeMin` + `timeMax` — calendarId
+fills in automatically." in `alfred-composio-googlecalendar/SKILL.md`
+once the cache is populated. Gmail primary inbox and Notion default
+workspace are TODOed with the same shape. Direct sidecar test of
+`GOOGLECALENDAR_EVENTS_LIST` with the defaults injected: **1.98
+seconds end-to-end.** The honest caveat: the end-to-end Voice PE
+calendar smoke still came in at 67s on first iteration because the
+LLM, by training-data bias, fans out across `LIST_CALENDARS` + 7
+per-calendar `EVENTS_LIST` calls before trusting the shortcut.
+Further prompt-side tuning (or a Phase-D forced-delegation gate) is
+left as follow-up; the architecture and the cache are in place and
+proven.
+
+**`/tools` becomes the disposition console** (#182). The page now
+groups MCP tools **by server** rather than as a flat list. Each
+server is a card showing its name, tool count, current
+DIRECT/DELEGATED state, audit trail (`last flipped <when> by <who>`),
+and a one-click "flip to delegated" / "flip to direct" button. After a
+flip the UI shows "hermes restarting…" for ~12 seconds then refetches
+the live row. The three self-protected servers (`alfred`,
+`alfred-ctrl`, `execute`) render with a `locked` chip instead of a
+toggle, with a tooltip explaining the self-protection. The lever moves
+across **every channel Alfred-main serves at once** — Telegram, Slack,
+SMS, Voice PE (via the HA conversation agent), Paperclip, OMI, and
+inbound email. The two channels that *don't* pick it up are
+voice-bridge (gpt-realtime-2 with its own curated `VOICE_BRIDGE_ALLOWLIST`)
+and `claude.ai/code` (which consumes Hermes' MCP tools directly without
+a Hermes LLM turn).
+
+**Around the latency program**, two HA-side guards landed:
+`ha__integration_remove` now requires the exact phrase `"yes, sever my
+own connection to Home Assistant"` before it'll act on the `alfred`
+domain (#173), after Alfred accidentally deleted his own HA integration
+during a 2026-05-29 session. The `/channels/ha/turn` route now
+short-circuits when alfred-ha sends the `__alfred_ha_preflight__`
+sentinel text (#174), avoiding the 30s Hermes cold-start that was
+firing false `cannot_connect` on the integration's connection test.
+The `alfred-ha` HACS custom_component bumped to v1.1.3 with
+`DEFAULT_TIMEOUT` 30 → 90s and a per-entry OptionsFlow so the timeout
+is tunable without re-installing.
+
+**Recall.ai in-meeting two-way voice goes live** (#113 PR5 / #171,
+with card polish in #170 and #172). Alfred can now talk back in a
+meeting bot's transcript, not just listen. The persona is locked: the
+bot speaks **as Alfred, never as the principal** — four guards
+enforce this from the prompt down through the Twilio Streams layer.
+
+**New fleet member: `rami.alfred.black`** provisioned to a fresh
+Hetzner cx53 in nbg1-dc3 (178.105.224.71) with the full 23/31 container
+stack healthy and all nine Let's Encrypt certs valid. Eight provider
+keys (Hetzner, Cloudflare Global API Key, OpenRouter, Composio, OpenAI,
+DockerHub, Recall.ai, Groq) were lifted out of conversation/.env
+plaintext and stored encrypted in `home.alfred.black`'s Vaultwarden
+under the new **"Provider API Keys"** folder
+(`aa794a95-fb7b-4889-a5a9-6dc34ecf70c2`) so future tenant
+provisioning runs read from there rather than from operator memory.
+
+This is the first release where Alfred's runtime model is *tunable by
+the principal at runtime*. The lever exists.
+
+### Added
+
+**Phase A — Composio HTTP sidecar (#177)**
+- `packages/learn/src/composio_server.py` — FastAPI app on `:8788`
+  with `POST /composio/execute {action, arguments, user_id,
+  connected_account_id} → result` and `GET /health`. Composio SDK
+  client is a module-scope singleton; no per-request init.
+- `packages/learn/entrypoint.sh` starts the sidecar in the background
+  before `exec python -m src.worker` so the Temporal worker stays
+  foreground and the sidecar restarts with the container.
+- `packages/ctrl/src/api/routes/integrations.ts:3055-3135` —
+  `executeComposioAction` now POSTs to `http://alfred-learn:8788/composio/execute`.
+  Behind `COMPOSIO_EXECUTOR=docker|http` (default `http`); the
+  dockerExec path stays as one-line emergency rollback.
+
+**Phase B — tool_disposition runtime model (#178)**
+- `state.db` migration `0014_tool_disposition.sql` — table seeded
+  with all 9 MCP servers (`alfred`, `alfred-ctrl`, `sure`, `plane`,
+  `vaultwarden`, `paperclip`, `execute`, `hass`, `files`) at
+  `disposition='direct'`, `updated_by='init'`. Backwards-compatible:
+  pre-existing tenants get the same behaviour as before until they
+  flip something.
+- `GET /api/v1/agents/tool-disposition` returns the 9-row map with
+  `{server, disposition, updated_at, updated_by}`.
+- `POST /api/v1/agents/tool-disposition` flips one row, queues a
+  debounced `docker compose restart hermes` (10s window so a flurry
+  coalesces), returns the new state + `restart_scheduled` boolean.
+- `POST /api/v1/agents/focused-subagent` — the focused-subagent
+  execution route. Session key `focus-<domain>-<short-hash>`, builds
+  a persona+task+context prompt, calls Hermes workers `:18790/v1/responses`
+  with that session key (mirrors the existing `_call_clerk` pattern),
+  returns the subagent's plain-text answer verbatim. 60s default
+  timeout.
+- Three new MCP tools on the `alfred` server (`packages/mcp-server/src/tools/alfred.ts`):
+  - `list_tool_dispositions` — live map, cached 60s.
+  - `set_tool_disposition` — `{server, disposition, updated_by='alfred'}`.
+    Self-protected `alfred-ctrl` / `alfred` / `execute` write a warning
+    note in the audit row but the backend accepts the flip if Sir is
+    deliberate.
+  - `delegate_to_focused_agent` — `{task, domain, context?}`. The
+    delegation gateway. Use when the target server is DELEGATED or
+    when fanning out across many calls (gmail batch, calendar
+    multi-account).
+- `packages/hermes/init/render_mcp_servers.py` reads
+  `tool_disposition` at render time and writes `tools.include: []` for
+  servers with `disposition='delegated'`, preserving operator-owned
+  blocks (same pattern as `migrate_main_profile_tool_trim.py` from
+  PR #176).
+- `packages/mcp-server/skills/alfred-mcp-skill.md` — new "How to use
+  the disposition map" section near the top: glance at
+  `list_tool_dispositions` at session start (cached 60s, cheap), pick
+  DIRECT or DELEGATED per server, relay subagent replies verbatim, ask
+  Sir before promoting a sensitive server.
+
+**Phase C — primary-entity defaults cache (#179, #180, #181)**
+- `state.db` migration `0015_composio_user_defaults.sql` — composite-PK
+  table on `(toolkit, user_id)`, JSON `default_args` payload, `source`
+  provenance (`oauth_completion` / `manual` / `backfill`),
+  `updated_at` index.
+- OAuth-completion hook in `auto-config` (`packages/ctrl/src/api/routes/integrations.ts`)
+  — on `googlecalendar` connection, fires `GOOGLECALENDAR_LIST_CALENDARS`
+  via the Phase A sidecar, picks `primary === true`, persists
+  `{calendarId: <id>}` with `source='oauth_completion'`. Gmail + Notion
+  TODOed with the same shape inside `cacheComposioPrimaryDefaults()`.
+- `GET /api/v1/integrations/defaults?toolkit=…&user_id=…` — lookup
+  surface for the sidecar.
+- `POST /api/v1/integrations/:toolkit/refresh-defaults` — manual
+  re-resolution / backfill.
+- Sidecar (`packages/learn/src/composio_server.py`) — 5-minute
+  in-process TTL cache on defaults; merges defaults *under* LLM args
+  so explicit `calendarId` still wins.
+- `generateComposioSkill()` — adds a "Primary calendar shortcut"
+  callout to `alfred-composio-googlecalendar/SKILL.md` when a cached
+  id exists, with a worked example.
+
+**`/tools` disposition console (#182)**
+- `packages/web/src/tools/operations.ts` — two new Wasp ops:
+  `getToolDispositions` (query) and `setToolDisposition` (action,
+  `updated_by='sir'`). Plain async-function shape with `Promise<any>`
+  return — the Wasp `Promise<T>` trap from PRs #139 and #145 caught
+  us a third time; the convention is documented in the file header
+  to prevent a fourth.
+- `packages/web/src/tools/ToolsPage2.tsx` — MCP section regrouped by
+  server. New `McpServerCard` component carries the disposition badge,
+  audit line, flip button (or `locked` chip for self-protected
+  servers), and a collapsible per-tool detail list (the previous flat
+  view, now expandable per server).
+- Live verified: home.alfred.black `/tools` returns HTTP 200 in 62 ms,
+  `setToolDisposition` round-trips through ctrl-api with debounced
+  Hermes restart firing as advertised.
+
+**Recall.ai in-meeting two-way voice (#171)**
+- Alfred speaks **as Alfred, never as the principal**. Persona
+  enforced at four points: the bot's input transcript prompt, the
+  realtime persona seed, the Streams layer's voice anchor, and the
+  reply post-processor.
+- `/channels` Recall card surfaces API key + webhook secret inputs
+  with correct status text (#170) and the real webhook event names
+  Recall publishes (`bot.in_call_recording`, `bot.done`,
+  `bot.fatal`) (#172).
+
+**Operational**
+- `rami.alfred.black` fleet tenant — full provisioning landed on
+  Hetzner cx53 nbg1-dc3 IPv4 178.105.224.71, 9 Cloudflare A-records,
+  all 9 LE certs valid, 23/31 healthy services.
+- 8 provider API keys lifted into `home.alfred.black` Vaultwarden
+  (folder `aa794a95-fb7b-4889-a5a9-6dc34ecf70c2`, "Provider API
+  Keys") with `david@sabo.tech` paired to the Cloudflare Global Key.
+  The plaintext-in-env era ends here for tenant provisioning.
+
+### Changed
+
+- `ha__integration_remove` requires the exact phrase `"yes, sever my
+  own connection to Home Assistant"` before acting on the `alfred`
+  domain (#173). Live-tested after a 2026-05-29 incident where Alfred
+  removed his own HA integration mid-session.
+- `/api/v1/channels/ha/turn` short-circuits the `__alfred_ha_preflight__`
+  sentinel text instantly instead of routing through Hermes — kills the
+  30-second `cannot_connect` false-positive during integration setup
+  (#174).
+- `alfred-ha` HACS custom_component v1.1.3 — `DEFAULT_TIMEOUT` 30 →
+  90 s + per-entry OptionsFlow so the timeout is tunable without
+  re-install. v1.1.2 was the docs-only follow-up.
+- Composio tool-catalogue trim (#176, retroactively rolled into Phase
+  A's input-token win). Per-profile `tools.include` whitelists:
+  `sure` 95 → 23, `hass` 85 → 28, `paperclip` 40 → 18. Trims ~40s
+  off LLM time-to-first-token per voice/chat turn before Phase A even
+  starts work.
+
+### Fixed
+
+- Phase C hotfix #180: `GOOGLECALENDAR_LIST_CALENDARS` response shape
+  is `data.calendars`, not `data.items` — the OAuth-completion cache
+  was silently writing nothing for the first hour of Phase C being live.
+- Phase C hotfix #181: the sidecar's defaults lookup was pointed at
+  `alfred-ctrl-api` (the legacy hostname); switched to `ctrl-api` via
+  the `ALFRED_CTRL_URL` env var so the cache hit on every call.
+
+### Build & CI
+
+- Three iterations to land PR #182 — the same Wasp `Promise<T>` trap
+  that bit #139 and #145 fires when an op's return type is a concrete
+  object literal (not assignable to Wasp's `Payload` constraint). The
+  fix is an explicit `Promise<any>` annotation on the function
+  signature; the file header now documents the rule so a fourth
+  occurrence is caught at review.
+
+### Memory
+
+- New `docker-cp-tmpfs-quirk` — `docker cp` into
+  `alfred-black-hermes-1:/tmp/...` silently fails (rc=0, file never
+  appears) because /tmp is a compose tmpfs. Use `docker exec -i ...
+  sh -c 'cat > /tmp/x'` instead.
+- New `never-env-dump` — Sir's standing rule: never `env` (full dump)
+  with a grep filter; name each var explicitly via `printenv VARNAME`
+  or strip values with `awk -F= '{print $1}'` for names-only.
+- New `hacs-restart-needed` — HACS-installed component upgrades need
+  a full HA Core restart, not just `config_entries/reload`. The
+  reload runs the old code from Python's `sys.modules` cache.
+
+## [2026-05-29]
+
+Alfred Black becomes **the principal's house operator**. Before this
+release, "Alfred can control my home" was a vibes claim — he could read a
+few states through Home Assistant if everything was already configured,
+and that was it. After this release he is a full Tier-4 superuser on
+Home Assistant: he can install Hue with the IP you tell him, install a
+HACS theme, restart Core (auto-snapshotting first), provision a child
+account with restricted access, rename an entity, write a wake-word
+model into `/share/openwakeword/`, SSH into the host to tail a log, and
+log every destructive verb against a Desk decision so you can audit
+who-did-what-and-why a week later. The whole **Tier 4 HA Autonomy**
+project (GH #115/#158) shipped tonight in eight phased PRs (#161-#168)
+with locked defaults: destructive verbs require a `decision_ref`, every
+backup-needing verb auto-snapshots first via `triggerBackupBeforeAction`,
+and every non-trivial write lands a daybook entry. The hass MCP tool
+catalogue grew from **16 to 85** in one session.
+
+The structural enabler is **the alfred-ha Supervisor bridge** (v1.1.1)
+— a HACS-installed custom component that exposes nine LLAT-callable HA
+services (`alfred.supervisor_call`, `supervisor_addon_info`,
+`supervisor_addon_options_update`, `supervisor_host_info`,
+`supervisor_os_info`, and four `supervisor_share_*` for file CRUD under
+`/share/`). HA's own LLATs are Core-scoped by design; this bridge gives
+LLAT callers full Supervisor scope through a path-safety-guarded
+proxy, which means Alfred no longer needs SSH for any addon-management
+or shared-file write. The wake-word `.tflite` upload that motivated the
+bridge proved the path end-to-end — a single
+`POST /api/services/alfred/supervisor_share_write` landed
+`alfred.tflite` at `/share/openwakeword/alfred.tflite` and openWakeWord
+picked it up after one addon restart.
+
+**HA conversation agent live.** `conversation.alfred` is now the default
+engine on the principal's Assist pipeline
+(`01k4qpm8fz8r1nx59zjdrxtasp`). Channel-token mint (#140) +
+`/api/v1/channels/ha/turn` (#122) + a v1.1.1 HACS install land the
+custom component on the principal's HA via WebSocket; pipeline updates
+via `assist_pipeline/pipeline/update` route every Assist turn through
+the same Hermes-main session store as Slack / Telegram / email / web
+chat, so the kitchen voice satellite and the dashboard typed chat are
+the same Alfred with the same memory. Voice bridges still own the
+realtime audio path for phone calls; the HA-side text path uses HA
+Cloud STT + ElevenLabs TTS at the edges.
+
+**Wake word: the truth, with sources.** The `alfred` openWakeWord model
+(from `fwartner/home-assistant-wakewords-collection`) is loaded on the
+host. **It will fire on Wyoming-protocol satellites** that stream
+audio to HA. **It will NOT fire on the Home Assistant Voice PE**
+because that device runs `microWakeWord` (a different runtime, model
+format not interchangeable) on the on-device ESP32-S3, with a fixed
+firmware model list (`Hey Jarvis` / `Hey Mycroft` / `Okay Nabu`). To get
+"Alfred" on Voice PE means either training a `microWakeWord` model and
+flashing custom firmware via ESPHome Builder, or using the experimental
+community firmware fork that flips `use_wake_word: true` to enable
+streaming. Tracked upstream at
+[`esphome/home-assistant-voice-pe#334`](https://github.com/esphome/home-assistant-voice-pe/issues/334).
+
+**SSH wired both ways.** The principal's `~/.ssh/id_ed25519` and a
+freshly-generated `alfred-hermes@home.alfred.black` ed25519 key were
+written to the `core_ssh` addon's `authorized_keys` via the new bridge
+(`alfred.supervisor_addon_options_update`). Both keys verified
+end-to-end — Alfred can `ssh root@100.70.124.6 -p 22` from inside the
+Hermes container, the principal can do the same from their Mac (LAN or
+Tailscale). Alfred's private key is stored in Vaultwarden as
+**"HA SSH (Alfred Hermes)"** in the `Home Assistant` folder, with the
+connection card (host / port / fingerprint / pubkey) as custom fields
+so Alfred can read individual values cleanly. The new skill doc (#169)
+teaches Alfred the **decision tree** — SSH only when MCP and the
+bridge can't cover the job (live log tail, `/config/configuration.yaml`
+edits, `df -h`), because SSH bypasses the gate-and-audit machinery
+that Tier-4 defaults require.
+
+**Operational cleanups that bit us and got fixed:**
+`channels_ha`'s `vault-cli` response parser was reading the
+double-wrapped LIST shape against single-object responses, causing
+`VAULT_LLAT_MISSING` 502s once any single-object endpoint was hit
+(#157). The `deploy-compose` workflow that was supposed to auto-roll
+docker-compose.yaml + Caddyfile to the fleet on every main push shipped
+in #156 but its `FLEET_SSH_KEY` repo secret was never set, so #156 and
+#159 both failed silently at `Configure SSH` until I noticed and added
+the secret. The Caddyfile's `@public_webhooks` matcher omitted
+`/api/v1/channels/ha/*`, so HA's preflight POST to `/turn` hit the SPA's
+nginx and got a misleading 405 — same pattern as the May-28 Composio
+webhook fix, broadened in #159 along with a `caddy` `pids_limit` bump
+from 256 → 1024 (after a runtime `errno=11` saturation event during the
+HA setup run) and a `deploy/README.md` note that `sed -i` on the
+Caddyfile changes the host inode and requires `docker restart` to
+re-mount. The `mcp-stdio` bundle on `home`'s `/hermes-state/` was a week
+stale (chat-Alfred missing the `hass` and `files` MCP servers entirely
+because the operator-owned-config preservation pattern was incorrectly
+applied to a build artifact); #160 makes the rsync unconditional on
+every init and adds an ADD-only mutator that grafts required
+`mcp_servers` entries into the operator-owned `config.yaml`.
+
+**State.db migrations 0011-0013** add `ha_event`, `ha_backup_ref`
+(with `triggered_by` provenance: `user` / `auto:<verb>` /
+`strategy:auto`), `ha_integration_ref` (with `removed_at` soft-delete so
+"Alfred installed and removed this" survives), and `ha_user_ref` (with
+`llat_vw_id` mapping each HA user account to its Vaultwarden item).
+
+The full new tool catalogue + decision tree is documented in
+`packages/mcp-server/skills/alfred-mcp-skill.md` (#169); the live Hermes
+runtime on the principal's tenant has the new bundle as of this release.
+
 ## [2026-05-25]
 
 Alfred Black becomes **one Alfred**. Until this release, a "delegate" from

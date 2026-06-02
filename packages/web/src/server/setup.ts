@@ -5,6 +5,7 @@ import { registerAgentMailReceiver } from "./agentmailReceiver";
 import { registerOAuth2Routes } from "./oauth2";
 import { attachTerminalProxy, registerTerminalStatusRoute } from "./terminalProxy";
 import { registerChatProxy } from "./chatProxy";
+import { registerFilesProxy } from "./filesProxy";
 
 export const serverSetup: ServerSetupFn = async ({ app, server }) => {
   app.use("/api/v1", v1ApiProxy);
@@ -31,5 +32,15 @@ export const serverSetup: ServerSetupFn = async ({ app, server }) => {
     console.log("[setup] Chat proxy registered successfully");
   } catch (err) {
     console.error("[setup] Failed to register chat proxy:", err);
+  }
+  try {
+    // /files (#114 PR3) — multipart upload + blob streaming proxy.
+    // Mounts POST /api/files/upload and GET /api/files/blob/*. The
+    // rest of /files (list/usage/stat/patch/delete) goes through the
+    // standard Wasp queries in dashboard/operations.ts.
+    registerFilesProxy(app);
+    console.log("[setup] Files proxy registered successfully");
+  } catch (err) {
+    console.error("[setup] Failed to register files proxy:", err);
   }
 };

@@ -49,6 +49,7 @@ const BASELINE_PERSONA = [
   "## Tools",
   "- `self({endpoint, method?, body?, query?})` — call this tenant's ctrl-api for vault, streams, learning, workflows, schedules, workers, admin, and phone outbound ops.",
   "- `composio_execute({action, arguments})` — third-party app actions (Gmail, Calendar, GitHub, Notion, Slack, Drive).",
+  "- `files__list` / `files__search` / `files__stat` / `files__read_text` — read-only access to the files Sir has uploaded to /files. Text files up to 32 KB are inlined; larger or binary files return only metadata (with a `too_large` flag) so you can tell Sir to open them on the dashboard. You cannot delete or create files from a call — that's MCP / dashboard only.",
   "",
   '**Latency masking**: before EVERY tool call, say exactly "One moment, sir." — nothing else — then invoke the tool. After the tool returns, deliver the answer in 1–2 sentences. Never read raw tool output.',
 ].join("\n");
@@ -149,6 +150,8 @@ const VOICE_GUARDRAILS = [
   "5. **Empty result is not failure.** If the tool returns an empty array / no items, say so honestly: \"There's nothing on your calendar for that window, sir.\" Do NOT fabricate items to fill the silence.",
   "",
   "6. **Truncated result.** If you see `\"...[truncated NNNb]...\"` in a tool result, say \"I have the first few — shall I pull the rest, sir?\" — do NOT invent the missing items from primer context.",
+  "",
+  "7. **Files: respect `too_large`.** If `files__read_text` returns `{too_large: true, ...}`, the file's contents are NOT in your context. Tell Sir the file is too large to read aloud (or that it's binary) and offer the dashboard — never recite contents you didn't actually receive.",
 ].join("\n");
 
 export function buildInstructions(ctx: InstructionContext): string {

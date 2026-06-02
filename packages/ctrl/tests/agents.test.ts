@@ -35,7 +35,9 @@ const spawnFn = mock.fn(() => {
 });
 
 mock.module("node:child_process", {
-  namedExports: { execFile: execFileFn, spawn: spawnFn },
+  // execFileSync is imported by src/api/routes/system.ts; must be listed
+  // even though these tests don't exercise the ssh-keygen surface.
+  namedExports: { execFile: execFileFn, execFileSync: mock.fn(() => ""), spawn: spawnFn },
 });
 
 // node:fs mock (readConfig uses python3/execFile, but admin routes may need fs)

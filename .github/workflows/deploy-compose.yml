@@ -1,0 +1,197 @@
+# Sync host-side static config to every alfred-black tenant on push to main.
+#
+# Why this exists
+# ---------------
+# The build-*.yml workflows push Docker images to DockerHub, and tenants pull
+# them on `docker compose up -d`. But there has never been a workflow that
+# updates the host-side files compose actually loads:
+#
+#   * /opt/alfred/docker-compose.yaml — services, profiles, mounts
+#   * /opt/alfred/caddy/Caddyfile     — public ingress
+#   * /opt/alfred/caddy/plane-proxy.Caddyfile
+#   * /opt/alfred/.env.example        — operator reference (does NOT touch .env)
+#
+# Consequence: any PR that adds a new service (e.g. #121, which added the
+# `tailscale` profile) ships its image but never reaches a tenant — the
+# service literally isn't in the compose file on disk. Live evidence from
+# 2026-05-29 on home.alfred.black: `/opt/alfred/docker-compose.yaml` was
+# dated May 28 and `docker compose --profile tailscale config --services`
+# returned nothing because the service block was missing.
+#
+# This workflow closes that loop: on every push to main that touches one of
+# the tracked files, SCP the fresh copy to each tenant under /opt/alfred/,
+# back up the old copy as `.bak-<sha>`, and `docker compose up -d` to apply.
+# Compose is idempotent — only services whose definition changed restart.
+#
+# Tenant list is hard-coded for now (5 known hosts). When the SaaS Plane app
+# exposes a tenant directory we can pull this from a single source of truth.
+name: deploy-compose
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docker-compose.yaml"
+      - "caddy/Caddyfile"
+      - "caddy/plane-proxy.Caddyfile"
+      - ".env.example"
+      - ".github/workflows/deploy-compose.yml"
+  workflow_dispatch:
+    inputs:
+      tenants:
+        description: "Comma-separated tenant hostnames (default: all 5)"
+        required: false
+        default: "home.alfred.black,rj.alfred.black,joe.alfred.black,zsolt.alfred.black,miguel.alfred.black"
+
+concurrency:
+  # Serialise per-branch so two pushes don't race on the same tenant.
+  group: deploy-compose-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    strategy:
+      # Don't abort the other tenants if one fails — partial rollout is
+      # better than no rollout, and the summary makes the gap obvious.
+      fail-fast: false
+      matrix:
+        tenant:
+          - home.alfred.black
+          - rj.alfred.black
+          - joe.alfred.black
+          - zsolt.alfred.black
+          - miguel.alfred.black
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure SSH
+        # The FLEET_SSH_KEY secret holds the private half of
+        # ~/.ssh/alfred-black-verify, which is authorised on every tenant's
+        # root account. Don't add it to the agent — write it to a file with
+        # 0600 and pass it via -i so the runner is hermetic.
+        env:
+          FLEET_SSH_KEY: ${{ secrets.FLEET_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${FLEET_SSH_KEY:-}" ]; then
+            echo "FAIL: FLEET_SSH_KEY secret is empty or unset." >&2
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          printf '%s\n' "$FLEET_SSH_KEY" > ~/.ssh/alfred-black-verify
+          chmod 600 ~/.ssh/alfred-black-verify
+          # Trust the tenant on first contact — every Alfred Black tenant
+          # uses a known hostname behind Caddy, so we accept-new rather than
+          # pinning a host key (host keys rotate when the VM is reprovisioned).
+          {
+            echo "Host *.alfred.black"
+            echo "  User root"
+            echo "  IdentityFile ~/.ssh/alfred-black-verify"
+            echo "  IdentitiesOnly yes"
+            echo "  StrictHostKeyChecking accept-new"
+            echo "  UserKnownHostsFile ~/.ssh/known_hosts"
+            echo "  ConnectTimeout 15"
+          } > ~/.ssh/config
+          chmod 600 ~/.ssh/config
+
+      - name: Pre-flight — reachable?
+        # If the tenant is offline, skip cleanly with a summary entry instead
+        # of failing the whole matrix leg. Reduces alert noise from known
+        # planned-downtime hosts.
+        id: preflight
+        run: |
+          set -euo pipefail
+          host='${{ matrix.tenant }}'
+          if ssh -o BatchMode=yes "${host}" 'echo ok' >/dev/null 2>&1; then
+            echo "reachable=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "reachable=false" >> "$GITHUB_OUTPUT"
+            echo ":warning: ${host} unreachable — skipped." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Sync compose + Caddy + .env.example
+        if: steps.preflight.outputs.reachable == 'true'
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          host='${{ matrix.tenant }}'
+          short_sha="${SHA:0:12}"
+
+          # 1. Back up the existing copies so a bad deploy is one `mv` away.
+          #    Keep the prior backup if SHA collides (re-run); the timestamp
+          #    discriminates.
+          ssh "${host}" "
+            set -e
+            ts=\$(date -u +%Y%m%dT%H%M%SZ)
+            for f in docker-compose.yaml caddy/Caddyfile caddy/plane-proxy.Caddyfile .env.example; do
+              if [ -f /opt/alfred/\${f} ]; then
+                cp -a /opt/alfred/\${f} /opt/alfred/\${f}.bak-${short_sha}-\${ts}
+              fi
+            done
+          "
+
+          # 2. scp the four tracked files. Use -p to preserve mtime so the
+          #    operator can see when the file was actually changed in the
+          #    repo, not when CI ran.
+          scp -p docker-compose.yaml "${host}:/opt/alfred/docker-compose.yaml"
+          scp -p caddy/Caddyfile "${host}:/opt/alfred/caddy/Caddyfile"
+          scp -p caddy/plane-proxy.Caddyfile "${host}:/opt/alfred/caddy/plane-proxy.Caddyfile"
+          scp -p .env.example "${host}:/opt/alfred/.env.example"
+
+      - name: Apply (docker compose up -d)
+        if: steps.preflight.outputs.reachable == 'true'
+        run: |
+          set -euo pipefail
+          host='${{ matrix.tenant }}'
+          # Compose is idempotent — only services whose hash changed restart.
+          # The `name: alfred-black` at the top of docker-compose.yaml sets
+          # the project name, but we pass -p explicitly for clarity and so
+          # this matches `docker ps`'s container naming.
+          ssh "${host}" '
+            set -e
+            cd /opt/alfred
+            # Validate the file parses before doing anything destructive.
+            docker compose -p alfred-black config --quiet
+            docker compose -p alfred-black up -d
+          '
+
+      - name: Reload Caddy (gracefully)
+        if: steps.preflight.outputs.reachable == 'true'
+        # `docker compose up -d` will NOT restart Caddy when only its
+        # bind-mounted Caddyfile changed (the container hash is unchanged).
+        # `caddy reload` re-reads the file in-place without dropping
+        # connections.
+        run: |
+          set -euo pipefail
+          host='${{ matrix.tenant }}'
+          ssh "${host}" '
+            cd /opt/alfred
+            if docker compose -p alfred-black ps caddy --status running --quiet | grep -q .; then
+              docker compose -p alfred-black exec -T caddy \
+                caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile || \
+                docker compose -p alfred-black restart caddy
+            fi
+          '
+
+      - name: Per-tenant summary
+        if: steps.preflight.outputs.reachable == 'true'
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          host='${{ matrix.tenant }}'
+          short_sha="${SHA:0:12}"
+          {
+            echo "### ${host}"
+            echo ""
+            echo "- sha: \`${short_sha}\`"
+            echo "- compose: synced + applied"
+            echo "- caddy: reloaded"
+            echo ""
+            echo "Live service list:"
+            echo ""
+            echo '```'
+            ssh "${host}" 'cd /opt/alfred && docker compose -p alfred-black ps --format "table {{.Service}}\t{{.Status}}" 2>/dev/null | head -40' || echo "(ps unavailable)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

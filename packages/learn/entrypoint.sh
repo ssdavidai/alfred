@@ -25,5 +25,16 @@ else
     echo "⚠ Schedule registration returned exit code $CODE (may already exist or need retry)"
 fi
 
+# Composio HTTP sidecar — eliminates ~4s docker-exec cold-start per call.
+# Runs as a background subprocess so the Temporal worker remains PID 1's
+# foreground child (Docker stops on the worker, not the sidecar). The
+# sidecar exits when the container does; if it crashes mid-run, ctrl-api
+# will surface a 502 and Sir/Alfred can fall back via COMPOSIO_EXECUTOR=docker.
+echo "Starting Composio HTTP sidecar on :8788..."
+uvicorn src.composio_server:app --host 0.0.0.0 --port 8788 \
+    --log-level info --no-access-log &
+SIDECAR_PID=$!
+echo "  composio sidecar pid=$SIDECAR_PID"
+
 echo "Starting worker..."
 exec python -m src.worker

@@ -218,6 +218,10 @@ mock.module("node:child_process", {
       const cb = args[args.length - 1] as Function;
       cb(null, "{}", "");
     }),
+    // execFileSync is imported by src/api/routes/system.ts (ssh-keygen
+    // path, unused here) — must be listed or the mock loader 500s the
+    // whole module import.
+    execFileSync: mock.fn(() => ""),
     spawn: mock.fn(() => ({
       stderr: { on: mock.fn() },
       stdin: { write: mock.fn(), end: mock.fn() },

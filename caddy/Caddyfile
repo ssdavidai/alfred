@@ -19,13 +19,30 @@
 	email {$ACME_EMAIL}
 }
 
+# Tailscale Serve / cert overlays (issue #109 PR 4).
+#
+# When the principal clicks "Issue cert" on the /channels Tailscale card,
+# ctrl-api's POST /api/v1/channels/tailscale/cert route runs
+# `tailscale cert <domain>` inside the sidecar, copies the resulting `.crt`
+# + `.key` into the shared `tailscale-certs` bind mount, and writes a
+# per-domain snippet here. The `import` glob silently expands to zero
+# files on a stock tenant (no Tailscale sidecar, no certs) — Caddy treats
+# a missing-file `import` of a glob pattern as a no-op, so this line is
+# safe even before PR 4 surfaces are exercised.
+#
+# Snippets are full site blocks (e.g. `home-alfred-black.tail-acme.ts.net
+# { tls /tailscale-certs/...crt /tailscale-certs/...key; reverse_proxy
+# web-client:80 }`). Caddy hot-reloads on `caddy reload`, which ctrl-api
+# triggers via `docker exec caddy caddy reload --config /etc/caddy/Caddyfile`.
+import /tailscale-snippets/*.caddy
+
 # Apex — the Wasp React SPA (static, served by the web-client nginx).
 # `wasp build` splits the app in two: the SPA is served here; its API
 # server lives on api.<domain> below. Distinct hosts — no path-prefix
 # ambiguity between client routes and server endpoints.
 #
 # EXCEPT: a small set of PUBLIC ctrl-api webhook paths must be reachable
-# on the apex domain because third-party services (OMI, Plane, Vexa,
+# on the apex domain because third-party services (OMI, Plane,
 # Paperclip, arbitrary stream webhooks) compose their callback URLs from
 # TENANT_BASE_URL which is the apex (e.g. https://home.alfred.black).
 # Without this path-level handler, those requests would land on the SPA
@@ -53,8 +70,30 @@
 	# COMPOSIO_WEBHOOK_SECRET is unset). Discovery #293 found the Caddy
 	# matcher was never updated and every Composio webhook was 405-ing
 	# at the SPA's nginx.
+	#
+	# /api/v1/channels/ha/* is the Home Assistant channel surface (#111).
+	# /turn is the conversation-agent inbound (PR1) — bearer-authed via
+	# the shared channel_tokens table (channel='ha-conversation'), same
+	# pattern as Paperclip's heartbeat (HMAC instead of bearer), routed
+	# through the same Caddy gate so HA can reach ctrl-api directly
+	# rather than bouncing through the SPA's nginx (which would 405).
+	#
+	# The wildcard (rather than `/turn` literal) is intentional: every
+	# other /api/v1/channels/ha/* route (status / registry / proposal /
+	# service / etc.) is operator-auth-gated by server.ts's
+	# `authenticate()` call, so routing them through ctrl-api is safe —
+	# unauthorised callers get a clean 401 from ctrl-api instead of a
+	# misleading 405 from the SPA's nginx. Discovered 2026-05-29 wiring
+	# HA conversation on home: the live Caddyfile only had the literal
+	# `/turn` entry and HA's preflight POST was 405-ing at the SPA.
+	#
+	# /api/v1/webhooks/vexa stays in the matcher even though the upstream
+	# Vexa stack was retired in #113 PR1 — ctrl-api keeps a 410 Gone stub
+	# so any in-flight Vexa retries terminate visibly here instead of
+	# 405-ing at the SPA's nginx. Drop this entry when the stub goes (the
+	# PR that lands Recall.ai — #113 PR2).
 	@public_webhooks {
-		path /api/v1/streams/omi/* /api/v1/plane/webhook /api/v1/webhooks/plane/steward /api/v1/webhooks/vexa /api/v1/webhooks/in/* /api/v1/channels/email/inbound /api/v1/channels/paperclip/* /api/v1/composio/webhook
+		path /api/v1/streams/omi/* /api/v1/plane/webhook /api/v1/webhooks/plane/steward /api/v1/webhooks/vexa /api/v1/webhooks/recall /api/v1/webhooks/in/* /api/v1/channels/email/inbound /api/v1/channels/paperclip/* /api/v1/channels/ha/* /api/v1/composio/webhook
 	}
 	handle @public_webhooks {
 		reverse_proxy ctrl-api:3100
@@ -128,7 +167,9 @@ sms.{$DOMAIN} {
 	reverse_proxy hermes:8080
 }
 
-# Voice — Twilio Media Streams WebSocket endpoint for the voice-bridge.
+# Voice — Twilio Media Streams WebSocket endpoint + voice-bridge HTTP
+# control surface for Home Assistant's REST integration.
+#
 # Hermes has no native phone-call adapter (upstream issue #409), so
 # realtime audio bridges through a separate service that translates
 # Twilio mulaw <-> OpenAI gpt-realtime. The bridge's :9000 listener
@@ -136,6 +177,19 @@ sms.{$DOMAIN} {
 # console, set the number's "A CALL COMES IN" webhook to a TwiML <Stream>
 # pointing at `wss://voice.{$DOMAIN}/voice/<id>?sig=...`. Caddy auto-issues
 # the LE cert + handles the WS upgrade transparently.
+#
+# Issue #112 PR5 adds three HTTP endpoints on the same :9000 listener that
+# Home Assistant's REST integration can hit over TLS via this hostname:
+#
+#   GET /esphome/devices   — list HA installs paired with the bridge
+#   GET /wyoming/status    — Wyoming Protocol fallback readiness
+#   GET /health, /metrics  — pre-existing operator endpoints
+#
+# These are unauthenticated on voice-bridge itself (boundary lives at
+# ctrl-api, which is the only caller of /esphome/devices + /wyoming/status
+# in production). The voice subdomain stays DNS-only at Cloudflare
+# (orange cloud off) — see the comment above the apex block for the
+# WSS-upgrade rationale.
 voice.{$DOMAIN} {
 	encode zstd gzip
 	reverse_proxy voice-bridge:9000

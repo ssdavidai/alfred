@@ -55,6 +55,12 @@ ENV PYTHONUNBUFFERED=1 \
 # - curl, ca-certificates : NodeSource setup + healthcheck.
 # - procps         : the supervisor uses `pgrep`/process checks.
 # - openssh-client : agents may `git`/`ssh` from the terminal tool.
+# - iptables       : PR 4 of docs/codex-builder-runtime.md — the codex-builder
+#                    profile's egress allowlist (scoped --uid-owner 10001) is
+#                    installed at supervisor boot when ENABLE_CODEX_BUILDER=1.
+#                    Dormant on every other tenant. Adds ~10 MB to the image.
+# - dnsutils       : `dig` resolves OpenAI/GitHub/npm CIDR sets at boot for
+#                    the iptables setup. Tiny (~5 MB).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         tini \
         git \
@@ -64,6 +70,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl ca-certificates \
         procps \
         openssh-client \
+        iptables \
+        dnsutils \
     && rm -rf /var/lib/apt/lists/*
 
 # --- Node.js 22 (NodeSource) --------------------------------------------------
@@ -73,6 +81,41 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/* \
     && node --version && npm --version
+
+# =============================================================================
+# OpenAI Codex CLI — installed for use ONLY by the codex-builder profile.
+# =============================================================================
+# Available on PATH inside the container, but the codex-builder profile (PR 2)
+# is the only one with credentials (CODEX_HOME) and an isolated workspace to
+# act on. main/workers/heavy can `which codex` but a `codex exec` would 401
+# (no auth file in their CODEX_HOME) and would have no workspace to mutate
+# (their terminal.cwd is the profile dir, not /work).
+#
+# Source: npm @openai/codex. Pin a version arg so a future bump is explicit
+# and reviewable. See docs/codex-builder-runtime.md §3 for the install
+# rationale (image-size impact, separation of concerns, security model).
+#
+# PR 1 of 5 — Sir 2026-05-28. The CLI is INERT until PR 2 lands the profile
+# config + supervisor entry. No existing profile's behaviour changes here.
+ARG CODEX_CLI_REF=0.135.0
+RUN npm install -g --no-audit --no-fund "@openai/codex@${CODEX_CLI_REF}" \
+ && codex --version
+
+# --- /etc/passwd entry for the codex-builder uid (10001) ----------------------
+# Pre-create the uid that PR 2's supervisor.sh will drop the codex-builder
+# gateway process onto via `setpriv --reuid 10001`. Without an entry,
+# tools that stat the running uid's home dir (codex, ssh, git, npm) emit
+# noisy "No passwd entry for user 10001" warnings even though they otherwise
+# work — and a future Hermes hook that relies on `pwd.getpwuid(os.geteuid())`
+# would crash on KeyError. Doing it in PR 1 keeps PR 2 focused on the profile
+# rendering and supervisor wiring; the uid is unused until then.
+#
+# Home points at the profile state dir (laid down by PR 2's init container).
+# Shell is /usr/sbin/nologin — the operator-facing surface for this uid is
+# `docker exec -u 10001 ... bash`, NOT an interactive login.
+RUN echo 'codex-builder:x:10001:10001::/hermes-state/profiles/codex-builder:/usr/sbin/nologin' \
+    >> /etc/passwd \
+ && echo 'codex-builder:x:10001:' >> /etc/group
 
 # =============================================================================
 # Install Hermes Agent from a PINNED upstream ref.
@@ -133,6 +176,36 @@ RUN python3 /tmp/patch_openai_sdk.py \
  && grep -q 'for output in (response.output or \[\]):' \
         /usr/local/lib/python3.12/site-packages/openai/lib/_parsing/_responses.py \
  && rm /tmp/patch_openai_sdk.py
+
+# =============================================================================
+# Patch: profile-dir-aware parent chmod in hermes_cli/auth.py.
+#
+# Upstream Hermes' _save_auth_store (and the qwen + nous shared-store
+# variants) hard-codes `os.chmod(<path>.parent, 0o700)` on every save —
+# token refresh, provider login, write-back of cached creds. In
+# alfred-black HERMES_HOME points at a *profile* dir
+# (e.g. /hermes-state/profiles/codex-builder) whose mode is owned by the
+# init container. PR #118 set the codex-builder profile dir to 0o711 so
+# the paperclip-hermes adapter (uid 1000) can traverse to .env for the
+# gateway's API_SERVER_KEY; an auth-store save then resets it back to
+# 0o700 and the next paperclip → :18793 dispatch 401s with
+# hermes_auth_failed / invalid_api_key (GH #119). The companion fix —
+# HERMES_HOME_MODE=0711 in the codex-builder profile .env — handles the
+# `_secure_dir(home)` path that fires at every CLI startup; this patch
+# handles the auth-save path that fires at every token write.
+#
+# See patch_upstream_hermes_auth.py for the full rationale. The patch is
+# idempotent + tripwire'd; a future HERMES_REF bump that moves any of
+# the three needles fails the build loudly.
+#
+# Sir 2026-05-30 — durable fix for GH #119.
+COPY packages/hermes/patch_upstream_hermes_auth.py /tmp/patch_upstream_hermes_auth.py
+RUN python3 /tmp/patch_upstream_hermes_auth.py \
+ && grep -q "alfred-black: profile-dir-aware chmod" \
+        /usr/local/lib/python3.12/site-packages/hermes_cli/auth.py \
+ && grep -q "_alfred_is_profile_dir" \
+        /usr/local/lib/python3.12/site-packages/hermes_cli/auth.py \
+ && rm /tmp/patch_upstream_hermes_auth.py
 
 # =============================================================================
 # Bake the hermes-lcm plugin (lossless cross-session context engine).
@@ -234,6 +307,63 @@ RUN printf '#!/bin/sh\nexec hermes -p main "$@"\n' > /usr/local/bin/alfred && \
     printf '#!/bin/sh\nexec hermes -p workers "$@"\n' > /usr/local/bin/workers-cli && \
     printf '#!/bin/sh\nexec hermes -p heavy "$@"\n' > /usr/local/bin/heavy-cli && \
     chmod +x /usr/local/bin/alfred /usr/local/bin/workers-cli /usr/local/bin/heavy-cli
+
+# =============================================================================
+# codex-builder profile helpers (PR 4 of docs/codex-builder-runtime.md).
+# =============================================================================
+# Two scripts the codex-builder profile needs at runtime:
+#
+#   setup-egress-jail.sh — iptables OUTPUT chain scoped --uid-owner 10001,
+#     allowlists OpenAI/GitHub/npm/PyPI/crates.io, REJECTs everything else.
+#     Called by the supervisor at boot when ENABLE_CODEX_BUILDER=1.
+#
+#   codex-builder-prep-run.sh — invoked by the codex-builder agent at run
+#     start. Creates /work/runs/<runId>/repo as a fresh `git clone` and
+#     checks out a feature branch. Returns the workspace path on stdout.
+#     Defensive on runId/issueId — refuses path traversal, refuses to
+#     overwrite an existing run dir (collisions = bug).
+#
+# Both are baked into /usr/local/bin so they're on the codex-builder
+# gateway's PATH and the existing 3 profiles can ignore them.
+#
+# PR 5 adds codex-builder-run.sh — the wrapper the codex-builder agent
+# invokes per-run. Takes (runId, issueId, promptFile), shells out to
+# `codex exec`, commits + pushes, writes /work/runs/<runId>/audit.json,
+# emits a JSON envelope on stdout.
+COPY packages/hermes/docker/setup-egress-jail.sh /usr/local/bin/codex-builder-setup-egress.sh
+COPY packages/hermes/docker/codex-builder-prep-run.sh /usr/local/bin/codex-builder-prep-run.sh
+COPY packages/hermes/docker/codex-builder-run.sh /usr/local/bin/codex-builder-run.sh
+RUN chmod +x /usr/local/bin/codex-builder-setup-egress.sh \
+             /usr/local/bin/codex-builder-prep-run.sh \
+             /usr/local/bin/codex-builder-run.sh
+
+# codex-builder profile persona — `SOUL.md` Hermes loads per-profile.
+# This is the agent identity Sir's Paperclip persona references. The
+# init container copies it into the profile dir (PR 5).
+COPY packages/hermes/SOUL.codex-builder.md /opt/hermes-assets/SOUL.codex-builder.md
+
+# =============================================================================
+# Self-render renderer scripts (#120 Lane IIb).
+# =============================================================================
+# When ctrl-api registers a new user-facing profile AFTER init has exited,
+# the supervisor's SIGUSR1 reconciler needs to render that profile dir
+# inline — no operator step, no init re-run. We bake the SAME two renderer
+# scripts the init container runs (render_hermes.py + render_mcp_servers.py)
+# plus the two .njk templates into the runtime image, so the runtime self-
+# render is byte-identical to a boot-time render.
+#
+# jinja2 + ruamel.yaml are required by render_hermes.py (template render)
+# and render_mcp_servers.py (round-trip YAML mutator). pinned to the same
+# versions the init image uses for byte-stable output across re-renders.
+#
+# render_registry.py is NOT baked here — supervisor reads the registry JSON
+# ctrl-api already wrote (no state.db mount in the hermes runtime).
+RUN pip install --no-cache-dir "jinja2==3.1.6" "ruamel.yaml==0.18.6"
+COPY packages/hermes/init/render_hermes.py       /opt/hermes-init/render_hermes.py
+COPY packages/hermes/init/render_mcp_servers.py  /opt/hermes-init/render_mcp_servers.py
+COPY packages/hermes/hermes-config.yaml.njk      /opt/hermes-init/templates/hermes-config.yaml.njk
+COPY packages/hermes/hermes-profile.env.njk      /opt/hermes-init/templates/hermes-profile.env.njk
+RUN chmod 0755 /opt/hermes-init/render_hermes.py /opt/hermes-init/render_mcp_servers.py
 
 # =============================================================================
 # Supervisor entrypoint.

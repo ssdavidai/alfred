@@ -44,7 +44,7 @@ export default function TermsOfServicePage() {
               <li>A persistent background AI worker that monitors streams, processes tasks, and takes autonomous actions on your behalf</li>
               <li>Integration capabilities with third-party services via credentials you provide (email, calendar, messaging, etc.)</li>
               <li>An inbox for review of AI-generated content and autonomous actions</li>
-              <li>Device management and secure remote access via Tailscale VPN</li>
+              <li>Optional secure remote access by joining your instance to your own Tailscale tailnet (opt-in, principal-authenticated)</li>
               <li>API access via bearer token authentication for programmatic control</li>
               <li>An administrative web dashboard at alfred.black</li>
             </ul>
@@ -71,7 +71,7 @@ export default function TermsOfServicePage() {
 
           <section>
             <h2 className="font-display text-2xl tracking-tight mb-3">6. Infrastructure and Instance Provisioning</h2>
-            <p>Upon activation, we provision a dedicated virtual machine on Hetzner Cloud infrastructure in your selected region, running your personal Alfred instance. The instance is connected to a private Tailscale network and assigned a subdomain (e.g., yourname.alfred.black).</p>
+            <p>Upon activation, we provision a dedicated virtual machine on Hetzner Cloud infrastructure in your selected region, running your personal Alfred instance, and assign it a subdomain (e.g., yourname.alfred.black) reachable over the public internet via standard HTTPS. Optionally, you may also connect your instance to your own Tailscale tailnet from the Channels page in the dashboard — when you do, you authenticate against your own Tailscale account, and the instance becomes reachable on your tailnet in addition to the public subdomain.</p>
             <p className="mt-3">We reserve the right to migrate instances to equivalent or superior hardware. Downtime during maintenance will be minimized and communicated in advance where feasible.</p>
             <p className="mt-3">You are responsible for the third-party credentials you store in your instance. We encrypt credentials at rest but cannot guarantee security against all attack vectors. Use strong, unique passwords and revoke credentials you no longer need.</p>
           </section>

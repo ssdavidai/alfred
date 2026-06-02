@@ -32,8 +32,8 @@
 // `@public_webhooks` matcher routes /api/v1/webhooks/* + /api/v1/channels/*
 // through to ctrl-api on :3100). web-1 sits behind Wasp auth middleware.
 // Putting the webhook landing here keeps the "public, HMAC-only" pattern
-// consistent with the Paperclip heartbeat, Vexa, and the Plane steward
-// hook. The state write *does* live in web-db, so we hop one container
+// consistent with the Paperclip heartbeat and the Plane steward hook.
+// The state write *does* live in web-db, so we hop one container
 // over via the AAS_API_KEY-secured internal endpoint. This avoids giving
 // ctrl-api a Prisma client just for a single field-flip.
 //

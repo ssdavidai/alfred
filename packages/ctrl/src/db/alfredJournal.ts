@@ -202,33 +202,89 @@ export function queryRecentJournal(
   scope:
     | { principal_id: string }
     | { channel: string; chat_id: string },
-  opts: { limit?: number; within_hours?: number } = {},
+  opts: { limit?: number; within_hours?: number; hermes_profile?: string | null } = {},
 ): JournalEntry[] {
   const limit = Math.max(1, Math.min(50, opts.limit ?? 20));
   const withinHours = Math.max(0.1, opts.within_hours ?? 24);
   const cutoff = new Date(Date.now() - withinHours * 3600 * 1000).toISOString();
 
+  // Lane IV — optional per-profile filter so the Hermes one-alfred plugin can
+  // pull only the target profile's continuity. When a Sentinel profile asks
+  // for recent journal entries, it shouldn't see Alfred-main's outbound.
+  // When `hermes_profile` is undefined (the default), no scoping is applied —
+  // legacy callers see all profiles. When it's null, only rows with a NULL
+  // hermes_profile match (pre-Lane-IV rows). Pass a slug to filter to it.
+  const profileFilter = opts.hermes_profile;
+
   let rows: RawJournalRow[];
   if ("principal_id" in scope) {
-    rows = db
-      .prepare(
-        `SELECT * FROM alfred_journal
-           WHERE principal_id = ?
-             AND ts >= ?
-           ORDER BY ts DESC, rowid DESC
-           LIMIT ?`,
-      )
-      .all(scope.principal_id, cutoff, limit) as RawJournalRow[];
+    if (profileFilter === undefined) {
+      rows = db
+        .prepare(
+          `SELECT * FROM alfred_journal
+             WHERE principal_id = ?
+               AND ts >= ?
+             ORDER BY ts DESC, rowid DESC
+             LIMIT ?`,
+        )
+        .all(scope.principal_id, cutoff, limit) as RawJournalRow[];
+    } else if (profileFilter === null) {
+      rows = db
+        .prepare(
+          `SELECT * FROM alfred_journal
+             WHERE principal_id = ?
+               AND ts >= ?
+               AND hermes_profile IS NULL
+             ORDER BY ts DESC, rowid DESC
+             LIMIT ?`,
+        )
+        .all(scope.principal_id, cutoff, limit) as RawJournalRow[];
+    } else {
+      rows = db
+        .prepare(
+          `SELECT * FROM alfred_journal
+             WHERE principal_id = ?
+               AND ts >= ?
+               AND hermes_profile = ?
+             ORDER BY ts DESC, rowid DESC
+             LIMIT ?`,
+        )
+        .all(scope.principal_id, cutoff, profileFilter, limit) as RawJournalRow[];
+    }
   } else {
-    rows = db
-      .prepare(
-        `SELECT * FROM alfred_journal
-           WHERE channel = ? AND chat_id = ?
-             AND ts >= ?
-           ORDER BY ts DESC, rowid DESC
-           LIMIT ?`,
-      )
-      .all(scope.channel, scope.chat_id, cutoff, limit) as RawJournalRow[];
+    if (profileFilter === undefined) {
+      rows = db
+        .prepare(
+          `SELECT * FROM alfred_journal
+             WHERE channel = ? AND chat_id = ?
+               AND ts >= ?
+             ORDER BY ts DESC, rowid DESC
+             LIMIT ?`,
+        )
+        .all(scope.channel, scope.chat_id, cutoff, limit) as RawJournalRow[];
+    } else if (profileFilter === null) {
+      rows = db
+        .prepare(
+          `SELECT * FROM alfred_journal
+             WHERE channel = ? AND chat_id = ?
+               AND ts >= ?
+               AND hermes_profile IS NULL
+             ORDER BY ts DESC, rowid DESC
+             LIMIT ?`,
+        )
+        .all(scope.channel, scope.chat_id, cutoff, limit) as RawJournalRow[];
+    } else {
+      rows = db
+        .prepare(
+          `SELECT * FROM alfred_journal
+             WHERE channel = ? AND chat_id = ?
+               AND ts >= ?
+               AND hermes_profile = ?
+             ORDER BY ts DESC, rowid DESC
+             LIMIT ?`,
+        )
+        .all(scope.channel, scope.chat_id, cutoff, profileFilter, limit) as RawJournalRow[];
+    }
   }
   return rows.map(rowToEntry);
 }

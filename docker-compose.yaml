@@ -13,13 +13,10 @@
 #
 # Profiles:
 #   * (default — no profile)  always-on services. `docker compose up -d`.
-#   * vexa                    the 9-container transcript stack.
-#                             `docker compose --profile vexa up -d`.
 #
 # Minimum VM spec: the default-profile `mem_limit` ceilings sum to ~37 GB, so
 # 32 GB is below the hard cap and OOM-kills a container under load. Floor is
 # 48 GB RAM (32 GB only survives a near-idle box); 48 GB recommended.
-# The `vexa` profile adds ~7 GB of limits → plan on 56-64 GB with it on.
 # Also: 4+ vCPU, 80+ GB disk.
 #
 # Host port bindings: only `caddy` (80/443). Every other service talks over
@@ -46,6 +43,18 @@ services:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
+      # Tailscale-issued certs (issue #109 PR 4). The /channels Tailscale
+      # card's "Issue cert" button calls POST /api/v1/channels/tailscale/cert
+      # which runs `tailscale cert <domain>` inside the sidecar and copies
+      # the resulting `.crt` + `.key` into this directory. Caddy imports
+      # snippets from /tailscale-snippets/*.caddy at load time (see the
+      # `import` directive at the top of Caddyfile) — the cert route writes
+      # one snippet per domain and then triggers `caddy reload` via
+      # `docker exec`. The directory must exist on the host before compose
+      # up (bootstrap.sh creates it); on a stock tenant the import is a
+      # no-op because the glob matches zero files.
+      - ./caddy/tailscale-certs:/tailscale-certs
+      - ./caddy/tailscale-snippets:/tailscale-snippets
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/ >/dev/null 2>&1 || exit 0"]
       interval: 30s
@@ -53,7 +62,16 @@ services:
       retries: 3
       start_period: 10s
     mem_limit: 256m
-    pids_limit: 256
+    # Bumped 256 -> 1024 on 2026-05-29. Caddy's runtime is small but every
+    # operator `caddy validate` / `caddy reload` (e.g. ctrl-api's tailscale
+    # cert route, an interactive shell-out during incident response, or the
+    # deploy-compose.yml graceful-reload step) forks a fresh Go runtime —
+    # which spawns ~30-50 OS threads per invocation. On home.alfred.black
+    # the cap was hit live during HA wiring: `caddy reload` returned
+    # `runtime: failed to create new OS thread; errno=11` (EAGAIN) and
+    # every shell-out inside the container failed. 1024 is well clear of
+    # the steady-state ~80-100 threads + room for concurrent reloads.
+    pids_limit: 1024
 
   # ── web-db — Postgres for the Wasp web app (auth, ApiKey, OAuth) ────
   web-db:
@@ -147,6 +165,22 @@ services:
       - vault_data:/vault
       - hermes_data:/hermes-state
       - alfred_data:/alfred-data
+      # codex-builder workspace mount — init chowns it to 10001:10001 mode
+      # 0700 (PR 4 of docs/codex-builder-runtime.md §6) so the codex-builder
+      # gateway can mkdir /work/runs/<runId>/. NOT mounted in any other
+      # compose service (paperclip / ctrl-api / web / alfred) — the run
+      # data is invisible to the rest of the stack. See the hermes service
+      # volumes for the matching mount on the consumer side.
+      - hermes_codex_work:/work
+      # Phase B — runtime-flippable tool dispositions. The init container's
+      # render_mcp_servers.py reads state.db.tool_disposition READ-ONLY to
+      # decide which MCP servers on main get `tools.include: []`. ctrl-api
+      # remains the SOLE writer; this mount is :ro so the init container
+      # can never accidentally write to the single-writer DB. On a fresh
+      # tenant the file doesn't yet exist — the mutator falls back to
+      # all-direct (matching the migration seed) so init never blocks on
+      # this signal.
+      - state_data:/ctrl-data:ro
     env_file:
       - .env
     environment:
@@ -155,10 +189,31 @@ services:
       # and the hermes runtime sees the same volume at the same path.
       - HERMES_DATA_DIR=/hermes-state
       - HERMES_RUNTIME_HOME=/hermes-state
+      # Phase B — path to ctrl-api's state.db for the disposition reader.
+      # The mount above lands the volume at /ctrl-data; the DB lives at
+      # /ctrl-data/alfred-state.db (matching ctrl-api's STATE_DB_PATH
+      # default of /state/alfred-state.db). Best-effort: render_mcp_servers
+      # gracefully degrades if the file or table is missing.
+      - STATE_DB_PATH=/ctrl-data/alfred-state.db
       # init step 9 seeds the sender allowlist + stages the Sure/owner email
       # files from OWNER_EMAIL. env_file already injects it, but pin it
       # explicitly so the canonical name is unambiguous at this boundary (C9).
       - OWNER_EMAIL=${OWNER_EMAIL:-}
+      # codex-builder hardening (PR 4 of docs/codex-builder-runtime.md §6).
+      # When the flag is on, init step 7b chowns the codex-builder profile
+      # dir + /work to 10001:10001 mode 0700, writes the deploy key, and
+      # runs the negative-assert spot-checks (uid 10001 cannot read /vault,
+      # /alfred-data, other-profile .env files). When off, the chowns
+      # still happen but the asserts are skipped — flipping the flag on
+      # later does not require a chown sweep.
+      - ENABLE_CODEX_BUILDER=${ENABLE_CODEX_BUILDER:-false}
+      # Base64-encoded private SSH key for the GitHub deploy key on
+      # ssdavidai/alfred (repo-scoped, write-enabled). When set, init
+      # writes it to /hermes-state/profiles/codex-builder/.ssh/codex_id_ed25519
+      # owned 10001:10001 mode 0600. When empty (default everywhere except
+      # home), no key is written and PR 5's wrapper emits a clean
+      # "deploy key missing" run audit if git push is attempted.
+      - CODEX_BUILDER_DEPLOY_KEY_B64=${CODEX_BUILDER_DEPLOY_KEY_B64:-}
 
   # ── temporal — workflow engine for alfred-learn ─────────────────────
   temporal:
@@ -251,6 +306,16 @@ services:
   # Hermes /v1 API directly.
   hermes:
     image: ssdavidai00/alfred-black-hermes:latest
+    # No `ports:` — hermes binds 0.0.0.0 inside the container on the four
+    # reserved ports (18789/18790/18791/18793) PLUS any registry-allocated
+    # user-facing profile port (18794..18799 per #120 Lane II). All of
+    # these are reachable ONLY via the compose default network as
+    # `http://hermes:<port>` from sibling containers (ctrl-api, paperclip,
+    # alfred-learn, voice-bridge). They are intentionally NOT host-published
+    # so the only external surface is Caddy ingress on :443, which in turn
+    # routes through ctrl-api's auth-gated proxy. Adding user-facing profile
+    # ports to a `ports:` block would expose them on the VM's public IP
+    # without any TLS or auth wrapping.
     depends_on:
       init:
         condition: service_completed_successfully
@@ -260,6 +325,19 @@ services:
       - hermes_data:/hermes-state
       - vault_data:/vault
       - alfred_data:/alfred-data
+      # Sealed builder runtime workspace — mounted in the hermes container
+      # only. Owned uid 10001 mode 0700 by the init container (PR 4); the
+      # codex-builder gateway process drops to uid 10001 (PR 4) and is the
+      # only consumer. Not mounted in paperclip / ctrl-api / web / any other
+      # service: the run data is not even visible to the rest of the stack.
+      # See docs/codex-builder-runtime.md §5.
+      - hermes_codex_work:/work
+      # Store 5 (files) — read-only mount of the principal-facing blob
+      # volume. PR 2 of issue #114 will give Hermes a files__read MCP
+      # tool that reaches blobs via this mount; ctrl-api is the SOLE
+      # writer (mounted :rw in its own stanza below). docs/specs/
+      # issue-114-local-file-storage.md §5.1.
+      - files_data:/files:ro
     tmpfs:
       - /tmp:size=256m
     environment:
@@ -272,6 +350,17 @@ services:
       # container renders profile config from this (via its env_file: .env);
       # pinned here too so the value is unambiguous at the hermes boundary.
       - HERMES_HEAVY_MODEL=${HERMES_HEAVY_MODEL:-anthropic/claude-opus-4-6}
+      # codex-builder profile (:18793) — Sir's decision #2 in
+      # docs/codex-builder-runtime.md §11.2. Default false: the profile is
+      # rendered everywhere by the init container, but the supervisor's
+      # 4th `start_proc` only fires when this is true. Home flips this to
+      # true in /opt/alfred/.env; rj/joe/zsolt/miguel leave it unset and
+      # get an idle profile dir with no listening process on :18793.
+      - ENABLE_CODEX_BUILDER=${ENABLE_CODEX_BUILDER:-false}
+      # Model used by the codex-builder profile's supervising Hermes agent
+      # (the codex CLI invocation it shells out to uses the same model).
+      # Default tracks the latest OpenAI Codex model; overridable.
+      - HERMES_CODEX_BUILDER_MODEL=${HERMES_CODEX_BUILDER_MODEL:-gpt-5-codex}
       - NODE_OPTIONS=--max-old-space-size=3072
       - CTRL_API_URL=http://ctrl-api:3100
       # Per-job timeout (seconds) Hermes applies to every `cron` job. This is
@@ -312,6 +401,24 @@ services:
       - ALL
     cap_add:
       - DAC_OVERRIDE
+      # NET_ADMIN — needed by PR 4's iptables egress allowlist scoped to
+      # uid 10001 (codex-builder), which installs OUTPUT rules at supervisor
+      # boot to allow OpenAI / GitHub / npm / PyPI / crates.io egress and
+      # REJECT everything else for uid 10001. The cap is dormant until PR 4
+      # adds the iptables setup script; it does NOT grant any of the other
+      # 3 profiles new privileges (they run as uid 10000 and their egress
+      # paths are unrestricted today). See docs/codex-builder-runtime.md §6.
+      - NET_ADMIN
+      # SETUID + SETGID — needed by PR 4's `setpriv --reuid=10001
+      # --regid=10001 ...` wrap on the codex-builder gateway's start_proc.
+      # Without these the supervisor (running as root) gets
+      # `setpriv: setresuid failed: Operation not permitted` and the
+      # codex-builder gateway crashes in a tight restart loop. cap_drop:
+      # ALL + this targeted cap_add is still a much tighter posture than
+      # the default (which doesn't drop ALL). Live-observed crash loop
+      # on home 2026-05-28 right after PR #104 landed.
+      - SETUID
+      - SETGID
     # Sized for two Python gateway processes + MCP stdio children. The
     # workers side carries the heavier task-registry boot path.
     mem_limit: 6g
@@ -331,6 +438,11 @@ services:
       - vault_data:/vault
       - alfred_data:/app/data
       - hermes_data:/root/.hermes
+      # Store 5 (files) — read-only mount of the principal-facing blob
+      # volume. The vault daemon's PR-4 extraction pipeline will read
+      # uploaded files via this mount; ctrl-api stays the SOLE writer.
+      # docs/specs/issue-114-local-file-storage.md §5.1.
+      - files_data:/files:ro
     tmpfs:
       - /tmp:size=256m
     environment:
@@ -378,16 +490,35 @@ services:
       - state_data:/state
       - ingest_data:/ingest
       - cold_data:/cold
+      # Store 5 (files) — principal-facing blob volume. ctrl-api is the
+      # SOLE writer (`:rw`); hermes + the alfred daemon mount this same
+      # volume `:ro` and write only through POST /api/v1/files/upload.
+      # Issue #114 PR 1; see docs/specs/issue-114-local-file-storage.md §5.1.
+      - files_data:/files
+      # Store 5 cold archive (#114 PR 5) — companion volume for ZSTD-19
+      # compressed copies of any blob untouched for 90+ days. The daily
+      # FilesColdArchiveWorkflow (alfred-learn) drives the promotion via
+      # ctrl-api's POST /api/v1/files/cold-promote endpoint, which:
+      #   1. reads the live blob from /files
+      #   2. streams it through node:zlib.createZstdCompress at level 19
+      #   3. lands the compressed bytes at /cold-files/<ULID>.zst
+      #   4. atomically flips file_blobs.path to `cold:<ULID>` and
+      #      unlinks the live copy.
+      # GET /api/v1/files/blob/* transparently decompresses cold reads
+      # via createZstdDecompress — the principal sees the same shape on
+      # the read side either way. Only ctrl-api needs RW on this volume;
+      # no other service mounts it.
+      - files_cold_data:/cold-files
       # ctrl-api restarts sibling containers (worker ops, chore runs).
       - /var/run/docker.sock:/var/run/docker.sock
       # The host compose dir, bind-mounted RW. ctrl-api modules
-      # (vexa.ts/models.ts/credentials.ts/admin.ts/logs.ts) read and write
+      # (models.ts/credentials.ts/admin.ts/logs.ts) read and write
       # ${COMPOSE_DIR}/.env and shell out to `docker compose -f
       # ${COMPOSE_DIR}/docker-compose.yaml`. COMPOSE_DIR defaulted to the
       # bare-VM path /srv/alfred-black, which does not exist in this
       # containerized single-VM topology, so every .env read/write threw
-      # ENOENT (the vexa-toggle 500, the empty model catalog). RW so the
-      # vexa flag + credential writes land in the real file the rest of the
+      # ENOENT (e.g. the empty model catalog). RW so credential and
+      # provider-key writes land in the real file the rest of the
       # stack reads. ${COMPOSE_DIR_HOST} defaults to /opt/alfred (the merged
       # single-VM layout); override in .env for a different host path.
       - ${COMPOSE_DIR_HOST:-/opt/alfred}:/srv/alfred-black
@@ -500,7 +631,7 @@ services:
       # GROQ_API_KEY). env_file: .env injects it too, but the raw provider
       # keys above are explicitly blanked here, so pin GROQ through cleanly
       # — without it every audio group is discarded as "empty transcription"
-      # and OMI capture is silently dead. Distinct from VEXA_TRANSCRIPTION_*.
+      # and OMI capture is silently dead.
       - GROQ_API_KEY=${GROQ_API_KEY:-}
       - ALFRED_LEARN_ENABLED=${ALFRED_LEARN_ENABLED:-true}
       - ALFRED_CTRL_URL=http://ctrl-api:3100
@@ -522,24 +653,10 @@ services:
       - COMPOSIO_CACHE_DIR=/tmp/composio
       - HOME=/tmp
       - WORKERS_OPENCLAW_CONFIG=/hermes-state/profiles/workers/config.yaml
-      # Vexa transcript intake — gated by VEXA_ENABLED. When false the
-      # meeting_capture + transcript_intake schedules are not registered.
-      - VEXA_ENABLED=${VEXA_ENABLED:-false}
-      - VEXA_API_URL=${VEXA_API_URL:-http://vexa-api-gateway:8000}
-      - VEXA_BOT_DISPLAY_NAME=${VEXA_BOT_DISPLAY_NAME:-Alfred}
-      # VEXA_GCAL_STREAM_ID is intentionally NOT defaulted here. The old
-      # default `composio-googlecalendar` short-circuited transcript.py's
-      # candidate list (_gcal_stream_candidates) to a single slug whose stream
-      # file never exists, so find_upcoming_meet_events returned [] forever and
-      # no meeting bot ever dispatched. Left unset, transcript.py tries its own
-      # ordered candidates, canonical
-      # `composio-googlecalendar-googlecalendar-events-list` first. An operator
-      # whose Composio slug genuinely differs can still override it via .env
-      # (env_file injects it). See transcript.py:_gcal_stream_candidates.
       # Owner identity. The code reads OWNER_EMAIL (pull.py, first_brief_email.py,
       # fleet_audit.py, init step 9, sure-bootstrap.rb); transcript.py still
       # reads ALFRED_OWNER_EMAIL. Set BOTH from the same .env OWNER_EMAIL so the
-      # cross-tenant ingest guard, first-brief sender allowlist, and Vexa
+      # cross-tenant ingest guard, first-brief sender allowlist, and meeting-bot
       # attendee match all see the principal's address. (C9: canonical=OWNER_EMAIL.)
       - OWNER_EMAIL=${OWNER_EMAIL:-}
       - ALFRED_OWNER_EMAIL=${OWNER_EMAIL:-}
@@ -621,6 +738,51 @@ services:
       MCP_APPROVAL_SECRET: ${MCP_APPROVAL_SECRET}
       MAX_CALL_SECONDS: "1800"
       IDLE_HANGUP_SECONDS: "60"
+      # ESPHome Native API listener (issue #112 — HA Voice). PR1 ships the
+      # connect+pair+idle skeleton; the voice_assistant audio flow lands in
+      # PR2/PR3 and the per-area budget in PR7. ESPHOME_API_ENABLED defaults
+      # to "0" inside the container — we flip it to "1" here so single-VM
+      # tenants pair with HA out of the box. HA_VOICE_API_TOKEN stays empty
+      # in PR1 (tailnet boundary per spec §5.5 Q7); PR2 wires it into the
+      # channel_tokens table from #111.
+      ESPHOME_API_ENABLED: "${ESPHOME_API_ENABLED:-1}"
+      ESPHOME_API_PORT: "6053"
+      ESPHOME_API_BIND: "0.0.0.0"
+      HA_VOICE_API_TOKEN: "${HA_VOICE_API_TOKEN:-}"
+      # Stable per-tenant seed for the synthetic ESPHome device's MAC. Empty
+      # default falls back to os.hostname(); tenants on shared hostnames
+      # (none today) would set this explicitly.
+      ESPHOME_TENANT_SEED: "${ESPHOME_TENANT_SEED:-}"
+      ESPHOME_FRIENDLY_NAME: "${ESPHOME_FRIENDLY_NAME:-Alfred}"
+      # ── Wyoming Protocol fallback (issue #112 PR5) ──────────────────
+      # Off by default — most tenants route HA → us via the ESPHome
+      # Native API (PR1/PR2) which has a shorter audio path. Flip to
+      # WYOMING_ENABLED=1 on tenants whose HA install can't reach :6053
+      # over the LAN (HA-OS / HA-Cloud) but CAN reach the Wyoming server
+      # on the tailnet. Same brain factory, different transport.
+      WYOMING_ENABLED: "${WYOMING_ENABLED:-0}"
+      WYOMING_PORT: "10300"
+      WYOMING_BIND: "0.0.0.0"
+    ports:
+      # ESPHome Native API. Plain TCP — not HTTP — so Caddy can't terminate
+      # it; HA's ESPHome integration expects no TLS on :6053 (the
+      # noise-encrypted variant is out of scope for PR1, see spec §5.5).
+      #
+      # Bound to 127.0.0.1 ONLY — issue #112 PR 4 flipped this from a
+      # wide-open 0.0.0.0:6053:6053 bind. Recommended remote ingress for
+      # the principal's ESPHome devices is the Tailscale sidecar
+      # (`docker compose --profile tailscale up -d`), which advertises
+      # :6053 onto the tailnet; OR an mDNS-reachable subnet for satellite
+      # devices on the same LAN. End-to-end setup steps:
+      # packages/voice-bridge/docs/ha-pipeline-setup.md.
+      - "127.0.0.1:6053:6053"
+      # Wyoming Protocol fallback (#112 PR5). Also localhost-only — HA's
+      # Wyoming integration reaches it the same way as the ESPHome listener
+      # (via the Tailscale sidecar's `tailscale serve --bg 10300` when the
+      # operator enables it). Bound iff WYOMING_ENABLED=1; the listener
+      # itself only boots when the env flag is set, so leaving the port
+      # mapping on with the flag off is a no-op.
+      - "127.0.0.1:10300:10300"
     healthcheck:
       test: ["CMD-SHELL", "node -e \"require('http').get('http://127.0.0.1:9000/health', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))\""]
       interval: 30s
@@ -1392,253 +1554,64 @@ services:
     mem_limit: 256m
     pids_limit: 256
 
-  # ── Vexa — transcript bot stack (profile: vexa) ─────────────────────
-  # `docker compose --profile vexa up -d`. 9 services, ~3 GB resident.
-  # Folded inline here (the alfred-platform fleet ran Vexa as a separate
-  # compose project; a single-VM stack has no reason to).
-  vexa-redis:
-    image: redis:7.0-alpine
-    profiles: ["vexa"]
-    restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 3s
-      retries: 3
-    volumes:
-      - vexa_redis:/data
-    mem_limit: 512m
-    pids_limit: 256
-
-  vexa-postgres:
-    image: postgres:17-alpine
-    profiles: ["vexa"]
-    restart: unless-stopped
-    command: ["postgres", "-c", "idle_in_transaction_session_timeout=60000"]
+  # ── Tailscale sidecar (profile: tailscale) — issue #109 PR 1 ─────────
+  # OFF by default on every fresh tenant. `docker compose up -d` does NOT
+  # start this container — only `docker compose --profile tailscale up -d`
+  # does (which PR 3's /connections card will invoke on the principal's
+  # "Turn on" click). The principal then drives Connect from the dashboard
+  # and the sidecar joins their own tailnet via Tailscale's device-style
+  # auth-URL flow (path C; see docs/specs/issue-109-tailscale-via-ui.md).
+  #
+  # Hostname: derived from $DOMAIN with dots replaced by dashes
+  # (e.g. DOMAIN=home.alfred.black → home-alfred-black). Compose's variable
+  # interpolation does NOT support Bash-style `${VAR//./-}` pattern
+  # substitution, so bootstrap.sh derives the value and writes it to .env
+  # as TAILSCALE_HOSTNAME_PREFIX. The fallback to $DOMAIN here is purely
+  # defensive — Tailscale accepts dotted hostnames but normalises them,
+  # which is less predictable than the bootstrap-derived form.
+  # See §3.2.1 of the spec.
+  #
+  # State (the node key in tailscaled.state) lives in the named volume
+  # `tailscale_data`; surviving `docker compose pull` is the whole point.
+  # PR 2 lands the ctrl-api routes that drive `tailscale up / status /
+  # logout / down` via `docker exec`; PR 3 the /connections card; PR 4
+  # `tailscale cert` + `tailscale serve` for inbound from the tailnet.
+  tailscale:
+    image: tailscale/tailscale:stable
+    profiles: ["tailscale"]
+    hostname: "${TAILSCALE_HOSTNAME_PREFIX:-${DOMAIN}}"
     environment:
-      - POSTGRES_DB=vexa
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=${VEXA_POSTGRES_PASSWORD}
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d vexa"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
+      TS_AUTHKEY: "${TAILSCALE_AUTHKEY:-}"
+      TS_STATE_DIR: "/var/lib/tailscale"
+      TS_HOSTNAME: "${TAILSCALE_HOSTNAME_PREFIX:-${DOMAIN}}"
+      TS_USERSPACE: "false"
+      TS_EXTRA_ARGS: "--accept-routes ${TAILSCALE_TAGS:+--advertise-tags=${TAILSCALE_TAGS}}"
     volumes:
-      - vexa_postgres:/var/lib/postgresql/data
-    mem_limit: 1g
-    pids_limit: 256
-
-  vexa-minio:
-    image: minio/minio:latest
-    profiles: ["vexa"]
+      - tailscale_data:/var/lib/tailscale
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
     restart: unless-stopped
-    command: ["server", "/data", "--console-address", ":9001"]
-    environment:
-      - MINIO_ROOT_USER=vexa-access-key
-      - MINIO_ROOT_PASSWORD=${VEXA_MINIO_PASSWORD}
-    volumes:
-      - vexa_minio:/data
-    mem_limit: 1g
-    pids_limit: 256
-
-  vexa-minio-init:
-    image: minio/mc:latest
-    profiles: ["vexa"]
-    restart: "no"
-    depends_on:
-      vexa-minio:
-        condition: service_started
-    entrypoint:
-      - /bin/sh
-      - -c
-      - |
-        sleep 5
-        mc alias set vexa http://vexa-minio:9000 vexa-access-key ${VEXA_MINIO_PASSWORD}
-        mc mb --ignore-existing vexa/vexa
-        exit 0
     mem_limit: 128m
-    pids_limit: 128
-
-  vexa-admin-api:
-    image: vexaai/admin-api:0.10.6
-    profiles: ["vexa"]
-    restart: unless-stopped
-    init: true
-    environment:
-      - DB_HOST=vexa-postgres
-      - DB_PORT=5432
-      - DB_NAME=vexa
-      - DB_USER=postgres
-      - DB_PASSWORD=${VEXA_POSTGRES_PASSWORD}
-      - DB_SSL_MODE=disable
-      - ADMIN_API_TOKEN=${VEXA_ADMIN_API_TOKEN}
-      - INTERNAL_API_SECRET=${VEXA_INTERNAL_API_SECRET}
-      - LOG_LEVEL=INFO
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/')"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-    depends_on:
-      vexa-postgres:
-        condition: service_healthy
-    mem_limit: 512m
-    pids_limit: 256
-
-  vexa-runtime-api:
-    image: vexaai/runtime-api:0.10.6
-    profiles: ["vexa"]
-    restart: unless-stopped
-    init: true
-    # runtime-api spawns Vexa-bot containers as docker children — it needs
-    # the docker socket. Bot containers attach to the alfred-black network.
-    # The socket grants root-equivalent host control, so on this 3rd-party
-    # image at minimum forbid privilege escalation (no setuid/file-caps gain).
-    # We keep the RW socket mount (required to spawn bots) but do NOT cap_drop
-    # ALL — the upstream runtime-api's internal cap needs are unaudited and a
-    # blanket drop risks silently breaking bot spawning (FAILURE-MODES §Vexa).
-    security_opt:
-      - no-new-privileges:true
-    environment:
-      - DOCKER_NETWORK=alfred-black_default
-      - BROWSER_IMAGE=vexaai/vexa-bot:0.10.6
-      - REDIS_URL=redis://vexa-redis:6379
-      - MINIO_ENDPOINT=vexa-minio:9000
-      - MINIO_ACCESS_KEY=vexa-access-key
-      - MINIO_SECRET_KEY=${VEXA_MINIO_PASSWORD}
-      - MINIO_BUCKET=vexa
-      - DB_HOST=vexa-postgres
-      - DB_PORT=5432
-      - DB_NAME=vexa
-      - DB_USER=postgres
-      - DB_PASSWORD=${VEXA_POSTGRES_PASSWORD}
-      - DB_SSL_MODE=disable
-      - ALLOW_PRIVATE_CALLBACKS=1
-      - LOG_LEVEL=INFO
-      - TRANSCRIPTION_SERVICE_URL=${VEXA_TRANSCRIPTION_URL:-https://api.groq.com/openai/v1/audio/transcriptions}
-      - TRANSCRIPTION_SERVICE_TOKEN=${VEXA_TRANSCRIPTION_TOKEN:-}
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    depends_on:
-      vexa-redis:
-        condition: service_started
-      vexa-postgres:
-        condition: service_healthy
-    mem_limit: 1g
-    pids_limit: 512
-
-  vexa-meeting-api:
-    image: ssdavidai00/vexa-meeting-api:latest
-    profiles: ["vexa"]
-    restart: unless-stopped
-    init: true
-    environment:
-      - DB_HOST=vexa-postgres
-      - DB_PORT=5432
-      - DB_NAME=vexa
-      - DB_USER=postgres
-      - DB_PASSWORD=${VEXA_POSTGRES_PASSWORD}
-      - DB_SSL_MODE=disable
-      - REDIS_URL=redis://vexa-redis:6379/0
-      - REDIS_HOST=vexa-redis
-      - REDIS_PORT=6379
-      - ADMIN_TOKEN=${VEXA_ADMIN_API_TOKEN}
-      - INTERNAL_API_SECRET=${VEXA_INTERNAL_API_SECRET}
-      - RUNTIME_API_URL=http://vexa-runtime-api:8090
-      - MEETING_API_URL=http://vexa-meeting-api:8080
-      - BOT_IMAGE_NAME=vexaai/vexa-bot:0.10.6
-      - DOCKER_NETWORK=alfred-black_default
-      - STORAGE_BACKEND=minio
-      - MINIO_ENDPOINT=vexa-minio:9000
-      - MINIO_ACCESS_KEY=vexa-access-key
-      - MINIO_SECRET_KEY=${VEXA_MINIO_PASSWORD}
-      - MINIO_BUCKET=vexa
-      - MINIO_SECURE=false
-      - RECORDING_ENABLED=true
-      - CAPTURE_MODES=audio
-      - TRANSCRIPTION_SERVICE_URL=${VEXA_TRANSCRIPTION_URL:-https://api.groq.com/openai/v1/audio/transcriptions}
-      - TRANSCRIPTION_SERVICE_TOKEN=${VEXA_TRANSCRIPTION_TOKEN:-}
-      - LOG_LEVEL=INFO
-    volumes:
-      - vexa_recordings:/data/recordings
-    depends_on:
-      vexa-redis:
-        condition: service_started
-      vexa-postgres:
-        condition: service_healthy
-      vexa-runtime-api:
-        condition: service_started
-    mem_limit: 1g
-    pids_limit: 512
-
-  vexa-api-gateway:
-    image: vexaai/api-gateway:0.10.6
-    profiles: ["vexa"]
-    restart: unless-stopped
-    init: true
-    environment:
-      - ADMIN_API_URL=http://vexa-admin-api:8001
-      - MEETING_API_URL=http://vexa-meeting-api:8080
-      - TRANSCRIPTION_COLLECTOR_URL=http://vexa-meeting-api:8080
-      - REDIS_URL=redis://vexa-redis:6379/0
-      - INTERNAL_API_SECRET=${VEXA_INTERNAL_API_SECRET}
-      - RATE_LIMIT_RPM=600
-      - LOG_LEVEL=INFO
-      - CORS_ORIGINS=*
-      # Vexa expects MCP_URL even when MCP isn't running.
-      - MCP_URL=http://127.0.0.1:1
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/')"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-    depends_on:
-      vexa-admin-api:
-        condition: service_healthy
-      vexa-meeting-api:
-        condition: service_started
-      vexa-redis:
-        condition: service_started
-    mem_limit: 1g
-    pids_limit: 512
-
-  vexa-dashboard:
-    image: ssdavidai00/vexa-dashboard:latest
-    profiles: ["vexa"]
-    restart: unless-stopped
-    init: true
-    environment:
-      - VEXA_API_URL=http://vexa-api-gateway:8000
-      - VEXA_ADMIN_API_URL=http://vexa-admin-api:8001
-      - VEXA_ADMIN_API_KEY=${VEXA_ADMIN_API_TOKEN}
-      - VEXA_API_KEY=${VEXA_API_KEY:-}
-      - DEFAULT_BOT_NAME=${VEXA_BOT_DISPLAY_NAME:-Alfred}
-      - ALLOW_REGISTRATIONS=false
-      - AI_BASE_URL=http://hermes:18789/v1
-      - AI_MODEL=openai/hermes/main
-      - NEXT_PUBLIC_APP_URL=https://vexa.${DOMAIN}
-      - NEXT_PUBLIC_VEXA_WS_URL=https://vexa.${DOMAIN}
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 20s
-    depends_on:
-      vexa-api-gateway:
-        condition: service_started
-      vexa-admin-api:
-        condition: service_healthy
-    mem_limit: 512m
-    pids_limit: 256
 
 volumes:
   vault_data:
+  # Store 5 (files) — principal-facing opaque blob volume. ctrl-api
+  # owns this volume :rw; hermes + the alfred daemon mount it :ro and
+  # write only through POST /api/v1/files/upload. Issue #114 PR 1.
+  # docs/specs/issue-114-local-file-storage.md.
+  files_data:
+  # Store 5 cold archive (#114 PR 5) — companion to files_data, holds
+  # ZSTD-19 compressed copies of any blob untouched for 90+ days. ctrl-api
+  # is the sole consumer; nothing else mounts this volume. The blob layout
+  # is `<ULID>.zst`, one file per unique sha256 (file_blobs row).
+  files_cold_data:
   hermes_data:
+  # Sealed builder runtime workspace — used by the codex-builder Hermes
+  # profile only. Owned uid 10001 mode 0700 by the init container (PR 4).
+  # See docs/codex-builder-runtime.md §5.
+  hermes_codex_work:
   alfred_data:
   temporal_data:
   ollama_data:
@@ -1657,7 +1630,7 @@ volumes:
   sure_pgdata:
   sure_redis:
   paperclip_data:
-  vexa_redis:
-  vexa_postgres:
-  vexa_minio:
-  vexa_recordings:
+  # Tailscale sidecar state — node key in tailscaled.state survives
+  # `docker compose pull/up/restart`. Issue #109 PR 1. See §3.5 of
+  # docs/specs/issue-109-tailscale-via-ui.md.
+  tailscale_data:

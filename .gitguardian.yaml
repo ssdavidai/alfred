@@ -1,0 +1,26 @@
+# GitGuardian repo-level config.
+# Reference: https://docs.gitguardian.com/ggshield-docs/reference/secret-scan/all-options#yaml-configuration
+version: 2
+secret:
+  ignored-paths:
+    # Test fixtures contain synthetic auth-key shaped strings that match the
+    # Tailscale `tskey-auth-…` pattern. They are clearly marked FIXTUREONLY.
+    - "packages/ctrl/tests/channels_tailscale.test.ts"
+    # /channels Tailscale card derivation tests — same FIXTUREONLY rule.
+    # #109 PR3 (2026-05-29).
+    - "packages/web/src/dashboard/tailscaleCardCore.test.ts"
+    # Home Assistant tests use a synthetic LLAT placeholder
+    # `llat_TEST_0000…000` that matches HA's long-lived access token
+    # shape but is never real. See #110 PR1 backfill.
+    - "packages/ctrl/tests/channels_ha_pr1.test.ts"
+    # channels_ha.ts builds the Vaultwarden API payload that stores the
+    # principal's LLAT. The Vaultwarden item shape uses `password:` as a
+    # field name (Bitwarden API contract), assigned the in-memory LLAT
+    # value. GitGuardian's "Generic Password" detector flags any
+    # `password:` assignment; this file is the Vault writer and is
+    # audited by hand. No literal secret ever appears here.
+    - "packages/ctrl/src/api/routes/channels_ha.ts"
+    # /channels HA card unit tests. Same `llat_TEST_…` placeholder
+    # convention as channels_ha_pr1.test.ts; the JWT-shaped fixtures are
+    # synthetic (TEST_aaa…/TEST_bbb…/TEST_ccc… segments). See #110 PR3.
+    - "packages/web/src/dashboard/haCardCore.test.ts"

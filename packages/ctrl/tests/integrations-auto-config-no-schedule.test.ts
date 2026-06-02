@@ -264,6 +264,8 @@ mock.module("node:child_process", {
       stdin: { write: mock.fn(), end: mock.fn() },
       on: mock.fn(),
     })),
+    // execFileSync needed by src/api/routes/system.ts (ssh-keygen, unused here).
+    execFileSync: mock.fn(() => ""),
   },
 });
 

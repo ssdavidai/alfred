@@ -60,6 +60,7 @@ import {
   markJournalDelivered,
   resolvePrincipal,
 } from "../../db/alfredJournal.js";
+import { resolveProfileContextForChannel } from "../../db/agentProfiles.js";
 import { resolveDeliveryTarget } from "../hermes-sessions.js";
 import { dockerExec } from "../helpers.js";
 import { slackPostMessage } from "./slack.js";
@@ -94,20 +95,26 @@ interface DeliveryResult {
  * Telegram delivery — direct Bot API call (api.telegram.org).
  *
  * The bot token lives in the hermes container's per-profile .env
- * (`$HERMES_HOME/profiles/main/.env` — TELEGRAM_BOT_TOKEN). We read it
- * via `docker exec hermes cat`. Telegram receives the bytes on the
- * chat_id; from Sir's phone it looks like @alfred_black_the_butler_bot
- * sent the message — same as inbound replies.
+ * (`$HERMES_HOME/profiles/<slug>/.env` — TELEGRAM_BOT_TOKEN), where <slug>
+ * is the profile bound to (`telegram`, chat_id) per the channel_profile_binding
+ * registry. Lane I default seed keeps every channel pointing at `main` until
+ * Lane III's UI rebinds explicitly. We read via `docker exec hermes cat`.
+ * Telegram receives the bytes on the chat_id; from Sir's phone it looks like
+ * the bot sent the message — same as inbound replies.
  */
 async function deliverTelegram(
+  profile: string,
   chatId: string,
   text: string,
 ): Promise<DeliveryResult> {
-  // Lazy-read the token. Cache for 60s — restart-bouncing the hermes
-  // container shouldn't slow every send.
-  const token = await getTelegramBotToken();
+  // Lazy-read the token. Cache for 60s per profile — restart-bouncing the
+  // hermes container shouldn't slow every send.
+  const token = await getTelegramBotToken(profile);
   if (!token) {
-    return { ok: false, error: "no TELEGRAM_BOT_TOKEN in hermes main profile .env" };
+    return {
+      ok: false,
+      error: `no TELEGRAM_BOT_TOKEN in hermes ${profile} profile .env`,
+    };
   }
   try {
     const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
@@ -133,25 +140,32 @@ async function deliverTelegram(
   }
 }
 
-let _tgTokenCache: { value: string; at: number } | null = null;
+// One bot-token cache per profile slug. The map is unbounded but each entry
+// is a (string, number) — 6 user-facing + 4 infra profiles is a hard cap, so
+// memory is bounded by the registry's port range.
+const _tgTokenCache: Map<string, { value: string; at: number }> = new Map();
 const TG_TOKEN_TTL_MS = 60_000;
 
-async function getTelegramBotToken(): Promise<string | null> {
+async function getTelegramBotToken(profile: string): Promise<string | null> {
   const now = Date.now();
-  if (_tgTokenCache && now - _tgTokenCache.at < TG_TOKEN_TTL_MS) {
-    return _tgTokenCache.value || null;
+  const cached = _tgTokenCache.get(profile);
+  if (cached && now - cached.at < TG_TOKEN_TTL_MS) {
+    return cached.value || null;
   }
   try {
     const stdout = await dockerExec("hermes", [
       "sh",
       "-c",
-      "grep ^TELEGRAM_BOT_TOKEN= $HERMES_HOME/profiles/main/.env 2>/dev/null | cut -d= -f2-",
+      `grep ^TELEGRAM_BOT_TOKEN= $HERMES_HOME/profiles/${profile}/.env 2>/dev/null | cut -d= -f2-`,
     ]);
     const token = stdout.trim().replace(/^["']|["']$/g, "");
-    _tgTokenCache = { value: token, at: now };
+    _tgTokenCache.set(profile, { value: token, at: now });
     return token || null;
   } catch (e) {
-    console.warn("[alfred-deliver] failed to read telegram bot token:", e);
+    console.warn(
+      `[alfred-deliver] failed to read telegram bot token (${profile}):`,
+      e,
+    );
     return null;
   }
 }
@@ -160,22 +174,24 @@ async function getTelegramBotToken(): Promise<string | null> {
  * Slack delivery — direct chat.postMessage call.
  *
  * The bot token lives in the hermes container's per-profile .env
- * (`$HERMES_HOME/profiles/main/.env` — `SLACK_BOT_TOKEN`). We read it via
- * `docker exec hermes cat` (60s cache, same shape as the Telegram adapter).
- * Slack receives the bytes on `chat_id` (channel id, user id for DM-to-self,
- * or group id); the bot must already be a member of the channel for posts
- * to land. Failure surfaces as `{ ok: false, error }` so the journal
- * records the truth.
+ * (`$HERMES_HOME/profiles/<slug>/.env` — `SLACK_BOT_TOKEN`), where <slug>
+ * is the profile bound to (`slack`, chat_id) per the channel_profile_binding
+ * registry. We read it via `docker exec hermes cat` (60s cache, same shape as
+ * the Telegram adapter). Slack receives the bytes on `chat_id` (channel id,
+ * user id for DM-to-self, or group id); the bot must already be a member of
+ * the channel for posts to land. Failure surfaces as `{ ok: false, error }`
+ * so the journal records the truth.
  */
 async function deliverSlack(
+  profile: string,
   chatId: string,
   text: string,
 ): Promise<DeliveryResult> {
-  const token = await getSlackBotToken();
+  const token = await getSlackBotToken(profile);
   if (!token) {
     return {
       ok: false,
-      error: "no SLACK_BOT_TOKEN in hermes main profile .env",
+      error: `no SLACK_BOT_TOKEN in hermes ${profile} profile .env`,
     };
   }
   const r = await slackPostMessage(token, chatId, text);
@@ -183,30 +199,35 @@ async function deliverSlack(
   return { ok: false, error: r.error };
 }
 
-let _slackTokenCache: { value: string; at: number } | null = null;
+const _slackTokenCache: Map<string, { value: string; at: number }> = new Map();
 const SLACK_TOKEN_TTL_MS = 60_000;
 
-async function getSlackBotToken(): Promise<string | null> {
+async function getSlackBotToken(profile: string): Promise<string | null> {
   const now = Date.now();
-  if (_slackTokenCache && now - _slackTokenCache.at < SLACK_TOKEN_TTL_MS) {
-    return _slackTokenCache.value || null;
+  const cached = _slackTokenCache.get(profile);
+  if (cached && now - cached.at < SLACK_TOKEN_TTL_MS) {
+    return cached.value || null;
   }
   try {
     const stdout = await dockerExec("hermes", [
       "sh",
       "-c",
-      "grep ^SLACK_BOT_TOKEN= $HERMES_HOME/profiles/main/.env 2>/dev/null | cut -d= -f2-",
+      `grep ^SLACK_BOT_TOKEN= $HERMES_HOME/profiles/${profile}/.env 2>/dev/null | cut -d= -f2-`,
     ]);
     const token = stdout.trim().replace(/^["']|["']$/g, "");
-    _slackTokenCache = { value: token, at: now };
+    _slackTokenCache.set(profile, { value: token, at: now });
     return token || null;
   } catch (e) {
-    console.warn("[alfred-deliver] failed to read slack bot token:", e);
+    console.warn(
+      `[alfred-deliver] failed to read slack bot token (${profile}):`,
+      e,
+    );
     return null;
   }
 }
 
 async function deliverEmail(
+  _profile: string,
   _chatId: string,
   _text: string,
 ): Promise<DeliveryResult> {
@@ -218,16 +239,17 @@ async function deliverEmail(
 
 async function deliverByChannel(
   channel: string,
+  profile: string,
   chatId: string,
   text: string,
 ): Promise<DeliveryResult> {
   switch (channel) {
     case "telegram":
-      return deliverTelegram(chatId, text);
+      return deliverTelegram(profile, chatId, text);
     case "slack":
-      return deliverSlack(chatId, text);
+      return deliverSlack(profile, chatId, text);
     case "email":
-      return deliverEmail(chatId, text);
+      return deliverEmail(profile, chatId, text);
     case "webchat":
       return {
         ok: false,
@@ -319,6 +341,13 @@ export function registerAlfredDeliverRoutes(): void {
       }
     }
 
+    // Lane IV — resolve the target Hermes profile for this (channel, chat_id).
+    // The default-binding seeds in 0017_agent_profiles keep every channel
+    // pointing at 'main' until Lane III's UI rebinds explicitly. After
+    // rebinding, an outbound to a bound chat_id reads tokens from THAT
+    // profile's .env and journal entries scope to THAT profile.
+    const profileCtx = resolveProfileContextForChannel(db, channel, to);
+
     const pending = appendJournal(db, {
       channel,
       chat_id: to,
@@ -327,6 +356,7 @@ export function registerAlfredDeliverRoutes(): void {
       status: "pending",
       source_kind: typeof b.source_kind === "string" ? b.source_kind : null,
       source_ref: typeof b.source_ref === "string" ? b.source_ref : null,
+      hermes_profile: profileCtx.journal_scope_key,
       metadata: {
         urgency,
         principal_note:
@@ -341,7 +371,12 @@ export function registerAlfredDeliverRoutes(): void {
     });
 
     // ── Deliver the bytes via the channel adapter.
-    const result = await deliverByChannel(channel, to, message);
+    const result = await deliverByChannel(
+      channel,
+      profileCtx.slug,
+      to,
+      message,
+    );
 
     if (!result.ok) {
       const updated = markJournalDelivered(db, pending.id, {

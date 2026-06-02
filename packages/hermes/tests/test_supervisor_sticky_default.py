@@ -74,16 +74,25 @@ def test_supervisor_sticky_default_is_after_wait_for_profiles():
 
 
 def test_supervisor_sticky_default_is_before_main_gateway_launch():
-    """The call must run BEFORE the main gateway is launched."""
+    """The call must run BEFORE the main gateway is launched.
+
+    #120 Lane II — the literal `hermes -p main gateway run` line was
+    replaced by the templated start_registered_profile function called
+    from the registry loop. The boot-time launch is now anchored at the
+    `done < <(read_registry)` line that closes the initial dispatch loop.
+    """
     src = _read()
     sticky_line = _line_index(src, "hermes profile use main")
-    launch_line = _line_index(src, 'hermes -p main gateway run')
-    assert launch_line >= 0, "expected `hermes -p main gateway run` launch line"
+    launch_line = _line_index(src, "ANCHOR: BOOT_LAUNCH_LOOP")
+    assert launch_line >= 0, (
+        "expected the registry-driven launch loop's `done < <(read_registry)` "
+        "line — supervisor.sh was restructured"
+    )
     assert sticky_line >= 0
     assert sticky_line < launch_line, (
         f"`hermes profile use main` (line {sticky_line + 1}) must come BEFORE "
-        f"the `hermes -p main gateway run` launch (line {launch_line + 1}) — "
-        f"so the pointer is set the moment the container reports ready."
+        f"the registry launch loop (line {launch_line + 1}) — so the pointer "
+        f"is set the moment the container reports ready."
     )
 
 

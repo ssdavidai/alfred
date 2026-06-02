@@ -284,6 +284,38 @@ INTERVAL_SCHEDULES = [
         "workflow": "DecayWatcherWorkflow",
         "interval": timedelta(hours=6),
     },
+    {
+        # Recall.ai dispatcher (#113 PR4) — every 5 min reads the
+        # principal's Google Calendar for the next 15 min, applies
+        # the operator-configured auto_join_policy (off /
+        # principal_attendee / all), dedupes against
+        # already-dispatched calendar_event_ids, refuses dispatches
+        # that would blow the monthly_hours_cap, and POSTs to
+        # ctrl-api's create-bot route for each surviving event. The
+        # workflow is a no-op when auto_join_policy=off, so leaving
+        # the schedule registered on tenants that haven't enabled
+        # Recall costs only one ctrl-api GET per tick.
+        "id": "al-recall-dispatcher",
+        "workflow": "RecallDispatcherWorkflow",
+        "interval": timedelta(minutes=5),
+    },
+    {
+        # HA registry bootstrap (#110 PR5) — every 6h pulls the operator's
+        # HA install's full state / area / device / automation surface
+        # and refreshes ha_registry in state.db (via ctrl-api's
+        # /api/v1/channels/ha/registry/bulk route). The workflow is a
+        # no-op (returns ``{ok: False, code: "HA_NOT_CONNECTED"}``) when
+        # no HA install is connected, so the schedule costs only one
+        # ctrl-api GET per tick on tenants that haven't connected HA.
+        #
+        # 6 hours matches the spec §6.PR5 cadence. On-demand triggers
+        # via ctrl-api's /api/v1/channels/ha/registry/refresh route
+        # start a one-shot run with a unique workflow_id so they don't
+        # clash with the scheduled tick.
+        "id": "al-ha-bootstrap",
+        "workflow": "HaBootstrapWorkflow",
+        "interval": timedelta(hours=6),
+    },
 ]
 
 CALENDAR_SCHEDULES = [
@@ -366,6 +398,23 @@ CALENDAR_SCHEDULES = [
         "args": ["evening"],
         "calendar": ScheduleCalendarSpec(
             hour=[ScheduleRange(start=17)],
+            minute=[ScheduleRange(start=0)],
+        ),
+    },
+    {
+        # #114 PR 5 — daily cold-archive sweep for Store 5 (files).
+        # Walks the principal's files table for blobs untouched in
+        # >=90 days, hands each one to ctrl-api's
+        # POST /api/v1/files/cold-promote endpoint (zstd-19 compress
+        # → write to `files_cold_data` → unlink live → atomic SQL
+        # flip). Runs at 03:00 LOCAL — low-traffic window, sits
+        # comfortably between nightly_maintenance and the morning
+        # briefing. The sweep is per-entry-isolated so one bad file
+        # never wedges the rest of the run.
+        "id": "al-files-cold-archive",
+        "workflow": "FilesColdArchiveWorkflow",
+        "calendar": ScheduleCalendarSpec(
+            hour=[ScheduleRange(start=3)],
             minute=[ScheduleRange(start=0)],
         ),
     },

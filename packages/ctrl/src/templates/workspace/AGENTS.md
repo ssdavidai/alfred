@@ -62,7 +62,7 @@ In-flight agents are the swarm's hands. Don't step on them.
 Canonical terms (do NOT use the parenthesised alternatives):
 
 - **signal** (not "observation", "event", "stream item") — every
-  inbound message / calendar move / vexa transcript / omi capture
+  inbound message / calendar move / meeting transcript / omi capture
   after extraction.
 - **decision** (not "judgment-old", "choice card", "action") — what
   Sir told the system to do, with intent / note / outcome_record.

@@ -10,12 +10,20 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { makeExecute, resolveSessionKey } from "../src/server/execute.js";
+import {
+  makeExecute,
+  pickGatewayUrlForAgent,
+  resolveSessionKey,
+} from "../src/server/execute.js";
 import type {
   AdapterAgent,
   AdapterExecutionContext,
 } from "../src/types/paperclip.js";
 import type { HermesCallResult } from "../src/server/hermes-http.js";
+import {
+  DEFAULT_HERMES_GATEWAY_URL,
+  HERMES_CODEX_BUILDER_GATEWAY_URL,
+} from "../src/shared/constants.js";
 
 function makeAgent(over: Partial<AdapterAgent> = {}): AdapterAgent {
   return {
@@ -78,7 +86,7 @@ describe("execute — happy path", () => {
   it("returns Paperclip-shaped result with usage + session params", async () => {
     let captured: { sessionKey: string; input: string } | null = null;
     const execute = makeExecute({
-      readApiKey: () => "stub-key",
+      readApiKey: (_p) => "stub-key",
       callHermes: async (sessionKey, input) => {
         captured = { sessionKey, input };
         const result: HermesCallResult = {
@@ -113,7 +121,7 @@ describe("execute — happy path", () => {
   it("renders task variables into the prompt", async () => {
     let prompt: string | null = null;
     const execute = makeExecute({
-      readApiKey: () => null,
+      readApiKey: (_p) => null,
       callHermes: async (_session, input) => {
         prompt = input;
         return { ok: true, text: "", usage: null, raw: {} };
@@ -137,7 +145,7 @@ describe("execute — happy path", () => {
   it("renders the noTask section when no task assigned", async () => {
     let prompt: string | null = null;
     const execute = makeExecute({
-      readApiKey: () => null,
+      readApiKey: (_p) => null,
       callHermes: async (_session, input) => {
         prompt = input;
         return { ok: true, text: "ok", usage: null, raw: {} };
@@ -153,7 +161,7 @@ describe("execute — happy path", () => {
 describe("execute — error paths", () => {
   it("maps HERMES_AUTH to a 1-exit with errorCode", async () => {
     const execute = makeExecute({
-      readApiKey: () => "wrong-key",
+      readApiKey: (_p) => "wrong-key",
       callHermes: async () => ({
         ok: false,
         code: "HERMES_AUTH",
@@ -170,7 +178,7 @@ describe("execute — error paths", () => {
 
   it("maps HERMES_TIMEOUT to exit 124 + timedOut=true", async () => {
     const execute = makeExecute({
-      readApiKey: () => "k",
+      readApiKey: (_p) => "k",
       callHermes: async () => ({
         ok: false,
         code: "HERMES_TIMEOUT",
@@ -186,7 +194,7 @@ describe("execute — error paths", () => {
 
   it("preserves session key on transient failure", async () => {
     const execute = makeExecute({
-      readApiKey: () => "k",
+      readApiKey: (_p) => "k",
       callHermes: async () => ({
         ok: false,
         code: "HERMES_UNREACHABLE",
@@ -204,7 +212,7 @@ describe("execute — session continuity", () => {
   it("reuses the same session key across heartbeats", async () => {
     const seen: string[] = [];
     const execute = makeExecute({
-      readApiKey: () => "k",
+      readApiKey: (_p) => "k",
       callHermes: async (sessionKey) => {
         seen.push(sessionKey);
         return { ok: true, text: "ok", usage: null, raw: {} };
@@ -224,7 +232,7 @@ describe("execute — session continuity", () => {
   it("honours a pinned sessionKey from adapterConfig", async () => {
     let captured: string | null = null;
     const execute = makeExecute({
-      readApiKey: () => "k",
+      readApiKey: (_p) => "k",
       callHermes: async (sessionKey) => {
         captured = sessionKey;
         return { ok: true, text: "ok", usage: null, raw: {} };
@@ -233,5 +241,127 @@ describe("execute — session continuity", () => {
     const agent = makeAgent({ adapterConfig: { sessionKey: "custom-session" } });
     await execute(makeCtx(agent));
     assert.equal(captured, "custom-session");
+  });
+});
+
+// =============================================================================
+// pickGatewayUrlForAgent — codex-builder routing (PR 3 of
+// docs/codex-builder-runtime.md)
+// =============================================================================
+describe("pickGatewayUrlForAgent", () => {
+  it("routes codex-feature-builder to the codex-builder gateway", () => {
+    const result = pickGatewayUrlForAgent(
+      makeAgent({ name: "codex-feature-builder" }),
+      {},
+    );
+    assert.equal(result.gatewayUrl, HERMES_CODEX_BUILDER_GATEWAY_URL);
+    assert.equal(result.gatewayUrl, "http://hermes:18793");
+    assert.equal(result.profile, "codex-builder");
+  });
+
+  it("is case-insensitive on the agent name lookup", () => {
+    const result = pickGatewayUrlForAgent(
+      makeAgent({ name: "Codex-Feature-Builder" }),
+      {},
+    );
+    assert.equal(result.gatewayUrl, HERMES_CODEX_BUILDER_GATEWAY_URL);
+    assert.equal(result.profile, "codex-builder");
+  });
+
+  it("routes every other agent name to the main gateway", () => {
+    for (const name of [
+      "hermes",
+      "alfred-engineering-orchestrator",
+      "alfred-code-reviewer",
+      "ceo",
+      "",
+      "codex",
+      "feature-builder",
+      "codex-feature-builderx",
+    ]) {
+      const result = pickGatewayUrlForAgent(makeAgent({ name }), {});
+      assert.equal(
+        result.gatewayUrl,
+        DEFAULT_HERMES_GATEWAY_URL,
+        `name=${JSON.stringify(name)} must route to main, got ${result.gatewayUrl}`,
+      );
+      assert.equal(result.profile, "main");
+    }
+  });
+
+  it("falls back to main when agent is null or missing a name", () => {
+    assert.equal(
+      pickGatewayUrlForAgent(null, {}).gatewayUrl,
+      DEFAULT_HERMES_GATEWAY_URL,
+    );
+    assert.equal(
+      pickGatewayUrlForAgent(undefined, {}).gatewayUrl,
+      DEFAULT_HERMES_GATEWAY_URL,
+    );
+  });
+
+  it("operator override (config.hermesGatewayUrl) wins even for codex-feature-builder", () => {
+    // The override targets the network surface, not the auth surface —
+    // profile stays `main` so the caller reads the main API key.
+    const result = pickGatewayUrlForAgent(
+      makeAgent({ name: "codex-feature-builder" }),
+      { hermesGatewayUrl: "http://debug:18794" },
+    );
+    assert.equal(result.gatewayUrl, "http://debug:18794");
+    assert.equal(result.profile, "main");
+  });
+});
+
+describe("execute — routing wiring", () => {
+  it("calls the codex-builder gateway with the codex-builder API key", async () => {
+    let captured: { gatewayUrl: string; apiKey: string | null } | null = null;
+    const execute = makeExecute({
+      readApiKey: (p) =>
+        p === "codex-builder" ? "codex-builder-key" : "main-key",
+      callHermes: async (_sessionKey, _input, opts) => {
+        captured = { gatewayUrl: opts.gatewayUrl, apiKey: opts.apiKey };
+        return { ok: true, text: "ok", usage: null, raw: {} };
+      },
+    });
+    const agent = makeAgent({ name: "codex-feature-builder" });
+    await execute(makeCtx(agent));
+    assert.ok(captured);
+    assert.equal(captured!.gatewayUrl, "http://hermes:18793");
+    assert.equal(captured!.apiKey, "codex-builder-key");
+  });
+
+  it("calls the main gateway with the main API key for everyone else", async () => {
+    let captured: { gatewayUrl: string; apiKey: string | null } | null = null;
+    const execute = makeExecute({
+      readApiKey: (p) =>
+        p === "codex-builder" ? "codex-builder-key" : "main-key",
+      callHermes: async (_sessionKey, _input, opts) => {
+        captured = { gatewayUrl: opts.gatewayUrl, apiKey: opts.apiKey };
+        return { ok: true, text: "ok", usage: null, raw: {} };
+      },
+    });
+    const agent = makeAgent({ name: "alfred-engineering-orchestrator" });
+    await execute(makeCtx(agent));
+    assert.ok(captured);
+    assert.equal(captured!.gatewayUrl, "http://hermes:18789");
+    assert.equal(captured!.apiKey, "main-key");
+  });
+
+  it("logs the profile name on the [hermes] line so an operator can diff", async () => {
+    const logs: string[] = [];
+    const execute = makeExecute({
+      readApiKey: (_p) => "k",
+      callHermes: async () => ({ ok: true, text: "ok", usage: null, raw: {} }),
+    });
+    const agent = makeAgent({ name: "codex-feature-builder" });
+    const ctx = makeCtx(agent);
+    ctx.onLog = async (_stream, chunk) => {
+      logs.push(chunk);
+    };
+    await execute(ctx);
+    const callingLine = logs.find((l) => l.startsWith("[hermes] Calling"));
+    assert.ok(callingLine, "expected a [hermes] Calling log line");
+    assert.match(callingLine!, /profile=codex-builder/);
+    assert.match(callingLine!, /gateway=http:\/\/hermes:18793/);
   });
 });

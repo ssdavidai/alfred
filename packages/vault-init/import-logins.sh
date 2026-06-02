@@ -27,12 +27,6 @@
 #                   username = BW_USER (from .env)
 #                   password = BW_PASSWORD (from .env)
 #
-#   "Vexa" — uri=https://<sub>-vexa.<domain>
-#            username = ALFRED_OWNER_EMAIL (from .env, fallback BW_USER)
-#            password = VEXA_ADMIN_API_TOKEN (from /host/vexa/.env)
-#            (only created when /host/vexa/.env is mounted and the
-#            ADMIN_API_TOKEN key is present — i.e. setupVexa ran on
-#            this tenant; skipped silently otherwise.)
 #
 # Inputs:
 #   BW_USER, BW_PASSWORD, BW_SERVER_URL — same shape other vault-init scripts use
@@ -176,32 +170,8 @@ upsert_login \
   "$BW_PASSWORD" \
   "https://${SUBDOMAIN}-vault.${DOMAIN}"
 
-# 4. Vexa — synapsr/vexa-dashboard signs the user in by email. The Vexa
-# admin API token doubles as the password for the admin login surface,
-# but the dashboard itself runs in direct-login mode (ALLOW_REGISTRATIONS
-# is false; see vexa-stack.yaml.njk). Sir's email goes in the username
-# field; the password slot carries the admin token so a single autofill
-# covers /admin/* routes.
-#
-# Reads ADMIN_API_TOKEN from /host/vexa/.env (mounted ro by the
-# provisioner / vault-init compose service when Vexa is enabled).
-VEXA_ENV_PATH_LOGIN="${VEXA_ENV_PATH:-/host/vexa/.env}"
-vexa_login_password=""
-if [ -f "$VEXA_ENV_PATH_LOGIN" ]; then
-  line=$(grep -E '^ADMIN_API_TOKEN=' "$VEXA_ENV_PATH_LOGIN" | tail -n1)
-  if [ -n "$line" ]; then
-    val="${line#ADMIN_API_TOKEN=}"
-    if [[ "$val" == \'*\' && "${#val}" -ge 2 ]]; then
-      val="${val:1:${#val}-2}"
-    fi
-    vexa_login_password="$val"
-  fi
-fi
-vexa_login_user=$(read_env ALFRED_OWNER_EMAIL || echo "$BW_USER")
-upsert_login \
-  "Vexa" \
-  "$vexa_login_user" \
-  "$vexa_login_password" \
-  "https://${SUBDOMAIN}-vexa.${DOMAIN}"
+# (The "Vexa" login was retired in #113 PR1 — no admin dashboard left
+# to autofill. Recall.ai's surface, when it lands in #113 PR2+, lives
+# inside /channels; no separate login mirror needed.)
 
 log "import-logins.sh done"

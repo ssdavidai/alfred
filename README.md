@@ -256,8 +256,7 @@ provisioning, no billing — **one repo, one VM, one `docker compose up`.**
 
 The full stack — web app, ctrl-api, Temporal, Ollama, Hermes, the vault
 daemon, Plane (~13 containers), Sure (~5 containers), and Vaultwarden — is
-memory-hungry. Enabling the optional Vexa profile adds roughly **3 GB** of RAM
-and disk on top.
+memory-hungry.
 
 > At-rest disk encryption is **not** applied by the stack (no LUKS). The
 > security-conscious should provision an encrypted Docker data-root or an
@@ -325,7 +324,7 @@ offers to run `docker compose up -d` for you.
 cp .env.example .env
 # Edit .env — fill the "USER MUST FILL" block: DOMAIN, ACME_EMAIL, OWNER_NAME,
 # OPENROUTER_API_KEY, COMPOSIO_API_KEY (+ optional ANTHROPIC_API_KEY, Mailgun,
-# GOOGLE_CLIENT_*, HERMES_MAIN_MODEL / HERMES_WORKERS_MODEL, VEXA_*)
+# GOOGLE_CLIENT_*, HERMES_MAIN_MODEL / HERMES_WORKERS_MODEL)
 nano .env
 ./scripts/bootstrap.sh    # generate every auto-secret into .env (run once)
 docker compose up -d
@@ -333,7 +332,7 @@ docker compose up -d
 
 `scripts/bootstrap.sh` validates the required fields and appends every
 auto-generated secret (`AAS_API_KEY`, `COLUMN_ENCRYPTION_KEY`, `JWT_SECRET`, the
-Hermes gateway token, Plane/Sure/Vexa datastore credentials, the Vaultwarden
+Hermes gateway token, Plane/Sure datastore credentials, the Vaultwarden
 admin token, …) with `openssl rand -hex 32`. It is idempotent — re-running never
 overwrites an existing value.
 
@@ -370,15 +369,12 @@ agents) take **bare OpenRouter model IDs**. Defaults: `x-ai/grok-4.3` and
 `docker compose up -d --force-recreate init hermes`. Hermes also supports
 switching provider entirely (`docker compose exec hermes hermes model`).
 
-### Optional: the Vexa meeting-transcription stack
+### Meeting-bot transcription
 
-Vexa (meeting-bot transcription) ships behind a Compose profile, off by default:
-
-```sh
-docker compose --profile vexa up -d
-```
-
-Without `--profile vexa`, its nine containers are simply not created.
+The earlier Vexa profile was retired in issue
+[#113](https://github.com/ssdavidai/alfred/issues/113). A Recall.ai
+replacement is in flight; until it lands, no meeting-bot capture
+surface is bundled.
 
 ### Restarting
 

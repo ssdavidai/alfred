@@ -35,7 +35,85 @@ echo "=== alfred-black init container ==="
 HERMES_DATA_DIR="${HERMES_DATA_DIR:-/hermes-data}"
 # Where the HERMES RUNTIME container sees the same volume (its HERMES_HOME).
 HERMES_RUNTIME_HOME="${HERMES_RUNTIME_HOME:-/opt/data}"
-PROFILES=(main workers heavy)
+
+# Profiles whose state we render on every tenant. The codex-builder profile
+# (PR 2 of docs/codex-builder-runtime.md) is rendered fleet-wide so the port
+# layout stays uniform, but the SUPERVISOR only LAUNCHES its gateway when
+# ENABLE_CODEX_BUILDER=true in the runtime container env. Home flips that
+# flag true; rj/joe/zsolt/miguel leave it unset.
+#
+# #120 Lane II — replaced the previous hard-coded
+#     PROFILES=(main workers heavy)
+#     PROFILES_RENDERED=(main workers heavy codex-builder)
+# with a query against state.db. Two derived lists below:
+#   * PROFILES_RENDERED     — every live profile from agent_profile.
+#   * PROFILES_FULL_DEPLOY  — that list minus codex-builder (the sealed
+#                              runtime gets config+.env but no skills/MCP).
+#
+# Every profile we render config + .env for. Each one gets profile_dir +
+# workspace/ + mcp/ created; codex-builder additionally gets its own
+# .codex/ + .ssh/ + workspace/runs/ tree but skips the skills + MCP-bundle
+# deploys further down. The supervisor reads ENABLE_CODEX_BUILDER to decide
+# whether to launch a gateway against the codex-builder dir.
+#
+# #120 Lane II — PROFILES_RENDERED is now sourced from state.db via
+# render_registry.py (the agent_profile table, populated by ctrl-api's
+# 0017 migration + any user-facing POST). Each entry is a `slug:port:model`
+# tuple — entrypoint.sh splits the tuple into PROFILE_NAMES /
+# PROFILE_PORTS / PROFILE_MODELS parallel arrays so the existing
+# `for profile in "${PROFILES_RENDERED[@]}"` loops keep their shape.
+#
+# Fallback path: when state.db is unreachable (fresh tenant, pre-migration,
+# RO mount missing), render_registry.py emits the four reserved profiles
+# with their canonical ports — so this script ALWAYS produces a valid
+# 4-profile render even when ctrl-api hasn't booted yet.
+#
+# render_registry.py ALSO writes the `_registry.json` the supervisor reads
+# at boot. ctrl-api re-writes the same file on every profile create/archive
+# (packages/ctrl/src/hermes/supervisor.ts) and SIGUSR1's the hermes
+# container so the supervisor picks up the change without a full restart.
+echo "[init] Enumerating Hermes profiles from agent_profile registry..."
+mapfile -t PROFILE_TUPLES < <(
+    STATE_DB_PATH="${STATE_DB_PATH:-/ctrl-data/alfred-state.db}" \
+    HERMES_DATA_DIR="${HERMES_DATA_DIR:-/hermes-data}" \
+        python3 /setup/render_registry.py
+)
+if (( ${#PROFILE_TUPLES[@]} == 0 )); then
+    echo "[init] FATAL: render_registry.py returned no profiles — refusing to continue"
+    exit 1
+fi
+PROFILES_RENDERED=()
+declare -A PROFILE_PORTS=()
+declare -A PROFILE_MODELS=()
+for tuple in "${PROFILE_TUPLES[@]}"; do
+    # `slug:port:model` — model is the last field; everything to the right
+    # of the second colon is the model (which CAN contain forward slashes,
+    # not colons, per OpenRouter's `vendor/model` convention).
+    slug="${tuple%%:*}"
+    rest="${tuple#*:}"
+    port="${rest%%:*}"
+    model="${rest#*:}"
+    if [[ -z "$slug" || -z "$port" ]]; then
+        echo "[init] WARN: skipping malformed registry tuple: ${tuple}"
+        continue
+    fi
+    PROFILES_RENDERED+=("$slug")
+    PROFILE_PORTS["$slug"]="$port"
+    PROFILE_MODELS["$slug"]="$model"
+done
+echo "[init] Profiles to render: ${PROFILES_RENDERED[*]}"
+
+# PROFILES_FULL_DEPLOY — the subset that gets skills, MCP bundle, AGENTS.md,
+# TOOLS.md, SOUL.md. codex-builder is excluded by design (sealed runtime,
+# no MCP catalogue, no skill library). Lane II — user-facing profiles get
+# the same conversational kit as `main` (they ARE Alfred variants on a
+# different channel binding), so they ARE in this list.
+PROFILES_FULL_DEPLOY=()
+for slug in "${PROFILES_RENDERED[@]}"; do
+    [[ "$slug" == "codex-builder" ]] && continue
+    PROFILES_FULL_DEPLOY+=("$slug")
+done
+echo "[init] Profiles for full deploy (skills + MCP + AGENTS.md): ${PROFILES_FULL_DEPLOY[*]}"
 
 # Resolve bundled paths via the installed alfred Python package.
 SCAFFOLD_DIR=$(python3 -c "from alfred._data import get_scaffold_dir; print(get_scaffold_dir())")
@@ -93,10 +171,20 @@ echo "[init] memories dir ready at $MEMORIES_DIR (chmod 0777 for cross-container
 # gets its own copy of: skills/, mcp-stdio/ (the 5-app bundle), mcp/
 # (ctrl-server.mjs), AGENTS.md, and a workspace/ scratch dir.
 # =============================================================================
-for profile in "${PROFILES[@]}"; do
+for profile in "${PROFILES_RENDERED[@]}"; do
     PROFILE_DIR="$HERMES_DATA_DIR/profiles/$profile"
-    mkdir -p "$PROFILE_DIR/skills" "$PROFILE_DIR/workspace" "$PROFILE_DIR/mcp"
-    echo "[init] Profile dir ready: $PROFILE_DIR"
+    if [[ "$profile" == "codex-builder" ]]; then
+        # Sealed runtime — no skills/, no mcp/ (mcp_servers: {} in
+        # config.yaml means the gateway never spawns an MCP child). Lay
+        # down workspace/ (terminal cwd) + .codex/ (CODEX_HOME) + .ssh/
+        # (PR 4 deploy key dst); the chown/chmod hardening to uid 10001
+        # happens in PR 4.
+        mkdir -p "$PROFILE_DIR/workspace" "$PROFILE_DIR/.codex" "$PROFILE_DIR/.ssh"
+        echo "[init] Profile dir ready (sealed): $PROFILE_DIR"
+    else
+        mkdir -p "$PROFILE_DIR/skills" "$PROFILE_DIR/workspace" "$PROFILE_DIR/mcp"
+        echo "[init] Profile dir ready: $PROFILE_DIR"
+    fi
 done
 
 # --- 2.0. One-time skill consolidation ---------------------------------------
@@ -110,7 +198,7 @@ done
 # at the Hermes-native location only; this block migrates leftover
 # composio dirs from older deployments and removes the empty parallel
 # tree so it can never re-divide the catalogue.
-for profile in "${PROFILES[@]}"; do
+for profile in "${PROFILES_FULL_DEPLOY[@]}"; do
     LEGACY_SKILLS_DIR="$HERMES_DATA_DIR/profiles/$profile/workspace/skills"
     CANONICAL_SKILLS_DIR="$HERMES_DATA_DIR/profiles/$profile/skills"
     if [[ -d "$LEGACY_SKILLS_DIR" ]]; then
@@ -137,7 +225,7 @@ done
 # From the `alfred` Python package — for the vault-worker daemons. Deployed
 # into BOTH profiles (the workers profile runs them; main carries them too
 # so the user-facing agent can read what they do).
-for profile in "${PROFILES[@]}"; do
+for profile in "${PROFILES_FULL_DEPLOY[@]}"; do
     SKILLS_DST="$HERMES_DATA_DIR/profiles/$profile/skills"
     for skill in vault-curator vault-janitor vault-distiller; do
         SRC_HASH=$(find "$SKILLS_SRC_DIR/$skill" -type f -exec md5sum {} \; | sort | md5sum | cut -d' ' -f1)
@@ -158,7 +246,7 @@ done
 # alfred-prime-federation skill is Prime-only.
 MAIN_SKILLS_SRC="/setup/workspace-template/skills"
 if [[ -d "$MAIN_SKILLS_SRC" ]]; then
-    for profile in "${PROFILES[@]}"; do
+    for profile in "${PROFILES_FULL_DEPLOY[@]}"; do
         SKILLS_DST="$HERMES_DATA_DIR/profiles/$profile/skills"
         for skill_dir in "$MAIN_SKILLS_SRC"/*/; do
             [[ -d "$skill_dir" ]] || continue
@@ -191,7 +279,7 @@ fi
 WORKSPACE_DOCS_SRC="/setup/workspace-template/docs/TOOLS.md"
 if [[ -f "$WORKSPACE_DOCS_SRC" ]]; then
     SRC_HASH=$(md5sum "$WORKSPACE_DOCS_SRC" | cut -d' ' -f1)
-    for profile in "${PROFILES[@]}"; do
+    for profile in "${PROFILES_FULL_DEPLOY[@]}"; do
         WS_DIR="$HERMES_DATA_DIR/profiles/$profile/workspace"
         mkdir -p "$WS_DIR"
         HASH_FILE="$WS_DIR/.TOOLS.md.content-hash"
@@ -209,7 +297,7 @@ fi
 MCP_SRC="/setup/mcp/ctrl-server.mjs"
 if [[ -f "$MCP_SRC" ]]; then
     SRC_HASH=$(md5sum "$MCP_SRC" | cut -d' ' -f1)
-    for profile in "${PROFILES[@]}"; do
+    for profile in "${PROFILES_FULL_DEPLOY[@]}"; do
         MCP_DST="$HERMES_DATA_DIR/profiles/$profile/mcp"
         mkdir -p "$MCP_DST"
         HASH_FILE="$MCP_DST/.ctrl-server.content-hash"
@@ -224,21 +312,39 @@ if [[ -f "$MCP_SRC" ]]; then
 fi
 
 # --- 2e. 5-app stdio MCP bundle ----------------------------------------------
+# UNCONDITIONAL rsync — the bundle is a build artifact baked into the init
+# image (see Dockerfile `COPY --from=mcp-builder /mcp-server/dist
+# ./mcp-stdio/...`), not operator config. Its source of truth is the IMAGE,
+# not the volume. The previous hash-gate (a content-hash file at
+# `.mcp-stdio.content-hash`) was load-bearing only if the hash compute itself
+# stayed honest across image bumps; on home (2026-05-29) the bundle on disk
+# stayed pre-#128/#130 even after `docker compose pull` of the init image,
+# leaving Hermes' main profile without the `hass` + `files` MCP servers
+# (chat-Alfred answered "no, I'm not connected to HA" while ctrl-api was
+# actively pulling 1078 HA registry rows). Whatever caused the hash gate to
+# silently misfire isn't worth chasing — the gate optimises a copy that takes
+# milliseconds. `rsync -a --delete` is the same shape as the previous slow
+# path and treats the image as authoritative, which is what we want for a
+# build artifact.
+#
+# Critically NOT in the operator-preserve / runtime-key list (see
+# render_hermes.py `_RUNTIME_KEY_PREFIXES`): an operator never edits this
+# directory by hand. The two operator-owned Hermes assets are config.yaml
+# (preserved by render_hermes.py) and the runtime-managed `.env` keys
+# (merge-preserved by render_hermes.py's `_merge_preserve_runtime_keys`).
+# Everything else under <profile_dir>/ — mcp-stdio/, mcp/, skills/,
+# AGENTS.md, SOUL.md — is a build artifact and re-syncs from the image.
 MCP_STDIO_SRC="/setup/mcp-stdio"
 if [[ -d "$MCP_STDIO_SRC" ]]; then
-    BUNDLE_HASH=$(find "$MCP_STDIO_SRC" -type f -not -name '.*' \
-        -exec md5sum {} \; | sort | md5sum | cut -d' ' -f1)
-    for profile in "${PROFILES[@]}"; do
+    for profile in "${PROFILES_FULL_DEPLOY[@]}"; do
         MCP_STDIO_DST="$HERMES_DATA_DIR/profiles/$profile/mcp-stdio"
-        HASH_FILE="$HERMES_DATA_DIR/profiles/$profile/.mcp-stdio.content-hash"
-        if [[ -f "$HASH_FILE" ]] && [[ "$(cat "$HASH_FILE")" == "$BUNDLE_HASH" ]]; then
-            echo "[init] MCP stdio bundle unchanged in $profile, skipping"
-        else
-            mkdir -p "$MCP_STDIO_DST"
-            rsync -a --delete "$MCP_STDIO_SRC/" "$MCP_STDIO_DST/"
-            echo "$BUNDLE_HASH" > "$HASH_FILE"
-            echo "[init] MCP stdio bundle deployed to $profile"
-        fi
+        mkdir -p "$MCP_STDIO_DST"
+        rsync -a --delete "$MCP_STDIO_SRC/" "$MCP_STDIO_DST/"
+        # Stale hash file from the pre-2026-05-29 gate. Remove so a future
+        # operator inspecting the dir doesn't think the bundle's currency is
+        # being tracked here (it isn't — the IMAGE is the source of truth).
+        rm -f "$HERMES_DATA_DIR/profiles/$profile/.mcp-stdio.content-hash"
+        echo "[init] MCP stdio bundle synced to $profile (unconditional)"
     done
 fi
 
@@ -246,7 +352,7 @@ fi
 AGENTS_SRC="/setup/AGENTS.md"
 if [[ -f "$AGENTS_SRC" ]]; then
     AGENTS_HASH=$(md5sum "$AGENTS_SRC" | cut -d' ' -f1)
-    for profile in "${PROFILES[@]}"; do
+    for profile in "${PROFILES_FULL_DEPLOY[@]}"; do
         PROFILE_DIR="$HERMES_DATA_DIR/profiles/$profile"
         HASH_FILE="$PROFILE_DIR/.agents-md.content-hash"
         if [[ -f "$HASH_FILE" ]] && [[ "$(cat "$HASH_FILE")" == "$AGENTS_HASH" ]]; then
@@ -283,7 +389,7 @@ else
 fi
 if [[ -n "$SOUL_SRC" ]]; then
     SOUL_HASH=$(md5sum "$SOUL_SRC" | cut -d' ' -f1)
-    for profile in "${PROFILES[@]}"; do
+    for profile in "${PROFILES_FULL_DEPLOY[@]}"; do
         PROFILE_DIR="$HERMES_DATA_DIR/profiles/$profile"
         DST="$PROFILE_DIR/SOUL.md"
         HASH_FILE="$PROFILE_DIR/.soul-md.content-hash"
@@ -449,19 +555,47 @@ fi
 # API_SERVER_KEY in each .env.
 # =============================================================================
 echo "[init] Rendering Hermes profile configs..."
-for profile in "${PROFILES[@]}"; do
+for profile in "${PROFILES_RENDERED[@]}"; do
     INIT_PROFILE_DIR="$HERMES_DATA_DIR/profiles/$profile"
     RUNTIME_PROFILE_DIR="$HERMES_RUNTIME_HOME/profiles/$profile"
     mkdir -p "$INIT_PROFILE_DIR"
 
+    # #120 Lane II — pass the registry-allocated port + model through to
+    # render_hermes.py. For the four reserved profiles these are identical
+    # to the hard-coded fallbacks in render_hermes.py (back-compat); for
+    # user-facing profiles created via ctrl-api they're the dynamically
+    # allocated 18794..18799 port + the operator's chosen model.
+    PROFILE_PORT="${PROFILE_PORTS[$profile]:-}"
+    PROFILE_MODEL="${PROFILE_MODELS[$profile]:-}"
+
     HERMES_VAULT_PATH="/vault" \
     HERMES_RUNTIME_PROFILE_DIR="$RUNTIME_PROFILE_DIR" \
+    HERMES_RENDER_PORT="$PROFILE_PORT" \
+    HERMES_RENDER_MODEL="$PROFILE_MODEL" \
         python3 /setup/render_hermes.py \
             "$profile" \
             "$INIT_PROFILE_DIR" \
             /setup \
             "$GATEWAY_TOKEN"
-    echo "[init] Rendered Hermes profile: $profile"
+    echo "[init] Rendered Hermes profile: $profile (port=$PROFILE_PORT model=$PROFILE_MODEL)"
+
+    # --- 6a. Backfill required mcp_servers entries -----------------------
+    # render_hermes.py preserves an existing operator-owned config.yaml.
+    # When a new MCP server lands in the template (e.g. `hass` PR #128 or
+    # `files` PR #130), existing tenants never see it because their
+    # config.yaml predates the addition. render_mcp_servers.py is an
+    # idempotent ADD-only mutator that backfills any missing
+    # required-server entry on every init boot (preserving operator
+    # customisations / explicit disables). codex-builder is hard-skipped
+    # (sealed runtime: mcp_servers: {} by design). See the script docstring.
+    if [[ -f "$INIT_PROFILE_DIR/config.yaml" ]]; then
+        PROFILE_DIR="$INIT_PROFILE_DIR" \
+        HERMES_RUNTIME_PROFILE_DIR="$RUNTIME_PROFILE_DIR" \
+        CTRL_API_URL="${CTRL_API_URL:-http://ctrl-api:3100}" \
+        STATE_DB_PATH="${STATE_DB_PATH:-/ctrl-data/alfred-state.db}" \
+            python3 /setup/render_mcp_servers.py "$profile" \
+            || echo "[init] WARN: render_mcp_servers.py failed for $profile (non-fatal)"
+    fi
 done
 
 # --- 6b. Telegram gateway block — INTENTIONALLY UNMANAGED HERE --------------
@@ -503,6 +637,314 @@ fi
 # =============================================================================
 chown -R 10000:10000 "$HERMES_DATA_DIR" 2>/dev/null || true
 chown -R 10000:10000 /vault 2>/dev/null || true
+
+# =============================================================================
+# 7b. codex-builder profile FS isolation (PR 4 of
+#     docs/codex-builder-runtime.md §6).
+#
+# The codex-builder gateway runs under uid 10001 (PR 4 supervisor.sh
+# swap). For its sandbox to mean anything we MUST ensure uid 10001 can:
+#   * read+write /hermes-state/profiles/codex-builder/ (own state)
+#   * read+write /work (the per-run workspace mount)
+# AND cannot:
+#   * read /vault (the principal's surface)
+#   * read /alfred-data (gateway tokens + Sure/Plane bootstrap inputs)
+#   * read other profiles' .env (provider keys, channel tokens)
+#   * read main's .codex/ auth.json (codex-builder has its OWN auth at
+#     /hermes-state/profiles/codex-builder/.codex/auth.json — see PR 2
+#     supervisor.sh mirror block)
+#
+# The chowns + chmods below establish the can-read side. The cannot-read
+# side is enforced by the surrounding /vault + /alfred-data + other-
+# profile dirs being 0700 root:root or 0700 10000:10000 — anything 10001
+# tries to read is uid-mismatched, no read bit.
+#
+# Idempotent — re-runs on every init container start. Safe alongside
+# step 7's broader chown above (this block REPLACES the chown for the
+# codex-builder subtree).
+# =============================================================================
+CODEX_PROFILE_DIR="$HERMES_DATA_DIR/profiles/codex-builder"
+if [[ -d "$CODEX_PROFILE_DIR" ]]; then
+    echo "[init] [codex-builder] hardening profile dir + /work for uid 10001"
+
+    # --- Deploy codex-builder SOUL.md (the agent persona) -------------------
+    # The other 3 profiles read /opt/data/SOUL.md (the global persona Hermes
+    # serves at gateway boot — `consolidate SOUL.md` step in supervisor.sh).
+    # codex-builder is per-profile-distinct; its identity is the sealed
+    # engineering executor, NOT Alfred. We render it to the profile dir.
+    # Idempotent — only writes if absent or different.
+    CB_SOUL_SRC="/setup/SOUL.codex-builder.md"
+    if [[ -f "$CB_SOUL_SRC" ]]; then
+        CB_SOUL_DST="$CODEX_PROFILE_DIR/SOUL.md"
+        CB_SOUL_HASH_FILE="$CODEX_PROFILE_DIR/.soul-md.content-hash"
+        CB_SOUL_HASH=$(md5sum "$CB_SOUL_SRC" | cut -d' ' -f1)
+        if [[ -f "$CB_SOUL_HASH_FILE" ]] && [[ "$(cat "$CB_SOUL_HASH_FILE")" == "$CB_SOUL_HASH" ]]; then
+            echo "[init] [codex-builder] SOUL.md unchanged, skipping"
+        else
+            cp "$CB_SOUL_SRC" "$CB_SOUL_DST"
+            echo "$CB_SOUL_HASH" > "$CB_SOUL_HASH_FILE"
+            echo "[init] [codex-builder] deployed SOUL.md"
+        fi
+    fi
+
+    # The whole profile dir is owned by 10001 mode 0711 — uid 10000 (other
+    # gateways) and root will use DAC_OVERRIDE if they need to write, but
+    # the codex-builder gateway can never escape its own home.
+    #
+    # Why 0711 (not 0700): the paperclip-hermes adapter runs in the paperclip
+    # container as uid 1000 (gosu node entrypoint, no DAC_OVERRIDE), and
+    # needs to read .env to pull the gateway's API_SERVER_KEY for the
+    # Authorization: Bearer header. 0700 made that EACCES so the adapter
+    # silently sent no auth header and every dispatch 401'd. The execute
+    # bit lets uid 1000 traverse to specific files (.env, see below); the
+    # missing read bit means it still can't `ls` the dir or stumble onto
+    # auth.json / .codex/ / workspace tree — and those individual files
+    # stay 0600 so even if uid 1000 knew the path it couldn't open them.
+    chown -R 10001:10001 "$CODEX_PROFILE_DIR" 2>/dev/null || true
+    chmod 0711 "$CODEX_PROFILE_DIR" 2>/dev/null || true
+    # Recursive 0700 on subdirs (sealed), 0600 on files (owner-only by default).
+    find "$CODEX_PROFILE_DIR" -type d -exec chmod 0700 {} + 2>/dev/null || true
+    find "$CODEX_PROFILE_DIR" -type f -exec chmod 0600 {} + 2>/dev/null || true
+    # Then the two targeted opens: top-level dir back to 0711 (traverse), and
+    # .env world-readable (0644) so the paperclip adapter's uid 1000 can
+    # read API_SERVER_KEY. The .env never carries provider secrets for the
+    # codex-builder profile (codex CLI's auth lives in .codex/auth.json,
+    # which stays 0600 inside .codex/ at 0700 — uid 1000 can't reach it).
+    chmod 0711 "$CODEX_PROFILE_DIR" 2>/dev/null || true
+    if [[ -f "$CODEX_PROFILE_DIR/.env" ]]; then
+        chmod 0644 "$CODEX_PROFILE_DIR/.env" 2>/dev/null || true
+    fi
+    # config.yaml ends up 0600 — that's tighter than the 0640 the other
+    # profiles use but fine because the only reader is the codex-builder
+    # gateway process at uid 10001 (init/hermes containers use DAC_OVERRIDE).
+
+    # /work is the named volume mounted at /work in the hermes service. The
+    # init container has it mounted at /work too (we added it below).
+    # Chown to 10001:10001 mode 0700 so ONLY the codex-builder gateway can
+    # see / write the per-run dirs. The volume isn't mounted in any other
+    # service so this is also the only mount point on the box.
+    if [[ -d /work ]]; then
+        chown 10001:10001 /work 2>/dev/null || true
+        chmod 0700 /work 2>/dev/null || true
+        mkdir -p /work/runs
+        chown 10001:10001 /work/runs 2>/dev/null || true
+        chmod 0700 /work/runs 2>/dev/null || true
+    else
+        echo "[init] [codex-builder] WARNING: /work not mounted in init container —"
+        echo "[init] [codex-builder]   add it to the init service's volumes block in docker-compose.yaml"
+    fi
+
+    # Lay down a default network-allowlist.txt so a future operator can
+    # extend the egress allowlist without rebuilding the image. The egress
+    # jail script reads any additional hosts from this file at supervisor
+    # boot. Idempotent — only writes if absent (preserves operator edits).
+    NET_ALLOW="$CODEX_PROFILE_DIR/network-allowlist.txt"
+    if [[ ! -f "$NET_ALLOW" ]]; then
+        cat > "$NET_ALLOW" <<'EOF'
+# codex-builder additional network egress allowlist.
+#
+# One hostname per line, '#' starts a comment, blank lines ignored.
+# These hosts are resolved at supervisor boot via `dig +short A <host>` and
+# added as ACCEPT rules in iptables OUTPUT chain scoped --uid-owner 10001
+# (TCP 443 + TCP 22 per host). Default deny stays in place — anything not
+# listed here OR in the script's BUILTIN_HOSTS array is REJECTed.
+#
+# BUILTIN_HOSTS (already on the list, do NOT duplicate):
+#   api.openai.com  chatgpt.com
+#   api.github.com  github.com  codeload.github.com
+#   registry.npmjs.org  pypi.org  files.pythonhosted.org  static.crates.io  crates.io
+#
+# Add a host below if a codex run needs a private registry, an internal
+# package mirror, or a tenant-specific deploy target. Restart hermes to
+# apply.
+EOF
+        chown 10001:10001 "$NET_ALLOW" 2>/dev/null || true
+        chmod 0600 "$NET_ALLOW" 2>/dev/null || true
+        echo "[init] [codex-builder] seeded $NET_ALLOW"
+    fi
+
+    # --- Deploy key (read from /opt/alfred/.env via init env passthrough) ---
+    # The codex-builder profile pushes branches to ssdavidai/alfred via a
+    # repo-scoped deploy key with "Allow write access" on. The private key
+    # lives in Vaultwarden + is mirrored into the per-tenant /opt/alfred/.env
+    # as CODEX_BUILDER_DEPLOY_KEY_B64 (base64 of the OpenSSH private key).
+    # We write it here, chown to 10001, chmod 0600.
+    #
+    # When the var is empty (default everywhere except home), we skip the
+    # write — no key, no `git push` capability. PR 5's wrapper handles the
+    # absent-key case by emitting a clean "deploy key missing" run audit.
+    SSH_DIR="$CODEX_PROFILE_DIR/.ssh"
+    KEY_FILE="$SSH_DIR/codex_id_ed25519"
+    if [[ -n "${CODEX_BUILDER_DEPLOY_KEY_B64:-}" ]]; then
+        mkdir -p "$SSH_DIR"
+        # Decode and write. Tolerate either standard or URL-safe base64;
+        # standard libraries accept both.
+        if echo -n "$CODEX_BUILDER_DEPLOY_KEY_B64" | base64 -d > "$KEY_FILE" 2>/dev/null; then
+            chmod 0600 "$KEY_FILE"
+            chown 10001:10001 "$KEY_FILE"
+            echo "[init] [codex-builder] wrote deploy key $KEY_FILE ($(wc -c < "$KEY_FILE") bytes)"
+        else
+            rm -f "$KEY_FILE"
+            echo "[init] [codex-builder] WARNING: CODEX_BUILDER_DEPLOY_KEY_B64 set but failed to base64-decode — skipping"
+        fi
+        # known_hosts for github.com so the first push doesn't trip on a
+        # prompt (we have StrictHostKeyChecking=accept-new in the .env
+        # but a pre-seeded entry is more deterministic).
+        #
+        # If ssh-keyscan failed at first boot (DNS / network blip), the
+        # file gets created but EMPTY and the next init pass skips it
+        # entirely, leaving the codex-builder uid unable to write its
+        # OWN host key on accept-new (the file was root-owned 0644).
+        # Fix: delete-and-retry whenever empty.
+        if [[ -f "$SSH_DIR/known_hosts" ]] && [[ ! -s "$SSH_DIR/known_hosts" ]]; then
+            rm -f "$SSH_DIR/known_hosts"
+        fi
+        if [[ ! -f "$SSH_DIR/known_hosts" ]]; then
+            ssh-keyscan -t ed25519,ecdsa github.com 2>/dev/null > "$SSH_DIR/known_hosts" || true
+            if [[ -s "$SSH_DIR/known_hosts" ]]; then
+                echo "[init] [codex-builder] seeded $SSH_DIR/known_hosts with github.com keys"
+            else
+                # Couldn't fetch — leave an empty file so the codex-builder
+                # uid can write its own entry on the first connection's
+                # accept-new prompt. Empty + writeable beats absent (the
+                # uid otherwise can't create it depending on umask).
+                : > "$SSH_DIR/known_hosts"
+                echo "[init] [codex-builder] WARNING: ssh-keyscan github.com returned no keys — leaving empty known_hosts for accept-new"
+            fi
+        fi
+        # ALWAYS chown + chmod regardless of whether ssh-keyscan succeeded —
+        # the previous code only chowned on -s success, leaving an empty
+        # root-owned file the codex-builder uid couldn't write to.
+        chmod 0600 "$SSH_DIR/known_hosts" 2>/dev/null || true
+        chown 10001:10001 "$SSH_DIR/known_hosts" 2>/dev/null || true
+    else
+        echo "[init] [codex-builder] CODEX_BUILDER_DEPLOY_KEY_B64 unset — git push will fail clean (no key)"
+    fi
+
+    # --- Apply ACL deny for uid 10001 across the surrounding FS ----------
+    # The Posix-perm story alone doesn't tighten enough: /vault, /alfred-
+    # data, and the other profile .env files end up 0644 world-readable
+    # because every other consumer (ctrl-api, alfred-learn, vault-cli) is
+    # either root (DAC_OVERRIDE) or uid 1000 (must keep reading /vault).
+    # We cannot safely chmod those to 0640 without breaking those siblings.
+    #
+    # `setfacl -m u:10001:---` adds a per-uid deny ACL that is independent
+    # of owner/group/world bits — uid 10001 is denied read regardless of
+    # the underlying mode. Other uids keep their existing access verbatim.
+    #
+    # Idempotent: re-running adds the same ACL entries, which setfacl
+    # treats as a no-op.
+    #
+    # Coverage:
+    #   * /vault  — the principal's surface
+    #   * /alfred-data/.gateway-token (file, not the whole dir — alfred-
+    #     learn still needs to read other files there)
+    #   * other-profile dirs (main / workers / heavy)
+    #
+    # The codex-builder's OWN profile dir is OWNED by uid 10001 (the
+    # chowns above), so an ACL deny would lock the gateway out of its
+    # own state. We explicitly do NOT setfacl that dir.
+    if command -v setfacl >/dev/null 2>&1; then
+        setfacl -R -m u:10001:--- /vault 2>/dev/null \
+            && echo "[init] [codex-builder] denied uid 10001 read on /vault (ACL)" \
+            || echo "[init] [codex-builder] WARNING: setfacl /vault failed (filesystem may not support ACLs?)"
+        if [[ -f /alfred-data/.gateway-token ]]; then
+            setfacl -m u:10001:--- /alfred-data/.gateway-token 2>/dev/null \
+                && echo "[init] [codex-builder] denied uid 10001 read on /alfred-data/.gateway-token (ACL)"
+        fi
+        # #120 Lane II — every non-codex-builder profile (reserved infra +
+        # user-facing) gets the same ACL deny. PROFILES_RENDERED is sourced
+        # from state.db so user-facing profiles created via ctrl-api are
+        # covered automatically — without this, a freshly created sentinel
+        # profile would leave a uid-10001-readable .env on disk and the
+        # sandbox would be effective only for the original 4 profiles.
+        for p in "${PROFILES_RENDERED[@]}"; do
+            if [[ "$p" == "codex-builder" ]]; then
+                continue  # owned by uid 10001 — see comment above
+            fi
+            P_ENV="$HERMES_DATA_DIR/profiles/$p/.env"
+            if [[ -f "$P_ENV" ]]; then
+                setfacl -m u:10001:--- "$P_ENV" 2>/dev/null \
+                    && echo "[init] [codex-builder] denied uid 10001 read on profiles/$p/.env (ACL)"
+            fi
+            # auth.json + config.yaml are also sensitive — main/auth.json
+            # is the OAuth credential we mirror, but the codex-builder
+            # ALREADY HAS its own copy (PR 2 mirror). Deny uid 10001 from
+            # reading the SOURCE so a compromised codex-builder cannot
+            # walk back to main and read its sibling's auth.
+            for sensitive in auth.json config.yaml; do
+                P_FILE="$HERMES_DATA_DIR/profiles/$p/$sensitive"
+                if [[ -f "$P_FILE" ]]; then
+                    setfacl -m u:10001:--- "$P_FILE" 2>/dev/null || true
+                fi
+            done
+        done
+        # The codex-builder's parent dir (profiles/) needs uid 10001 to
+        # be able to CHDIR through it to reach codex-builder/. Posix
+        # behaviour: cd through a dir needs x (execute) only, not r.
+        # Mode 0755 on profiles/ is fine; our ACL denies on individual
+        # files don't change directory traversal.
+    else
+        echo "[init] [codex-builder] WARNING: setfacl missing — falling back to perm-only isolation"
+        echo "[init] [codex-builder]   Install acl package in the init image (apt-get install acl)."
+    fi
+
+    # --- Negative-asserts: the codex-builder uid 10001 must NOT be able to
+    #     read these paths. We test by `setpriv --reuid 10001 cat <file>`
+    #     and fail the init if any of them succeed. Defense-in-depth — the
+    #     chmods above should already block, but a single fat-fingered
+    #     chmod elsewhere in this script could open a hole that nothing
+    #     would catch otherwise.
+    #
+    # Negative-asserts are enforced ONLY when ENABLE_CODEX_BUILDER is on.
+    # On a tenant that doesn't run the codex-builder gateway, the chowns
+    # still happen for safety (so the profile dir is correctly owned if
+    # the flag is later flipped on), but the asserts are skipped — the
+    # /vault chown step 7 may not have run yet on a first-boot init+hermes
+    # pull cycle, and a transient race shouldn't fail provisioning.
+    if [[ "${ENABLE_CODEX_BUILDER:-false}" == "true" ]]; then
+        echo "[init] [codex-builder] negative-asserts: uid 10001 must NOT read these paths"
+        ASSERT_FAILS=0
+        # SOUL.md is the marker — we want a file we know exists in /vault.
+        if setpriv --reuid 10001 --regid 10001 --clear-groups \
+               cat /vault/SOUL.md > /dev/null 2>&1; then
+            echo "[init] [codex-builder] FAIL: uid 10001 can read /vault/SOUL.md"
+            ASSERT_FAILS=$((ASSERT_FAILS + 1))
+        fi
+        if setpriv --reuid 10001 --regid 10001 --clear-groups \
+               cat /alfred-data/.gateway-token > /dev/null 2>&1; then
+            echo "[init] [codex-builder] FAIL: uid 10001 can read /alfred-data/.gateway-token"
+            ASSERT_FAILS=$((ASSERT_FAILS + 1))
+        fi
+        for p in "${PROFILES_RENDERED[@]}"; do
+            if [[ "$p" == "codex-builder" ]]; then
+                continue
+            fi
+            P_ENV="$HERMES_DATA_DIR/profiles/$p/.env"
+            if [[ -f "$P_ENV" ]] && setpriv --reuid 10001 --regid 10001 --clear-groups \
+                   cat "$P_ENV" > /dev/null 2>&1; then
+                echo "[init] [codex-builder] FAIL: uid 10001 can read $P_ENV"
+                ASSERT_FAILS=$((ASSERT_FAILS + 1))
+            fi
+        done
+        # Positive-assert too — uid 10001 MUST be able to read its own .env
+        # (otherwise the supervisor's source-and-export will silently fail).
+        if ! setpriv --reuid 10001 --regid 10001 --clear-groups \
+               cat "$CODEX_PROFILE_DIR/.env" > /dev/null 2>&1; then
+            echo "[init] [codex-builder] FAIL: uid 10001 CANNOT read its own .env"
+            ASSERT_FAILS=$((ASSERT_FAILS + 1))
+        fi
+        if (( ASSERT_FAILS > 0 )); then
+            echo "[init] [codex-builder] FATAL: ${ASSERT_FAILS} FS isolation assertion(s) failed"
+            echo "[init] [codex-builder]   The sandbox is not effective. Refusing to allow the codex-builder gateway to start."
+            echo "[init] [codex-builder]   Check the chown/chmod above; check /vault is owned 10000:10000 mode 0700."
+            exit 71
+        fi
+        echo "[init] [codex-builder] all isolation assertions passed"
+    else
+        echo "[init] [codex-builder] ENABLE_CODEX_BUILDER not true — skipping isolation asserts (chowns still applied)"
+    fi
+fi
 
 mkdir -p /alfred-data
 chmod -R 777 /alfred-data 2>/dev/null || true

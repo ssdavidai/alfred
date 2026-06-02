@@ -22,6 +22,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  test-naming-guard:
+    # Cheap fail-fast guard against the glob-escape bug PR #133 fixed: the
+    # ctrl/web test runners glob `tests/*.test.ts` (suffix convention). A file
+    # named `test_foo.ts` (prefix convention) is silently invisible to the
+    # runner — that's how #110 PR1's whole batch of HA-channel tests shipped
+    # without running. This step rejects the prefix shape so the regression
+    # cannot recur.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reject tests/test_*.ts naming (must be *.test.ts)
+        run: |
+          bad=$(find packages/ctrl/tests packages/web/src -name 'test_*.ts' -not -name '*.test.ts' 2>/dev/null || true)
+          if [ -n "$bad" ]; then
+            echo "FAIL — these test files use the prefix-naming convention which the runner glob skips:"
+            echo "$bad"
+            echo "Rename to *.test.ts (suffix convention) so they actually run."
+            exit 1
+          fi
+
   build-ctrl:
     runs-on: ubuntu-latest
     steps:
@@ -119,16 +139,30 @@ jobs:
                      DJANGO_SECRET_KEY POSTGRES_PASSWORD REDIS_PASSWORD \
                      MINIO_ROOT_PASSWORD LIVE_SERVER_SECRET_KEY \
                      SURE_SECRET_KEY_BASE SURE_POSTGRES_PASSWORD \
-                     SURE_REDIS_PASSWORD VEXA_POSTGRES_PASSWORD \
-                     VEXA_MINIO_PASSWORD VEXA_ADMIN_API_TOKEN \
-                     VEXA_INTERNAL_API_SECRET; do
+                     SURE_REDIS_PASSWORD; do
               echo "${k}=cidummy0000000000000000000000000000"
             done
           } >> .env
       - name: docker compose config (default profile)
         run: docker compose config --quiet
-      - name: docker compose config (vexa profile)
-        run: docker compose --profile vexa config --quiet
+      - name: docker compose config (tailscale profile — issue #109 PR 1)
+        run: docker compose --profile tailscale config --quiet
+      - name: tailscale OFF by default (no service unless profile passed)
+        # PR 1's acceptance gate: `docker compose up -d` alone must NEVER
+        # bring up the tailscale sidecar. Profile gating is the load-bearing
+        # contract — if this assertion ever flips, every existing tenant
+        # would silently start joining a tailnet on next deploy.
+        run: |
+          set -euo pipefail
+          if docker compose config --services | grep -qx tailscale; then
+            echo "FAIL: tailscale service appeared under the default profile." >&2
+            exit 1
+          fi
+          if ! docker compose --profile tailscale config --services | grep -qx tailscale; then
+            echo "FAIL: tailscale service missing under --profile tailscale." >&2
+            exit 1
+          fi
+          echo "OK: tailscale is profile-gated, off by default."
 
   bootstrap-lint:
     runs-on: ubuntu-latest
@@ -141,3 +175,27 @@ jobs:
         # zero-CLI Paperclip seed for every new tenant, so we lint it
         # alongside the host bootstrap script.
         run: shellcheck packages/hermes/init/bootstrap-paperclip.sh
+
+  workflow-lint:
+    # actionlint catches the foot-guns we previously discovered the hard way:
+    # missing `secrets.` prefix, ill-formed matrix entries, `if:` expressions
+    # that always evaluate true, and shell-script syntax in `run:` blocks.
+    # We've shipped deploy workflows before that were syntactically valid YAML
+    # but broken at expand-time; actionlint is the lightest defence.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install actionlint
+        run: |
+          set -euo pipefail
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          ./actionlint -version
+      - name: Lint all workflows
+        # Lint every workflow; deploy-compose.yml is the immediate reason we
+        # added the check, but the project is small enough that the full sweep
+        # is free and catches regressions in the build-*.yml family too.
+        # We disable actionlint's shellcheck integration here — the
+        # bootstrap-lint job already runs shellcheck on the scripts we care
+        # about, and the inline `run:` blocks are short and intentional
+        # (e.g. `SC2029` for ssh remote-side expansion of $SHA is desired).
+        run: ./actionlint -color -shellcheck=

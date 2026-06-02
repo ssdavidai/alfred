@@ -14,24 +14,33 @@ import path from "node:path";
 import {
   DEFAULT_HERMES_GATEWAY_URL,
   DEFAULT_HERMES_CONFIG_DIR,
+  type HermesProfileName,
 } from "../shared/constants.js";
 
 // ── auth key resolver ────────────────────────────────────────────────────
 
 /**
- * Read API_SERVER_KEY for the `main` Hermes profile out of its rendered
+ * Read API_SERVER_KEY for a given Hermes profile out of its rendered
  * `.env`. The per-profile file is the source of truth at runtime
  * (`packages/ctrl/src/api/routes/channels_paperclip.ts::readHermesMainApiKey`
- * uses the identical resolver; we observed live a mismatch between the
- * compose-level HERMES_API_SERVER_KEY seed and the profile-level value
- * (64 vs 43 chars), so reading the file directly is what works).
+ * uses the identical resolver for the main profile; we observed live a
+ * mismatch between the compose-level HERMES_API_SERVER_KEY seed and the
+ * profile-level value (64 vs 43 chars), so reading the file directly is
+ * what works).
  *
- * Override via `HERMES_CONFIG_DIR` for tests / dev mounts.
+ * codex-builder support added 2026-05-28 (PR 3 of docs/codex-builder-
+ * runtime.md): the sealed-runtime profile renders its own API_SERVER_KEY
+ * in /hermes-state/profiles/codex-builder/.env. By passing the profile
+ * name through here we can mint per-profile API auth from a single
+ * resolver — no need for a parallel readHermesCodexBuilderApiKey() copy.
+ *
+ * Override the base dir via `HERMES_CONFIG_DIR` for tests / dev mounts.
  */
-export function readHermesMainApiKey(
+export function readHermesProfileApiKey(
+  profile: HermesProfileName,
   configDir = process.env.HERMES_CONFIG_DIR ?? DEFAULT_HERMES_CONFIG_DIR,
 ): string | null {
-  const envPath = path.join(configDir, "main", ".env");
+  const envPath = path.join(configDir, profile, ".env");
   let raw: string;
   try {
     raw = fs.readFileSync(envPath, "utf-8");
@@ -48,6 +57,17 @@ export function readHermesMainApiKey(
     }
   }
   return null;
+}
+
+/**
+ * Back-compat shim. Old call sites (ctrl-api's channels_paperclip resolver,
+ * internal one-off scripts) read the main-profile key by name; preserve
+ * the entrypoint so this PR is a pure additive change for them.
+ */
+export function readHermesMainApiKey(
+  configDir = process.env.HERMES_CONFIG_DIR ?? DEFAULT_HERMES_CONFIG_DIR,
+): string | null {
+  return readHermesProfileApiKey("main", configDir);
 }
 
 // ── response shape extractor ─────────────────────────────────────────────

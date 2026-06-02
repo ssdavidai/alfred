@@ -4,6 +4,11 @@ pyyaml==6.0.2
 requests>=2.31.0
 composio>=0.11.0
 
+# Composio HTTP sidecar (src/composio_server.py) — long-running FastAPI app
+# that replaces the docker-exec shell-out from ctrl-api. ~4s → ~500ms per call.
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+
 # Behavioral profiler (#283)
 setuptools<70  # tsfresh needs pkg_resources, removed in setuptools>=82
 pandas==2.2.3
@@ -13,3 +18,16 @@ tsfresh==0.21.1
 hdbscan==0.8.40
 pyod==2.0.2
 lifetimes==0.11.3
+
+# File-extraction pipeline (#114 Lane B). Pure-Python extractors keep
+# the image small + portable:
+#   * pypdf       — PDF text extraction (no native deps).
+#   * python-docx — DOCX paragraph/table extraction.
+#   * openpyxl    — XLSX sheet/cell extraction (read_only mode keeps RAM
+#                   bounded on multi-MB spreadsheets).
+# Images / audio / video are intentionally unsupported in Lane B —
+# the workflow marks them `extraction_error="unsupported_mime"`. OCR
+# (tesseract) + Groq Whisper land in a follow-up.
+pypdf==5.0.1
+python-docx==1.1.2
+openpyxl==3.1.5

@@ -46,14 +46,73 @@ import {
   dockerComposeCmd,
   HERMES_CONTAINER,
 } from "../helpers.js";
+import { getStateDb } from "../../db/state.js";
+import {
+  resolveProfileForChannel,
+  assertWritableProfile,
+} from "../../db/agentProfiles.js";
+import { appendAudit } from "./state.js";
+import { restartProfile } from "../../hermes/supervisor.js";
+
+// ── #206 Lane IV — per-(profile, channel_kind) identity override ──────────
+// Lane I's channel_identity table + resolver landed via #221; use the real
+// helper (stub removed — staging-verified the override resolves live).
+import {
+  resolveChannelIdentity,
+  type ResolvedChannelIdentity,
+} from "../../db/channelIdentity.js";
+
+const RESERVED_PROFILES_FOR_IDENTITY: ReadonlySet<string> = new Set([
+  "main",
+  "workers",
+  "heavy",
+  "codex-builder",
+]);
 
 const VAULT_CLI_URL = process.env.VAULT_CLI_URL || "http://vault-cli:8087";
 const HERMES_HOME =
   process.env.HERMES_HOME_IN_CONTAINER || "/hermes-state";
-const MAIN_PROFILE_DIR = `${HERMES_HOME}/profiles/main`;
-const PROFILE_ENV_PATH = `${MAIN_PROFILE_DIR}/.env`;
 const VAULT_BOT_ITEM_NAME = "Slack Bot Token";
 const VAULT_APP_ITEM_NAME = "Slack App Token";
+
+// #120 Lane V — per-profile vault item naming. Main keeps the bare names
+// for back-compat; non-main profiles use the suffix shape so each profile's
+// Slack tokens are distinct Vaultwarden records.
+function slackVaultItemNames(slug: string): { bot: string; app: string } {
+  if (slug === "main") {
+    return { bot: VAULT_BOT_ITEM_NAME, app: VAULT_APP_ITEM_NAME };
+  }
+  return {
+    bot: `${VAULT_BOT_ITEM_NAME} · ${slug}`,
+    app: `${VAULT_APP_ITEM_NAME} · ${slug}`,
+  };
+}
+
+// Lane IV — per-profile paths. The legacy MAIN_PROFILE_DIR / PROFILE_ENV_PATH
+// constants were the only thing keeping every slack route pointed at main.
+// Each route now resolves a profile per request (?profile=<slug> or fallback
+// to the channel-default binding).
+interface SlackProfilePaths {
+  profileSlug: string;
+  profileDir: string;
+  envPath: string;
+}
+
+function pathsForProfile(slug: string): SlackProfilePaths {
+  const profileDir = `${HERMES_HOME}/profiles/${slug}`;
+  return {
+    profileSlug: slug,
+    profileDir,
+    envPath: `${profileDir}/.env`,
+  };
+}
+
+function resolveSlackProfile(query?: URLSearchParams): SlackProfilePaths {
+  const explicit = query?.get("profile")?.trim() || null;
+  if (explicit) return pathsForProfile(explicit);
+  const slug = resolveProfileForChannel(getStateDb(), "slack", null);
+  return pathsForProfile(slug);
+}
 
 // Slack token shapes (canonical):
 //   Bot User OAuth Token:  xoxb-<team_id>-<bot_id>-<secret>
@@ -221,11 +280,13 @@ const SLACK_ENV_KEYS = [
 ] as const;
 type SlackEnvKey = (typeof SLACK_ENV_KEYS)[number];
 
-async function readProfileEnv(): Promise<Record<string, string>> {
+async function readProfileEnv(
+  paths: SlackProfilePaths,
+): Promise<Record<string, string>> {
   const raw = await dockerExec(HERMES_CONTAINER, [
     "sh",
     "-c",
-    `cat ${PROFILE_ENV_PATH} 2>/dev/null || true`,
+    `cat ${paths.envPath} 2>/dev/null || true`,
   ]);
   const out: Record<string, string> = {};
   for (const line of raw.split("\n")) {
@@ -248,12 +309,13 @@ async function readProfileEnv(): Promise<Record<string, string>> {
 }
 
 async function writeProfileEnvKeys(
+  paths: SlackProfilePaths,
   updates: Partial<Record<SlackEnvKey, string | null>>,
 ): Promise<void> {
   const raw = await dockerExec(HERMES_CONTAINER, [
     "sh",
     "-c",
-    `cat ${PROFILE_ENV_PATH} 2>/dev/null || true`,
+    `cat ${paths.envPath} 2>/dev/null || true`,
   ]);
   const lines = raw === "" ? [] : raw.split("\n");
   if (lines.length && lines[lines.length - 1] === "") lines.pop();
@@ -282,13 +344,13 @@ async function writeProfileEnvKeys(
   }
   const content = out.join("\n") + "\n";
 
-  const tmp = `${PROFILE_ENV_PATH}.tmp.${process.pid}.${Date.now()}`;
+  const tmp = `${paths.envPath}.tmp.${process.pid}.${Date.now()}`;
   await dockerExecWithStdin(
     HERMES_CONTAINER,
     [
       "sh",
       "-c",
-      `mkdir -p ${MAIN_PROFILE_DIR} && cat > ${tmp} && mv ${tmp} ${PROFILE_ENV_PATH}`,
+      `mkdir -p ${paths.profileDir} && cat > ${tmp} && mv ${tmp} ${paths.envPath}`,
     ],
     content,
     30_000,
@@ -363,12 +425,75 @@ async function slackAuthTest(botToken: string): Promise<AuthTestResult> {
   }
 }
 
+/**
+ * Build the chat.postMessage payload, applying the per-profile identity
+ * override (#206 Lane IV) when one is present.
+ *
+ * Slack honours two override fields on chat.postMessage:
+ *   - `username` — overrides the bot's display name PER MESSAGE
+ *   - `icon_url` — public HTTPS URL of an avatar image
+ *
+ * `icon_url` requires Slack's CDN to fetch the file, so we only set it
+ * when `SLACK_AVATAR_BASE_URL` is configured (the tenant's public
+ * hostname plus the static-avatar path). If the override has an
+ * avatar_path but no public base URL, the avatar is silently dropped
+ * and a log line names the limitation — Sir's PR body documents this.
+ *
+ * Exported for the unit test — the test asserts the payload shape
+ * without firing a real fetch.
+ */
+export function buildSlackPostMessagePayload(
+  channel: string,
+  text: string,
+  override: ResolvedChannelIdentity | null,
+  profileSlug?: string,
+): Record<string, unknown> {
+  const payload: Record<string, unknown> = { channel, text, mrkdwn: true };
+  if (override?.display_name) {
+    payload.username = override.display_name;
+  }
+  if (override?.avatar_path) {
+    const base = (process.env.SLACK_AVATAR_BASE_URL ?? "").trim();
+    if (base && profileSlug) {
+      const fname = override.avatar_path.split("/").pop() ?? "avatar";
+      payload.icon_url = `${base.replace(/\/$/, "")}/${encodeURIComponent(
+        profileSlug,
+      )}/${encodeURIComponent(fname)}`;
+    } else {
+      console.warn(
+        `[slack] avatar override skipped for profile '${profileSlug ?? "?"}': SLACK_AVATAR_BASE_URL not set`,
+      );
+    }
+  }
+  return payload;
+}
+
+/**
+ * Resolve the identity override for `profileSlug` on Slack. Returns null
+ * for reserved profiles or when no override is set.
+ */
+export function resolveSlackIdentity(
+  profileSlug: string,
+): ResolvedChannelIdentity | null {
+  if (RESERVED_PROFILES_FOR_IDENTITY.has(profileSlug)) return null;
+  return resolveChannelIdentity(getStateDb(), profileSlug, "slack");
+}
+
 /** Send a chat message via Slack Web API. Used by /test + alfred-deliver. */
 export async function slackPostMessage(
   botToken: string,
   channel: string,
   text: string,
+  profileSlug?: string,
 ): Promise<{ ok: true; ts: string } | { ok: false; error: string }> {
+  // #206 Lane IV — pick up the per-profile override at send time.
+  const override = profileSlug ? resolveSlackIdentity(profileSlug) : null;
+  const payload = buildSlackPostMessagePayload(
+    channel,
+    text,
+    override,
+    profileSlug,
+  );
   try {
     const r = await fetch("https://slack.com/api/chat.postMessage", {
       method: "POST",
@@ -376,7 +501,7 @@ export async function slackPostMessage(
         Authorization: `Bearer ${botToken}`,
         "Content-Type": "application/json; charset=utf-8",
       },
-      body: JSON.stringify({ channel, text, mrkdwn: true }),
+      body: JSON.stringify(payload),
       signal: AbortSignal.timeout(10_000),
     });
     const j = (await r.json().catch(() => ({}))) as {
@@ -465,12 +590,37 @@ async function getSlackManifest(): Promise<string> {
 // ── Routes ────────────────────────────────────────────────────────────────
 
 export function registerSlackRoutes(): void {
+  // GET /resolve?channel_id=<id> — Lane IV debug surface.
+  addRoute("GET", "/api/v1/channels/slack/resolve", async ({ res, query }) => {
+    const channelId = query.get("channel_id")?.trim() || null;
+    const { resolveProfileContextForChannel } = await import(
+      "../../db/agentProfiles.js"
+    );
+    const ctx = resolveProfileContextForChannel(
+      getStateDb(),
+      "slack",
+      channelId,
+    );
+    sendJson(res, 200, {
+      channel_kind: "slack",
+      channel_identity: channelId,
+      profile: ctx.slug,
+      bound_profile: ctx.bound_slug,
+      cascaded: ctx.cascaded,
+      api_server_port: ctx.api_server_port,
+      api_server_key_present: ctx.api_server_key != null,
+      profile_dir: ctx.profile_dir,
+      journal_scope: ctx.journal_scope_key,
+    });
+  });
+
   // GET /status — fail-soft. NEVER 5xx (dashboard polls it).
-  addRoute("GET", "/api/v1/channels/slack/status", async ({ res }) => {
+  addRoute("GET", "/api/v1/channels/slack/status", async ({ res, query }) => {
+    const paths = resolveSlackProfile(query);
     let envMap: Record<string, string> = {};
     let envErr: string | null = null;
     try {
-      envMap = await readProfileEnv();
+      envMap = await readProfileEnv(paths);
     } catch (e) {
       envErr = e instanceof Error ? e.message : String(e);
     }
@@ -571,8 +721,17 @@ export function registerSlackRoutes(): void {
   });
 
   // PUT /tokens — write bot + app tokens + opts to .env + vault, restart hermes.
-  addRoute("PUT", "/api/v1/channels/slack/tokens", async ({ res, body }) => {
-    const b = (body ?? {}) as Record<string, unknown>;
+  addRoute(
+    "PUT",
+    "/api/v1/channels/slack/tokens",
+    async ({ res, body, query }) => {
+      const paths = resolveSlackProfile(query);
+      try {
+        assertWritableProfile(getStateDb(), paths.profileSlug);
+      } catch (e) {
+        throw new ValidationError(e instanceof Error ? e.message : String(e));
+      }
+      const b = (body ?? {}) as Record<string, unknown>;
 
     const botToken =
       typeof b.bot_token === "string" ? b.bot_token.trim() : "";
@@ -591,53 +750,103 @@ export function registerSlackRoutes(): void {
       );
     }
 
-    // Optional Phase-2 fields.
-    const updates: Partial<Record<SlackEnvKey, string | null>> = {
-      SLACK_BOT_TOKEN: botToken,
-      SLACK_APP_TOKEN: appToken,
-    };
-    if (typeof b.allowed_users === "string") {
-      updates.SLACK_ALLOWED_USERS = b.allowed_users.trim() || null;
-    }
-    if (typeof b.home_channel === "string") {
-      updates.SLACK_HOME_CHANNEL = b.home_channel.trim() || null;
-    }
-    if (typeof b.allowed_channels === "string") {
-      updates.SLACK_ALLOWED_CHANNELS = b.allowed_channels.trim() || null;
-    }
+      // Optional Phase-2 fields.
+      const updates: Partial<Record<SlackEnvKey, string | null>> = {
+        SLACK_BOT_TOKEN: botToken,
+        SLACK_APP_TOKEN: appToken,
+      };
+      if (typeof b.allowed_users === "string") {
+        updates.SLACK_ALLOWED_USERS = b.allowed_users.trim() || null;
+      }
+      if (typeof b.home_channel === "string") {
+        updates.SLACK_HOME_CHANNEL = b.home_channel.trim() || null;
+      }
+      if (typeof b.allowed_channels === "string") {
+        updates.SLACK_ALLOWED_CHANNELS = b.allowed_channels.trim() || null;
+      }
 
-    // Vaultwarden = canonical store. Two items (bot + app). Both must succeed
-    // before we touch the .env so a vault outage doesn't leave us with the
-    // tokens half-saved (.env set, vault missing).
-    await upsertVaultItem(VAULT_BOT_ITEM_NAME, botToken);
-    await upsertVaultItem(VAULT_APP_ITEM_NAME, appToken);
-    await writeProfileEnvKeys(updates);
-    // Drop the auth.test cache so /status reflects the new token immediately.
-    _authTestCache = null;
-    restartHermes();
-    sendJson(res, 200, { ok: true, state: "configured_starting" });
-  });
+      // Vaultwarden = canonical store. Two items (bot + app), per profile.
+      // Both must succeed before we touch the .env so a vault outage doesn't
+      // leave us with the tokens half-saved (.env set, vault missing).
+      const itemNames = slackVaultItemNames(paths.profileSlug);
+      await upsertVaultItem(itemNames.bot, botToken);
+      await upsertVaultItem(itemNames.app, appToken);
+      await writeProfileEnvKeys(paths, updates);
+      appendAudit({
+        action_type: "channel_token_set",
+        actor: "principal",
+        source: "channels/slack/tokens",
+        target_path: "channels/slack/tokens",
+        target_kind: "channel",
+        subject_ref: paths.profileSlug,
+        summary: `Slack tokens set on profile '${paths.profileSlug}'`,
+        payload: { profile_slug: paths.profileSlug, channel_kind: "slack" },
+      });
+      // Drop the auth.test cache so /status reflects the new token immediately.
+      _authTestCache = null;
+      const restart = restartProfile(paths.profileSlug, {
+        allowComposeFallback: true,
+      });
+      sendJson(res, 200, {
+        ok: true,
+        state: "configured_starting",
+        profile: paths.profileSlug,
+        restart_scope: restart.scope,
+        restart_warning: restart.warning,
+      });
+    },
+  );
 
   // DELETE /tokens — wipe vault items + drop all SLACK_* env keys + restart.
-  addRoute("DELETE", "/api/v1/channels/slack/tokens", async ({ res }) => {
-    await deleteVaultItem(VAULT_BOT_ITEM_NAME);
-    await deleteVaultItem(VAULT_APP_ITEM_NAME);
-    await writeProfileEnvKeys({
-      SLACK_BOT_TOKEN: null,
-      SLACK_APP_TOKEN: null,
-      SLACK_ALLOWED_USERS: null,
-      SLACK_HOME_CHANNEL: null,
-      SLACK_ALLOWED_CHANNELS: null,
-    });
-    _authTestCache = null;
-    restartHermes();
-    sendJson(res, 200, { ok: true, state: "unconfigured" });
-  });
+  addRoute(
+    "DELETE",
+    "/api/v1/channels/slack/tokens",
+    async ({ res, query }) => {
+      const paths = resolveSlackProfile(query);
+      try {
+        assertWritableProfile(getStateDb(), paths.profileSlug);
+      } catch (e) {
+        throw new ValidationError(e instanceof Error ? e.message : String(e));
+      }
+      const itemNames = slackVaultItemNames(paths.profileSlug);
+      await deleteVaultItem(itemNames.bot);
+      await deleteVaultItem(itemNames.app);
+      await writeProfileEnvKeys(paths, {
+        SLACK_BOT_TOKEN: null,
+        SLACK_APP_TOKEN: null,
+        SLACK_ALLOWED_USERS: null,
+        SLACK_HOME_CHANNEL: null,
+        SLACK_ALLOWED_CHANNELS: null,
+      });
+      appendAudit({
+        action_type: "channel_token_cleared",
+        actor: "principal",
+        source: "channels/slack/tokens",
+        target_path: "channels/slack/tokens",
+        target_kind: "channel",
+        subject_ref: paths.profileSlug,
+        summary: `Slack tokens cleared on profile '${paths.profileSlug}'`,
+        payload: { profile_slug: paths.profileSlug, channel_kind: "slack" },
+      });
+      _authTestCache = null;
+      const restart = restartProfile(paths.profileSlug, {
+        allowComposeFallback: true,
+      });
+      sendJson(res, 200, {
+        ok: true,
+        state: "unconfigured",
+        profile: paths.profileSlug,
+        restart_scope: restart.scope,
+        restart_warning: restart.warning,
+      });
+    },
+  );
 
   // POST /test — send a real test message via Slack Web API.
   // Target: SLACK_HOME_CHANNEL if set, else the bot's own user_id (DM-to-self).
-  addRoute("POST", "/api/v1/channels/slack/test", async ({ res }) => {
-    const envMap = await readProfileEnv().catch(() => ({}) as Record<string, string>);
+  addRoute("POST", "/api/v1/channels/slack/test", async ({ res, query }) => {
+    const paths = resolveSlackProfile(query);
+    const envMap = await readProfileEnv(paths).catch(() => ({}) as Record<string, string>);
     const botToken = envMap.SLACK_BOT_TOKEN ?? "";
     if (!botToken) {
       throw new ValidationError(
@@ -666,6 +875,7 @@ export function registerSlackRoutes(): void {
       botToken,
       channel,
       `🤵 Test message from your Alfred dashboard · ${stamp}`,
+      paths.profileSlug,
     );
     if (result.ok) {
       sendJson(res, 200, {

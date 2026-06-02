@@ -64,7 +64,7 @@ def test_merge_preserves_telegram_keys_from_existing_env(tmp_path: Path) -> None
         "API_SERVER_PORT=18789\n"
         "OPENROUTER_API_KEY=newkey\n"  # template overrides
     )
-    out = _merge_preserve_runtime_keys(rendered, env_path)
+    out = _merge_preserve_runtime_keys(rendered, env_path, "main")
 
     # Template's value for OPENROUTER_API_KEY wins.
     parsed = _parse_env_keys(out)
@@ -80,14 +80,46 @@ def test_merge_preserves_telegram_keys_from_existing_env(tmp_path: Path) -> None
 def test_no_existing_env_returns_rendered_unchanged(tmp_path: Path) -> None:
     env_path = tmp_path / ".env"  # does not exist
     rendered = "API_SERVER_PORT=18789\n"
-    assert _merge_preserve_runtime_keys(rendered, env_path) == rendered
+    assert _merge_preserve_runtime_keys(rendered, env_path, "main") == rendered
+
+
+def test_codex_builder_skips_runtime_preservation(tmp_path: Path) -> None:
+    """codex-builder is the sealed-runtime profile (PR 2 of
+    docs/codex-builder-runtime.md). Its .env is a strict positive allowlist
+    — preserving runtime-managed keys would be a leak vector. Even when the
+    existing .env carries TELEGRAM_/SLACK_/PAPERCLIP_/AAS_ keys (e.g. from
+    a misconfigured operator copy), the preservation step MUST return the
+    rendered output unchanged for this profile.
+    """
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "OPENROUTER_API_KEY=should-never-be-here\n"
+        "TELEGRAM_BOT_TOKEN=leak-vector-1\n"
+        "PAPERCLIP_API_KEY=leak-vector-2\n"
+        "TWILIO_ACCOUNT_SID=AC" + ("0" * 32) + "\n"
+    )
+    rendered = (
+        "API_SERVER_PORT=18793\n"
+        "API_SERVER_MODEL_NAME=codex-builder\n"
+        "CODEX_HOME=/hermes-state/profiles/codex-builder/.codex\n"
+    )
+    out = _merge_preserve_runtime_keys(rendered, env_path, "codex-builder")
+
+    # Strict equality — the rendered output must be returned untouched.
+    assert out == rendered
+    parsed = _parse_env_keys(out)
+    assert "TELEGRAM_BOT_TOKEN" not in parsed
+    assert "PAPERCLIP_API_KEY" not in parsed
+    assert "TWILIO_ACCOUNT_SID" not in parsed
+    # Even the OPENROUTER_API_KEY "in the existing file" did not flow through.
+    assert "OPENROUTER_API_KEY" not in parsed
 
 
 def test_non_allowlisted_keys_are_not_preserved(tmp_path: Path) -> None:
     env_path = tmp_path / ".env"
     env_path.write_text("MY_RANDOM_EDIT=foo\nSOME_LEGACY=bar\n")
     rendered = "API_SERVER_PORT=18789\n"
-    out = _merge_preserve_runtime_keys(rendered, env_path)
+    out = _merge_preserve_runtime_keys(rendered, env_path, "main")
     parsed = _parse_env_keys(out)
     assert "MY_RANDOM_EDIT" not in parsed
     assert "SOME_LEGACY" not in parsed
@@ -101,7 +133,7 @@ def test_all_runtime_prefixes_are_picked_up(tmp_path: Path) -> None:
         lines.append(f"{prefix}SAMPLE=value-for-{prefix.lower()}")
     env_path.write_text("\n".join(lines) + "\n")
     rendered = "API_SERVER_PORT=18789\n"
-    out = _merge_preserve_runtime_keys(rendered, env_path)
+    out = _merge_preserve_runtime_keys(rendered, env_path, "main")
     parsed = _parse_env_keys(out)
     for prefix in _RUNTIME_KEY_PREFIXES:
         key = f"{prefix}SAMPLE"
@@ -115,7 +147,7 @@ def test_template_takes_precedence_for_allowlisted_keys(tmp_path: Path) -> None:
     env_path = tmp_path / ".env"
     env_path.write_text("TELEGRAM_BOT_TOKEN=stale-token\n")
     rendered = "TELEGRAM_BOT_TOKEN=template-set\n"
-    out = _merge_preserve_runtime_keys(rendered, env_path)
+    out = _merge_preserve_runtime_keys(rendered, env_path, "main")
     parsed = _parse_env_keys(out)
     assert parsed["TELEGRAM_BOT_TOKEN"] == "template-set"
 
@@ -142,7 +174,7 @@ def test_merge_preserves_twilio_and_sms_keys_from_existing_env(tmp_path: Path) -
         "API_SERVER_PORT=18789\n"
         "OPENROUTER_API_KEY=newkey\n"  # template still wins for provider keys
     )
-    out = _merge_preserve_runtime_keys(rendered, env_path)
+    out = _merge_preserve_runtime_keys(rendered, env_path, "main")
     parsed = _parse_env_keys(out)
 
     # Template wins for OPENROUTER_API_KEY (not in the runtime allowlist).

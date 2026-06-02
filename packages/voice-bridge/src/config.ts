@@ -85,6 +85,41 @@ export const config = {
   maxCallSeconds: Number(optional("MAX_CALL_SECONDS", "1800")),
   // Idle hangup if no audio either way (Phase 9 hardening)
   idleHangupSeconds: Number(optional("IDLE_HANGUP_SECONDS", "60")),
+
+  // ── ESPHome Native API (issue #112, PR1 skeleton) ───────────────────────
+  // Second listener that speaks the ESPHome Native API so Home Assistant's
+  // ESPHome integration discovers voice-bridge over mDNS and pairs with us.
+  // PR1 ships the skeleton: handshake + device info + entity list. The
+  // voice_assistant audio flow lands in PR2/PR3.
+  //
+  // Default is opt-in (ESPHOME_API_ENABLED=0) per spec §6 — flip to "1" once
+  // the audio path stabilises. PR1 deploys flip the env in docker-compose.
+  esphomeApiEnabled: optional("ESPHOME_API_ENABLED", "0") === "1",
+  esphomeApiPort: Number(optional("ESPHOME_API_PORT", "6053")),
+  esphomeApiBind: optional("ESPHOME_API_BIND", "0.0.0.0"),
+  // Optional ConnectRequest password. PR1 default = empty (tailnet boundary
+  // per spec §5.5 Q7 resolution). The HA_VOICE_API_TOKEN lane joins the
+  // channel_tokens table from #111 in PR2.
+  haVoiceApiToken: optional("HA_VOICE_API_TOKEN", ""),
+  // Tenant seed used to derive a stable locally-administered MAC for the
+  // synthetic ESPHome device. Falls back to os.hostname() in computeIdentity.
+  esphomeTenantSeed: optional("ESPHOME_TENANT_SEED", ""),
+  esphomeFriendlyName: optional("ESPHOME_FRIENDLY_NAME", "Alfred"),
+
+  // ── Wyoming Protocol fallback (issue #112, PR5) ─────────────────────────
+  // HA's Wyoming integration speaks a different on-wire shape than the
+  // ESPHome Native API — JSONL events over a TCP socket on :10300. We
+  // implement the satellite-side surface so HA can route a full Assist
+  // pipeline through us without going via mDNS-discovered ESPHome.
+  //
+  // OFF by default (WYOMING_ENABLED=0) because the ESPHome Native API path
+  // is shorter end-to-end. Flip to "1" on tenants whose HA install can't
+  // reach :6053 over the LAN (HA-OS / HA-Cloud) but CAN reach a Wyoming
+  // server on the same tailnet. See packages/voice-bridge/docs/
+  // ha-pipeline-setup.md for the trade-off.
+  wyomingEnabled: optional("WYOMING_ENABLED", "0") === "1",
+  wyomingPort: Number(optional("WYOMING_PORT", "10300")),
+  wyomingBind: optional("WYOMING_BIND", "0.0.0.0"),
 } as const;
 
 export type Config = typeof config;

@@ -55,12 +55,25 @@ import { registerTelegramRoutes } from "./routes/telegram.js";
 import { registerSlackRoutes } from "./routes/slack.js";
 import { registerSmsRoutes } from "./routes/sms.js";
 import { registerVoiceRoutes } from "./routes/voice.js";
+import { registerVoiceEsphomeRoutes } from "./routes/voice_esphome.js";
 import { registerOmiChannelRoutes } from "./routes/channels_omi.js";
 import { registerPaperclipChannelRoutes } from "./routes/channels_paperclip.js";
 import { registerPaperclipEvidenceRoutes } from "./routes/paperclipEvidence.js";
+import {
+  registerChannelsRecallRoutes,
+  registerRecallWebhookRoute,
+} from "./routes/channels_recall.js";
+import { registerHaChannelRoutes } from "./routes/channels_ha.js";
+import { registerHaWsRoutes } from "./routes/channels_ha_ws.js";
+import { registerChannelTokenRoutes } from "./routes/channel_tokens.js";
+import { registerChannelsTokensRoutes } from "./routes/channels_tokens.js";
 import { registerComposioWebhookRoutes } from "./routes/composioWebhook.js";
 import { registerAlfredJournalRoutes } from "./routes/alfredJournal.js";
 import { registerAlfredDeliverRoutes } from "./routes/alfredDeliver.js";
+import { registerFilesRoutes } from "./routes/files.js";
+import { registerChannelsTailscaleRoutes } from "./routes/channels_tailscale.js";
+import { registerProfileRoutes } from "./routes/profiles.js";
+import { registerChannelIdentityRoutes } from "./routes/channel_identity.js";
 
 export interface RouteParams {
   [key: string]: string;
@@ -173,9 +186,42 @@ export function createApiServer(): http.Server {
   registerSlackRoutes();
   registerSmsRoutes();
   registerVoiceRoutes();
+  // /api/v1/channels/voice/esphome/* + /wyoming/status — #112 PR5. Live
+  // wiring of the ESPHome listener + Wyoming fallback for the dashboard's
+  // VoiceWakeWordsCard. Read routes proxy to voice-bridge over the docker
+  // network; POST /devices/test opens a real outbound ESPHome Native API
+  // probe against the satellite IP the operator pastes in.
+  registerVoiceEsphomeRoutes();
   registerOmiChannelRoutes();
   registerPaperclipChannelRoutes();
   registerPaperclipEvidenceRoutes();
+  // /api/v1/channels/recall/* + /api/v1/webhooks/recall — Recall.ai
+  // meeting-bot channel (#113 PR2). Card-driven config + inbound
+  // Svix-signed webhook. The card UI lands in PR3a/3b; the alfred-learn
+  // dispatcher in PR4; the voice/webpage path in PR5/6.
+  registerChannelsRecallRoutes();
+  registerRecallWebhookRoute();
+  // /api/v1/channels/ha/* — Home Assistant conversation agent (#111). PR1
+  // ships the non-streaming /turn route; #110 PR1 extends with discovery
+  // routes; PR3+ extends with tool partitioning + streaming.
+  registerHaChannelRoutes();
+  // /api/v1/channels/ha/ws/* — Tier 4 long-lived WS surface (#115/#158 PR1).
+  // status + WS-backed registry pull. Closes #149 (the area/device gap
+  // from #110 PR5 — REST returned 404 for area_registry/list because
+  // those registries are WS-only).
+  registerHaWsRoutes();
+  // /api/v1/channel-tokens/* — shared per-channel bearer-token surface
+  // (#111 PR1, Sir's decision Q2). HA-conversation tokens land here; HA
+  // Voice (#112) joins next; Paperclip migrates onto it later.
+  registerChannelTokenRoutes();
+  // /api/v1/channels/tokens/* — canonical REST surface for the same
+  // shared bearer-token table (#111 PR4). REST-uniform: resource at the
+  // path root, methods pick the operation
+  // (POST mint, GET list, GET :id, DELETE revoke, POST :id/rotate).
+  // The legacy /api/v1/channel-tokens/* surface stays registered above
+  // so existing fleet bearers + the first cut of the HA card keep
+  // working; new web-layer callers (PR4 web operations) use this surface.
+  registerChannelsTokensRoutes();
   registerComposioWebhookRoutes();
   // The one-Alfred continuity layer — alfred_journal + principal mapping
   // (the persistence + lookup surface) plus alfred-deliver (the unified
@@ -183,6 +229,24 @@ export function createApiServer(): http.Server {
   // ONE Alfred, always. See docs/design/one-alfred.md.
   registerAlfredJournalRoutes();
   registerAlfredDeliverRoutes();
+  // Store 5 (files) — principal-facing blob store. Issue #114 PR 1
+  // ships volume + table + REST routes; PR 2 wires the MCP tools,
+  // PR 3 the dashboard, PR 4 content extraction. See
+  // docs/specs/issue-114-local-file-storage.md.
+  registerFilesRoutes();
+  // /api/v1/channels/tailscale/* — the six lifecycle routes that drive
+  // the off-by-default tailscale sidecar shipped in PR 1 of issue #109.
+  // PR 3 wires the /connections web card; PR 4 the Caddy + Serve story.
+  // See docs/specs/issue-109-tailscale-via-ui.md.
+  registerChannelsTailscaleRoutes();
+  // Multi-profile Hermes registry (#120 Lane I). Registry-only — no
+  // Hermes-side activation yet (Lane II); no channel-route rewiring (Lane IV).
+  // See packages/ctrl/src/db/migrations/0017_agent_profiles.sql.
+  registerProfileRoutes();
+  // Per-(profile, channel_kind) display_name + avatar (#206 Q6 Lane I).
+  // Consumed by Lane IV adapters at send time via resolveChannelIdentity().
+  // See packages/ctrl/src/db/migrations/0018_channel_identity.sql.
+  registerChannelIdentityRoutes();
 
   const server = http.createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const start = Date.now();
@@ -221,6 +285,10 @@ export function createApiServer(): http.Server {
         pathname.startsWith("/api/v1/streams/omi/") ||
         pathname === "/api/v1/plane/webhook" ||
         pathname === "/api/v1/webhooks/plane/steward" ||
+        // Vexa webhook retired in #113 PR1; the 410 Gone stub still
+        // lives at /api/v1/webhooks/vexa so any retrying caller hears
+        // back. Kept public so unauthenticated retries see the 410, not
+        // a 401 (which they would interpret as a transient outage).
         pathname === "/api/v1/webhooks/vexa" ||
         pathname.startsWith("/api/v1/webhooks/in/") ||
         pathname === "/api/v1/channels/email/inbound" ||
@@ -228,12 +296,34 @@ export function createApiServer(): http.Server {
         // <ts>.<raw-body>), not bearer-authed. Lane V's Caddy
         // @public_webhooks matcher passes /api/v1/channels/paperclip/* through.
         pathname === "/api/v1/channels/paperclip/heartbeat" ||
+        // Home Assistant conversation /turn — bearer-authed via the shared
+        // channel_tokens table (channel='ha-conversation'). The route
+        // calls channelTokenBearer() itself; the global master-key gate
+        // would otherwise 401 every HA install whose bearer is NOT the
+        // master AAS_API_KEY. Issue #111 PR1.
+        pathname === "/api/v1/channels/ha/turn" ||
         // Composio webhook is HMAC-validated against COMPOSIO_WEBHOOK_SECRET
         // (Standard-Webhooks scheme on `webhook-signature` / older shape on
         // `x-composio-signature`). Composio cannot send a Bearer header so
         // the global auth gate must not pre-empt the HMAC check. See
         // routes/composioWebhook.ts for the full auth model.
-        pathname === "/api/v1/composio/webhook";
+        pathname === "/api/v1/composio/webhook" ||
+        // Recall.ai webhook (#113 PR2). Svix-signed
+        // (svix-id / svix-timestamp / svix-signature over the raw body
+        // keyed on RECALL_WEBHOOK_SECRET). Same posture as the Composio
+        // entry above — the HMAC validator lives in
+        // routes/channels_recall.ts and needs the exact bytes.
+        pathname === "/api/v1/webhooks/recall" ||
+        // #120 Lane Vb — ctrl-api's voice-inbound TwiML landing pad. The
+        // principal can configure Twilio to point at this URL (alongside
+        // the more-direct voice-bridge /twiml/inbound). The route only
+        // emits routing-decision TwiML — no secrets read, no profile
+        // mutation. In production Sir should still set TWILIO_AUTH_TOKEN
+        // per profile so the receiving side (voice-bridge) validates
+        // X-Twilio-Signature on the same body. Smoke endpoints accept the
+        // ?format=json shape so the routing decision can be asserted
+        // without going through Twilio.
+        pathname === "/api/v1/channels/voice/inbound";
       if (!isPublic) {
         // Pass method+pathname so the scoped-token path can check the
         // route allowlist (see auth.ts VOICE_BRIDGE_ALLOWLIST). The master
@@ -265,10 +355,12 @@ export function createApiServer(): http.Server {
       const isRawBody =
         pathname === "/api/v1/plane/webhook" ||
         pathname === "/api/v1/webhooks/plane/steward" ||
-        pathname === "/api/v1/webhooks/vexa" ||
         // Composio's Standard-Webhooks scheme signs the raw body, so the
         // handler must see the exact bytes — see routes/composioWebhook.ts.
-        pathname === "/api/v1/composio/webhook";
+        pathname === "/api/v1/composio/webhook" ||
+        // Recall.ai's Svix-signed webhook also needs the raw bytes for
+        // HMAC verification (see routes/channels_recall.ts).
+        pathname === "/api/v1/webhooks/recall";
       const query = new URLSearchParams(qIdx >= 0 ? url.slice(qIdx + 1) : "");
 
       const matched = matchRoute(method, pathname);

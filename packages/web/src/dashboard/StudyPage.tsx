@@ -3,7 +3,7 @@
 // Sections in a sidebar layout:
 //
 //   • Settings    — agent config (model + agent voice/tone), workspace
-//                   files (RULES.md, AGENTS.md, SOUL.md), Vexa toggle.
+//                   files (RULES.md, AGENTS.md, SOUL.md).
 //   • Account     — billing portal + identity.
 //   • API keys    — listApiKeys / createApiKey / revokeApiKey for
 //                   programmatic SaaS access.
@@ -34,8 +34,6 @@ import {
   getAgentConfig,
   updateAgentModel,
   getModelCatalog,
-  getVexaAutoJoin,
-  setVexaAutoJoin,
   getAgentSettings,
   setAgentSetting,
   getWorkspaceFile,
@@ -245,9 +243,6 @@ function SettingsSection() {
     retry: false,
   });
   const { data: catalog } = useQuery(getModelCatalog, undefined, { retry: false });
-  const { data: vexa, refetch: refetchVexa } = useQuery(getVexaAutoJoin, undefined, {
-    retry: false,
-  });
   const { data: rulesData, refetch: refetchRules } = useQuery(
     getWorkspaceFile,
     { filename: "RULES.md" },
@@ -307,7 +302,6 @@ function SettingsSection() {
     return { ...p, riders, model };
   }).filter((p) => p.riders.length > 0 || p.model);
 
-  const vexaEnabled = Boolean((vexa as any)?.enabled);
   const [savingProfile, setSavingProfile] = useState<string | null>(null);
 
   async function changeProfileModel(profileId: string, model: string) {
@@ -325,15 +319,6 @@ function SettingsSection() {
       console.error("change model failed", e);
     } finally {
       setSavingProfile(null);
-    }
-  }
-
-  async function toggleVexa() {
-    try {
-      await setVexaAutoJoin({ enabled: !vexaEnabled });
-      await refetchVexa();
-    } catch (e) {
-      console.error("vexa toggle failed", e);
     }
   }
 
@@ -386,20 +371,6 @@ function SettingsSection() {
             </div>
           </li>
         ))}
-        <li className="grid grid-cols-[200px_1fr] gap-6 py-5 border-b border-rule items-baseline">
-          <span className="font-display italic text-[18px]">Meeting bot</span>
-          <div className="flex items-baseline gap-4">
-            <span
-              className="font-body italic flex-1"
-              style={{ color: "var(--marginalia)" }}
-            >
-              {vexaEnabled ? "Auto-joining" : "Off"}
-            </span>
-            <button onClick={toggleVexa} className="btn-link">
-              {vexaEnabled ? "Stop" : "Start"}
-            </button>
-          </div>
-        </li>
       </ul>
 
       <AgentAutonomySection />

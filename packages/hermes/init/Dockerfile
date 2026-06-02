@@ -29,7 +29,17 @@ FROM python:3.12-slim-bookworm
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     rsync gettext-base git ca-certificates curl gnupg \
+    acl \
+    util-linux \
     && rm -rf /var/lib/apt/lists/*
+# acl + util-linux: setfacl (codex-builder uid-10001 negative ACL on
+# /vault, /alfred-data, other-profile dirs) + setpriv (the negative-
+# assert spot-checks in step 7b). PR 4b — without these the existing
+# "world readable" perms on /vault (0644) etc. defeat the uid-only
+# negative-asserts because uid 10001 reads as "other". ACL deny rules
+# preserve every other consumer's read access (alfred-learn uid 1000,
+# vault-cli root, hermes main uid 10000) while specifically blocking
+# uid 10001. ~2 MB added.
 
 # docker-ce-cli only — bootstrap-paperclip.sh shells out to `docker exec`
 # / `docker inspect` against the paperclip sidecar (via the docker socket
@@ -57,13 +67,27 @@ RUN pip install --no-cache-dir --no-deps /alfred-src
 
 # Jinja2 — renders the per-profile Hermes config.yaml + .env from .njk
 # templates (Nunjucks `.njk` is a Jinja2-compatible subset here).
-RUN pip install --no-cache-dir "jinja2==3.1.6"
+# ruamel.yaml — round-trip YAML editor (preserves comments + quotes +
+# ordering) used by the ADD-only config.yaml mutators (render_sms_gateway,
+# render_mcp_servers). PyYAML would reformat the operator-owned config on
+# every write; ruamel.yaml leaves the surrounding file byte-stable when it
+# only needs to graft a new sub-block.
+RUN pip install --no-cache-dir "jinja2==3.1.6" "ruamel.yaml==0.18.6"
 
 # Build context is the alfred-black monorepo root. All COPY paths below are
 # repo-relative.
 COPY packages/hermes/init/entrypoint.sh        ./entrypoint.sh
 COPY packages/hermes/init/render_hermes.py     ./render_hermes.py
+# render_registry.py — #120 Lane II. Enumerates the agent_profile registry
+# from ctrl-api's state.db (mounted RO at /ctrl-data/alfred-state.db) and
+# emits the slug:port:model list entrypoint.sh iterates over, plus writes
+# /hermes-state/profiles/_registry.json the supervisor reads at boot.
+COPY packages/hermes/init/render_registry.py   ./render_registry.py
 COPY packages/hermes/init/render_sms_gateway.py ./render_sms_gateway.py
+# render_mcp_servers.py — idempotent ADD-only mutator that backfills new
+# required MCP server entries (e.g. `hass` PR #128, `files` PR #130) into
+# the operator-owned per-profile config.yaml. Sibling of render_sms_gateway.
+COPY packages/hermes/init/render_mcp_servers.py ./render_mcp_servers.py
 # Paperclip auto-bootstrap. Invoked as the entrypoint of the sibling
 # `paperclip-init` compose service (see docker-compose.yaml). Not run by
 # this image's default entrypoint.sh — keeps the main init container
@@ -127,6 +151,11 @@ COPY packages/mcp-server/instructions/alfred-custom-instructions.md ./AGENTS.md
 # baseline SOUL, replacing Hermes' stock Nous identity. The onboarding-chosen
 # persona at /vault/SOUL.md takes precedence when present (see entrypoint).
 COPY packages/hermes/init/SOUL.md ./SOUL.md
+
+# SOUL.codex-builder.md — the codex-builder profile's distinct persona (a
+# sealed engineering executor, NOT Alfred). Deployed into the codex-builder
+# profile dir by entrypoint.sh step 7b. Not used by main/workers/heavy.
+COPY packages/hermes/SOUL.codex-builder.md ./SOUL.codex-builder.md
 
 RUN chmod +x entrypoint.sh bootstrap-paperclip.sh
 

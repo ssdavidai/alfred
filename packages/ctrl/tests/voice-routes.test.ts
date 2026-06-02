@@ -38,11 +38,39 @@ import realFs from "node:fs";
 // no-op, but defer to the real fs for anything else (tsx loader still
 // needs it to read source files).
 
+// State the fakes read from on each call, mutated per-test in `beforeEach`.
+interface FakeState {
+  composeService: "missing" | "running" | "starting" | "unhealthy";
+  envText: string; // contents of the hermes-main /.env
+  composeEnvText: string; // contents of COMPOSE_DIR/.env (OPENAI_API_KEY + allowlist)
+  logsTail: string; // tail of voice-bridge container logs (used in error state)
+}
+
+const fake: FakeState = {
+  composeService: "missing",
+  envText: "",
+  composeEnvText: "",
+  logsTail: "",
+};
+
+// fs.readFileSync is called by voice.ts's `readComposeEnvKey()` to read
+// COMPOSE_DIR/.env directly (OPENAI_API_KEY + voice allowlist). Intercept
+// that one path and serve `fake.composeEnvText`; defer to real fs for
+// anything else (tsx loader, source files).
+const realReadFileSync = realFs.readFileSync;
+const readFileSyncFn = mock.fn((p: any, opts?: any) => {
+  if (typeof p === "string" && p.endsWith("/.env")) {
+    return fake.composeEnvText;
+  }
+  return realReadFileSync(p, opts);
+});
+
 const fsMock = {
   ...realFs,
   mkdirSync: mock.fn(() => undefined),
   writeFileSync: mock.fn(() => undefined),
   appendFileSync: mock.fn(() => undefined),
+  readFileSync: readFileSyncFn,
 };
 
 mock.module("node:fs", {
@@ -54,21 +82,9 @@ mock.module("node:fs", {
     mkdirSync: fsMock.mkdirSync,
     writeFileSync: fsMock.writeFileSync,
     appendFileSync: fsMock.appendFileSync,
+    readFileSync: readFileSyncFn,
   },
 });
-
-// State the fakes read from on each call, mutated per-test in `beforeEach`.
-interface FakeState {
-  composeService: "missing" | "running" | "starting" | "unhealthy";
-  envText: string; // contents of the hermes-main /.env
-  logsTail: string; // tail of voice-bridge container logs (used in error state)
-}
-
-const fake: FakeState = {
-  composeService: "missing",
-  envText: "",
-  logsTail: "",
-};
 
 // dockerComposeCmd(["ps","voice-bridge","--format","json"]) is the
 // compose_service_exists probe. When the service is absent, `docker
@@ -199,6 +215,7 @@ after(async () => {
 beforeEach(() => {
   fake.composeService = "missing";
   fake.envText = "";
+  fake.composeEnvText = "";
   fake.logsTail = "";
   dockerComposeCmdFn.mock.resetCalls();
   dockerExecFn.mock.resetCalls();
@@ -282,6 +299,10 @@ describe("GET /api/v1/channels/voice/status", () => {
       "TWILIO_ACCOUNT_SID=AC00000000000000000000000000000000\n" +
       "TWILIO_AUTH_TOKEN=00000000000000000000000000000000\n" +
       "TWILIO_PHONE_NUMBER=+15550100\n";
+    // PR #42 made OPENAI_API_KEY a gate for state="configured_running"
+    // (voice-bridge needs it to talk to gpt-realtime). Without it, /status
+    // resolves to state="unconfigured" with openai_key_set=false.
+    fake.composeEnvText = "OPENAI_API_KEY=sk-test-dummy\n";
     const { status, data } = await get("/api/v1/channels/voice/status");
     assert.equal(status, 200);
     assert.equal(data.compose_service_exists, true);
@@ -293,7 +314,17 @@ describe("GET /api/v1/channels/voice/status", () => {
 
   it("reports state=error with a non-null error string when the service is unhealthy", async () => {
     fake.composeService = "unhealthy";
-    fake.envText = "TWILIO_PHONE_NUMBER=+15550100\n";
+    // #120 Lane Vb: voice is now per-profile and `configured=true` requires
+    // SID + TOKEN + phone, mirroring the SMS card. The test seeds all three
+    // so the resolution falls through to the health probe (which the test
+    // controls via `fake.composeService`).
+    fake.envText =
+      "TWILIO_ACCOUNT_SID=AC00000000000000000000000000000000\n" +
+      "TWILIO_AUTH_TOKEN=00000000000000000000000000000000\n" +
+      "TWILIO_PHONE_NUMBER=+15550100\n";
+    // OPENAI_API_KEY required for state="error" too (otherwise the
+    // openai-key-missing path swallows it as state="unconfigured").
+    fake.composeEnvText = "OPENAI_API_KEY=sk-test-dummy\n";
     fake.logsTail =
       "voice-bridge | ERROR: media stream websocket connection refused\n";
     const { status, data } = await get("/api/v1/channels/voice/status");

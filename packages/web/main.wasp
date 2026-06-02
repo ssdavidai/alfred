@@ -301,6 +301,40 @@ page ChannelsPage {
   component: import ChannelsPage from "@src/dashboard/ChannelsPage"
 }
 
+// /profiles — multi-profile Hermes manager (#120 Lane III).
+// One page lists user-facing personas; the New flow walks Sir through a
+// minimal wizard (slug, label, model, optional persona template); the
+// detail page surfaces channel bindings + archive/restore.
+route ProfilesRoute { path: "/profiles", to: ProfilesPage }
+page ProfilesPage {
+  authRequired: true,
+  component: import ProfilesPage from "@src/dashboard/ProfilesPage"
+}
+
+route ProfileNewRoute { path: "/profiles/new", to: ProfileNewPage }
+page ProfileNewPage {
+  authRequired: true,
+  component: import ProfileNewPage from "@src/dashboard/ProfileNewPage"
+}
+
+route ProfileDetailRoute { path: "/profiles/:slug", to: ProfileDetailPage }
+page ProfileDetailPage {
+  authRequired: true,
+  component: import ProfileDetailPage from "@src/dashboard/ProfileDetailPage"
+}
+
+// /profiles/:slug/channels — per-profile FULL channels surface (#120 Lane V).
+// Renders every profile-aware channel card (Telegram / Slack / SMS /
+// Paperclip) scoped to one profile slug. Instance-level channels (Voice /
+// OMI / HA / Recall / Email / Tailscale / Terminal) render an honest
+// "configured on /channels" notice — see ProfileChannelsPage.tsx for the
+// reasons.
+route ProfileChannelsRoute { path: "/profiles/:slug/channels", to: ProfileChannelsPage }
+page ProfileChannelsPage {
+  authRequired: true,
+  component: import ProfileChannelsPage from "@src/dashboard/ProfileChannelsPage"
+}
+
 // /chat — the dashboard chat surface (#29). Replaces the OpenClaw raw
 // WebSocket widget; talks to the Hermes runtime over HTTP/SSE via the
 // chat proxy registered in src/server/setup.ts.
@@ -351,6 +385,17 @@ route VaultRoute { path: "/vault", to: VaultPage }
 page VaultPage {
   authRequired: true,
   component: import VaultPage from "@src/dashboard/VaultPage"
+}
+
+// /files — principal-facing blob store (#114 PR3). Distinct from /vault:
+// the vault is the principal's knowledge surface (markdown the principal
+// reads and edits); /files is raw blob storage (PDFs, images, audio,
+// archives) that Alfred can read but the principal owns. Backed by
+// `files_data` named volume + ctrl-api routes shipped in PR1.
+route FilesRoute { path: "/files", to: FilesPage }
+page FilesPage {
+  authRequired: true,
+  component: import FilesPage from "@src/dashboard/FilesPage"
 }
 
 // /matters + /matters/:id — long-running concerns (M4 #859).
@@ -540,6 +585,53 @@ query getVaultTitleIndex {
   entities: []
 }
 
+// /files — principal-facing blob store (#114 PR3). Read endpoints flow
+// through standard Wasp queries; upload + blob (multipart / raw bytes)
+// ride through src/server/filesProxy.ts (registered in setup.ts).
+query getFilesUsage {
+  fn: import { getFilesUsage } from "@src/dashboard/operations",
+  entities: []
+}
+
+query getFilesList {
+  fn: import { getFilesList } from "@src/dashboard/operations",
+  entities: []
+}
+
+query getFileStat {
+  fn: import { getFileStat } from "@src/dashboard/operations",
+  entities: []
+}
+
+action updateFileLabel {
+  fn: import { updateFileLabel } from "@src/dashboard/operations",
+  entities: []
+}
+
+action deleteFile {
+  fn: import { deleteFile } from "@src/dashboard/operations",
+  entities: []
+}
+
+// #114 §7+§8 — Recycle-bin view + symmetric restore.
+//
+// `listDeletedFiles` powers the "Recently deleted" expander on /files,
+// surfacing soft-deleted rows whose tombstone falls inside the 30-day
+// restore window. `restoreFile` clears the tombstone (atomically, with
+// `file_blobs.ref_count` bumped back up) and writes a `file_restore`
+// row to the audit ledger via appendAudit — the inverse undo recipe
+// points back at DELETE so /study#audit reads the two-event story
+// cleanly.
+query listDeletedFiles {
+  fn: import { listDeletedFiles } from "@src/dashboard/operations",
+  entities: []
+}
+
+action restoreFile {
+  fn: import { restoreFile } from "@src/dashboard/operations",
+  entities: []
+}
+
 // STATE-MUTATION Phase E (#893) — briefings index + single. Wraps the
 // ctrl-api endpoints written by the alfred-learn BriefingWorkflow.
 // Powers /brief (most-recent) and /briefings (chronological list).
@@ -651,17 +743,6 @@ query getCredentials {
 
 action updateCredentials {
   fn: import { updateCredentials } from "@src/dashboard/operations",
-  entities: []
-}
-
-// Vexa meeting-bot auto-join toggle
-query getVexaAutoJoin {
-  fn: import { getVexaAutoJoin } from "@src/dashboard/operations",
-  entities: []
-}
-
-action setVexaAutoJoin {
-  fn: import { setVexaAutoJoin } from "@src/dashboard/operations",
   entities: []
 }
 
@@ -904,6 +985,385 @@ action disconnectOmiGroqKey {
 
 action sendOmiTest {
   fn: import { sendOmiTest } from "@src/dashboard/operations",
+  entities: []
+}
+
+// Lane III (Tailscale, #109 PR3 — 2026-05-29) — operator opt-in card on
+// /channels. Four ops backed by ctrl-api /api/v1/channels/tailscale/*
+// (PR2 #127 landed the routes). The sidecar lives under
+// `profiles: ["tailscale"]` in docker-compose — off by default. State
+// derivation lives in tailscaleCardCore.ts. PR4 (cert + serve) lands the
+// LE-cert passthrough + Caddy/Funnel ingress.
+query getTailscaleStatus {
+  fn: import { getTailscaleStatus } from "@src/dashboard/operations",
+  entities: []
+}
+
+action connectTailscale {
+  fn: import { connectTailscale } from "@src/dashboard/operations",
+  entities: []
+}
+
+action disconnectTailscale {
+  fn: import { disconnectTailscale } from "@src/dashboard/operations",
+  entities: []
+}
+
+query getTailscalePeers {
+  fn: import { getTailscalePeers } from "@src/dashboard/operations",
+  entities: []
+}
+
+// Lane III (Recall.ai, #113 PR3) — operator-facing /channels card. Five ops
+// against the ctrl-api routes shipped in PR2 (#129). The composite
+// getRecallChannelStatus stitches /config + /usage + /bots/active into the
+// shape recallCardCore.deriveRecallCardState consumes. The card never sees
+// the raw RECALL_API_KEY; the validate-key flow round-trips and never
+// persists (persistence ships in PR3a).
+query getRecallChannelStatus {
+  fn: import { getRecallChannelStatus } from "@src/dashboard/operations",
+  entities: []
+}
+
+action updateRecallConfig {
+  fn: import { updateRecallConfig } from "@src/dashboard/operations",
+  entities: []
+}
+
+action validateRecallApiKey {
+  fn: import { validateRecallApiKey } from "@src/dashboard/operations",
+  entities: []
+}
+
+// Lane III (#113 PR3a) — persist a validated Recall API key. The card
+// calls this immediately after validateRecallApiKey returns {ok:true},
+// with the same key. ctrl-api validates again, writes to Vaultwarden +
+// the compose .env atomically, then restarts ctrl-api + alfred-learn.
+// Never echoes the full key; response carries `key_first6` only.
+action setRecallApiKey {
+  fn: import { setRecallApiKey } from "@src/dashboard/operations",
+  entities: []
+}
+
+// Persist the Svix signing secret Recall.ai's webhook dashboard mints.
+// Card-side companion to setRecallApiKey — required before any inbound
+// webhook delivery can be verified, otherwise ctrl-api's
+// /api/v1/webhooks/recall handler 503s with NOT_CONFIGURED.
+action setRecallWebhookSecret {
+  fn: import { setRecallWebhookSecret } from "@src/dashboard/operations",
+  entities: []
+}
+
+action testRecallWebhook {
+  fn: import { testRecallWebhook } from "@src/dashboard/operations",
+  entities: []
+}
+
+action terminateRecallBot {
+  fn: import { terminateRecallBot } from "@src/dashboard/operations",
+  entities: []
+}
+
+// Lane III (#113 PR4) — operator-facing "Send bot now" button on the
+// /channels Recall card. POSTs to ctrl-api's create-bot route with a
+// pasted meeting URL and (optionally) a friendly bot name override.
+// ctrl-api dedupes if calendar_event_id is supplied; the manual path
+// does not supply one (the card just hands over the URL).
+action dispatchRecallBot {
+  fn: import { dispatchRecallBot } from "@src/dashboard/operations",
+  entities: []
+}
+
+// === Recall PR5: in-meeting voice ===
+// Lane III — Alfred-in-meeting two-way voice ops. Three actions + one
+// query bind the RecallCard's live-bots section against the PR5
+// ctrl-api routes. muteRecallBot/unmuteRecallBot toggle the wake-word→
+// speak loop; recallBotSpeak is the manual "Speak now" CTA;
+// getRecallBotTranscript polls the per-bot transcript JSON companion
+// to the SSE stream. The bot speaks AS ALFRED in the meeting — these
+// ops drive Alfred's voice; they NEVER impersonate the principal.
+query getRecallBotTranscript {
+  fn: import { getRecallBotTranscript } from "@src/dashboard/operations",
+  entities: []
+}
+
+action muteRecallBot {
+  fn: import { muteRecallBot } from "@src/dashboard/operations",
+  entities: []
+}
+
+action unmuteRecallBot {
+  fn: import { unmuteRecallBot } from "@src/dashboard/operations",
+  entities: []
+}
+
+action recallBotSpeak {
+  fn: import { recallBotSpeak } from "@src/dashboard/operations",
+  entities: []
+}
+// === end Recall PR5 ===
+
+// Wave C — HA conversation setup card (#111 PR3). Reads the shared
+// `channel_tokens` table for rows with `channel='ha-conversation'`
+// (one row per HA install). Mint + revoke proxy to the same shared
+// surface; both 404-fall-through to a "Coming in PR4" message so the
+// card never breaks the page.
+query getHaInstalledTokens {
+  fn: import { getHaInstalledTokens } from "@src/dashboard/operations",
+  entities: []
+}
+
+action mintHaChannelToken {
+  fn: import { mintHaChannelToken } from "@src/dashboard/operations",
+  entities: []
+}
+
+action revokeChannelToken {
+  fn: import { revokeChannelToken } from "@src/dashboard/operations",
+  entities: []
+}
+
+// Wave C — Voice satellites & wake-words card (#112 PR3). Reads the
+// list of ESPHome devices the voice-bridge has discovered on the
+// LAN. Status endpoint lands in #112 PR4; until then the operation
+// 404-falls-through to `{ devices: [], unavailable: true }` so the
+// card surfaces a helpful empty-state message instead of an error.
+query getEsphomeDevices {
+  fn: import { getEsphomeDevices } from "@src/dashboard/operations",
+  entities: []
+}
+
+// #112 PR5 — operator-side probe of a satellite IP. Opens an outbound
+// ESPHome Native API connection from the tenant VM, runs Hello →
+// DeviceInfo → ListEntities, looks for a voice_assistant entity,
+// reports back with structured recommendations the card renders inline.
+action testEsphomeDevice {
+  fn: import { testEsphomeDevice } from "@src/dashboard/operations",
+  entities: []
+}
+
+// #112 PR5 — Wyoming-fallback readiness. Returns enabled / port /
+// last_handshake_at — the card renders a tile distinguishing
+// "Wyoming on" from "Wyoming off (the default)".
+query getWyomingStatus {
+  fn: import { getWyomingStatus } from "@src/dashboard/operations",
+  entities: []
+}
+
+// Lane I (Home Assistant, #110 PR3 — 2026-05-29) — operator deep-integrates
+// HA on /channels. Four ops backed by ctrl-api /api/v1/channels/ha/*
+// (PR1 #133 backfill landed the routes). State derivation lives in
+// haCardCore.ts. PR4 lands the /runs ledger; PR5 backfills the registry.
+query getHaStatus {
+  fn: import { getHaStatus } from "@src/dashboard/operations",
+  entities: []
+}
+
+query getHaRegistry {
+  fn: import { getHaRegistry } from "@src/dashboard/operations",
+  entities: []
+}
+
+action connectHa {
+  fn: import { connectHa } from "@src/dashboard/operations",
+  entities: []
+}
+
+action disconnectHa {
+  fn: import { disconnectHa } from "@src/dashboard/operations",
+  entities: []
+}
+
+action refreshHaRegistry {
+  fn: import { refreshHaRegistry } from "@src/dashboard/operations",
+  entities: []
+}
+
+// #110 PR6 — gap detection + proposal generation read/write surface.
+// The HaBootstrapWorkflow Phase B + C run inside the same workflow
+// the "Refresh registry" CTA above triggers; these five ops let the
+// HaCard read the resulting ha_gap / ha_proposal rows and take
+// principal action on them.
+query getHaGaps {
+  fn: import { getHaGaps } from "@src/dashboard/operations",
+  entities: []
+}
+
+query getHaProposals {
+  fn: import { getHaProposals } from "@src/dashboard/operations",
+  entities: []
+}
+
+action applyHaProposal {
+  fn: import { applyHaProposal } from "@src/dashboard/operations",
+  entities: []
+}
+
+action dismissHaGap {
+  fn: import { dismissHaGap } from "@src/dashboard/operations",
+  entities: []
+}
+
+action rejectHaProposal {
+  fn: import { rejectHaProposal } from "@src/dashboard/operations",
+  entities: []
+}
+
+// ============================================================
+// #120 Lane III — multi-profile Hermes
+// ============================================================
+// Thin proxies to ctrl-api's /api/v1/agent-profiles surface (Lane I).
+// The detail page reads `getAgentProfile` for the {profile, bindings}
+// shape that Lane IIb confirmed.
+
+query getAgentProfiles {
+  fn: import { getAgentProfiles } from "@src/dashboard/operations",
+  entities: []
+}
+
+query getAgentProfile {
+  fn: import { getAgentProfile } from "@src/dashboard/operations",
+  entities: []
+}
+
+action createAgentProfile {
+  fn: import { createAgentProfile } from "@src/dashboard/operations",
+  entities: []
+}
+
+action archiveAgentProfile {
+  fn: import { archiveAgentProfile } from "@src/dashboard/operations",
+  entities: []
+}
+
+action restoreAgentProfile {
+  fn: import { restoreAgentProfile } from "@src/dashboard/operations",
+  entities: []
+}
+
+action bindChannelToProfile {
+  fn: import { bindChannelToProfile } from "@src/dashboard/operations",
+  entities: []
+}
+
+action unbindChannelFromProfile {
+  fn: import { unbindChannelFromProfile } from "@src/dashboard/operations",
+  entities: []
+}
+
+// #204 Lane III — per-profile MCP catalog ops.
+// GET list, POST add, DELETE remove — all thin proxies to ctrl-api C1 routes.
+// `entities: []` because there is no Prisma entity backing these; the source of
+// truth is the Hermes profile config read/written via the ctrl-api.
+
+query getProfileMcp {
+  fn: import { getProfileMcp } from "@src/dashboard/operations",
+  entities: []
+}
+
+action addProfileMcp {
+  fn: import { addProfileMcp } from "@src/dashboard/operations",
+  entities: []
+}
+
+action removeProfileMcp {
+  fn: import { removeProfileMcp } from "@src/dashboard/operations",
+  entities: []
+}
+
+// #205 Lane III — per-profile skill catalogue (Q4 from #120). Mirrors the
+// Q3 MCP-ops shape; GET is a query (read), PUT is an action (toggle).
+// `entities: []` for the same reason as the MCP ops above — the source of
+// truth is the Hermes profile's filesystem catalogue + config.yaml read and
+// written via the ctrl-api.
+query getProfileSkills {
+  fn: import { getProfileSkills } from "@src/dashboard/operations",
+  entities: []
+}
+
+action setProfileSkillEnabled {
+  fn: import { setProfileSkillEnabled } from "@src/dashboard/operations",
+  entities: []
+}
+
+// #206 Lane III — per-(profile, channel_kind) display name + avatar overrides.
+// One query + two actions. The PUT action carries an avatar payload as
+// base64 + filename + mime (Wasp args are JSON-only); the operation
+// constructs multipart/form-data server-side before forwarding to
+// ctrl-api. `entities: []` — the canonical row is `channel_identity` in
+// ctrl-api's state.db (C1 contract); the SaaS layer never reads it
+// directly, only via these ops.
+query getChannelIdentities {
+  fn: import { getChannelIdentities } from "@src/dashboard/operations",
+  entities: []
+}
+
+action putChannelIdentity {
+  fn: import { putChannelIdentity } from "@src/dashboard/operations",
+  entities: []
+}
+
+action deleteChannelIdentity {
+  fn: import { deleteChannelIdentity } from "@src/dashboard/operations",
+  entities: []
+}
+
+// #120 Lane V — per-profile FULL channels surface ops.
+//
+// The three consolidator ops the /profiles/:slug/channels page wires up. They
+// route through Lane IV's ?profile=<slug> shape on ctrl-api so each profile
+// has its own Telegram / Slack / SMS / Paperclip credentials.
+
+query getProfileChannelStatuses {
+  fn: import { getProfileChannelStatuses } from "@src/dashboard/operations",
+  entities: []
+}
+
+action setProfileChannelToken {
+  fn: import { setProfileChannelToken } from "@src/dashboard/operations",
+  entities: []
+}
+
+action clearProfileChannelToken {
+  fn: import { clearProfileChannelToken } from "@src/dashboard/operations",
+  entities: []
+}
+
+// #120 Lane Vb2 — per-profile AgentMail inbox provisioning. Sir's
+// clarification: "email MUST be per profile." These ops wire the
+// /profiles/:slug/channels Email card to ctrl-api's
+// /api/v1/channels/email/{status,provision,inbox,test}?profile=<slug>.
+query getProfileEmailStatus {
+  fn: import { getProfileEmailStatus } from "@src/dashboard/operations",
+  entities: []
+}
+
+action provisionProfileEmailInbox {
+  fn: import { provisionProfileEmailInbox } from "@src/dashboard/operations",
+  entities: []
+}
+
+action clearProfileEmailInbox {
+  fn: import { clearProfileEmailInbox } from "@src/dashboard/operations",
+  entities: []
+}
+
+action sendProfileEmailTest {
+  fn: import { sendProfileEmailTest } from "@src/dashboard/operations",
+  entities: []
+}
+
+// #120 Lane Vb — explicit voice-credentials wrappers. Delegate to
+// setProfileChannelToken / clearProfileChannelToken under the hood; named
+// here so call sites that only handle voice don't have to remember the
+// channel-kind string.
+action setProfileVoiceCredentials {
+  fn: import { setProfileVoiceCredentials } from "@src/dashboard/operations",
+  entities: []
+}
+
+action clearProfileVoiceCredentials {
+  fn: import { clearProfileVoiceCredentials } from "@src/dashboard/operations",
   entities: []
 }
 
@@ -1336,6 +1796,21 @@ page ToolsPage {
 query getAllowedTools {
   fn: import { getAllowedTools } from "@src/tools/operations",
   entities: [ComposioConnection]
+}
+
+// Phase B tool dispositions: read the 9-row direct/delegated map for the
+// MCP servers Hermes-main loads, and flip a server between the two
+// modes. The action queues a debounced Hermes restart so the new
+// `tools.include: []` whitelist takes effect; the UI shows a "Hermes is
+// restarting" line and refetches once the window closes.
+query getToolDispositions {
+  fn: import { getToolDispositions } from "@src/tools/operations",
+  entities: []
+}
+
+action setToolDisposition {
+  fn: import { setToolDisposition } from "@src/tools/operations",
+  entities: []
 }
 
 // ============================================================

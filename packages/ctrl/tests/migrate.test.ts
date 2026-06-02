@@ -36,10 +36,17 @@ describe("state.db migration runner", () => {
     const db = new DatabaseSync(":memory:");
     db.exec(schema);
     const v = runMigrations(db);
-    // The latest version moves as new migrations land. Today: 2
-    // (0001_fix_pack + 0002_alfred_journal).
-    assert.equal(v, 2, "migrated to latest version");
-    assert.equal(userVersion(db), 2);
+    // Latest version moves as new migrations land. Today: 18
+    // (0001_fix_pack + 0002_alfred_journal + 0003_tailscale_connection
+    // + 0004_channel_tokens + 0005_ha_channel + 0006_files_table
+    // + 0007_recall + 0008_ha_event_subscription
+    // + 0009_ha_registry_vanished + 0010_files_cold_archive
+    // + 0011_ha_tier4 + 0012_ha_integration_ref_removed_at
+    // + 0013_recall_realtime + 0014_tool_disposition
+    // + 0015_composio_user_defaults + 0016_files_extraction
+    // + 0017_agent_profiles + 0018_channel_identity).
+    assert.equal(v, 18, "migrated to latest version");
+    assert.equal(userVersion(db), 18);
     assert.ok(cols(db, "observation").includes("processed_at"), "0001: processed_at present after migrate");
     // 0002: alfred_journal + alfred_principal tables present.
     const tables = (
@@ -52,6 +59,305 @@ describe("state.db migration runner", () => {
       tables.includes("alfred_principal"),
       "0002: alfred_principal table created",
     );
+    // 0003: tailscale_connection singleton table present, with the
+    // CHECK(id=1) guard that pins the table to one row. Issue #109 PR 1.
+    assert.ok(
+      tables.includes("tailscale_connection"),
+      "0003: tailscale_connection table created",
+    );
+    const tsCols = cols(db, "tailscale_connection");
+    for (const required of [
+      "id",
+      "state",
+      "tailnet_ip",
+      "tailnet_hostname",
+      "authkey_used_at",
+      "auth_url",
+      "last_status_probe_at",
+      "last_error",
+      "created_at",
+      "updated_at",
+    ]) {
+      assert.ok(
+        tsCols.includes(required),
+        `0003: tailscale_connection.${required} present`,
+      );
+    }
+    // Singleton guard: a second row at id=2 must be rejected by the CHECK.
+    const now = Date.now();
+    db.prepare(
+      "INSERT INTO tailscale_connection (id, state, created_at, updated_at) VALUES (?, ?, ?, ?)",
+    ).run(1, "disabled", now, now);
+    assert.throws(
+      () =>
+        db
+          .prepare(
+            "INSERT INTO tailscale_connection (id, state, created_at, updated_at) VALUES (?, ?, ?, ?)",
+          )
+          .run(2, "disabled", now, now),
+      /CHECK constraint failed/i,
+      "0003: CHECK(id=1) blocks a second tailscale_connection row",
+    );
+
+    // 0004: channel_tokens table present (issue #111 PR 1).
+    assert.ok(
+      tables.includes("channel_tokens"),
+      "0004: channel_tokens table created",
+    );
+    const ctCols = cols(db, "channel_tokens");
+    for (const required of ["id", "channel", "token_hash", "created_at"]) {
+      assert.ok(
+        ctCols.includes(required),
+        `0004: channel_tokens.${required} present`,
+      );
+    }
+
+    // 0008: ha_event_subscription table present (issue #110 PR 4).
+    assert.ok(
+      tables.includes("ha_event_subscription"),
+      "0008: ha_event_subscription table created",
+    );
+    const subCols = cols(db, "ha_event_subscription");
+    for (const required of [
+      "id",
+      "filter_json",
+      "started_at",
+      "last_event_at",
+      "closed_at",
+    ]) {
+      assert.ok(
+        subCols.includes(required),
+        `0008: ha_event_subscription.${required} present`,
+      );
+    }
+
+    // 0009: ha_registry.vanished_at column added (#110 PR 5). The
+    // HaBootstrapWorkflow tombstones (does NOT delete) entities that
+    // vanished from HA between pulls; the dashboard's "live" partial
+    // index over `vanished_at IS NULL` keeps the live read cheap.
+    const haRegCols = cols(db, "ha_registry");
+    assert.ok(
+      haRegCols.includes("vanished_at"),
+      "0009: ha_registry.vanished_at column added",
+    );
+
+    // 0010: file_blobs table + files.cold_promoted_at / ref_count
+    // columns + idx_files_last_accessed (issue #114 PR 5).
+    assert.ok(
+      tables.includes("file_blobs"),
+      "0010: file_blobs table created",
+    );
+    const blobCols = cols(db, "file_blobs");
+    for (const required of [
+      "sha256",
+      "path",
+      "size_bytes",
+      "ref_count",
+      "created_at",
+      "cold_promoted_at",
+    ]) {
+      assert.ok(
+        blobCols.includes(required),
+        `0010: file_blobs.${required} present`,
+      );
+    }
+    const fileCols = cols(db, "files");
+    assert.ok(
+      fileCols.includes("cold_promoted_at"),
+      "0010: files.cold_promoted_at present",
+    );
+    assert.ok(
+      fileCols.includes("ref_count"),
+      "0010: files.ref_count present",
+    );
+    // The PR 1 UNIQUE constraint on files.path is gone (dedupe needs
+    // two files.id rows to point at the same path). Verify the
+    // constraint was dropped: inserting two rows with the same path
+    // must succeed.
+    const filesNow = Date.now();
+    db.prepare(
+      `INSERT INTO files
+        (id, path, size_bytes, sha256, content_type, original_filename,
+         principal_label, uploaded_by, uploaded_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      "01HFTEST0000000000000000A",
+      "01HFTEST/dup.bin",
+      4,
+      "abc",
+      null,
+      "dup.bin",
+      null,
+      "principal",
+      filesNow,
+    );
+    assert.doesNotThrow(() =>
+      db
+        .prepare(
+          `INSERT INTO files
+            (id, path, size_bytes, sha256, content_type, original_filename,
+             principal_label, uploaded_by, uploaded_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          "01HFTEST0000000000000000B",
+          "01HFTEST/dup.bin",
+          4,
+          "abc",
+          null,
+          "dup.bin",
+          null,
+          "principal",
+          filesNow,
+        ),
+      "0010: files.path UNIQUE constraint dropped — dedupe needs shared paths",
+    );
+
+    // 0011: Tier 4 HA autonomy — ha_backup_ref + ha_integration_ref +
+    // ha_user_ref tables present (#115/#158 PR1).
+    for (const t of ["ha_backup_ref", "ha_integration_ref", "ha_user_ref"]) {
+      assert.ok(tables.includes(t), `0011: ${t} table created`);
+    }
+    for (const required of [
+      "id",
+      "ha_backup_id",
+      "triggered_by",
+      "decision_ref",
+      "ts",
+    ]) {
+      assert.ok(
+        cols(db, "ha_backup_ref").includes(required),
+        `0011: ha_backup_ref.${required} present`,
+      );
+    }
+    for (const required of ["entry_id", "installed_by", "decision_ref", "installed_at"]) {
+      assert.ok(
+        cols(db, "ha_integration_ref").includes(required),
+        `0011: ha_integration_ref.${required} present`,
+      );
+    }
+    // 0012: PR4 follow-up — soft-delete column on ha_integration_ref.
+    assert.ok(
+      cols(db, "ha_integration_ref").includes("removed_at"),
+      "0012: ha_integration_ref.removed_at present",
+    );
+    for (const required of ["ha_user_id", "name", "decision_ref", "llat_vw_id", "created_at"]) {
+      assert.ok(
+        cols(db, "ha_user_ref").includes(required),
+        `0011: ha_user_ref.${required} present`,
+      );
+    }
+
+    // 0016: files.{alfred_read_at, summary, extraction_error} present.
+    // These are the three columns the FileExtractionWorkflow writes
+    // back via PATCH /api/v1/files/:id/extraction (#114 Lane B).
+    const filesColsAfter = cols(db, "files");
+    for (const required of [
+      "alfred_read_at",
+      "summary",
+      "extraction_error",
+    ]) {
+      assert.ok(
+        filesColsAfter.includes(required),
+        `0016: files.${required} present`,
+      );
+    }
+
+    // 0017: agent_profile + channel_profile_binding tables present, the
+    // four reserved infra rows seeded, the per-channel-kind default
+    // bindings seeded, and channel_tokens.profile_slug column added
+    // (#120 Lane I).
+    assert.ok(
+      tables.includes("agent_profile"),
+      "0017: agent_profile table created",
+    );
+    assert.ok(
+      tables.includes("channel_profile_binding"),
+      "0017: channel_profile_binding table created",
+    );
+    const reservedSlugs = (
+      db
+        .prepare(
+          "SELECT slug FROM agent_profile WHERE is_reserved = 1 ORDER BY slug",
+        )
+        .all() as { slug: string }[]
+    ).map((r) => r.slug);
+    assert.deepEqual(
+      reservedSlugs,
+      ["codex-builder", "heavy", "main", "workers"],
+      "0017: four reserved infra profiles seeded",
+    );
+    const defaultBindingKinds = (
+      db
+        .prepare(
+          "SELECT channel_kind FROM channel_profile_binding WHERE id LIKE 'binding-default-%' ORDER BY channel_kind",
+        )
+        .all() as { channel_kind: string }[]
+    ).map((r) => r.channel_kind);
+    assert.deepEqual(
+      defaultBindingKinds,
+      [
+        "email",
+        "ha",
+        "omi",
+        "paperclip",
+        "recall",
+        "slack",
+        "sms",
+        "tailscale",
+        "telegram",
+        "terminal",
+        "voice",
+      ],
+      "0017: per-channel-kind default bindings seeded",
+    );
+    assert.ok(
+      cols(db, "channel_tokens").includes("profile_slug"),
+      "0017: channel_tokens.profile_slug column added",
+    );
+
+    // 0018: channel_identity table present + (profile_slug, channel_kind) PK
+    // + the five expected columns. The table is empty at fresh-migrate time;
+    // the route layer (PUT /channel-identities/:kind) is the only writer.
+    assert.ok(
+      tables.includes("channel_identity"),
+      "0018: channel_identity table created",
+    );
+    const ciCols = cols(db, "channel_identity");
+    for (const required of [
+      "profile_slug",
+      "channel_kind",
+      "display_name",
+      "avatar_path",
+      "avatar_mime",
+      "updated_at",
+    ]) {
+      assert.ok(
+        ciCols.includes(required),
+        `0018: channel_identity.${required} present`,
+      );
+    }
+    // Composite PK enforces one row per (profile, channel_kind). Insert a
+    // sentinel via the seeded 'main' profile then prove a second insert at
+    // the same PK is rejected.
+    db.prepare(
+      `INSERT INTO channel_identity
+         (profile_slug, channel_kind, display_name, avatar_path, avatar_mime)
+       VALUES ('main', 'telegram', 'Alfred', NULL, NULL)`,
+    ).run();
+    assert.throws(
+      () =>
+        db
+          .prepare(
+            `INSERT INTO channel_identity
+               (profile_slug, channel_kind, display_name)
+             VALUES ('main', 'telegram', 'Alfred (dup)')`,
+          )
+          .run(),
+      /UNIQUE constraint failed|PRIMARY KEY/i,
+      "0018: composite PK rejects a second row for the same (profile, kind)",
+    );
+
     db.close();
   });
 
@@ -60,7 +366,7 @@ describe("state.db migration runner", () => {
     db.exec(schema);
     runMigrations(db);
     const v2 = runMigrations(db);
-    assert.equal(v2, 2);
+    assert.equal(v2, 18);
     assert.equal(
       cols(db, "observation").filter((c) => c === "processed_at").length,
       1,

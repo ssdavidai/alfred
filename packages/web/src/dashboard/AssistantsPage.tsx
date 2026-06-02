@@ -7,10 +7,7 @@ import {
   triggerWorker,
   updateAgentModel,
   updateCredentials,
-  getVexaAutoJoin,
-  setVexaAutoJoin,
 } from "wasp/client/operations";
-import { Switch } from "../client/components/ui/switch";
 import { Navigate } from "react-router-dom";
 import { Card, CardContent, CardTitle } from "../client/components/ui/card";
 import { Button } from "../client/components/ui/button";
@@ -477,8 +474,6 @@ export function AssistantsContent() {
   return (
     <>
       <h2 className="font-serif mb-6 text-2xl font-light text-cream">Services</h2>
-
-      <VexaAutoJoinToggle />
 
       {isLoading && (
         <p className="text-muted-foreground">Loading assistant status...</p>
@@ -1003,116 +998,5 @@ function SurveyorTab({
   );
 }
 
-/* ------------------------------------------------------------------ */
-/*  Meeting bot — Vexa auto-join toggle                                 */
-/* ------------------------------------------------------------------ */
-
-/**
- * Toggle that flips VEXA_ENABLED on the tenant + pauses/unpauses the
- * `al-meeting-capture` Temporal schedule. Sir uses this to silence
- * Alfred for a focused work block (toggle off) and resume auto-join
- * later (toggle on) without SSH or a docker compose restart.
- *
- * Stays in "Services" tab because conceptually it's "is the meeting
- * service running?", and the schedule pause/unpause is the operative
- * action — the underlying compose stack stays up either way (we want
- * the dashboard, transcript history, etc. to remain accessible while
- * auto-join is paused).
- */
-type VexaAutoJoinState = {
-  enabled?: boolean;
-  schedule_paused?: boolean | null;
-  warning?: string | null;
-};
-
-function VexaAutoJoinToggle() {
-  // Wasp infers the operation return as `{}` since we don't type the
-  // server function (proxy operations like this one return whatever
-  // ctrl-api emitted, dynamically). Cast at the boundary so the UI can
-  // read the three fields the route documents.
-  const { data: rawData, isLoading, error, refetch } = useQuery(getVexaAutoJoin);
-  const data = rawData as VexaAutoJoinState | undefined;
-  const [pending, setPending] = useState(false);
-  const [warning, setWarning] = useState<string | null>(null);
-
-  const enabled = !!data?.enabled;
-  const schedulePaused = data?.schedule_paused;
-
-  const onToggle = async (next: boolean) => {
-    setPending(true);
-    setWarning(null);
-    try {
-      const rawResult = await setVexaAutoJoin({ enabled: next });
-      const result = rawResult as VexaAutoJoinState | undefined;
-      if (result?.warning) setWarning(String(result.warning));
-      await refetch();
-    } catch (e) {
-      setWarning(e instanceof Error ? e.message : String(e));
-    } finally {
-      setPending(false);
-    }
-  };
-
-  if (isLoading) {
-    return (
-      <Card className="mb-4">
-        <CardContent className="flex items-center gap-3 p-6">
-          <Loader2 className="h-4 w-4 animate-spin text-gold" />
-          <span className="text-sm text-muted-foreground">
-            Loading meeting bot status…
-          </span>
-        </CardContent>
-      </Card>
-    );
-  }
-
-  if (error) {
-    return (
-      <Card className="mb-4">
-        <CardContent className="p-6">
-          <p className="text-sm text-destructive">
-            Could not load meeting bot status: {error.message}
-          </p>
-        </CardContent>
-      </Card>
-    );
-  }
-
-  let scheduleLabel: string;
-  if (schedulePaused === null || schedulePaused === undefined) {
-    scheduleLabel = "schedule not yet provisioned";
-  } else if (schedulePaused) {
-    scheduleLabel = "schedule paused";
-  } else {
-    scheduleLabel = "schedule active";
-  }
-
-  return (
-    <Card className="mb-4">
-      <CardContent className="flex items-center justify-between gap-6 p-6">
-        <div className="min-w-0">
-          <CardTitle className="text-cream text-base">
-            Auto-join meetings
-          </CardTitle>
-          <p className="mt-1 text-sm text-muted-foreground">
-            When on, Alfred joins your Google Meet calls automatically and
-            transcribes them. When off, the bot stays out — you can still
-            invite it manually from the Vexa dashboard.
-          </p>
-          <p className="mt-1 font-mono text-xs text-[#8A8680]">
-            {scheduleLabel}
-          </p>
-          {warning && (
-            <p className="mt-1 text-xs text-destructive">{warning}</p>
-          )}
-        </div>
-        <Switch
-          checked={enabled}
-          disabled={pending}
-          onCheckedChange={onToggle}
-          aria-label="Toggle auto-join meetings"
-        />
-      </CardContent>
-    </Card>
-  );
-}
+// Meeting-bot auto-join toggle removed in #113 PR1 with the Vexa stack.
+// The replacement Recall.ai surface lives on /channels (#113 PR3a/PR3b).

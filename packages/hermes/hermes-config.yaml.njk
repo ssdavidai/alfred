@@ -33,7 +33,11 @@
               Same minimal-memory / no-channels / capped-concurrency posture
               as workers, but on an Opus-class model. API on :18791.
 #}
-{%- set is_main = (profile == "main") -%}
+{#- #120 Lane II — keep an external `is_main` override when the renderer
+    passed one (user-facing profiles render as main-like). Otherwise derive
+    from the slug for back-compat with anyone calling the template
+    directly. -#}
+{%- set is_main = is_main if is_main is defined else (profile == "main") -%}
 {%- set vault_path = vault_path | default("/vault") -%}
 {%- set ctrl_api_url = ctrl_api_url | default("http://ctrl-api:3100") -%}
 {%- set mcp_stdio_dir = mcp_stdio_dir | default("/opt/data/profiles/" + profile + "/mcp-stdio") -%}
@@ -47,6 +51,20 @@
 # =============================================================================
 # Model
 # =============================================================================
+{%- if profile == "codex-builder" %}
+# codex-builder is the sealed-runtime builder profile (docs/codex-builder-
+# runtime.md §2). Provider is HARD-PINNED to openai-codex — the codex CLI
+# this profile shells out to authenticates via ChatGPT OAuth, and the
+# supervising agent's LLM turns should use the same provider so the system
+# stays internally consistent. NOT overridable from .env: a future tenant
+# .env edit cannot accidentally swing this profile back to openrouter.
+model:
+  default: "{{ codex_builder_model | default('gpt-5-codex') }}"
+  provider: "openai-codex"
+  # No base_url for openai-codex — Hermes resolves the endpoint internally
+  # from the ChatGPT auth.json (shared with main per Sir's decision #1).
+  max_tokens: 8192
+{%- else %}
 model:
 {%- if is_main %}
   # User-facing Alfred — a capable model for the live chat surface.
@@ -80,6 +98,7 @@ model:
   # Sir 2026-05-27 — see joe.alfred.black cdsk incident: tool routing died
   # on this exact gate while the OpenRouter key still had $46 of credit.
   max_tokens: 8192
+{%- endif %}
 
 # =============================================================================
 # Agent behaviour
@@ -88,10 +107,18 @@ agent:
   # Tool-calling iteration ceiling per conversation.
 {%- if is_main %}
   max_turns: 80
+{%- elif profile == "codex-builder" %}
+  # codex-builder spends most of its turns shelling out to `codex exec`;
+  # 50 is consistent with workers/heavy and matches Sir's hand-off spec.
+  max_turns: 50
+  # Reason hard, act cheap — most "thought" happens inside the codex CLI.
+  reasoning_effort: "high"
 {%- else %}
   max_turns: 50
 {%- endif %}
+{%- if profile != "codex-builder" %}
   reasoning_effort: "medium"
+{%- endif %}
   verbose: false
   # Graceful drain on gateway stop/restart — let in-flight agents finish.
   restart_drain_timeout: 60
@@ -116,6 +143,18 @@ cron:
   # gateway process's own HERMES_HOME, so this affects main-profile cron jobs
   # only. The workers profile renders no `cron:` block and is unaffected.
   wrap_response: false
+{%- elif profile == "codex-builder" %}
+# codex-builder cron job — daily GC of /work/runs older than 7 days. Sir's
+# spec calls for ephemeral workspaces; the run dir is left in place after
+# a run for operator forensics (see docs/codex-builder-runtime.md §5) and
+# GC'd on this schedule. wrap_response: false because the only consumer is
+# `cleanup-old-runs` and the gateway's response wrap would just be noise.
+cron:
+  wrap_response: false
+  jobs:
+    - name: cleanup-old-runs
+      schedule: "13 3 * * *"
+      command: "find /work/runs -maxdepth 1 -mindepth 1 -type d -mtime +7 -exec rm -rf {} +"
 {%- else %}
 # Workers profile: no cron consumers — cron is left at Hermes defaults.
 {%- endif %}
@@ -144,10 +183,12 @@ memory:
   nudge_interval: 10
   flush_min_turns: 6
 {%- else %}
-  # Workers are stateless classification/curation agents — no conversation
-  # memory. This is the Hermes equivalent of OpenClaw's
-  # `plugins.slots.memory = "none"` on the workers gateway: it stops the
-  # unbounded memory-store growth that caused the QMD compaction death loop.
+  # Workers/heavy/codex-builder are stateless classification/curation/build
+  # agents — no conversation memory. This is the Hermes equivalent of
+  # OpenClaw's `plugins.slots.memory = "none"` on the workers gateway: it
+  # stops the unbounded memory-store growth that caused the QMD compaction
+  # death loop. codex-builder additionally is one-shot per run — there is
+  # no "user" or "principal" identity here, so user_profile would be empty.
   memory_enabled: false
   user_profile_enabled: false
   nudge_interval: 0
@@ -164,6 +205,13 @@ session_reset:
   mode: both
   idle_minutes: 1440
   at_hour: 4
+{%- elif profile == "codex-builder" %}
+  # Builder runs are one-shot per Paperclip issue — reset aggressively
+  # so the next run starts with no carry-over context. 5 min is well
+  # under the 30-min terminal.timeout below; a successful run finishes
+  # and the session goes idle, the next heartbeat finds it reset.
+  mode: idle
+  idle_minutes: 5
 {%- else %}
   # Workers run one-shot tasks; reset aggressively on idle so a worker
   # session never lingers and accumulates transcript.
@@ -180,6 +228,17 @@ delegation:
   max_iterations: 50
   max_concurrent_children: 3
   max_spawn_depth: 1
+{%- elif profile == "codex-builder" %}
+  # codex-builder NEVER delegates. The whole point is one sealed
+  # supervisor per Paperclip issue, driving codex-CLI through a
+  # restricted terminal. A spawned sub-agent would inherit none of the
+  # workspace mount logic and could undermine the security boundary by
+  # routing back through main's MCP catalogue (the orchestrator
+  # pattern in §1 is "Paperclip splits the work, not Hermes").
+  max_iterations: 50
+  max_concurrent_children: 1
+  max_spawn_depth: 0
+  subagent_auto_approve: false
 {%- else %}
   # Concurrency cap = 1. Background workers serialise all LLM calls — this
   # is the Hermes equivalent of OpenClaw's `agents.defaults.maxConcurrent: 1`
@@ -208,10 +267,12 @@ approvals:
   mode: smart
   timeout: 60
 {%- else %}
-  # Background workers run autonomously on cron/batch pipelines with no TTY
-  # and no human to answer a prompt — a `manual`/`smart` escalation would
-  # deadlock the run. `tool_loop_guardrails` (below) is the safety net that
-  # actually fits an unattended worker: a hard stop on stuck loops.
+  # Background workers / heavy / codex-builder run autonomously on cron /
+  # batch pipelines with no TTY and no human to answer a prompt — a
+  # `manual`/`smart` escalation would deadlock the run. For codex-builder
+  # specifically: the codex CLI's own `--sandbox workspace-write` is the
+  # safety net, not Hermes' approval surface. `tool_loop_guardrails`
+  # (below) is the additional belt-and-braces stop on stuck loops.
   mode: off
 {%- endif %}
 
@@ -245,9 +306,20 @@ terminal:
   # diverges (e.g. /hermes-state), so it now derives from the runtime profile
   # dir render_hermes bakes in. Pointed at the profile dir root (not the
   # workspace/ subdir) so it co-locates with the AGENTS.md the gateway loads.
+{%- if profile == "codex-builder" %}
+  # codex-builder runs codex out of /work (a separately-mounted named volume
+  # owned by uid 10001). workspace/ is a symlink into /work/runs created by
+  # the per-run prep script (PR 4); this cwd is the entry point.
+  cwd: "{{ runtime_profile_dir }}/workspace"
+  # 30-min wall-clock budget per `codex exec` (Sir's decision #3). Matches
+  # the Paperclip-side runTimeoutMs (see docs/codex-builder-runtime.md §7).
+  timeout: 1800
+  lifetime_seconds: 3600
+{%- else %}
   cwd: "{{ runtime_profile_dir }}/workspace"
   timeout: 180
   lifetime_seconds: 300
+{%- endif %}
 
 # =============================================================================
 # Skills
@@ -285,6 +357,14 @@ platform_toolsets:
   discord: [hermes-discord]
   whatsapp: [hermes-whatsapp]
   signal: [hermes-signal]
+{%- elif profile == "codex-builder" %}
+  # Sealed surface: terminal + file ONLY. No web (egress is iptables-
+  # restricted, see docs/codex-builder-runtime.md §6), no skills (none
+  # rendered into the profile dir), no todo (one-shot agent — no list to
+  # maintain), no vision (no images in code reviews here), no delegation
+  # (max_spawn_depth: 0 above is the hard fence; this is the soft one).
+  # The agent has exactly one verb: run terminal commands in /work/runs.
+  cli: [terminal, file]
 {%- else %}
   # Workers: terminal + file + web + skills + todo + delegation. No
   # messaging toolset — workers never deliver to a channel directly
@@ -295,9 +375,36 @@ platform_toolsets:
 # =============================================================================
 # MCP (Model Context Protocol) servers
 # =============================================================================
-# Six servers, identical on both profiles — migrated verbatim from the
-# OpenClaw `mcp.servers` block. One HTTP proxy + five stdio apps. Hermes
-# auto-namespaces every tool as mcp_<server>_<tool>.
+{%- if profile == "codex-builder" %}
+# codex-builder: explicitly empty. No ctrl-api, no Paperclip, no Plane,
+# no Sure, no Vaultwarden, no execute, no Composio. The supervisor agent
+# has zero MCP tools — its only verb is `terminal`. This is the hard
+# fence per docs/codex-builder-runtime.md §6: any future operator who
+# adds an MCP server here must justify why the sealed runtime should
+# gain a new external reach.
+mcp_servers: {}
+{%- else %}
+# Up to eight servers, profile-conditional:
+#   main, workers: 8  (the base 7 — alfred-ctrl + alfred + sure + plane +
+#                       vaultwarden + execute + paperclip — plus `files`)
+#   heavy:         7  (no `files` — heavy never touches the principal-facing
+#                       Store-5 surface; see the conditional block below.)
+#
+# Migrated verbatim from the OpenClaw `mcp.servers` block plus the
+# `paperclip` (2026-05-27) and `files` (2026-05-29) additions. One HTTP
+# proxy + N stdio apps. Hermes auto-namespaces every tool as
+# mcp_<server>_<tool>.
+#
+# `files` (PR 2 of issue #114): the principal's Store-5 blob surface
+# — list/stat/read/search/describe/usage/create/delete on local files
+# uploaded via the dashboard /files page. Wired on BOTH main and
+# workers: main needs it for the user-facing chat ("read that PDF Sir
+# uploaded"), workers needs it so the vault-curator / vault-janitor /
+# vault-distiller can correlate stored files with vault records (e.g.
+# attach a receipt PDF to a matter, or extract a slug from an uploaded
+# screenshot). NOT wired on `heavy` or `codex-builder` — heavy never
+# touches the principal-facing surface directly, and codex-builder is
+# the sealed-runtime builder profile with `mcp_servers: {}` by design.
 mcp_servers:
 
   # --- alfred-ctrl: HTTP proxy into this VM's ctrl-api ---------------------
@@ -369,6 +476,36 @@ mcp_servers:
     timeout: 120
     connect_timeout: 60
 
+{%- if is_main %}
+  # --- hass: Home Assistant operator surface (#110 PR2) --------------------
+  # 7th MCP server (added 2026-05-29). 16 tools — 11 read (registry / state
+  # / history / logbook / calendars / fuzzy entity resolution) + 5 PR3
+  # placeholders for the write surface (call_service / propose / apply /
+  # rollback / subscribe).
+  #
+  # MAIN PROFILE ONLY. Unlike the 6 servers above, `hass` is the user-facing
+  # Alfred's surface for talking about the principal's home — workers /
+  # heavy / codex-builder don't need it (background runs don't touch HA;
+  # PR3+ activities reach HA via ctrl-api's /channels/ha/* routes directly,
+  # not through this MCP server). Confining the catalogue to main also
+  # keeps the workers' tool listing lean.
+  #
+  # The HA long-lived access token NEVER reaches this MCP server — every
+  # tool proxies through ctrl-api's `/api/v1/channels/ha/*` routes, and
+  # ctrl-api owns the token (one consumer, one read path, one rotation
+  # surface — see issue #110 spec §6). Deliberately tighter than paperclip,
+  # which forces a per-profile PAPERCLIP_API_KEY because upstream MCP
+  # server design requires it; we control hass and got to choose.
+  hass:
+    command: "node"
+    args: ["{{ mcp_stdio_dir }}/dist/bin/stdio-app.js", "hass"]
+    env:
+      CTRL_API_URL: "{{ ctrl_api_url }}"
+      AAS_API_KEY: "${AAS_API_KEY}"
+    timeout: 120
+    connect_timeout: 60
+{%- endif %}
+
   # --- paperclip: Paperclip's first-party MCP server (paperclip.ing) -------
   # Wraps Paperclip's REST API as 48 stdio tools (companies, employees,
   # issues, projects, routines, approvals, …). Unlike the 5-app bundle
@@ -406,6 +543,33 @@ mcp_servers:
       PAPERCLIP_AGENT_ID: "${PAPERCLIP_AGENT_ID}"
     timeout: 120
     connect_timeout: 60
+
+{%- if is_main or profile == "workers" %}
+
+  # --- files: Store-5 blob surface (PR 2 of issue #114) --------------------
+  # Nine tools (list / stat / read_text / read_base64 / search / delete /
+  # create / usage / describe) onto ctrl-api's /api/v1/files/* routes —
+  # the principal-facing local file store added in PR 1.
+  #
+  # Wired on main + workers only:
+  #   * main    — the user-facing chat needs to read files Sir asks about
+  #               ("read that PDF I uploaded last week").
+  #   * workers — vault-curator, vault-janitor, and vault-distiller need
+  #               to correlate stored files with vault records (attach a
+  #               receipt PDF to a matter, slug-extract from a screenshot).
+  # NOT wired on `heavy` (background reasoning never touches principal-
+  # facing surfaces directly) or `codex-builder` (sealed runtime; see the
+  # codex-builder branch at the top of the mcp_servers block).
+  files:
+    command: "node"
+    args: ["{{ mcp_stdio_dir }}/dist/bin/stdio-app.js", "files"]
+    env:
+      CTRL_API_URL: "{{ ctrl_api_url }}"
+      AAS_API_KEY: "${AAS_API_KEY}"
+    timeout: 120
+    connect_timeout: 60
+{%- endif %}
+{%- endif %}{# end mcp_servers else (codex-builder gets mcp_servers: {} above) #}
 
 {%- if is_main %}
 # =============================================================================

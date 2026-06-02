@@ -28,6 +28,10 @@ from src.workflows.plane_sync import PlaneSyncWorkflow
 from src.workflows.plane_reverse_sync import PlaneReverseSyncWorkflow
 from src.workflows.plane_reconciliation import PlaneReconciliationWorkflow
 from src.workflows.fleet_audit import FleetAuditWorkflow
+from src.workflows.files_cold_archive import (
+    FilesColdArchiveWorkflow,
+)
+from src.workflows.file_extraction import FileExtractionWorkflow
 from src.workflows.composio_reconnect_cleanup import (
     ComposioReconnectCleanupWorkflow,
 )
@@ -56,6 +60,8 @@ from src.workflows.signal_router import (
 from src.workflows.stream_event_purge import StreamEventPurgeWorkflow
 from src.workflows.reversal_calibration import ReversalCalibrationWorkflow
 from src.workflows.briefing import BriefingWorkflow
+from src.workflows.recall_dispatcher import RecallDispatcherWorkflow
+from src.workflows.ha_bootstrap import HaBootstrapWorkflow
 
 # Chore template workflows (static + dynamic)
 from src.workflows.chores import ALL_CHORE_TEMPLATES
@@ -399,6 +405,26 @@ from src.activities.composio_reconnect import (
     verify_new_connection_active,
 )
 
+# Files cold-archive sweep (#114 PR 5) — daily promotion of unaccessed
+# blobs from `files_data` (live volume) to `files_cold_data` (ZSTD-19
+# compressed). ctrl-api owns the compression + atomic SQL flip; the
+# workflow is pure orchestration over these two activities.
+from src.activities.files_cold_archive import (
+    find_cold_candidates,
+    promote_to_cold,
+)
+
+# File content extraction (#114 Lane B) — one-shot per-upload pipeline.
+# Triggered fire-and-forget by ctrl-api's POST /api/v1/files/upload
+# route; runs the per-mime extractor + workers-gateway summary + stamps
+# the row so the /files page can render the "Alfred read it" badge.
+from src.activities.file_extraction import (
+    fetch_and_extract_text,
+    read_file_metadata,
+    stamp_extraction_result,
+    summarise_extracted_text,
+)
+
 # Phase 2 #23: the openclaw .bak-* session reaper activity
 # (sweep_openclaw_bak_sessions) was DELETED — Hermes' SQLite
 # SessionStore removes the O(N) readdir leak it existed to mop up.
@@ -661,6 +687,34 @@ from src.activities.briefing import (
     list_active_matters_for_briefing,
 )
 
+# Recall.ai meeting-bot dispatcher (#113 PR4) — three activities the
+# RecallDispatcherWorkflow drives every 5 min. ``filter_dispatch_candidates``
+# is the pure helper; it's not an @activity.defn and is not registered here.
+from src.activities.recall_dispatcher import (
+    check_recall_dispatch_state,
+    dispatch_recall_bot,
+    fetch_upcoming_calendar_events,
+)
+
+# HA registry bootstrap (#110 PR5) — two activities the HaBootstrapWorkflow
+# drives every 6h + on demand. The pull side reads the operator-configured
+# HA install via the LLAT route; the write side bulk-upserts into ha_registry
+# and tombstones vanished entities. See src/workflows/ha_bootstrap.py.
+from src.activities.ha_bootstrap import (
+    pull_ha_registry,
+    write_ha_registry,
+)
+
+# HA gap detection + proposal generation (#110 PR6) — Phase B + Phase C
+# of HaBootstrapWorkflow. detect_ha_gaps re-reads the registry, runs
+# the 8 baseline detectors, and bulk-upserts ha_gap. generate_ha_proposals
+# templates a concrete YAML automation per open gap and POSTs each to
+# ctrl-api as a `pending` ha_proposal.
+from src.activities.ha_gap_detection import (
+    detect_ha_gaps,
+    generate_ha_proposals,
+)
+
 # Validators used as activities
 from src.validators.frontmatter import validate_classification
 
@@ -691,6 +745,8 @@ _STATIC_WORKFLOWS = [
     PlaneReconciliationWorkflow,
     FleetAuditWorkflow,
     ComposioReconnectCleanupWorkflow,
+    FilesColdArchiveWorkflow,
+    FileExtractionWorkflow,
     # OpenclawSessionSweepWorkflow removed — Phase 2 #23.
     # StewardWorkflow kept registered as a tombstone (#52): no longer
     # scheduled per-matter, but callable ad-hoc and harmless to register.
@@ -711,6 +767,17 @@ _STATIC_WORKFLOWS = [
     StreamEventPurgeWorkflow,
     ReversalCalibrationWorkflow,
     BriefingWorkflow,
+    # Recall.ai meeting-bot dispatcher (#113 PR4) — every 5 min reads
+    # the calendar, applies the policy gate, dispatches a bot per
+    # surviving event. Scheduled as ``al-recall-dispatcher`` in
+    # register_schedules.py.
+    RecallDispatcherWorkflow,
+    # HA registry bootstrap (#110 PR5) — every 6h pulls the operator's
+    # HA install state/area/device/automation surface and refreshes
+    # ha_registry. Scheduled as ``al-ha-bootstrap`` in
+    # register_schedules.py; also triggered on demand by the HaCard
+    # "Refresh registry" CTA via ctrl-api's /registry/refresh route.
+    HaBootstrapWorkflow,
     *ALL_CHORE_TEMPLATES,
 ]
 
@@ -954,6 +1021,15 @@ ALL_ACTIVITIES = [
     verify_new_connection_active,
     delete_old_connection,
     remove_ledger_entry,
+    # Files cold-archive sweep (#114 PR 5)
+    find_cold_candidates,
+    promote_to_cold,
+    # File extraction pipeline (#114 Lane B) — one-shot per-upload
+    # FileExtractionWorkflow chains these four activities.
+    read_file_metadata,
+    fetch_and_extract_text,
+    summarise_extracted_text,
+    stamp_extraction_result,
     # sweep_openclaw_bak_sessions removed — Phase 2 #23.
     # Plane reverse sync (#536 B7)
     plane_reverse_sync_is_enabled,
@@ -1121,6 +1197,19 @@ ALL_ACTIVITIES = [
     get_prior_briefing,
     briefing_visit_matter,
     compose_and_write_briefing,
+    # Recall.ai meeting-bot dispatcher (#113 PR4) — see
+    # src.workflows.recall_dispatcher.RecallDispatcherWorkflow.
+    check_recall_dispatch_state,
+    dispatch_recall_bot,
+    fetch_upcoming_calendar_events,
+    # HA registry bootstrap (#110 PR5) — see
+    # src.workflows.ha_bootstrap.HaBootstrapWorkflow.
+    pull_ha_registry,
+    write_ha_registry,
+    # HA gap detection + proposal generation (#110 PR6) — Phase B + C
+    # run inside the same HaBootstrapWorkflow after Phase A's write.
+    detect_ha_gaps,
+    generate_ha_proposals,
 ]
 
 

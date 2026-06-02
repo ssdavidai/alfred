@@ -38,6 +38,7 @@ import {
   type OnboardingGmailMode,
 } from "../server/onboardingGmailMode";
 import { checkGmailConnection } from "../integrations/operations";
+import { pickTailnetHostnameForDashboard } from "./tailscaleCardCore";
 
 // ============================================================
 // AgentPhone (Phase 8 — dashboard PhonePage)
@@ -574,6 +575,493 @@ export const sendOmiTest = async (_args: unknown, context: any) => {
 };
 
 // ============================================================
+// Tailscale channel (#109 PR3) — operator opt-in to a Tailscale sidecar.
+// Backed by ctrl-api /api/v1/channels/tailscale/* (PR2 #127 landed the
+// routes). Three Wasp ops:
+//   getTailscaleStatus  → { state, tailnet_ip, tailnet_hostname, auth_url,
+//                           authkey_used_at, last_status_probe_at,
+//                           last_error, reason }
+//   connectTailscale    → POST { authkey?: string }
+//                          - authkey present → Path A (paste an auth key)
+//                          - authkey absent  → Path C (device-auth URL,
+//                                              returned in `auth_url`)
+//                          Returns: { ok, state, path: "A" | "C",
+//                                     auth_url?: string }
+//                          The action NEVER echoes the authkey back to
+//                          the client — the security rule.
+//   disconnectTailscale → POST {} → { ok, state: "disabled", warnings }
+//   getTailscalePeers   → { peers: TailscalePeer[], reason?: string }
+//
+// PR4 (cert + serve) will add the cert/serve actions; the ctrl-api
+// returns 501 for those today.
+// ============================================================
+
+export const getTailscaleStatus = async (_args: unknown, context: any) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    path: "/api/v1/channels/tailscale/status",
+  });
+};
+
+/**
+ * Connect the tenant to the operator's tailnet.
+ *
+ * Body: { authkey?: string }
+ *
+ *   • authkey present (non-empty) → ctrl-api takes Path A: writes the
+ *     key into Vaultwarden + /srv/alfred-black/.env, then brings the
+ *     tailscale sidecar up. The action ONLY surfaces the next ctrl-api
+ *     state — the key itself is never echoed back to the client.
+ *
+ *   • authkey absent / empty → ctrl-api takes Path C: brings the sidecar
+ *     up with TAILSCALE_ENABLED=true but no auth key, and `tailscaled`
+ *     mints a device-auth URL the operator opens in a new tab. The URL
+ *     is included in the response so the React layer can render it.
+ *
+ * SECURITY: only the first 6 chars of the authkey may EVER appear in any
+ * error message surfaced to the client. The action trims the key, then
+ * passes it through to ctrl-api — it is never logged here. ctrl-api
+ * errors (e.g. 502 DOCKER_COMPOSE_FAILED) bubble through with their
+ * `error.message`, which does not contain the key.
+ */
+export const connectTailscale = async (
+  args: { authkey?: string },
+  context: any,
+) => {
+  const instance = await getUserInstance(context);
+  const raw = typeof args?.authkey === "string" ? args.authkey.trim() : "";
+  // Path C body is {} (no key); Path A includes the trimmed key.
+  const body = raw.length > 0 ? { authkey: raw } : {};
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/channels/tailscale/connect",
+    body,
+  });
+};
+
+export const disconnectTailscale = async (_args: unknown, context: any) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/channels/tailscale/disconnect",
+  });
+};
+
+export const getTailscalePeers = async (_args: unknown, context: any) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    path: "/api/v1/channels/tailscale/peers",
+  });
+};
+
+// ============================================================
+// Lane III — Recall.ai channel on /channels (#113 PR3).
+// ============================================================
+//
+// PR2 (#129) shipped these ctrl-api routes; PR3 wires the SaaS proxy
+// + React surface against them. The merged PR2 surface deliberately
+// stops short of persisting the API key (that lands in PR3a); the
+// card-side flow paste→validate→hint reflects that.
+//
+//   GET   /api/v1/channels/recall/config            → RecallConfig
+//   PATCH /api/v1/channels/recall/config            → 200 (updated row)
+//   GET   /api/v1/channels/recall/usage             → RecallUsage
+//   GET   /api/v1/channels/recall/bots/active       → { bots: RecallBot[] }
+//   POST  /api/v1/channels/recall/validate-key      → { ok, account?, reason? }
+//   DELETE /api/v1/channels/recall/bots/:bot_id     → 200 (status: leaving|done)
+//   POST  /api/v1/channels/recall/webhook-test      → { ok, status, latency_ms }
+//
+// `getRecallChannelStatus` stitches the first three into the composite
+// shape recallCardCore.deriveRecallCardState consumes. The `enabled`
+// boolean is derived from "does /usage succeed" — a 503 NOT_CONFIGURED
+// from the upstream means "no RECALL_API_KEY on file"; any other error
+// surfaces as the .error field.
+
+interface RecallCompositeStatus {
+  enabled: boolean;
+  config: any | null;
+  usage: any | null;
+  active_bots: any[];
+  error: string | null;
+  webhook_url?: string;
+  webhook_secret_first6?: string | null;
+  webhook_secret_set?: boolean;
+}
+
+async function safeProxy(
+  instance: any,
+  options: Parameters<typeof proxyToTenant>[1],
+): Promise<{ ok: true; data: any } | { ok: false; status: number; message: string }> {
+  try {
+    const data = await proxyToTenant(instance, options);
+    return { ok: true, data };
+  } catch (err: any) {
+    const status =
+      typeof err?.statusCode === "number"
+        ? err.statusCode
+        : typeof err?.status === "number"
+          ? err.status
+          : 0;
+    const message =
+      typeof err?.message === "string" ? err.message : "ctrl-api error";
+    return { ok: false, status, message };
+  }
+}
+
+export const getRecallChannelStatus = async (
+  _args: unknown,
+  context: any,
+) => {
+  const instance = await getUserInstance(context);
+
+  // Three parallel reads — config + usage + active_bots.
+  const [configRes, usageRes, botsRes] = await Promise.all([
+    safeProxy(instance, { path: "/api/v1/channels/recall/config" }),
+    safeProxy(instance, { path: "/api/v1/channels/recall/usage" }),
+    safeProxy(instance, { path: "/api/v1/channels/recall/bots/active" }),
+  ]);
+
+  // 503 anywhere = NOT_CONFIGURED on the tenant side → enabled=false.
+  // Any other non-2xx → error string (the card surfaces verbatim).
+  const config = configRes.ok ? configRes.data : null;
+  const usage = usageRes.ok ? usageRes.data : null;
+  const active_bots = botsRes.ok ? (botsRes.data?.bots ?? []) : [];
+
+  let error: string | null = null;
+  const probes = [configRes, usageRes, botsRes];
+  // `enabled` is the "do we have a working API key on file" signal.
+  // The /config + /usage + /bots routes don't gate on RECALL_API_KEY —
+  // they return 200 on a fresh tenant with no key. Earlier versions of
+  // this code derived enabled from "all three probes succeeded" which
+  // mis-classified the no-key state as `configured` and rendered the
+  // card with NO API key paste field (PR #153 shipped the persistence
+  // endpoint; the card never got the input). Drive it off the
+  // explicit api_key_set flag instead — when the field is absent on
+  // the wire (pre-#153 ctrl-api) fall back to the old heuristic so the
+  // card stays renderable.
+  const configOk = configRes.ok;
+  const apiKeySet =
+    config && typeof config.api_key_set === "boolean"
+      ? config.api_key_set === true
+      : null;
+  const usageOk = usageRes.ok;
+  const enabled =
+    configOk &&
+    (apiKeySet === true ||
+      // Fallback: no explicit flag on the wire → treat both-routes-up as
+      // "good enough" (pre-#153 contract).
+      (apiKeySet === null && usageOk));
+
+  // Surface the first hard error (non-503) we saw — 503 is the
+  // "expected" pre-paste state and shouldn't render as an error.
+  for (const r of probes) {
+    if (!r.ok && r.status !== 503 && r.status !== 0) {
+      error = r.message;
+      break;
+    }
+  }
+
+  // Pull through the webhook posture so the card's pill + setup expander
+  // can render off them without a second proxy hop. The fields are
+  // optional on the wire (older ctrl-api may omit) so the card layer
+  // treats `undefined` as "unknown" rather than "false".
+  const webhookSecretSet =
+    config && typeof config.webhook_secret_set === "boolean"
+      ? config.webhook_secret_set
+      : undefined;
+  const webhookSecretFirst6 =
+    config && typeof config.webhook_secret_first6 === "string"
+      ? config.webhook_secret_first6
+      : null;
+  const webhookUrl =
+    config && typeof config.webhook_url === "string"
+      ? config.webhook_url
+      : undefined;
+
+  return {
+    enabled,
+    config,
+    usage,
+    active_bots,
+    error,
+    webhook_url: webhookUrl,
+    webhook_secret_first6: webhookSecretFirst6,
+    webhook_secret_set: webhookSecretSet,
+  };
+};
+
+export const updateRecallConfig = async (
+  args: Record<string, unknown>,
+  context: any,
+) => {
+  if (!args || typeof args !== "object") {
+    throw new HttpError(400, "config patch body required");
+  }
+  if (Object.keys(args).length === 0) {
+    throw new HttpError(400, "patch body must include at least one field");
+  }
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "PATCH",
+    path: "/api/v1/channels/recall/config",
+    body: args,
+  });
+};
+
+/** Round-trip-validate a Recall API key against the Recall API. The key
+ *  is NEVER logged here; the ctrl-api persists nothing on its side either
+ *  — that's setRecallApiKey's job. The response is `{ ok, account? }` or
+ *  `{ ok: false, reason }` — we pass it through verbatim so the card can
+ *  render the reason. */
+export const validateRecallApiKey = async (
+  args: { api_key: string; region?: string },
+  context: any,
+): Promise<any> => {
+  if (typeof args?.api_key !== "string" || args.api_key.trim().length === 0) {
+    throw new HttpError(400, "api_key required");
+  }
+  const instance = await getUserInstance(context);
+  const body: Record<string, string> = { api_key: args.api_key.trim() };
+  if (typeof args.region === "string" && args.region.length > 0) {
+    body.region = args.region;
+  }
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/channels/recall/validate-key",
+    body,
+  });
+};
+
+/** Persist a validated Recall API key (#113 PR3a). Closes the gap PR #136
+ *  documented as "persistence pending": after the card receives an
+ *  {ok:true} from validateRecallApiKey, it immediately calls this action
+ *  with the same key. ctrl-api validates AGAIN against Recall (never
+ *  trust a "validate already happened" claim), then writes to BOTH
+ *  Vaultwarden (canonical, via the vault-cli sidecar) AND the compose
+ *  /.env (atomic, via tempfile + rename), then restarts ctrl-api +
+ *  alfred-learn so the new env takes effect.
+ *
+ *  The key never enters the SaaS layer's logs — we only log the action
+ *  call itself; the value rides the proxied body and the ctrl-api
+ *  response carries only `key_first6`.
+ *
+ *  Return shape on fresh writes:
+ *    { ok, region, key_first6, persisted_to: ['vaultwarden', '.env'],
+ *      restarted: ['ctrl-api', 'alfred-learn'], eta_seconds }
+ *  On a re-paste of the same key + region:
+ *    { ok: true, idempotent: true, region, key_first6, ... }
+ *
+ *  Annotation `Promise<any>` — the Wasp Payload trap. Operations whose
+ *  return type isn't a Prisma entity must be annotated as `Promise<any>`
+ *  so Wasp's TypeScript generator doesn't squeeze the shape into an
+ *  unrelated Payload type. */
+export const setRecallApiKey = async (
+  args: { api_key: string; region?: string },
+  context: any,
+): Promise<any> => {
+  if (typeof args?.api_key !== "string" || args.api_key.trim().length === 0) {
+    throw new HttpError(400, "api_key required");
+  }
+  const instance = await getUserInstance(context);
+  const body: Record<string, string> = { api_key: args.api_key.trim() };
+  if (typeof args.region === "string" && args.region.length > 0) {
+    body.region = args.region;
+  }
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/channels/recall/api-key",
+    body,
+  });
+};
+
+/** Persist the Svix signing secret Recall.ai's webhook dashboard mints.
+ *  Operator-only; ctrl-api atomically merges RECALL_WEBHOOK_SECRET into
+ *  the compose .env and restarts ctrl-api so the next inbound delivery
+ *  verifies against the new secret. The secret NEVER enters the SaaS
+ *  layer's logs — the response carries only `secret_first6`.
+ *
+ *  Return shape on fresh writes:
+ *    { ok, secret_first6, persisted_to: ['.env'], restarted: [...],
+ *      eta_seconds }
+ *  On a re-paste of the same secret:
+ *    { ok: true, idempotent: true, secret_first6, ... }
+ *
+ *  Annotation `Promise<any>` — the Wasp Payload trap. */
+export const setRecallWebhookSecret = async (
+  args: { webhook_secret: string },
+  context: any,
+): Promise<any> => {
+  if (
+    typeof args?.webhook_secret !== "string" ||
+    args.webhook_secret.trim().length === 0
+  ) {
+    throw new HttpError(400, "webhook_secret required");
+  }
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/channels/recall/webhook-secret",
+    body: { webhook_secret: args.webhook_secret.trim() },
+  });
+};
+
+/** Fire the synthetic webhook through ctrl-api → ctrl-api → state.db.
+ *  Functions as the card's "Test webhook" CTA; returns `{ ok, status,
+ *  latency_ms, sample_response }`. */
+export const testRecallWebhook = async (_args: unknown, context: any) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/channels/recall/webhook-test",
+  });
+};
+
+/** Terminate a mid-meeting bot. ctrl-api calls Recall's DELETE then flips
+ *  the local row to "leaving". */
+export const terminateRecallBot = async (
+  args: { bot_id: string },
+  context: any,
+) => {
+  if (typeof args?.bot_id !== "string" || args.bot_id.trim().length === 0) {
+    throw new HttpError(400, "bot_id required");
+  }
+  const instance = await getUserInstance(context);
+  const safe = encodeURIComponent(args.bot_id.trim());
+  return proxyToTenant(instance, {
+    method: "DELETE",
+    path: `/api/v1/channels/recall/bots/${safe}`,
+  });
+};
+
+/** Manually dispatch a Recall bot for a meeting URL (#113 PR4).
+ *
+ *  Card-side "Send bot now" CTA. The bot_name override is optional —
+ *  ctrl-api falls back to the configured default if omitted. The card
+ *  does NOT supply a calendar_event_id because this is the
+ *  ad-hoc, off-calendar path; the dispatcher workflow supplies one
+ *  for the automated path and ctrl-api uses it for dedupe. */
+export const dispatchRecallBot = async (
+  args: { meeting_url: string; bot_name?: string },
+  context: any,
+) => {
+  if (
+    typeof args?.meeting_url !== "string" ||
+    args.meeting_url.trim().length === 0
+  ) {
+    throw new HttpError(400, "meeting_url required");
+  }
+  const body: Record<string, string> = {
+    meeting_url: args.meeting_url.trim(),
+  };
+  if (typeof args.bot_name === "string" && args.bot_name.trim().length > 0) {
+    body.bot_name = args.bot_name.trim();
+  }
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/channels/recall/bots",
+    body,
+  });
+};
+
+// === Recall PR5: in-meeting voice ===
+// Four ops bind the RecallCard's live-bots section against the new
+// PR5 ctrl-api routes. The bot speaks AS ALFRED in the meeting — these
+// ops drive Alfred's voice; they never impersonate the principal.
+//
+// Wasp Payload-trap note: each op below is annotated `Promise<any>` so
+// Wasp's TypeScript generator doesn't squeeze the proxied response into
+// an unrelated Payload type (see the same pattern on validateRecallApiKey
+// above for the rationale).
+
+/** Mute Alfred-in-meeting on a live Recall bot. Pauses the
+ *  wake-word→speak loop without dropping the WS subscriber; the
+ *  transcript stream keeps flowing. */
+export const muteRecallBot = async (
+  args: { bot_id: string },
+  context: any,
+): Promise<any> => {
+  if (typeof args?.bot_id !== "string" || args.bot_id.trim().length === 0) {
+    throw new HttpError(400, "bot_id required");
+  }
+  const instance = await getUserInstance(context);
+  const safe = encodeURIComponent(args.bot_id.trim());
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: `/api/v1/channels/recall/bots/${safe}/mute`,
+  });
+};
+
+/** Unmute Alfred-in-meeting — resume the wake-word→speak loop. */
+export const unmuteRecallBot = async (
+  args: { bot_id: string },
+  context: any,
+): Promise<any> => {
+  if (typeof args?.bot_id !== "string" || args.bot_id.trim().length === 0) {
+    throw new HttpError(400, "bot_id required");
+  }
+  const instance = await getUserInstance(context);
+  const safe = encodeURIComponent(args.bot_id.trim());
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: `/api/v1/channels/recall/bots/${safe}/unmute`,
+  });
+};
+
+/** Operator-CTA: "Speak now" — render `text` through OpenAI TTS and
+ *  upload to Recall so the bot speaks the line into the meeting. The
+ *  rendered voice is ALFRED's voice (the same config.openaiVoice the
+ *  phone path uses), never the principal's. */
+export const recallBotSpeak = async (
+  args: { bot_id: string; text: string; voice?: string },
+  context: any,
+): Promise<any> => {
+  if (typeof args?.bot_id !== "string" || args.bot_id.trim().length === 0) {
+    throw new HttpError(400, "bot_id required");
+  }
+  if (typeof args?.text !== "string" || args.text.trim().length === 0) {
+    throw new HttpError(400, "text required");
+  }
+  const body: Record<string, string> = { text: args.text.trim() };
+  if (typeof args.voice === "string" && args.voice.trim().length > 0) {
+    body.voice = args.voice.trim();
+  }
+  const instance = await getUserInstance(context);
+  const safe = encodeURIComponent(args.bot_id.trim());
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: `/api/v1/channels/recall/bots/${safe}/respond`,
+    body,
+  });
+};
+
+/** Pull the most-recent transcript fragments for a Recall bot. The
+ *  upstream `/transcript-stream` route is an SSE — the SaaS proxy
+ *  can't proxy SSE through the JSON-shaped tenant proxy, so this
+ *  query polls a non-SSE companion. The dashboard polls at 2s. */
+export const getRecallBotTranscript = async (
+  args: { bot_id: string },
+  context: any,
+): Promise<any> => {
+  if (typeof args?.bot_id !== "string" || args.bot_id.trim().length === 0) {
+    throw new HttpError(400, "bot_id required");
+  }
+  const instance = await getUserInstance(context);
+  const safe = encodeURIComponent(args.bot_id.trim());
+  try {
+    return await proxyToTenant(instance, {
+      method: "GET",
+      path: `/api/v1/channels/recall/bots/${safe}/transcript`,
+    });
+  } catch (err: any) {
+    // Tolerant fallback: if the route isn't there (older tenants), surface
+    // an empty list rather than blow up the card.
+    return { bot_id: args.bot_id, events: [], unavailable: true };
+  }
+};
+// === end Recall PR5 ===
+
+// ============================================================
 // Dashboard Home
 // ============================================================
 
@@ -617,6 +1105,25 @@ export const getDashboardData: GetDashboardData<void, any> = async (
 
   // Single aggregated endpoint — one tunnel round-trip instead of six
   const raw = await proxyToTenant(instance, { path: "/api/v1/admin/dashboard" });
+
+  // #109 PR5: fire a tiny secondary probe for Tailscale state. We can't
+  // bundle this into /admin/dashboard without a server-side change there
+  // (the singleton tailscale_connection row lives in ctrl-api state.db,
+  // and /admin/dashboard already round-trips a bunch of containers/health
+  // queries). Keep the probe fail-soft: any error → tailscaleHostname stays
+  // null and the dashboard renders exactly as it did pre-this-patch.
+  let tailscaleHostnameFromLive: string | null = null;
+  try {
+    const ts = await proxyToTenant(instance, {
+      path: "/api/v1/channels/tailscale/status",
+    });
+    tailscaleHostnameFromLive = pickTailnetHostnameForDashboard(ts);
+  } catch {
+    // Fail-soft. Tailscale may be off; probe may 502; ctrl-api may have
+    // skipped its singleton row. tailscaleHostname stays null and widgets
+    // that read it render the no-tailnet state.
+    tailscaleHostnameFromLive = null;
+  }
 
   const healthRaw = raw?.health ?? null;
   const vaultRaw = raw?.vault ?? null;
@@ -668,7 +1175,13 @@ export const getDashboardData: GetDashboardData<void, any> = async (
     instance: {
       status: instance!.status,
       tier: instance!.tier,
-      tailscaleHostname: instance!.tailscaleHostname ?? null,
+      // #109 PR5: was always null (single-VM tenantProxy.getUserInstance
+      // returns {} so the back-compat `instance!.tailscaleHostname` field
+      // is undefined). Populate from the live ctrl-api status probe so
+      // dashboard widgets that read this field light up as soon as the
+      // principal connects on /channels.
+      tailscaleHostname:
+        tailscaleHostnameFromLive ?? instance!.tailscaleHostname ?? null,
       subdomainUrl: (instance as any).subdomainUrl ?? null,
       agentmailInboxAddress: (instance as any).agentmailInboxAddress ?? null,
     },
@@ -1025,34 +1538,6 @@ export const updateCredentials: UpdateCredentials<
     method: "PATCH",
     path: "/api/v1/admin/credentials",
     body: args,
-  });
-};
-
-// ============================================================
-// Vexa auto-join toggle
-// ============================================================
-// Bridges the Settings UI's switch to ctrl-api's vexa.ts route. Returns
-// `{enabled, schedule_paused}`. The two values can disagree briefly
-// while the toggle is mid-flight; the UI should treat `enabled` as
-// authoritative and use `schedule_paused` only as a "did the temporal
-// pause/unpause actually land" indicator.
-export const getVexaAutoJoin: any = async (
-  _args: void,
-  context: any,
-) => {
-  const instance = await getUserInstance(context);
-  return proxyToTenant(instance, { path: "/api/v1/admin/vexa/auto-join" });
-};
-
-export const setVexaAutoJoin: any = async (
-  args: { enabled: boolean },
-  context: any,
-) => {
-  const instance = await getUserInstance(context);
-  return proxyToTenant(instance, {
-    method: "POST",
-    path: "/api/v1/admin/vexa/auto-join",
-    body: { enabled: args.enabled },
   });
 };
 
@@ -2346,3 +2831,1516 @@ export const getVaultTitleIndex = async (
     return { titles: [] };
   }
 };
+
+// ============================================================
+// /files — principal-facing blob store (#114 PR3)
+// ============================================================
+//
+// PR1 shipped the routes (POST /upload, GET /list/usage/stat/blob, PATCH,
+// DELETE) on ctrl-api. Upload + blob ride through filesProxy.ts (raw
+// multipart/binary); the rest go through the standard Wasp queries +
+// actions below so the page can subscribe with `useQuery` and the
+// existing 60s `proxyToTenant` plumbing.
+//
+// Path encoding: file paths are `<ULID>/<safe-name>`. Both halves are
+// safe per the ctrl-api `sanitizeFilename`, so we splice into the path
+// directly. We DO percent-encode each segment defensively for the
+// :path-style endpoints (stat/patch/delete) since a future PR may
+// loosen `sanitizeFilename`.
+
+/** Safely encode each segment of a `<ULID>/<filename>` path. */
+function encodeFilesPath(p: string): string {
+  return p
+    .split("/")
+    .filter(Boolean)
+    .map((seg) => encodeURIComponent(seg))
+    .join("/");
+}
+
+/** GET /api/v1/files/usage — used by the quota strip + upload pre-flight. */
+export const getFilesUsage = async (_args: unknown, context: any) => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, { path: "/api/v1/files/usage" });
+};
+
+/** GET /api/v1/files/list?prefix=&q=&limit=&offset= */
+export const getFilesList = async (
+  args: {
+    prefix?: string;
+    q?: string;
+    limit?: number;
+    offset?: number;
+  } | undefined,
+  context: any,
+) => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const instance = await getUserInstance(context);
+  const query: Record<string, string> = {};
+  if (args?.prefix?.trim()) query.prefix = args.prefix.trim();
+  if (args?.q?.trim()) query.q = args.q.trim();
+  if (typeof args?.limit === "number" && args.limit > 0) {
+    query.limit = String(Math.floor(args.limit));
+  }
+  if (typeof args?.offset === "number" && args.offset >= 0) {
+    query.offset = String(Math.floor(args.offset));
+  }
+  return proxyToTenant(instance, {
+    path: "/api/v1/files/list",
+    query,
+  });
+};
+
+/** GET /api/v1/files/stat/:path — side-panel metadata for a selected row. */
+export const getFileStat = async (
+  args: { path: string },
+  context: any,
+) => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  if (typeof args?.path !== "string" || !args.path.trim()) {
+    throw new HttpError(400, "path required");
+  }
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    path: `/api/v1/files/stat/${encodeFilesPath(args.path)}`,
+  });
+};
+
+/** PATCH /api/v1/files/:path — inline pencil edit for principal_label.
+ *  PR2 of #114 added the route; PR3 surfaces it on the page. */
+export const updateFileLabel = async (
+  args: { path: string; principal_label: string | null },
+  context: any,
+) => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  if (typeof args?.path !== "string" || !args.path.trim()) {
+    throw new HttpError(400, "path required");
+  }
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "PATCH",
+    path: `/api/v1/files/${encodeFilesPath(args.path)}`,
+    body: { principal_label: args.principal_label },
+  });
+};
+
+/** DELETE /api/v1/files/:path — soft-delete (tombstone + blob unlink). */
+export const deleteFile = async (
+  args: { path: string },
+  context: any,
+) => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  if (typeof args?.path !== "string" || !args.path.trim()) {
+    throw new HttpError(400, "path required");
+  }
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "DELETE",
+    path: `/api/v1/files/${encodeFilesPath(args.path)}`,
+  });
+};
+
+/** GET /api/v1/files/list?only_deleted=true — the trash bin view.
+ *
+ *  Used by the /files "Recently deleted" expander to render a list of
+ *  soft-deleted files inside the 30-day restore window. The shape
+ *  matches getFilesList; we pass `only_deleted=true` on the wire so the
+ *  ctrl-api side flips the WHERE clause without exposing the SQL knob
+ *  to the dashboard. Issue #114 §14 step 7.
+ *
+ *  Annotation `Promise<any>` — the Wasp Payload trap. */
+export const listDeletedFiles = async (
+  args: { limit?: number } | undefined,
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const instance = await getUserInstance(context);
+  const query: Record<string, string> = { only_deleted: "true" };
+  if (typeof args?.limit === "number" && args.limit > 0) {
+    query.limit = String(Math.floor(args.limit));
+  }
+  return proxyToTenant(instance, {
+    path: "/api/v1/files/list",
+    query,
+  });
+};
+
+/** POST /api/v1/files/restore/:file_id — undo a soft-delete.
+ *
+ *  Closes the §14 step 7 loop ("Restore it. Telegram answers again.").
+ *  ctrl-api 410s with `BLOB_REAPED` if the blob was reaped at delete
+ *  time (sole reference, dedupe ref_count dropped to zero) — the UI
+ *  surfaces the message verbatim so Sir can tell why a restore failed.
+ *
+ *  Annotation `Promise<any>` — the Wasp Payload trap. */
+export const restoreFile = async (
+  args: { file_id: string },
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  if (typeof args?.file_id !== "string" || !args.file_id.trim()) {
+    throw new HttpError(400, "file_id required");
+  }
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: `/api/v1/files/restore/${encodeURIComponent(args.file_id.trim())}`,
+  });
+};
+
+// ============================================================
+// Wave C — HA conversation setup card (#111 PR3) and Voice
+// satellites / wake-words card (#112 PR3). Both cards land on
+// /channels; the HA card surfaces channel-token rows from
+// ctrl-api's shared channel_tokens table (PR #111 PR1), and the
+// voice card surfaces detected ESPHome satellites with graceful
+// 404 handling when the listener isn't enabled yet.
+// ============================================================
+
+/** Public-safe row shape returned by /api/v1/channels/tokens/* (#111
+ *  PR4). The ctrl-api wire format names the JSON-typed scope field
+ *  `scope_json` (mirroring the column name); the card's core helpers
+ *  read `scope`. We normalise at the boundary so the existing card
+ *  doesn't need to change. */
+interface ChannelTokenWireRow {
+  id: string;
+  channel: string;
+  label: string | null;
+  scope_json: Record<string, unknown> | null;
+  created_at: number;
+  last_used_at: number | null;
+  last_used_ip: string | null;
+  rotated_from: string | null;
+  revoked_at: number | null;
+}
+
+function wireRowToCardRow(r: ChannelTokenWireRow) {
+  return {
+    id: r.id,
+    channel: r.channel,
+    label: r.label,
+    scope: r.scope_json,
+    created_at: r.created_at,
+    last_used_at: r.last_used_at,
+    last_used_ip: r.last_used_ip,
+    rotated_from: r.rotated_from,
+    revoked_at: r.revoked_at,
+  };
+}
+
+/** Read the channel_tokens rows for `channel=ha-conversation`. Backed
+ *  by ctrl-api's canonical REST surface
+ *    GET /api/v1/channels/tokens?channel=ha-conversation
+ *  shipped in #111 PR4. Returns `{ tokens: ChannelTokenRow[] }` — the
+ *  card's haConversationCardCore.ts reads `t.scope.haInstanceId`, so
+ *  we normalise the wire's `scope_json` → `scope` here. */
+export const getHaInstalledTokens = async (
+  _args: unknown,
+  context: any,
+): Promise<any> => {
+  const instance = await getUserInstance(context);
+  try {
+    const raw = (await proxyToTenant(instance, {
+      path: "/api/v1/channels/tokens",
+      query: { channel: "ha-conversation" },
+    })) as { tokens?: ChannelTokenWireRow[] };
+    const tokens = Array.isArray(raw?.tokens)
+      ? raw.tokens.map(wireRowToCardRow)
+      : [];
+    return { tokens };
+  } catch (e: any) {
+    // ctrl-api images predating PR4 will 404 the new path. Surface a
+    // graceful empty list so the card paints "no installs yet" instead
+    // of an error toast. The card has its own `unavailable` rendering
+    // for this signal.
+    if (e instanceof HttpError && e.statusCode === 404) {
+      return { tokens: [], unavailable: true };
+    }
+    throw e;
+  }
+};
+
+/** Mint a new ha-conversation channel token. The principal supplies
+ *  a free-form label (typically `ha:<installId>`) and the install id
+ *  (a uuid v4 or a slug) which we stash on `scope.haInstanceId` so
+ *  ctrl-api's validator can pin auth back to a specific HA install.
+ *
+ *  Backed by POST /api/v1/channels/tokens (#111 PR4). The card reads
+ *  `r.token` (legacy field name from the PR1 surface); we re-shape
+ *  the canonical `raw_token` response field to `token` at this layer
+ *  so the merged card (#137) keeps compiling unchanged. */
+export const mintHaChannelToken = async (
+  args: { label?: string; installId?: string },
+  context: any,
+): Promise<any> => {
+  const label =
+    typeof args?.label === "string" && args.label.trim()
+      ? args.label.trim()
+      : null;
+  const installId =
+    typeof args?.installId === "string" && args.installId.trim()
+      ? args.installId.trim()
+      : null;
+  if (!installId) {
+    throw new HttpError(400, "installId required");
+  }
+  const instance = await getUserInstance(context);
+  try {
+    const raw = (await proxyToTenant(instance, {
+      method: "POST",
+      path: "/api/v1/channels/tokens",
+      body: {
+        channel: "ha-conversation",
+        label: label ?? `ha:${installId}`,
+        scope: { haInstanceId: installId },
+      },
+    })) as {
+      id: string;
+      raw_token: string;
+      label: string | null;
+      created_at: number;
+      scope_json: Record<string, unknown> | null;
+    };
+    // Two-name response: `raw_token` matches the PR4 ctrl-api spec;
+    // `token` is the field the merged HaConversationSetupCard already
+    // reads. Both point at the same one-time string. `meta.id` mirrors
+    // the legacy mint shape so any other caller that grabs the id off
+    // `meta` (e.g. a CLI consumer) keeps working.
+    return {
+      id: raw.id,
+      label: raw.label,
+      created_at: raw.created_at,
+      raw_token: raw.raw_token,
+      token: raw.raw_token,
+      scope: raw.scope_json,
+      meta: { id: raw.id, label: raw.label, created_at: raw.created_at },
+    };
+  } catch (e: any) {
+    if (e instanceof HttpError && e.statusCode === 404) {
+      throw new HttpError(
+        501,
+        "Mint surface not deployed yet — ctrl-api image predates #111 PR4.",
+      );
+    }
+    throw e;
+  }
+};
+
+/** Revoke (soft-delete) a channel token by id. The HA card uses this
+ *  to retire an install — the per-install bearer stops authenticating
+ *  on the next request via channelTokenBearer. Idempotent at the
+ *  ctrl-api layer (revoking a revoked row is a no-op that still
+ *  returns 200). Backed by DELETE /api/v1/channels/tokens/:id (#111
+ *  PR4). */
+export const revokeChannelToken = async (
+  args: { id?: string },
+  context: any,
+) => {
+  if (typeof args?.id !== "string" || !args.id.trim()) {
+    throw new HttpError(400, "id required");
+  }
+  const instance = await getUserInstance(context);
+  try {
+    return await proxyToTenant(instance, {
+      method: "DELETE",
+      path: `/api/v1/channels/tokens/${encodeURIComponent(args.id.trim())}`,
+    });
+  } catch (e: any) {
+    if (e instanceof HttpError && e.statusCode === 404) {
+      throw new HttpError(
+        501,
+        "Revoke surface not deployed yet — ctrl-api image predates #111 PR4.",
+      );
+    }
+    throw e;
+  }
+};
+
+/** Read the list of ESPHome satellites the voice-bridge has seen on
+ *  the local network. The listener landed in #112 PR1; PR5 (this PR)
+ *  shipped the live ctrl-api route at /api/v1/channels/voice/esphome/
+ *  devices. The ctrl-api route now returns its own
+ *  `{enabled, listener_address, devices, unavailable?, error?}` shape
+ *  even when voice-bridge is unreachable — so the historical 404
+ *  fall-through is belt-and-braces only. */
+export const getEsphomeDevices = async (_args: unknown, context: any) => {
+  const instance = await getUserInstance(context);
+  try {
+    return await proxyToTenant(instance, {
+      path: "/api/v1/channels/voice/esphome/devices",
+    });
+  } catch (e: any) {
+    if (e instanceof HttpError && e.statusCode === 404) {
+      return { devices: [], unavailable: true };
+    }
+    throw e;
+  }
+};
+
+/** Run an outbound ESPHome Native API probe against a satellite IP that
+ *  the operator pastes in the /channels card. ctrl-api opens a TCP
+ *  connection from the tenant VM, walks the Hello → DeviceInfo →
+ *  ListEntities handshake, looks for a `voice_assistant:` entity, and
+ *  returns a structured diagnosis the card renders inline.
+ *
+ *  Body: { ip: string, hostname?: string, timeoutMs?: number }
+ *  Returns: { ok: boolean, info: { reachable, esphome_version,
+ *            mac_address, friendly_name, voice_assistant_present,
+ *            codec, recommendations: string[], error: string | null },
+ *            hostname: string | null }
+ *
+ *  Wired by #112 PR5. The operation is an action (it opens an outbound
+ *  TCP connection that costs O(timeoutMs) on the tenant) — Wasp
+ *  ergonomics prefer that for non-idempotent surfaces even when the
+ *  observable side-effect is "ran a probe". */
+export const testEsphomeDevice = async (
+  args: { ip: string; hostname?: string; timeoutMs?: number },
+  context: any,
+) => {
+  if (!args?.ip?.trim()) {
+    throw new HttpError(400, "ip is required");
+  }
+  const body: Record<string, unknown> = { ip: args.ip.trim() };
+  if (args.hostname && args.hostname.trim()) body.hostname = args.hostname.trim();
+  if (typeof args.timeoutMs === "number" && args.timeoutMs > 0) {
+    body.timeoutMs = args.timeoutMs;
+  }
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    path: "/api/v1/channels/voice/esphome/devices/test",
+    method: "POST",
+    body,
+  });
+};
+
+/** Read the Wyoming-fallback readiness status. Returns
+ *  `{enabled, port, bind, last_handshake_at, unavailable?, error?}`.
+ *  Used by the channels dashboard to render a tile distinguishing
+ *  "Wyoming on" from "Wyoming off (the default)" so the operator can
+ *  confirm WYOMING_ENABLED=1 actually took effect on the tenant VM. */
+export const getWyomingStatus = async (_args: unknown, context: any) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    path: "/api/v1/channels/voice/wyoming/status",
+  });
+};
+
+// ============================================================
+// Home Assistant channel (#110 PR3) — operator deep-integrates HA.
+// Backed by ctrl-api /api/v1/channels/ha/* (PR1 #133 backfill landed
+// the routes). Four Wasp ops:
+//
+//   getHaStatus       → { connected, state, ha_url, ha_version, label,
+//                         last_test_ok, last_test_at, error }
+//                       The LLAT is NEVER in the payload — ctrl-api
+//                       only stores the vault_item_id in state.db.
+//   getHaRegistry     → { entities, areas, devices, automations,
+//                         scenes, helpers }
+//                       Empty until PR5's HaBootstrapWorkflow populates
+//                       ha_registry.
+//   connectHa         → POST { ha_url, llat, label? } → { ok, ha_url,
+//                                                          ha_version,
+//                                                          state }
+//                       The action accepts the LLAT in transit, passes
+//                       it once to ctrl-api, and NEVER echoes it back
+//                       to the client.
+//   disconnectHa      → DELETE → { ok }
+//                       Clears the Vaultwarden item + state.db row.
+//
+// SECURITY: the LLAT is a ~180-char JWT-shaped Home Assistant
+// long-lived access token. It must NEVER appear in any log line,
+// toast, or error message that surfaces above ctrl-api. The action
+// passes the trimmed value through; ctrl-api errors (e.g. 401
+// AUTH_FAILED) do not echo the token.
+// ============================================================
+
+export const getHaStatus = async (_args: unknown, context: any) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    path: "/api/v1/channels/ha/status",
+  });
+};
+
+export const getHaRegistry = async (_args: unknown, context: any) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    path: "/api/v1/channels/ha/registry",
+  });
+};
+
+/**
+ * Connect the tenant to a Home Assistant install.
+ *
+ * Body: { ha_url: string, llat: string, label?: string }
+ *
+ *   • ha_url — http(s) URL to the HA frontend (validated client-side by
+ *     parseHaUrl + server-side by assertValidHaUrl in channels_ha.ts).
+ *   • llat   — Home Assistant long-lived access token. Stored in
+ *     Vaultwarden by ctrl-api; the state.db row only carries the
+ *     vault_item_id.
+ *   • label  — optional human label ("Home", "Cabin") for the
+ *     Vaultwarden item. Defaults to "Home Assistant" server-side.
+ *
+ * SECURITY: the trimmed LLAT is passed once to ctrl-api and never
+ * logged or echoed. The 200 response from ctrl-api does NOT include
+ * the LLAT.
+ */
+export const connectHa = async (
+  args: { ha_url: string; llat: string; label?: string },
+  context: any,
+) => {
+  if (!args?.ha_url?.trim()) {
+    throw new HttpError(400, "ha_url is required");
+  }
+  if (!args?.llat?.trim()) {
+    throw new HttpError(400, "llat is required");
+  }
+  const instance = await getUserInstance(context);
+  // Trim only — ctrl-api is the real validator. The label is optional;
+  // we forward it verbatim when present.
+  const body: Record<string, string> = {
+    ha_url: args.ha_url.trim(),
+    llat: args.llat.trim(),
+  };
+  if (typeof args.label === "string" && args.label.trim().length > 0) {
+    body.label = args.label.trim();
+  }
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/channels/ha/connect",
+    body,
+  });
+};
+
+export const disconnectHa = async (_args: unknown, context: any) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "DELETE",
+    path: "/api/v1/channels/ha/disconnect",
+  });
+};
+
+/**
+ * Trigger an on-demand HaBootstrapWorkflow run (#110 PR5).
+ *
+ * Backs the "Refresh registry" CTA in the HaCard's connected-state
+ * expander. The workflow auto-runs every 6h via the
+ * ``al-ha-bootstrap`` Temporal schedule; this lets the operator force
+ * a refresh without waiting (useful when a new HA device was just
+ * commissioned and they want it to show up in the registry now).
+ *
+ * Returns ``{ ok, workflow_id, eta }``. The dashboard should re-fetch
+ * `getHaRegistry` after ~30s.
+ */
+export const refreshHaRegistry = async (_args: unknown, context: any) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/channels/ha/registry/refresh",
+  });
+};
+
+// ============================================================
+// Home Assistant — gap detection + proposal generation (#110 PR6).
+// HaBootstrapWorkflow Phase B + C surface their results through these
+// five ops:
+//
+//   getHaGaps         → { open: [...], closed: [...] }
+//                       Both halves of the audit ledger sorted by
+//                       severity then discovered_at desc.
+//   getHaProposals    → { pending: [...], applied: [...], other: [...] }
+//                       The pending list is what the HaCard "Pending
+//                       proposals" section iterates over.
+//   applyHaProposal   → POST proposal apply with a server-minted
+//                       decision_ref. Routes through PR4's existing
+//                       /proposal/:id/apply (loop guard + snapshot).
+//   dismissHaGap      → PATCH gap with dismissed_at semantic.
+//                       No HA write.
+//   rejectHaProposal  → POST proposal reject (no HA write).
+//
+// Voice cannot trigger applyHaProposal — write actions stay through
+// alfred__act_on_decision per the voice-bridge contract. The voice
+// surface CAN call getHaGaps + getHaProposals (read-only).
+// ============================================================
+
+export const getHaGaps = async (_args: unknown, context: any) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    path: "/api/v1/channels/ha/gaps",
+  });
+};
+
+export const getHaProposals = async (_args: unknown, context: any) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    path: "/api/v1/channels/ha/proposals",
+  });
+};
+
+/**
+ * Apply an HA proposal through the PR4 loop-guard + snapshot pattern.
+ *
+ * The PR4 route requires a `decision_ref` (formatted ulid). We mint
+ * it server-side here so the principal doesn't have to think about
+ * it. The same value goes into the ha_proposal row + the ha_run row,
+ * closing the audit loop.
+ *
+ * Body the client passes:  { proposalId: string, automationId?: string }
+ *
+ * Voice cannot reach this op — Wasp auth + the voice-bridge token
+ * scope both forbid it.
+ */
+export const applyHaProposal = async (
+  args: { proposalId: string; automationId?: string },
+  context: any,
+) => {
+  if (!args?.proposalId?.trim()) {
+    throw new HttpError(400, "proposalId is required");
+  }
+  const instance = await getUserInstance(context);
+  // Mint a decision_ref — same shape PR4's assertDecisionRef expects
+  // (ULID-ish: 26 chars, Crockford base32). Use crypto.randomUUID and
+  // strip dashes to get a 32-char alphanumeric — PR4 accepts either
+  // shape via its format-gate. For maximum compat we just generate a
+  // ULID-shaped string using timestamp + random.
+  const decision_ref = mintDecisionRef();
+  const body: Record<string, string> = {
+    decision_ref,
+  };
+  if (typeof args.automationId === "string" && args.automationId.trim()) {
+    body.automation_id = args.automationId.trim();
+  }
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: `/api/v1/channels/ha/proposal/${encodeURIComponent(
+      args.proposalId.trim(),
+    )}/apply`,
+    body,
+  });
+};
+
+export const dismissHaGap = async (
+  args: { gapId: string },
+  context: any,
+) => {
+  if (!args?.gapId?.trim()) {
+    throw new HttpError(400, "gapId is required");
+  }
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "PATCH",
+    path: `/api/v1/channels/ha/gap/${encodeURIComponent(args.gapId.trim())}/dismiss`,
+  });
+};
+
+export const rejectHaProposal = async (
+  args: { proposalId: string },
+  context: any,
+) => {
+  if (!args?.proposalId?.trim()) {
+    throw new HttpError(400, "proposalId is required");
+  }
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: `/api/v1/channels/ha/proposal/${encodeURIComponent(
+      args.proposalId.trim(),
+    )}/reject`,
+  });
+};
+
+// ────────────────────────────────────────────────────────────────────────
+// #120 Lane III — multi-profile Hermes
+// ────────────────────────────────────────────────────────────────────────
+//
+// Seven thin proxies to ctrl-api's /api/v1/agent-profiles surface (Lane I).
+// All seven are plain async functions with `Promise<any>` return — the Wasp
+// Payload-trap rule from `packages/web/src/tools/operations.ts` header.
+//
+// The wire shape coming back from ctrl-api is:
+//   GET    /api/v1/agent-profiles                     → { profiles, port_range, free_slots }
+//   GET    /api/v1/agent-profiles/:slug               → { profile, bindings }   ← Lane IIb smoke confirms this shape
+//   POST   /api/v1/agent-profiles            (202)    → { profile, note }
+//   DELETE /api/v1/agent-profiles/:slug               → { profile, note }
+//   POST   /api/v1/agent-profiles/:slug/restore       → { profile, note }       ← new in this lane
+//   POST   /api/v1/agent-profiles/:slug/bindings      → { binding }
+//   DELETE /api/v1/agent-profiles/:slug/bindings/:id  → { ok, binding_id }
+//
+// We pass these through verbatim — the React pages do the rendering. The
+// `Promise<any>` annotation is load-bearing per memory/PRs #139/#145/#182/
+// #184/#186; do NOT add a typed return.
+
+export const getAgentProfiles = async (
+  _args: unknown,
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, { path: "/api/v1/agent-profiles" });
+};
+
+export const getAgentProfile = async (
+  args: { slug: string },
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const slug = String(args?.slug ?? "").trim();
+  if (!slug) throw new HttpError(400, "slug required");
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    path: `/api/v1/agent-profiles/${encodeURIComponent(slug)}`,
+  });
+};
+
+export const createAgentProfile = async (
+  args: {
+    slug: string;
+    label: string;
+    description?: string;
+    model: string;
+    persona_template?: string;
+    // #206 Q5 extension (FIX-CONTRACTS C3): three optional bootstrap
+    // questions that materialize RULES.md + daybook.md on the profile dir.
+    // Lane I owns the file writes server-side.
+    role?: string;
+    tone?: string;
+    first_actions?: string[];
+  },
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const slug = String(args?.slug ?? "").trim();
+  const label = String(args?.label ?? "").trim();
+  const model = String(args?.model ?? "").trim();
+  if (!slug) throw new HttpError(400, "slug required");
+  if (!label) throw new HttpError(400, "label required");
+  if (!model) throw new HttpError(400, "model required");
+  const body: Record<string, unknown> = { slug, label, model };
+  if (typeof args?.description === "string" && args.description.trim()) {
+    body.description = args.description.trim();
+  }
+  if (
+    typeof args?.persona_template === "string" &&
+    args.persona_template.trim()
+  ) {
+    body.persona_template = args.persona_template;
+  }
+  // #206 Q5: role (≤200, single line), tone (≤64, single line),
+  // first_actions (≤10 items, each ≤200). The op trims + drops empties;
+  // ctrl-api re-validates and returns 422 on over-limit input with `field`.
+  if (typeof args?.role === "string") {
+    const role = args.role.trim().replace(/[\r\n]+/g, " ");
+    if (role.length > 200) {
+      throw new HttpError(422, "role must be 200 chars or fewer");
+    }
+    if (role) body.role = role;
+  }
+  if (typeof args?.tone === "string") {
+    const tone = args.tone.trim().replace(/[\r\n]+/g, " ");
+    if (tone.length > 64) {
+      throw new HttpError(422, "tone must be 64 chars or fewer");
+    }
+    if (tone) body.tone = tone;
+  }
+  if (Array.isArray(args?.first_actions)) {
+    const cleaned = args.first_actions
+      .map((s) => (typeof s === "string" ? s.trim() : ""))
+      .filter((s) => s.length > 0);
+    if (cleaned.length > 10) {
+      throw new HttpError(422, "first_actions must have 10 entries or fewer");
+    }
+    for (const entry of cleaned) {
+      if (entry.length > 200) {
+        throw new HttpError(
+          422,
+          "each first_actions entry must be 200 chars or fewer",
+        );
+      }
+    }
+    if (cleaned.length > 0) body.first_actions = cleaned;
+  }
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/agent-profiles",
+    body,
+  });
+};
+
+export const archiveAgentProfile = async (
+  args: { slug: string },
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const slug = String(args?.slug ?? "").trim();
+  if (!slug) throw new HttpError(400, "slug required");
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "DELETE",
+    path: `/api/v1/agent-profiles/${encodeURIComponent(slug)}`,
+  });
+};
+
+export const restoreAgentProfile = async (
+  args: { slug: string },
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const slug = String(args?.slug ?? "").trim();
+  if (!slug) throw new HttpError(400, "slug required");
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: `/api/v1/agent-profiles/${encodeURIComponent(slug)}/restore`,
+    body: {},
+  });
+};
+
+export const bindChannelToProfile = async (
+  args: { slug: string; channel_kind: string; channel_identity?: string },
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const slug = String(args?.slug ?? "").trim();
+  const channel_kind = String(args?.channel_kind ?? "").trim();
+  if (!slug) throw new HttpError(400, "slug required");
+  if (!channel_kind) throw new HttpError(400, "channel_kind required");
+  const body: Record<string, string> = { channel_kind };
+  if (
+    typeof args?.channel_identity === "string" &&
+    args.channel_identity.trim()
+  ) {
+    body.channel_identity = args.channel_identity.trim();
+  }
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: `/api/v1/agent-profiles/${encodeURIComponent(slug)}/bindings`,
+    body,
+  });
+};
+
+export const unbindChannelFromProfile = async (
+  args: { slug: string; binding_id: string },
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const slug = String(args?.slug ?? "").trim();
+  const binding_id = String(args?.binding_id ?? "").trim();
+  if (!slug) throw new HttpError(400, "slug required");
+  if (!binding_id) throw new HttpError(400, "binding_id required");
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "DELETE",
+    path: `/api/v1/agent-profiles/${encodeURIComponent(
+      slug,
+    )}/bindings/${encodeURIComponent(binding_id)}`,
+  });
+};
+
+// ── #204 Lane III — per-profile MCP catalog (C1 contract) ────────────────
+//
+// Three thin proxies to ctrl-api /api/v1/admin/profiles/:slug/mcp.
+// GET  → { slug, reserved, servers: [{ name, type, command_or_url, enabled }] }
+// POST → 201 { ok, name }   body: { name, url|command, auth_header?, auth_value? }
+// DELETE /:name → 200 { ok }
+//
+// Reserved profiles (main|workers|heavy|codex-builder): mutations return
+// 409 from ctrl-api; the UI layer renders list read-only and hides the form.
+//
+// `Promise<any>` annotation is REQUIRED — Wasp Payload trap (PRs #139 #145
+// #182 #184 #186). Never replace with a typed return.
+
+export const getProfileMcp = async (
+  args: { slug: string },
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const slug = String(args?.slug ?? "").trim();
+  if (!slug) throw new HttpError(400, "slug required");
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    path: `/api/v1/admin/profiles/${encodeURIComponent(slug)}/mcp`,
+  });
+};
+
+export const addProfileMcp = async (
+  args: {
+    slug: string;
+    name: string;
+    url?: string;
+    command?: string;
+    auth_header?: string;
+    auth_value?: string;
+  },
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const slug = String(args?.slug ?? "").trim();
+  const name = String(args?.name ?? "").trim();
+  if (!slug) throw new HttpError(400, "slug required");
+  if (!name) throw new HttpError(400, "name required");
+  if (!/^[a-z][a-z0-9_-]{0,40}$/.test(name)) {
+    throw new HttpError(400, "name must match ^[a-z][a-z0-9_-]{0,40}$");
+  }
+  const hasUrl =
+    typeof args?.url === "string" && args.url.trim().length > 0;
+  const hasCommand =
+    typeof args?.command === "string" && args.command.trim().length > 0;
+  if (!hasUrl && !hasCommand) {
+    throw new HttpError(400, "url or command required");
+  }
+  const body: Record<string, string> = { name };
+  if (hasUrl) body.url = args.url!.trim();
+  if (hasCommand) body.command = args.command!.trim();
+  if (typeof args?.auth_header === "string" && args.auth_header.trim()) {
+    body.auth_header = args.auth_header.trim();
+  }
+  if (typeof args?.auth_value === "string" && args.auth_value.trim()) {
+    body.auth_value = args.auth_value.trim();
+  }
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: `/api/v1/admin/profiles/${encodeURIComponent(slug)}/mcp`,
+    body,
+  });
+};
+
+export const removeProfileMcp = async (
+  args: { slug: string; name: string },
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const slug = String(args?.slug ?? "").trim();
+  const name = String(args?.name ?? "").trim();
+  if (!slug) throw new HttpError(400, "slug required");
+  if (!name) throw new HttpError(400, "name required");
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "DELETE",
+    path: `/api/v1/admin/profiles/${encodeURIComponent(slug)}/mcp/${encodeURIComponent(name)}`,
+  });
+};
+
+// ── #205 Lane III — per-profile skill catalogue (C-1.1 / C-1.2 contract) ──
+//
+// Two thin proxies to ctrl-api /api/v1/admin/profiles/:slug/skills.
+// GET     → { slug, reserved, skills: [{ name, description, enabled, last_invoked_at }] }
+// PUT /:name → 200 { ok, name, enabled }   body: { enabled }
+//
+// Reserved profiles (main|workers|heavy|codex-builder): mutations return
+// 409 from ctrl-api; the UI layer renders the catalogue read-only and
+// suppresses the toggle controls.
+//
+// `Promise<any>` annotation is REQUIRED — Wasp Payload trap (PRs #139 #145
+// #182 #184 #186 #214). Never replace with a typed return.
+
+// Skill directory names are slug-ish: lowercase, hyphen/underscore allowed,
+// longer cap than MCP server names (skill slugs run long — see C-1.2).
+const SKILL_NAME_RE = /^[a-z][a-z0-9_-]{0,80}$/;
+
+export const getProfileSkills = async (
+  args: { slug: string },
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const slug = String(args?.slug ?? "").trim();
+  if (!slug) throw new HttpError(400, "slug required");
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    path: `/api/v1/admin/profiles/${encodeURIComponent(slug)}/skills`,
+  });
+};
+
+export const setProfileSkillEnabled = async (
+  args: { slug: string; name: string; enabled: boolean },
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const slug = String(args?.slug ?? "").trim();
+  const name = String(args?.name ?? "").trim();
+  if (!slug) throw new HttpError(400, "slug required");
+  if (!name) throw new HttpError(400, "name required");
+  if (!SKILL_NAME_RE.test(name)) {
+    throw new HttpError(400, "name must match ^[a-z][a-z0-9_-]{0,80}$");
+  }
+  if (typeof args?.enabled !== "boolean") {
+    throw new HttpError(400, "enabled (boolean) required");
+  }
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "PUT",
+    path: `/api/v1/admin/profiles/${encodeURIComponent(slug)}/skills/${encodeURIComponent(name)}`,
+    body: { enabled: args.enabled },
+  });
+};
+
+// ── #120 Lane V — per-profile FULL channels surface ──────────────────────
+//
+// Three consolidator ops that route through Lane IV's ?profile=<slug> shape
+// on ctrl-api. Each op validates the slug client-side then proxies the call
+// with the query attached. The existing main-profile ops above continue to
+// work unchanged (back-compat — no ?profile= means "default binding").
+//
+// `Promise<any>` annotation is load-bearing — Wasp's RPC layer narrows
+// concrete return types and silently swaps the codepath under us. See
+// the Sir-away memory note "Wasp Promise<T> trap".
+//
+// Channels we support per-profile in this lane:
+//   * telegram  — token (PUT/DELETE), status (GET), test (POST)
+//   * slack     — tokens (PUT/DELETE), status (GET), test (POST)
+//   * sms       — credentials (PUT/DELETE), status (GET), test (POST)
+//   * paperclip — api-key (POST), status (GET — main-only, see note)
+//
+// Channels intentionally NOT per-profile in this lane (instance-level):
+//   * omi / ha / recall / tailscale / terminal
+//   The honest reasons are documented inline on /profiles/:slug/channels.
+// (voice → per-profile in Lane Vb; email → per-profile in Lane Vb2.)
+
+const PROFILE_AWARE_CHANNEL_KINDS = [
+  "telegram",
+  "slack",
+  "sms",
+  "paperclip",
+  // #120 Lane Vb — voice is now per-profile (see channels/voice/credentials).
+  // Each profile owns its own Twilio number + creds; voice-bridge routes the
+  // inbound call to the resolved profile's persona + OPENAI key.
+  "voice",
+] as const;
+type ProfileAwareChannelKind = (typeof PROFILE_AWARE_CHANNEL_KINDS)[number];
+
+function _validateSlugArg(slug: unknown): string {
+  if (typeof slug !== "string" || !slug.trim()) {
+    throw new HttpError(400, "slug required");
+  }
+  // Mirrors the server-side regex in agentProfiles.ts validateSlug.
+  if (!/^[a-z][a-z0-9-]{1,30}$/.test(slug)) {
+    throw new HttpError(400, "slug must be lowercase kebab-case (2..31 chars)");
+  }
+  return slug;
+}
+
+function _validateKindArg(kind: unknown): ProfileAwareChannelKind {
+  if (
+    typeof kind !== "string" ||
+    !PROFILE_AWARE_CHANNEL_KINDS.includes(kind as ProfileAwareChannelKind)
+  ) {
+    throw new HttpError(
+      400,
+      `channel_kind must be one of ${PROFILE_AWARE_CHANNEL_KINDS.join(", ")}`,
+    );
+  }
+  return kind as ProfileAwareChannelKind;
+}
+
+// Map (kind → token-write route + method + body-shape) so the ops below
+// don't carry a switch each. Each ctrl-api route already accepts
+// ?profile=<slug> per Lane IV + Lane V.
+const _CHANNEL_TOKEN_ROUTE: Record<
+  ProfileAwareChannelKind,
+  { method: string; path: string }
+> = {
+  telegram: { method: "PUT", path: "/api/v1/channels/telegram/token" },
+  slack: { method: "PUT", path: "/api/v1/channels/slack/tokens" },
+  sms: { method: "PUT", path: "/api/v1/channels/sms/credentials" },
+  paperclip: { method: "POST", path: "/api/v1/channels/paperclip/api-key" },
+  voice: { method: "PUT", path: "/api/v1/channels/voice/credentials" },
+};
+
+const _CHANNEL_CLEAR_ROUTE: Record<
+  ProfileAwareChannelKind,
+  { method: string; path: string } | null
+> = {
+  telegram: { method: "DELETE", path: "/api/v1/channels/telegram/token" },
+  slack: { method: "DELETE", path: "/api/v1/channels/slack/tokens" },
+  sms: { method: "DELETE", path: "/api/v1/channels/sms/credentials" },
+  // Paperclip: no DELETE on the api-key route yet — wiping is a no-op for
+  // now (the operator can paste a different key over the top). Returns
+  // { ok: true, noop: true } to keep the UI's branchless call shape.
+  paperclip: null,
+  voice: { method: "DELETE", path: "/api/v1/channels/voice/credentials" },
+};
+
+const _CHANNEL_STATUS_ROUTE: Record<ProfileAwareChannelKind, string> = {
+  telegram: "/api/v1/channels/telegram/status",
+  slack: "/api/v1/channels/slack/status",
+  sms: "/api/v1/channels/sms/status",
+  paperclip: "/api/v1/channels/paperclip/status",
+  voice: "/api/v1/channels/voice/status",
+};
+
+/**
+ * Set a profile-scoped channel token (PUT/POST). The body shape is the
+ * channel's existing shape — telegram=`{token}`, slack=`{bot_token, app_token,
+ * signing_secret?}`, sms=`{account_sid, auth_token, from_number?}`,
+ * paperclip=`{api_key}`. We pass it through verbatim so the ctrl-api side's
+ * validation (and error messages) remain the source of truth.
+ */
+export const setProfileChannelToken = async (
+  args: {
+    slug: string;
+    channel_kind: string;
+    payload: Record<string, unknown>;
+  },
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const slug = _validateSlugArg(args?.slug);
+  const kind = _validateKindArg(args?.channel_kind);
+  if (
+    !args?.payload ||
+    typeof args.payload !== "object" ||
+    Array.isArray(args.payload)
+  ) {
+    throw new HttpError(400, "payload (object) is required");
+  }
+  const route = _CHANNEL_TOKEN_ROUTE[kind];
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: route.method,
+    path: route.path,
+    query: { profile: slug },
+    body: args.payload,
+  });
+};
+
+export const clearProfileChannelToken = async (
+  args: { slug: string; channel_kind: string },
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const slug = _validateSlugArg(args?.slug);
+  const kind = _validateKindArg(args?.channel_kind);
+  const route = _CHANNEL_CLEAR_ROUTE[kind];
+  if (!route) {
+    // Paperclip — no clear surface yet. Return a benign no-op so the UI
+    // can call this op uniformly.
+    return { ok: true, noop: true, reason: "no clear route for this channel" };
+  }
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: route.method,
+    path: route.path,
+    query: { profile: slug },
+  });
+};
+
+/**
+ * Batch fetch every profile-aware channel's status for one profile slug, so
+ * the /profiles/:slug/channels page lands in one round-trip. Each entry has
+ * the kind, the raw status shape, and a flag indicating fetch success.
+ *
+ * Fail-soft: a single channel's status failing does not abort the others —
+ * the page can still render the cards that work.
+ */
+export const getProfileChannelStatuses = async (
+  args: { slug: string },
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const slug = _validateSlugArg(args?.slug);
+  const instance = await getUserInstance(context);
+  const results = await Promise.all(
+    PROFILE_AWARE_CHANNEL_KINDS.map(async (kind) => {
+      try {
+        const status = await proxyToTenant(instance, {
+          path: _CHANNEL_STATUS_ROUTE[kind],
+          query: { profile: slug },
+        });
+        return { kind, ok: true, status };
+      } catch (e: any) {
+        return {
+          kind,
+          ok: false,
+          status: null,
+          error: String(e?.message ?? e ?? "fetch failed"),
+        };
+      }
+    }),
+  );
+  return {
+    slug,
+    channels: results,
+  };
+};
+
+// ── #120 Lane Vb2 — per-profile AgentMail inbox provisioning ─────────────
+//
+// Sir's clarification: "email MUST be per profile." These three ops thin-
+// proxy to the ctrl-api /api/v1/channels/email/{status,provision,inbox}
+// routes Lane Vb2 added. The shape matches the other Lane V channel ops
+// (slug → ctrl-api ?profile=<slug>). entities: []; uses the same
+// `Promise<any>` plain-async shape per the Wasp `Promise<T>` trap memory.
+
+/** Fetch the per-profile email-inbox status. */
+export const getProfileEmailStatus = async (
+  args: { slug: string },
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const slug = _validateSlugArg(args?.slug);
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    path: "/api/v1/channels/email/status",
+    query: { profile: slug },
+  });
+};
+
+/**
+ * Provision a fresh AgentMail inbox for the given profile. Calls AgentMail's
+ * real API (POST /pods/<id>/inboxes + POST /inboxes/<id>/api-keys) on the
+ * tenant; the inbox creds land in the profile's .env and a channel binding
+ * (email, <address>) → <slug> is written so inbound mail routes to it.
+ *
+ * `prefix` is optional — defaults to `alfred.<slug>` on the ctrl-api side.
+ */
+export const provisionProfileEmailInbox = async (
+  args: { slug: string; prefix?: string; display_name?: string },
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const slug = _validateSlugArg(args?.slug);
+  const body: Record<string, unknown> = {};
+  if (typeof args?.prefix === "string" && args.prefix.trim()) {
+    body.prefix = args.prefix.trim();
+  }
+  if (typeof args?.display_name === "string" && args.display_name.trim()) {
+    body.display_name = args.display_name.trim();
+  }
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/channels/email/provision",
+    query: { profile: slug },
+    body,
+  });
+};
+
+/**
+ * Release the AgentMail inbox bound to the profile. Best-effort upstream
+ * delete (the ctrl-api side falls through to "binding-removed only" when
+ * AGENTMAIL_MASTER_API_KEY is missing or the upstream call fails); always
+ * wipes the .env keys + drops the channel binding row.
+ */
+export const clearProfileEmailInbox = async (
+  args: { slug: string },
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const slug = _validateSlugArg(args?.slug);
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "DELETE",
+    path: "/api/v1/channels/email/inbox",
+    query: { profile: slug },
+  });
+};
+
+/**
+ * Send a test email from this profile's inbox to verify outbound auth
+ * end-to-end. The recipient is mandatory (operator's address, typically).
+ */
+export const sendProfileEmailTest = async (
+  args: { slug: string; to: string; subject?: string; text?: string },
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const slug = _validateSlugArg(args?.slug);
+  if (typeof args?.to !== "string" || !args.to.trim()) {
+    throw new HttpError(400, "`to` recipient is required");
+  }
+  const body: Record<string, unknown> = { to: args.to.trim() };
+  if (typeof args?.subject === "string" && args.subject.trim()) {
+    body.subject = args.subject.trim();
+  }
+  if (typeof args?.text === "string" && args.text.trim()) {
+    body.text = args.text.trim();
+  }
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/channels/email/test",
+    query: { profile: slug },
+    body,
+  });
+};
+
+// ── #120 Lane Vb — explicit voice-credentials wrappers ──────────────────
+//
+// The generic setProfileChannelToken/clearProfileChannelToken ops above
+// already cover voice (kind="voice" maps to /api/v1/channels/voice/
+// credentials in the route tables). These two explicit wrappers exist so
+// that (a) Sir's spec mention of `setProfileVoiceCredentials` / `clear
+// ProfileVoiceCredentials` lands as named ops in main.wasp, and (b) call
+// sites that only need voice don't need to remember the channel-kind
+// string. Both delegate to the generic op so there's a single ctrl-api
+// route in play.
+//
+// `Promise<any>` annotation is load-bearing — see the Wasp Promise<T>
+// trap note above.
+
+export const setProfileVoiceCredentials = async (
+  args: {
+    slug: string;
+    twilio_sid: string;
+    twilio_auth_token: string;
+    twilio_from_number: string;
+    openai_key?: string;
+  },
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const slug = _validateSlugArg(args?.slug);
+  const sid = typeof args?.twilio_sid === "string" ? args.twilio_sid.trim() : "";
+  const token =
+    typeof args?.twilio_auth_token === "string" ? args.twilio_auth_token.trim() : "";
+  const from =
+    typeof args?.twilio_from_number === "string"
+      ? args.twilio_from_number.trim()
+      : "";
+  if (!/^AC[a-f0-9]{32}$/.test(sid)) {
+    throw new HttpError(400, "twilio_sid must be a Twilio Account SID");
+  }
+  if (!/^[a-f0-9]{32}$/.test(token)) {
+    throw new HttpError(400, "twilio_auth_token must be 32 lowercase hex chars");
+  }
+  if (!/^\+[1-9]\d{1,14}$/.test(from)) {
+    throw new HttpError(400, "twilio_from_number must be E.164");
+  }
+  const payload: Record<string, string> = {
+    account_sid: sid,
+    auth_token: token,
+    from_number: from,
+  };
+  if (typeof args?.openai_key === "string" && args.openai_key.trim()) {
+    payload.openai_key = args.openai_key.trim();
+  }
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "PUT",
+    path: "/api/v1/channels/voice/credentials",
+    query: { profile: slug },
+    body: payload,
+  });
+};
+
+export const clearProfileVoiceCredentials = async (
+  args: { slug: string },
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const slug = _validateSlugArg(args?.slug);
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "DELETE",
+    path: "/api/v1/channels/voice/credentials",
+    query: { profile: slug },
+  });
+};
+
+// ── #206 Lane III — per-(profile, channel_kind) display name + avatar ────
+//
+// Three thin ops backing /profiles/:slug Q6 "Avatar + handle" sub-panel
+// (one per binding row). They map onto Lane I's REST surface (C2):
+//
+//   GET    /api/v1/agent-profiles/:slug/channel-identities
+//   PUT    /api/v1/agent-profiles/:slug/channel-identities/:kind  (multipart)
+//   DELETE /api/v1/agent-profiles/:slug/channel-identities/:kind
+//
+// `proxyToTenant` only speaks JSON, so the PUT op assembles a multipart
+// FormData body in Node and hits ctrl-api with `fetch` directly. The
+// browser hands us the avatar as a base64 data URL + filename (Wasp
+// actions are JSON-only too — that's the contract the React layer
+// converts to before calling); we decode here, attach as a Blob, and
+// stream the multipart upstream.
+//
+// Reserved profiles (main|workers|heavy|codex-builder): ctrl-api returns
+// 409 on PUT/DELETE; we surface the message verbatim.
+//
+// `Promise<any>` annotation is REQUIRED — Wasp Payload trap (PRs #139
+// #145 #182 #184 #186 #214 #217). Never replace with a typed return.
+
+const _CHANNEL_KIND_RE = /^[a-z][a-z0-9_-]{0,30}$/;
+const _AVATAR_MAX_BYTES = 2 * 1024 * 1024;
+const _AVATAR_ALLOWED_MIMES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+]);
+
+export const getChannelIdentities = async (
+  args: { slug: string },
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const slug = String(args?.slug ?? "").trim();
+  if (!slug) throw new HttpError(400, "slug required");
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    path: `/api/v1/agent-profiles/${encodeURIComponent(slug)}/channel-identities`,
+  });
+};
+
+export const putChannelIdentity = async (
+  args: {
+    slug: string;
+    channel_kind: string;
+    display_name?: string;
+    // Avatar arrives base64-encoded (data-URL prefix stripped by the
+    // caller) with its filename + mime; the op constructs the
+    // multipart/form-data body. Omit all three to update display_name only.
+    avatar_base64?: string;
+    avatar_filename?: string;
+    avatar_mime?: string;
+  },
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const slug = String(args?.slug ?? "").trim();
+  const channel_kind = String(args?.channel_kind ?? "").trim();
+  if (!slug) throw new HttpError(400, "slug required");
+  if (!_CHANNEL_KIND_RE.test(channel_kind)) {
+    throw new HttpError(400, "channel_kind required");
+  }
+  const display_name =
+    typeof args?.display_name === "string" ? args.display_name : "";
+  const trimmedName = display_name.trim();
+  if (trimmedName.length > 64) {
+    throw new HttpError(422, "display_name must be 64 chars or fewer");
+  }
+  if (/[\r\n]/.test(trimmedName)) {
+    throw new HttpError(422, "display_name must not contain newlines");
+  }
+  const hasAvatar =
+    typeof args?.avatar_base64 === "string" && args.avatar_base64.length > 0;
+  if (!trimmedName && !hasAvatar) {
+    throw new HttpError(400, "display_name or avatar required");
+  }
+
+  // Build multipart/form-data body. The Web FormData API (Node 22's
+  // `globalThis.FormData`) handles the boundary + Content-Type for us
+  // when we hand it to fetch.
+  const form = new FormData();
+  if (trimmedName) form.append("display_name", trimmedName);
+  if (hasAvatar) {
+    const mime =
+      typeof args?.avatar_mime === "string" && args.avatar_mime
+        ? args.avatar_mime
+        : "application/octet-stream";
+    if (!_AVATAR_ALLOWED_MIMES.has(mime)) {
+      throw new HttpError(400, "avatar must be image/png, image/jpeg, or image/webp");
+    }
+    const filename =
+      typeof args?.avatar_filename === "string" && args.avatar_filename
+        ? args.avatar_filename
+        : `avatar.${mime.split("/")[1] || "bin"}`;
+    let buf: Buffer;
+    try {
+      buf = Buffer.from(args.avatar_base64!, "base64");
+    } catch {
+      throw new HttpError(400, "avatar_base64 not valid base64");
+    }
+    if (buf.length === 0) {
+      throw new HttpError(400, "avatar payload empty");
+    }
+    if (buf.length > _AVATAR_MAX_BYTES) {
+      throw new HttpError(400, "avatar exceeds 2 MB");
+    }
+    // Node 22 has Blob in globalThis; FormData copes with Buffer-backed Blobs.
+    const blob = new Blob([buf], { type: mime });
+    form.append("avatar", blob, filename);
+  }
+
+  const CTRL_API_URL =
+    process.env.CTRL_API_URL ?? "http://ctrl-api:3100";
+  const CTRL_API_KEY = process.env.AAS_API_KEY ?? "";
+  if (!CTRL_API_KEY) {
+    throw new HttpError(500, "AAS_API_KEY is not configured");
+  }
+  const url = `${CTRL_API_URL}/api/v1/agent-profiles/${encodeURIComponent(slug)}/channel-identities/${encodeURIComponent(channel_kind)}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 60_000);
+  try {
+    const response = await fetch(url, {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${CTRL_API_KEY}`,
+        // DO NOT set Content-Type — letting fetch derive the boundary from
+        // FormData is the only way the upstream's multipart parser sees a
+        // well-formed body.
+      },
+      body: form,
+      signal: controller.signal,
+    });
+    const ct = response.headers.get("content-type") || "";
+    const text = await response.text();
+    if (!response.ok) {
+      const msg =
+        response.status === 404
+          ? "Profile not found"
+          : response.status === 409
+            ? text?.slice(0, 200) || "Reserved or archived profile"
+            : text?.slice(0, 200) || response.statusText;
+      throw new HttpError(response.status, msg);
+    }
+    if (ct.includes("application/json") && text) {
+      try {
+        return JSON.parse(text);
+      } catch {
+        return { raw: text };
+      }
+    }
+    return text;
+  } catch (err: any) {
+    if (err instanceof HttpError) throw err;
+    if (err?.name === "AbortError") {
+      throw new HttpError(504, "ctrl-api request timed out");
+    }
+    throw new HttpError(502, "Failed to reach the local ctrl-api");
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+export const deleteChannelIdentity = async (
+  args: { slug: string; channel_kind: string },
+  context: any,
+): Promise<any> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const slug = String(args?.slug ?? "").trim();
+  const channel_kind = String(args?.channel_kind ?? "").trim();
+  if (!slug) throw new HttpError(400, "slug required");
+  if (!_CHANNEL_KIND_RE.test(channel_kind)) {
+    throw new HttpError(400, "channel_kind required");
+  }
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "DELETE",
+    path: `/api/v1/agent-profiles/${encodeURIComponent(slug)}/channel-identities/${encodeURIComponent(channel_kind)}`,
+  });
+};
+
+
+// ── decision_ref minter ──────────────────────────────────────────────────
+//
+// Crockford base32, 26 chars — the ULID shape PR4's
+// `assertDecisionRef` accepts. We don't need cryptographic ULID
+// monotonicity here (one proposal-apply per user click), so a simple
+// timestamp + random suffix is fine.
+const _ULID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+function mintDecisionRef(): string {
+  const now = Date.now();
+  let timeChars = "";
+  let t = now;
+  for (let i = 0; i < 10; i++) {
+    timeChars = _ULID_ALPHABET[t & 31] + timeChars;
+    t = Math.floor(t / 32);
+  }
+  let randChars = "";
+  for (let i = 0; i < 16; i++) {
+    randChars += _ULID_ALPHABET[Math.floor(Math.random() * 32)];
+  }
+  return timeChars + randChars;
+}

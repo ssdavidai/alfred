@@ -1,0 +1,78 @@
+# PR review gate.
+#
+# Required-check on every PR. Blocks merge unless the PR body has a
+# `## Smoke evidence` section.
+#
+# This is the deterministic half of the smoke-as-truth rule. The agentic half
+# is `/ultrareview <pr#>` (in commands/ultrareview.md) which a human runs
+# locally before tapping merge. Together they keep lint-pass-shipping out of
+# the codebase.
+#
+# To make this a REQUIRED status check that actually blocks merge, add it as a
+# required check in:
+#   Repo Settings → Branches → main → Require status checks before merging
+#                                  → add 'smoke-evidence-check'
+#
+# Override for legitimately-docs-only PRs:
+#   Add `[skip smoke gate]` to the PR title, OR
+#   Put `## Smoke evidence` with the body `N/A — docs-only change` in the PR.
+
+name: pr-review-gate
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, ready_for_review, reopened]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  smoke-evidence-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Parse PR body for `## Smoke evidence`
+        env:
+          BODY: ${{ github.event.pull_request.body }}
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -euo pipefail
+
+          # Title-level override (rare):
+          if echo "$TITLE" | grep -qi '\[skip smoke gate\]'; then
+            echo "::notice::Smoke gate skipped via [skip smoke gate] in title."
+            exit 0
+          fi
+
+          # PR body must include one of these section headers (variations on the same idea):
+          if echo "$BODY" | grep -qE '^##[[:space:]]+Smoke evidence' ; then
+            echo "✓ '## Smoke evidence' section present."
+            exit 0
+          fi
+          if echo "$BODY" | grep -qE '^###[[:space:]]+Smoke evidence' ; then
+            echo "✓ '### Smoke evidence' section present."
+            exit 0
+          fi
+          if echo "$BODY" | grep -qE '^##[[:space:]]+Smoke verification' ; then
+            echo "✓ '## Smoke verification' section present."
+            exit 0
+          fi
+
+          # Neither found. Block.
+          echo "::error::PR body lacks a '## Smoke evidence' section."
+          echo ""
+          echo "Add a section to the PR body with verbatim smoke output."
+          echo "Minimum shape:"
+          echo "  ## Smoke evidence"
+          echo "  Tested on home.alfred.black at <UTC>."
+          echo "  \`\`\`"
+          echo "  §1 baseline: …"
+          echo "  §2 mutation: …"
+          echo "  §3 isolation check: …"
+          echo "  …"
+          echo "  \`\`\`"
+          echo ""
+          echo "For docs-only PRs where smoke doesn't apply:"
+          echo "  ## Smoke evidence"
+          echo "  N/A — docs-only change."
+          exit 1

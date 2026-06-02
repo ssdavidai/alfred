@@ -55,6 +55,8 @@ const execFileFn = mock.fn((...args: any[]) => {
 mock.module("node:child_process", {
   namedExports: {
     execFile: execFileFn,
+    // execFileSync needed by src/api/routes/system.ts (ssh-keygen, unused here).
+    execFileSync: mock.fn(() => ""),
     spawn: mock.fn(() => ({
       stderr: { on: mock.fn() },
       stdin: { write: mock.fn(), end: mock.fn() },

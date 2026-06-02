@@ -11,6 +11,10 @@
 //     briefings, decisions, schedules, workflows, matters, chores,
 //     signals/observations, learning. Parameterised paths land in
 //     VOICE_BRIDGE_PATTERN_ALLOWLIST (anchored regex). NO writes.
+//   - #114 PR4 (2026-05-29): + the read-only `files__*` surface — list,
+//     usage (exact); stat, blob (anchored regex with `.+` tail because
+//     the ULID/safe-name shape carries a `/`). Voice writes (upload,
+//     PATCH, DELETE) intentionally NOT in the allowlist.
 //
 // What this pins:
 //

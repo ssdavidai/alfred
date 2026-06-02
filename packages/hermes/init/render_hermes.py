@@ -12,7 +12,7 @@ render them with Jinja2 directly. No Node/Nunjucks runtime needed in the
 init container.
 
 Usage:
-    render_hermes.py <profile> <profile_dir> <template_dir>
+    render_hermes.py <profile> <profile_dir> <template_dir> <gateway_token>
 
 Environment (read for template variables):
     OPENROUTER_API_KEY, ANTHROPIC_API_KEY, OPENAI_API_KEY
@@ -22,9 +22,19 @@ Environment (read for template variables):
     HERMES_VAULT_PATH        (default /vault)
     CTRL_API_URL             (default http://ctrl-api:3100)
     HERMES_API_CORS_ORIGINS  (optional CORS allowlist)
+    HERMES_RENDER_PORT       (#120 Lane II) override the port for ANY profile;
+                             required for user-facing profiles whose port is
+                             allocated dynamically by ctrl-api's agent_profile
+                             registry (18794..18799).
+    HERMES_RENDER_MODEL      (#120 Lane II) override the model for a user-
+                             facing profile; falls back to the reserved-
+                             profile defaults when absent.
 
 Positional:
-    <profile>       "main" | "workers" | "heavy"
+    <profile>       any slug matching ^[a-z][a-z0-9-]{1,30}$ — the four
+                    reserved infra profiles (main / workers / heavy /
+                    codex-builder) plus any user-facing profile created
+                    via ctrl-api's /api/v1/agent-profiles POST.
     <profile_dir>   absolute path where this process WRITES config.yaml +
                     .env (the init container's view of the volume,
                     e.g. /hermes-data/profiles/main)
@@ -32,9 +42,17 @@ Positional:
     <gateway_token> the value of /alfred-data/.gateway-token — becomes
                     API_SERVER_KEY in the profile .env
 
+#120 Lane II — the legacy `_KNOWN_PROFILES` allowlist is gone. Any slug that
+matches the registry regex is accepted; the port is sourced from
+HERMES_RENDER_PORT (the supervisor / entrypoint.sh passes the registry's
+api_server_port). For back-compat with the existing 4 reserved profiles,
+their canonical ports are still hard-coded as a fallback when
+HERMES_RENDER_PORT is unset.
+
 The Hermes API server binds the canonical ports 18789 (main) / 18790
-(workers) / 18791 (heavy) directly — the hermes-shim that used to front it
-was retired in issue #40.
+(workers) / 18791 (heavy) / 18793 (codex-builder) directly — the
+hermes-shim that used to front it was retired in issue #40. User-facing
+profiles use 18794..18799 (allocated by ctrl-api).
 
 Path-baking: the absolute paths baked INTO the rendered config.yaml
 (mcp-stdio dir, ctrl-server.mjs, NODE_PATH) must be valid in the HERMES
@@ -54,16 +72,38 @@ sessions, memory, skills, or auth.json.
 from __future__ import annotations
 
 import os
+import re
 import sys
 from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
-# Hermes API server ports — the canonical ports every caller already uses.
-# The hermes-shim was retired (issue #40); the Hermes API server now binds
-# these ports directly. Must match docker/supervisor.sh and the EXPOSE in
-# the Dockerfile.
-_API_SERVER_PORT = {"main": 18789, "workers": 18790, "heavy": 18791}
+# Hermes API server ports — the canonical ports for the four reserved
+# infra profiles. The hermes-shim was retired (issue #40); the Hermes API
+# server now binds these ports directly. Must match docker/supervisor.sh
+# and the EXPOSE in the Dockerfile.
+#
+# codex-builder (:18793) is the sealed-runtime builder profile (PR 2 of the
+# codex-builder build, docs/codex-builder-runtime.md). It is rendered on
+# every tenant for fleet-uniform port layout, but the supervisor only
+# LAUNCHES it when ENABLE_CODEX_BUILDER=true in the per-tenant compose env.
+# So home gets the running gateway; rj/joe/zsolt/miguel get an idle profile
+# dir but no listening process on :18793.
+#
+# #120 Lane II — these are FALLBACK ports used when HERMES_RENDER_PORT is
+# unset. Any user-facing profile created via ctrl-api's POST
+# /api/v1/agent-profiles passes its allocated port (18794..18799) via
+# HERMES_RENDER_PORT.
+_RESERVED_PORT = {
+    "main": 18789,
+    "workers": 18790,
+    "heavy": 18791,
+    "codex-builder": 18793,
+}
+
+# Slug regex — same as the registry's `agent_profile.slug` constraint
+# (packages/ctrl/src/db/agentProfiles.ts: _SLUG_RE).
+_SLUG_RE = re.compile(r"^[a-z][a-z0-9-]{1,30}$")
 
 # The template renders the `model:` block with `provider: openrouter`. Hermes
 # owns provider/model selection natively (`hermes model`, with a live model
@@ -230,11 +270,23 @@ def _parse_env_keys(text: str) -> dict[str, str]:
     return out
 
 
-def _merge_preserve_runtime_keys(rendered: str, env_path: Path) -> str:
+def _merge_preserve_runtime_keys(
+    rendered: str, env_path: Path, profile: str
+) -> str:
     """Append runtime-managed keys (TELEGRAM_*, SLACK_*, …) from the
     existing .env to the freshly-rendered output, if they aren't already
     present in the render.
+
+    codex-builder is the explicit exception: its .env is a STRICT
+    positive allowlist (no provider keys, no MCP keys, no channel keys),
+    and any preservation step would be a leak vector — a stray
+    TELEGRAM_BOT_TOKEN written by ctrl-api into the wrong profile would
+    survive across re-renders here without preservation being skipped.
+    The sealed runtime exists exactly to keep secret surfaces small;
+    treat the per-profile .env as the surface authority.
     """
+    if profile == "codex-builder":
+        return rendered
     if not env_path.exists():
         return rendered
     try:
@@ -287,14 +339,48 @@ def main() -> int:
     template_dir = Path(sys.argv[3])
     gateway_token = sys.argv[4].strip()
 
-    if profile not in ("main", "workers", "heavy"):
+    # #120 Lane II — accept any slug matching the registry regex. The four
+    # reserved profiles still resolve to their canonical port via
+    # _RESERVED_PORT below; any other slug requires HERMES_RENDER_PORT to
+    # be set (the supervisor passes the registry's api_server_port).
+    if not _SLUG_RE.match(profile):
         print(
-            f"error: profile must be main|workers|heavy, got {profile!r}",
+            f"error: profile slug {profile!r} does not match "
+            f"^[a-z][a-z0-9-]{{1,30}}$",
             file=sys.stderr,
         )
         return 2
     if not gateway_token:
         print("error: gateway token is empty", file=sys.stderr)
+        return 2
+
+    # Resolve the API server port.
+    #   1. HERMES_RENDER_PORT env override — required for any non-reserved
+    #      slug; the supervisor passes the registry's allocated port here.
+    #   2. _RESERVED_PORT fallback — used by the existing 4 reserved
+    #      profiles when called without an explicit port (back-compat with
+    #      every pre-Lane-II caller).
+    #   3. Hard error — non-reserved slug with no port is a programmer
+    #      mistake we want to surface loud, not silently default to 18789.
+    port_override = os.environ.get("HERMES_RENDER_PORT", "").strip()
+    if port_override:
+        try:
+            api_server_port = int(port_override)
+        except ValueError:
+            print(
+                f"error: HERMES_RENDER_PORT={port_override!r} is not an integer",
+                file=sys.stderr,
+            )
+            return 2
+    elif profile in _RESERVED_PORT:
+        api_server_port = _RESERVED_PORT[profile]
+    else:
+        print(
+            f"error: profile {profile!r} is not a reserved infra profile and "
+            "HERMES_RENDER_PORT is unset (the user-facing profile's port from "
+            "the agent_profile registry must be passed via HERMES_RENDER_PORT)",
+            file=sys.stderr,
+        )
         return 2
 
     profile_dir.mkdir(parents=True, exist_ok=True)
@@ -335,10 +421,25 @@ def main() -> int:
     )
 
     # --- config.yaml ---------------------------------------------------------
+    # #120 Lane II — user-facing profiles (anything NOT in the reserved set)
+    # render through the same template branch as main: a capable
+    # conversational model via OpenRouter, with the standard agent posture.
+    # The HERMES_RENDER_MODEL env var (set by entrypoint.sh from the registry
+    # row) overrides the template's main_model default — so a profile created
+    # with model="anthropic/claude-opus-4-6" gets that model in its config.
+    is_reserved = profile in _RESERVED_PORT
+    is_main_like = profile == "main" or not is_reserved
+    model_override = os.environ.get("HERMES_RENDER_MODEL", "").strip()
+    main_model_value = (
+        model_override
+        if (is_main_like and model_override)
+        else os.environ.get("HERMES_MAIN_MODEL", "x-ai/grok-4.3")
+    )
+
     config_tmpl = env.get_template("hermes-config.yaml.njk")
     config_out = config_tmpl.render(
         profile=profile,
-        is_main=(profile == "main"),
+        is_main=is_main_like,
         vault_path=vault_path,
         ctrl_api_url=ctrl_api_url,
         mcp_stdio_dir=mcp_stdio_dir,
@@ -350,9 +451,16 @@ def main() -> int:
         # Bare OpenRouter model IDs (no `openrouter/` prefix — `provider:
         # openrouter` + base_url route it). Overridable via .env so a
         # stale model ID is a one-line fix, not a rebuild.
-        main_model=os.environ.get("HERMES_MAIN_MODEL", "x-ai/grok-4.3"),
+        main_model=main_model_value,
         workers_model=os.environ.get("HERMES_WORKERS_MODEL", "openai/gpt-4.1-nano"),
         heavy_model=os.environ.get("HERMES_HEAVY_MODEL", "anthropic/claude-opus-4-6"),
+        # codex-builder runs Hermes' supervising agent on the same openai-
+        # codex model the CLI it shells out to uses. Overridable so a
+        # future Codex model bump is a one-line .env change, not a
+        # template+rebuild. See docs/codex-builder-runtime.md §2.
+        codex_builder_model=os.environ.get(
+            "HERMES_CODEX_BUILDER_MODEL", "gpt-5-codex"
+        ),
     )
     config_path = profile_dir / "config.yaml"
     # config.yaml is operator-owned: once it exists, `hermes config` / the
@@ -372,8 +480,8 @@ def main() -> int:
     env_tmpl = env.get_template("hermes-profile.env.njk")
     env_out = env_tmpl.render(
         profile=profile,
-        is_main=(profile == "main"),
-        api_server_port=_API_SERVER_PORT[profile],
+        is_main=is_main_like,
+        api_server_port=api_server_port,
         api_server_key=gateway_token,
         # Bind 0.0.0.0 — the Hermes API server is now reached directly over
         # the compose network (the shim that used to front it is gone).
@@ -400,7 +508,7 @@ def main() -> int:
     # everything not in the template" rule) so an operator who hand-edits the
     # file with a stale provider key doesn't accidentally pin that stale
     # value across re-renders.
-    env_out = _merge_preserve_runtime_keys(env_out, env_path)
+    env_out = _merge_preserve_runtime_keys(env_out, env_path, profile)
     env_path.write_text(env_out, encoding="utf-8")
     # .env carries the API key + provider keys. We want it permissive
     # enough that sibling containers in the SAME compose stack — paperclip

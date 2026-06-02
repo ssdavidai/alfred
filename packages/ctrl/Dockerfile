@@ -66,6 +66,12 @@ FROM node:22-slim AS runtime
 # v2 plugin is NOT packaged for Debian, so fetch the official plugin binary
 # into the CLI plugins dir. ctrl-api shells `docker compose` to restart
 # sibling containers via the bind-mounted docker socket.
+#
+# `zstd` (#114 PR 5) — the cold-archive read path uses node:zlib's streaming
+# zstd codec (Node >= 22.15), so the runtime does NOT shell out to /usr/bin/zstd
+# at request time. We install the CLI anyway so operators can inspect a cold
+# blob ad-hoc (`zstd -d /cold-files/<ULID>.zst -o /tmp/probe`) without having to
+# write a Node one-liner. ~150 KB image cost; worth it for the on-call ergonomics.
 ARG TARGETARCH
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
@@ -77,6 +83,7 @@ RUN apt-get update \
        python3-yaml \
        openssh-client \
        docker.io \
+       zstd \
   && rm -rf /var/lib/apt/lists/* \
   && case "${TARGETARCH}" in \
        amd64) DC_ARCH="x86_64" ;; \
@@ -114,7 +121,10 @@ EXPOSE 3100
 
 # alfred-state.db / ingest.db / cold.db (Store 3 archive) live on named volumes
 # mounted at these paths.
-VOLUME ["/state", "/ingest", "/cold"]
+#
+# /files (Store 5 live) + /cold-files (Store 5 cold, #114 PR 5) are mounted
+# from the `files_data` + `files_cold_data` named volumes by docker-compose.
+VOLUME ["/state", "/ingest", "/cold", "/files", "/cold-files"]
 
 # Node 22's node:sqlite is behind an experimental flag.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
