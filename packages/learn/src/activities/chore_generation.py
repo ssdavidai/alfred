@@ -20,6 +20,7 @@ Design contract:
 """
 from __future__ import annotations
 
+import ast
 import asyncio
 import hashlib
 import json
@@ -932,6 +933,92 @@ def _resolve_tenant_timezone() -> str:
     return os.environ.get("TENANT_TIMEZONE", "UTC") or "UTC"
 
 
+def _extract_registered_workflow_name(python_source: str) -> tuple[str | None, str | None]:
+    """Extract the Temporal workflow name registered by the source.
+
+    Returns (class_name, registered_name) where:
+      - class_name is the bare class name of the @workflow.defn-decorated class
+      - registered_name is the Temporal name Temporal will use to register the
+        workflow — the `name=...` kwarg of @workflow.defn if present, else the
+        class name itself.
+
+    Returns (None, None) on:
+      - source that fails to parse
+      - source with no @workflow.defn class
+      - source with multiple @workflow.defn classes (we let the downstream
+        structural validator handle that; we don't pick one arbitrarily)
+
+    GH #150: the schedule's workflow_type comes from the envelope's
+    `workflow_class_name`, but the Temporal-registered name comes from the
+    source. If they disagree (e.g. envelope says "GitHubFailureTriageWorkflow"
+    but the source has `@workflow.defn(name="GithubFailureTriageWorkflow")`),
+    the schedule fires forever against an unregistered workflow type. This
+    helper exposes the registered name so the envelope validator can compare
+    them and reject the mismatch.
+    """
+    try:
+        tree = ast.parse(python_source)
+    except SyntaxError:
+        return None, None
+
+    defn_classes: list[ast.ClassDef] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and _has_workflow_defn_decorator_local(node):
+            defn_classes.append(node)
+
+    if len(defn_classes) != 1:
+        # Zero → the structural validator catches it.
+        # More than one → also a structural-validator concern; we don't
+        # guess which class the envelope was supposed to name.
+        return None, None
+
+    cls = defn_classes[0]
+    class_name = cls.name
+    registered_name = _workflow_defn_name_kwarg(cls) or class_name
+    return class_name, registered_name
+
+
+def _has_workflow_defn_decorator_local(node: ast.ClassDef) -> bool:
+    """Return True iff the class is decorated with @workflow.defn (with or without args).
+
+    Mirrors the helper in src.workflows.chores._dynamic_loader but kept local
+    to avoid a cross-module import cycle through the validator.
+    """
+    for dec in node.decorator_list:
+        if isinstance(dec, ast.Attribute) and dec.attr == "defn":
+            if isinstance(dec.value, ast.Name) and dec.value.id == "workflow":
+                return True
+        elif isinstance(dec, ast.Call):
+            inner = dec.func
+            if (
+                isinstance(inner, ast.Attribute)
+                and inner.attr == "defn"
+                and isinstance(inner.value, ast.Name)
+                and inner.value.id == "workflow"
+            ):
+                return True
+    return False
+
+
+def _workflow_defn_name_kwarg(node: ast.ClassDef) -> str | None:
+    """Return the `name=...` string literal passed to @workflow.defn, if any."""
+    for dec in node.decorator_list:
+        if not isinstance(dec, ast.Call):
+            continue
+        inner = dec.func
+        if not (
+            isinstance(inner, ast.Attribute)
+            and inner.attr == "defn"
+            and isinstance(inner.value, ast.Name)
+            and inner.value.id == "workflow"
+        ):
+            continue
+        for kw in dec.keywords:
+            if kw.arg == "name" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                return kw.value.value
+    return None
+
+
 def _validate_envelope(parsed: dict[str, Any]) -> tuple[bool, str]:
     """Validate that the parsed Opus response has the required envelope keys.
 
@@ -964,6 +1051,43 @@ def _validate_envelope(parsed: dict[str, Any]) -> tuple[bool, str]:
         return False, "missing or empty 'python_source'"
     if len(python_source) > 100_000:
         return False, f"python_source too large: {len(python_source)} bytes (max 100000)"
+
+    # GH #150 — workflow-name consistency between envelope and source.
+    #
+    # The schedule the caller creates uses envelope.workflow_class_name as its
+    # workflow_type. The string Temporal actually registers comes from the
+    # @workflow.defn(name=...) kwarg in the source (or, if omitted, the bare
+    # class name). When those two disagree (e.g. envelope says
+    # "GitHubFailureTriageWorkflow" but the source declares
+    # `@workflow.defn(name="GithubFailureTriageWorkflow")`) the schedule fires
+    # forever against a workflow type Temporal never registered — the
+    # original symptom of GH #150.
+    #
+    # Reject the mismatch here so the retry loop gets specific feedback and
+    # Opus aligns the two on the next attempt. Skip silently when the
+    # source is unparseable or has !=1 @workflow.defn classes; the
+    # structural validator (validate_template_source, called next) gives
+    # cleaner errors for those cases.
+    class_name, registered_name = _extract_registered_workflow_name(python_source)
+    if registered_name is not None and registered_name != workflow_class_name:
+        if class_name and class_name != registered_name:
+            # `@workflow.defn(name="...")` override is in play.
+            return False, (
+                f"workflow_class_name {workflow_class_name!r} does not match the "
+                f"Temporal name registered by the source: class "
+                f"{class_name!r} is decorated with "
+                f"@workflow.defn(name={registered_name!r}). Set "
+                f"workflow_class_name to {registered_name!r} (the name Temporal "
+                f"will use to look up the workflow), or remove the name= kwarg "
+                f"and rename the class to match the envelope."
+            )
+        return False, (
+            f"workflow_class_name {workflow_class_name!r} does not match the "
+            f"@workflow.defn class in the source ({registered_name!r}). The "
+            f"schedule registers under the envelope name but Temporal registers "
+            f"the class under the source name — they must be identical or the "
+            f"schedule fires against an unregistered workflow type."
+        )
 
     # C.1: user_facing_description is required for the new Chores UI.
     # We accept missing field for backwards compat but emit a warning,

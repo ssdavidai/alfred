@@ -37,12 +37,23 @@ export interface VoiceStatus {
   calling_number: string | null;
   /** True when the voice-bridge compose service is present on this VM. */
   compose_service_exists: boolean;
-  /** True when OPENAI_API_KEY is set in the compose .env. */
+  /** True when OPENAI_API_KEY is set in the profile's .env (#120 Lane Vb). */
   openai_key_set: boolean;
+  /** True when OPENAI_API_KEY is set in the compose-level .env. Main-only. */
+  openai_key_set_compose?: boolean;
+  /** Masked Twilio Account SID — "AC********…<last4>". Null when unset. */
+  account_sid_masked?: string | null;
   /** Comma-separated E.164 numbers permitted to call the bridge. "" if unset. */
   allowed_callers: string;
   /** True when any caller is allowed (default-open policy, no env vars set). */
   allow_all: boolean;
+  /** The "A call comes in" webhook URL for THIS profile. Sir pastes this
+   *  into the profile's Twilio number in the Twilio Console. Null when
+   *  DOMAIN isn't set (single-VM bring-up). #120 Lane Vb. */
+  webhook_url?: string | null;
+  /** Resolved profile slug. Echoes the ?profile=<slug> query the route
+   *  was called with, or the default binding for voice. #120 Lane Vb. */
+  profile_slug?: string;
 }
 
 export interface VoiceCardState {
@@ -146,6 +157,14 @@ export function deriveVoiceCardState(args: {
         };
       }
       // Configured + deployed, missing OpenAI key — the inline-input case.
+      // #120 Lane Vb: per-profile contexts inherit main's compose-level
+      // OPENAI key when their own is blank. `openai_key_set_compose=true`
+      // means "main has the instance key" — non-main profiles without their
+      // own key fall back to that, so they're NOT in the needsOpenaiKey
+      // state; they're just configured-running.
+      const hasOpenaiFallback =
+        status.openai_key_set === true ||
+        status.openai_key_set_compose === true;
       return {
         state: "unconfigured",
         heading: "Add your OpenAI key",
@@ -156,7 +175,7 @@ export function deriveVoiceCardState(args: {
         callingNumber: formatPhoneNumber(status.calling_number) || null,
         pill: "available",
         needsSmsFirst: false,
-        needsOpenaiKey: !status.openai_key_set,
+        needsOpenaiKey: !hasOpenaiFallback,
       };
   }
 }

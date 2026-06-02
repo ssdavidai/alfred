@@ -95,15 +95,23 @@ def test_propagation_is_after_sticky_default():
 
 
 def test_propagation_is_before_main_gateway_launch():
-    """The propagation block must run BEFORE the main gateway launches."""
+    """The propagation block must run BEFORE the gateway launch loop.
+
+    #120 Lane II — anchor is the templated registry launch loop's
+    `done < <(read_registry)` line (which replaces the previous trio of
+    per-profile start_proc calls).
+    """
     src = _read()
     cp_line = _line_index(src, 'cp "$MAIN_AUTH" "$P_AUTH"')
-    launch_line = _line_index(src, 'hermes -p main gateway run')
+    launch_line = _line_index(src, "ANCHOR: BOOT_LAUNCH_LOOP")
     assert cp_line >= 0, "expected propagation `cp` line"
-    assert launch_line >= 0, "expected `hermes -p main gateway run` launch line"
+    assert launch_line >= 0, (
+        "expected the registry-driven launch loop's "
+        "`done < <(read_registry)` line — supervisor.sh was restructured"
+    )
     assert cp_line < launch_line, (
         f"propagation `cp` (line {cp_line + 1}) must come BEFORE the "
-        f"`hermes -p main gateway run` launch (line {launch_line + 1}) — "
+        f"registry launch loop (line {launch_line + 1}) — "
         f"the gateways read auth.json on startup, so the per-profile "
         f"files must be in place before any of them boots."
     )

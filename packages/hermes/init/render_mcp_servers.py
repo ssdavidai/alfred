@@ -48,6 +48,7 @@ template shape no matter when the tenant was provisioned.
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 from typing import Iterable, Literal
 
@@ -108,12 +109,103 @@ _REQUIRED_MCP_SERVERS: dict[str, list[tuple[str, dict]]] = {
     #                 skips this profile entirely (see profile guard below).
 }
 
+# #120 Lane II — known reserved profile names. User-facing profiles (not in
+# this set) get the same MCP-server allowlist as `main` (they're
+# conversational Alfred variants). Heavy stays unaffected via the explicit
+# "unknown-profile" return path below.
+_RESERVED_PROFILES: frozenset[str] = frozenset({"main", "workers", "heavy", "codex-builder"})
+
 # codex-builder's whole identity is "no MCP catalogue". We must NEVER
 # graft `hass` or `files` into its sealed-runtime config — the egress
 # allowlist + UID isolation would let them spawn but the gateway agent
 # has no business reaching either surface. The mutator hard-skips this
 # profile name.
 _SEALED_PROFILES: frozenset[str] = frozenset({"codex-builder"})
+
+
+# -----------------------------------------------------------------------------
+# Phase B: runtime-flippable DIRECT vs DELEGATED disposition per MCP server.
+#
+# Source of truth is state.db.tool_disposition (migration 0014). The dispositions
+# only affect the MAIN profile's `tools.include` block:
+#
+#   * disposition='direct'      → leave tools.include alone (operator-owned
+#                                  whitelists from PR #176 are preserved).
+#   * disposition='delegated'   → set tools.include: [] for that server. The
+#                                  server stays spawned (the LLM can still
+#                                  reach it via delegate_to_focused_agent on
+#                                  the workers profile), but its tools are
+#                                  invisible to main's catalogue.
+#
+# Workers + heavy + codex-builder are unaffected — the disposition flag is a
+# main-only knob. -------------------------------------------------------------
+def _read_dispositions(state_db_path: Path) -> dict[str, str]:
+    """Read tool_disposition rows from state.db. Returns {server: disposition}.
+    Missing file / missing table → empty dict (fresh-tenant fallback: every
+    server is treated as 'direct', matching the migration seed)."""
+    if not state_db_path.exists():
+        return {}
+    # READ-ONLY connection (`mode=ro`) so the init container never accidentally
+    # writes to ctrl-api's single-writer DB. The mutator is a renderer, not an
+    # updater.
+    try:
+        uri = f"file:{state_db_path}?mode=ro"
+        conn = sqlite3.connect(uri, uri=True, timeout=2.0)
+        try:
+            cur = conn.execute(
+                "SELECT server, disposition FROM tool_disposition"
+            )
+            return {row[0]: row[1] for row in cur.fetchall()}
+        finally:
+            conn.close()
+    except sqlite3.OperationalError:
+        # Table doesn't exist yet (state.db predates migration 0014) — same
+        # fallback as "no file": every server defaults to direct.
+        return {}
+    except Exception:
+        # Any other SQLite hiccup: treat as no data; init must not abort.
+        return {}
+
+
+def _apply_dispositions_to_main(
+    mcp_servers: dict,
+    dispositions: dict[str, str],
+) -> bool:
+    """For each server in `dispositions` with disposition='delegated', set
+    `tools.include: []` on its config block (main profile only — callers gate
+    this). Returns True if any block was mutated.
+
+    Preserves operator-owned blocks: if a server is set to `null` (disabled
+    by operator) we skip it. If a server is a customised dict, we set
+    `tools.include: []` on it (the delegate flag wins over whitelist-based
+    customisation — the operator can always promote-to-direct via the
+    dashboard if they want their custom whitelist back).
+    """
+    mutated = False
+    for server, disposition in dispositions.items():
+        if server not in mcp_servers:
+            continue
+        block = mcp_servers[server]
+        if block is None:
+            # Operator-disabled — respect it.
+            continue
+        if not isinstance(block, dict):
+            continue
+
+        if disposition == "delegated":
+            tools = block.get("tools") if isinstance(block.get("tools"), dict) else {}
+            # Round-trip-friendly: only mutate if the current state isn't
+            # already `tools.include: []`. Avoids needless writes.
+            current_include = tools.get("include") if tools else None
+            if current_include == [] or (isinstance(current_include, list) and len(current_include) == 0):
+                continue
+            if not isinstance(block.get("tools"), dict):
+                block["tools"] = {}
+            block["tools"]["include"] = []
+            mutated = True
+        # disposition='direct' → no mutation. The operator-owned tools.include
+        # whitelist (or absence thereof) wins.
+    return mutated
 
 
 def _substitute(value: str, *, mcp_stdio_dir: str, ctrl_api_url: str) -> str:
@@ -173,6 +265,7 @@ def ensure_mcp_servers(
     profile: str,
     mcp_stdio_dir: str,
     ctrl_api_url: str,
+    state_db_path: Path | None = None,
 ) -> Literal["added", "present", "no-config", "sealed", "unknown-profile", "empty-mcp"]:
     """Idempotently add required `mcp_servers` entries to ``config_path``.
 
@@ -181,12 +274,23 @@ def ensure_mcp_servers(
       "sealed"          — codex-builder; mcp_servers stays {} (no-op)
       "unknown-profile" — profile has no required-server allowlist
       "empty-mcp"       — operator set `mcp_servers: {}` deliberately; preserved
-      "present"         — all required servers already in the config
-      "added"           — at least one missing entry was inserted
+      "present"         — all required servers already in the config (incl.
+                          disposition-derived `tools.include: []` already
+                          where it should be)
+      "added"           — at least one missing entry was inserted OR a
+                          disposition flip required mutating an existing
+                          server's tools.include block
 
-    ADD-only: an existing entry under any of the required names is
-    preserved verbatim (operator-owned, may be a hand-customised block
-    or even an explicit `null` to disable). The mutator never overwrites.
+    ADD-only for the server set: an existing entry under any of the required
+    names is preserved verbatim (operator-owned, may be a hand-customised
+    block or even an explicit `null` to disable). The mutator never deletes.
+
+    Phase B: disposition-driven `tools.include` mutation runs on the MAIN
+    profile only — when state_db_path is provided and the disposition table
+    is populated. A server with disposition='delegated' gets `tools.include:
+    []` lands on its block (whether the block was just-grafted or was
+    already operator-owned). Workers/heavy/codex-builder profiles are
+    untouched by this layer.
     """
     if not config_path.exists():
         return "no-config"
@@ -195,8 +299,17 @@ def ensure_mcp_servers(
         return "sealed"
 
     required = _REQUIRED_MCP_SERVERS.get(profile)
-    if not required:
-        return "unknown-profile"
+    if required is None:
+        # Heavy (a reserved profile with no allowlist entries) keeps the
+        # historical "unknown-profile" return — the test pins this exact
+        # outcome so heavy never picks up the principal-facing surfaces.
+        if profile in _RESERVED_PROFILES:
+            return "unknown-profile"
+        # #120 Lane II — user-facing profiles (created via ctrl-api's
+        # /api/v1/agent-profiles POST) fall here. Treat them like `main`:
+        # they're conversational Alfred variants and need the same baseline
+        # MCP catalogue.
+        required = _REQUIRED_MCP_SERVERS["main"]
 
     from ruamel.yaml import YAML
 
@@ -237,7 +350,23 @@ def ensure_mcp_servers(
         )
         added_any = True
 
-    if not added_any:
+    # Phase B: apply DELEGATED disposition to main-like profiles' mcp_servers.
+    # Workers/heavy stay full-catalogue — the focused-subagent path needs
+    # them. codex-builder was sealed above so never lands here.
+    # #120 Lane II — user-facing profiles (anything not in the reserved
+    # workers/heavy/codex-builder set) inherit main's disposition behaviour.
+    disposition_mutated = False
+    main_like = profile == "main" or profile not in {
+        "workers",
+        "heavy",
+        "codex-builder",
+    }
+    if main_like and state_db_path is not None:
+        dispositions = _read_dispositions(state_db_path)
+        if dispositions:
+            disposition_mutated = _apply_dispositions_to_main(mcp_servers, dispositions)
+
+    if not added_any and not disposition_mutated:
         return "present"
 
     with config_path.open("w", encoding="utf-8") as f:
@@ -275,12 +404,24 @@ if __name__ == "__main__":
 
     ctrl_api_url = os.environ.get("CTRL_API_URL", "http://ctrl-api:3100")
 
+    # Phase B: state.db lives in ctrl-api's data volume. The init container
+    # mounts it read-only at /ctrl-data (compose-template setting). Fresh
+    # tenants don't have the file yet — _read_dispositions handles missing
+    # file + missing table gracefully, so every server defaults to direct.
+    state_db_env = os.environ.get("STATE_DB_PATH", "").strip()
+    if state_db_env:
+        state_db_path: Path | None = Path(state_db_env)
+    else:
+        candidate = Path("/ctrl-data/alfred-state.db")
+        state_db_path = candidate if candidate.exists() else None
+
     try:
         outcome = ensure_mcp_servers(
             config,
             profile=profile,
             mcp_stdio_dir=mcp_stdio_dir,
             ctrl_api_url=ctrl_api_url,
+            state_db_path=state_db_path,
         )
     except Exception as exc:
         # Best-effort step; never abort init on a render hiccup.

@@ -105,11 +105,17 @@ export function registerAlfredJournalRoutes(): void {
     sendJson(res, 201, entry);
   });
 
-  // GET /api/v1/alfred-journal/recent?channel=…&chat_id=…&limit=…&within_hours=…
-  //   OR ?principal_id=…&limit=…&within_hours=…
+  // GET /api/v1/alfred-journal/recent?channel=…&chat_id=…&limit=…&within_hours=…[&profile=…]
+  //   OR ?principal_id=…&limit=…&within_hours=…[&profile=…]
   //
   // Hot path: the Hermes pre_gateway_dispatch hook calls this on every
   // inbound message. Indexed query, <5ms typical.
+  //
+  // Lane IV — optional `profile` filter so the One-Alfred plugin can pull
+  // only the target profile's continuity. When omitted, every profile's
+  // history is returned (legacy behaviour, no regression for `main`-only
+  // tenants). Pass `profile=<slug>` to scope. Special token `profile=__none__`
+  // returns only pre-Lane-IV rows (hermes_profile IS NULL).
   addRoute("GET", "/api/v1/alfred-journal/recent", async ({ res, query }) => {
     const limit = Number(query.get("limit") ?? 20);
     const withinHours = Number(query.get("within_hours") ?? 24);
@@ -117,6 +123,7 @@ export function registerAlfredJournalRoutes(): void {
     const principalId = query.get("principal_id");
     const channel = query.get("channel");
     const chatId = query.get("chat_id");
+    const profileParam = query.get("profile");
 
     if (!principalId && !(channel && chatId)) {
       throw new ValidationError(
@@ -124,22 +131,40 @@ export function registerAlfredJournalRoutes(): void {
       );
     }
 
+    // Translate the URL param into queryRecentJournal's hermes_profile arg.
+    //   missing  → undefined → no scoping
+    //   __none__ → null      → hermes_profile IS NULL (pre-Lane-IV rows only)
+    //   <slug>   → <slug>    → exact match
+    let hermesProfile: string | null | undefined;
+    if (profileParam === null) {
+      hermesProfile = undefined;
+    } else if (profileParam === "__none__") {
+      hermesProfile = null;
+    } else {
+      hermesProfile = profileParam;
+    }
+
     const db = getStateDb();
     const entries = principalId
       ? queryRecentJournal(db, { principal_id: principalId }, {
           limit,
           within_hours: withinHours,
+          hermes_profile: hermesProfile,
         })
       : queryRecentJournal(
           db,
           { channel: channel as string, chat_id: chatId as string },
-          { limit, within_hours: withinHours },
+          { limit, within_hours: withinHours, hermes_profile: hermesProfile },
         );
 
     sendJson(res, 200, {
       entries,
       count: entries.length,
-      window: { limit, within_hours: withinHours },
+      window: {
+        limit,
+        within_hours: withinHours,
+        ...(profileParam !== null ? { profile: profileParam } : {}),
+      },
     });
   });
 

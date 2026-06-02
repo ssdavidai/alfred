@@ -433,6 +433,8 @@ export function registerStateRoutes(): void {
       actor: query.get("actor"),
       source: query.get("source"),
       target_path: query.get("target"),
+      // #120 Lane V — prefix match (target_path LIKE 'value%').
+      target_path_prefix: query.get("target_like"),
       subject_ref: query.get("subject"),
       mode: query.get("mode"),
       since: query.get("since"),

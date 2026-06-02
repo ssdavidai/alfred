@@ -301,6 +301,40 @@ page ChannelsPage {
   component: import ChannelsPage from "@src/dashboard/ChannelsPage"
 }
 
+// /profiles — multi-profile Hermes manager (#120 Lane III).
+// One page lists user-facing personas; the New flow walks Sir through a
+// minimal wizard (slug, label, model, optional persona template); the
+// detail page surfaces channel bindings + archive/restore.
+route ProfilesRoute { path: "/profiles", to: ProfilesPage }
+page ProfilesPage {
+  authRequired: true,
+  component: import ProfilesPage from "@src/dashboard/ProfilesPage"
+}
+
+route ProfileNewRoute { path: "/profiles/new", to: ProfileNewPage }
+page ProfileNewPage {
+  authRequired: true,
+  component: import ProfileNewPage from "@src/dashboard/ProfileNewPage"
+}
+
+route ProfileDetailRoute { path: "/profiles/:slug", to: ProfileDetailPage }
+page ProfileDetailPage {
+  authRequired: true,
+  component: import ProfileDetailPage from "@src/dashboard/ProfileDetailPage"
+}
+
+// /profiles/:slug/channels — per-profile FULL channels surface (#120 Lane V).
+// Renders every profile-aware channel card (Telegram / Slack / SMS /
+// Paperclip) scoped to one profile slug. Instance-level channels (Voice /
+// OMI / HA / Recall / Email / Tailscale / Terminal) render an honest
+// "configured on /channels" notice — see ProfileChannelsPage.tsx for the
+// reasons.
+route ProfileChannelsRoute { path: "/profiles/:slug/channels", to: ProfileChannelsPage }
+page ProfileChannelsPage {
+  authRequired: true,
+  component: import ProfileChannelsPage from "@src/dashboard/ProfileChannelsPage"
+}
+
 // /chat — the dashboard chat surface (#29). Replaces the OpenClaw raw
 // WebSocket widget; talks to the Hermes runtime over HTTP/SSE via the
 // chat proxy registered in src/server/setup.ts.
@@ -576,6 +610,25 @@ action updateFileLabel {
 
 action deleteFile {
   fn: import { deleteFile } from "@src/dashboard/operations",
+  entities: []
+}
+
+// #114 §7+§8 — Recycle-bin view + symmetric restore.
+//
+// `listDeletedFiles` powers the "Recently deleted" expander on /files,
+// surfacing soft-deleted rows whose tombstone falls inside the 30-day
+// restore window. `restoreFile` clears the tombstone (atomically, with
+// `file_blobs.ref_count` bumped back up) and writes a `file_restore`
+// row to the audit ledger via appendAudit — the inverse undo recipe
+// points back at DELETE so /study#audit reads the two-event story
+// cleanly.
+query listDeletedFiles {
+  fn: import { listDeletedFiles } from "@src/dashboard/operations",
+  entities: []
+}
+
+action restoreFile {
+  fn: import { restoreFile } from "@src/dashboard/operations",
   entities: []
 }
 
@@ -1156,6 +1209,164 @@ action rejectHaProposal {
   entities: []
 }
 
+// ============================================================
+// #120 Lane III — multi-profile Hermes
+// ============================================================
+// Thin proxies to ctrl-api's /api/v1/agent-profiles surface (Lane I).
+// The detail page reads `getAgentProfile` for the {profile, bindings}
+// shape that Lane IIb confirmed.
+
+query getAgentProfiles {
+  fn: import { getAgentProfiles } from "@src/dashboard/operations",
+  entities: []
+}
+
+query getAgentProfile {
+  fn: import { getAgentProfile } from "@src/dashboard/operations",
+  entities: []
+}
+
+action createAgentProfile {
+  fn: import { createAgentProfile } from "@src/dashboard/operations",
+  entities: []
+}
+
+action archiveAgentProfile {
+  fn: import { archiveAgentProfile } from "@src/dashboard/operations",
+  entities: []
+}
+
+action restoreAgentProfile {
+  fn: import { restoreAgentProfile } from "@src/dashboard/operations",
+  entities: []
+}
+
+action bindChannelToProfile {
+  fn: import { bindChannelToProfile } from "@src/dashboard/operations",
+  entities: []
+}
+
+action unbindChannelFromProfile {
+  fn: import { unbindChannelFromProfile } from "@src/dashboard/operations",
+  entities: []
+}
+
+// #204 Lane III — per-profile MCP catalog ops.
+// GET list, POST add, DELETE remove — all thin proxies to ctrl-api C1 routes.
+// `entities: []` because there is no Prisma entity backing these; the source of
+// truth is the Hermes profile config read/written via the ctrl-api.
+
+query getProfileMcp {
+  fn: import { getProfileMcp } from "@src/dashboard/operations",
+  entities: []
+}
+
+action addProfileMcp {
+  fn: import { addProfileMcp } from "@src/dashboard/operations",
+  entities: []
+}
+
+action removeProfileMcp {
+  fn: import { removeProfileMcp } from "@src/dashboard/operations",
+  entities: []
+}
+
+// #205 Lane III — per-profile skill catalogue (Q4 from #120). Mirrors the
+// Q3 MCP-ops shape; GET is a query (read), PUT is an action (toggle).
+// `entities: []` for the same reason as the MCP ops above — the source of
+// truth is the Hermes profile's filesystem catalogue + config.yaml read and
+// written via the ctrl-api.
+query getProfileSkills {
+  fn: import { getProfileSkills } from "@src/dashboard/operations",
+  entities: []
+}
+
+action setProfileSkillEnabled {
+  fn: import { setProfileSkillEnabled } from "@src/dashboard/operations",
+  entities: []
+}
+
+// #206 Lane III — per-(profile, channel_kind) display name + avatar overrides.
+// One query + two actions. The PUT action carries an avatar payload as
+// base64 + filename + mime (Wasp args are JSON-only); the operation
+// constructs multipart/form-data server-side before forwarding to
+// ctrl-api. `entities: []` — the canonical row is `channel_identity` in
+// ctrl-api's state.db (C1 contract); the SaaS layer never reads it
+// directly, only via these ops.
+query getChannelIdentities {
+  fn: import { getChannelIdentities } from "@src/dashboard/operations",
+  entities: []
+}
+
+action putChannelIdentity {
+  fn: import { putChannelIdentity } from "@src/dashboard/operations",
+  entities: []
+}
+
+action deleteChannelIdentity {
+  fn: import { deleteChannelIdentity } from "@src/dashboard/operations",
+  entities: []
+}
+
+// #120 Lane V — per-profile FULL channels surface ops.
+//
+// The three consolidator ops the /profiles/:slug/channels page wires up. They
+// route through Lane IV's ?profile=<slug> shape on ctrl-api so each profile
+// has its own Telegram / Slack / SMS / Paperclip credentials.
+
+query getProfileChannelStatuses {
+  fn: import { getProfileChannelStatuses } from "@src/dashboard/operations",
+  entities: []
+}
+
+action setProfileChannelToken {
+  fn: import { setProfileChannelToken } from "@src/dashboard/operations",
+  entities: []
+}
+
+action clearProfileChannelToken {
+  fn: import { clearProfileChannelToken } from "@src/dashboard/operations",
+  entities: []
+}
+
+// #120 Lane Vb2 — per-profile AgentMail inbox provisioning. Sir's
+// clarification: "email MUST be per profile." These ops wire the
+// /profiles/:slug/channels Email card to ctrl-api's
+// /api/v1/channels/email/{status,provision,inbox,test}?profile=<slug>.
+query getProfileEmailStatus {
+  fn: import { getProfileEmailStatus } from "@src/dashboard/operations",
+  entities: []
+}
+
+action provisionProfileEmailInbox {
+  fn: import { provisionProfileEmailInbox } from "@src/dashboard/operations",
+  entities: []
+}
+
+action clearProfileEmailInbox {
+  fn: import { clearProfileEmailInbox } from "@src/dashboard/operations",
+  entities: []
+}
+
+action sendProfileEmailTest {
+  fn: import { sendProfileEmailTest } from "@src/dashboard/operations",
+  entities: []
+}
+
+// #120 Lane Vb — explicit voice-credentials wrappers. Delegate to
+// setProfileChannelToken / clearProfileChannelToken under the hood; named
+// here so call sites that only handle voice don't have to remember the
+// channel-kind string.
+action setProfileVoiceCredentials {
+  fn: import { setProfileVoiceCredentials } from "@src/dashboard/operations",
+  entities: []
+}
+
+action clearProfileVoiceCredentials {
+  fn: import { clearProfileVoiceCredentials } from "@src/dashboard/operations",
+  entities: []
+}
+
 query getAgentConfig {
   fn: import { getAgentConfig } from "@src/dashboard/operations",
   entities: []
@@ -1585,6 +1796,21 @@ page ToolsPage {
 query getAllowedTools {
   fn: import { getAllowedTools } from "@src/tools/operations",
   entities: [ComposioConnection]
+}
+
+// Phase B tool dispositions: read the 9-row direct/delegated map for the
+// MCP servers Hermes-main loads, and flip a server between the two
+// modes. The action queues a debounced Hermes restart so the new
+// `tools.include: []` whitelist takes effect; the UI shows a "Hermes is
+// restarting" line and refetches once the window closes.
+query getToolDispositions {
+  fn: import { getToolDispositions } from "@src/tools/operations",
+  entities: []
+}
+
+action setToolDisposition {
+  fn: import { setToolDisposition } from "@src/tools/operations",
+  entities: []
 }
 
 // ============================================================

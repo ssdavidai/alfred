@@ -33,10 +33,14 @@ import {
   getFileStat,
   updateFileLabel,
   deleteFile,
+  listDeletedFiles,
+  restoreFile,
 } from "wasp/client/operations";
 import { Frame } from "../client/components/ab/Frame";
 import {
+  badgeLabel,
   buildPrefixTree,
+  deriveBadgeState,
   deriveQuotaView,
   derivePreviewMode,
   formatBytes,
@@ -47,6 +51,7 @@ import {
   shortSha,
   shouldRejectUpload,
   uploadPercent,
+  type BadgeState,
   type FileRow,
   type FilesUsage,
   type LabelEditState,
@@ -318,8 +323,56 @@ export default function FilesPage() {
       if (selectedPath === row.path) setSelectedPath(null);
       refetchList();
       refetchUsage();
+      // The recycle bin's count changes too — refetch so the expander
+      // header label updates in lockstep.
+      refetchDeleted();
     } catch (err: any) {
       addBanner("error", `Delete failed: ${err?.message ?? "error"}`);
+    }
+  }
+
+  // ── Recently-deleted expander (#114 §7 + §8) ──────────────────────────
+  //
+  // The /files surface gains a collapsed-by-default panel listing files
+  // soft-deleted in the last 30 days. Each row carries a Restore button
+  // that calls the new POST /api/v1/files/restore/:file_id route; the
+  // 410 BLOB_REAPED case (sole reference reaped at delete time, bytes
+  // gone) surfaces verbatim so Sir sees a clear "this can't be restored"
+  // banner rather than a silent no-op.
+  const [showDeleted, setShowDeleted] = useState(false);
+  const {
+    data: deletedData,
+    refetch: refetchDeleted,
+  } = useQuery(
+    listDeletedFiles,
+    { limit: 100 },
+    { retry: false, enabled: showDeleted },
+  );
+  const deletedRows: FileRow[] = useMemo(() => {
+    const items = (deletedData as any)?.items;
+    return Array.isArray(items) ? (items as FileRow[]) : [];
+  }, [deletedData]);
+  const restoreAction = useAction(restoreFile);
+  const [restoringId, setRestoringId] = useState<string | null>(null);
+  async function onRestore(row: FileRow) {
+    if (restoringId) return;
+    setRestoringId(row.id);
+    try {
+      await restoreAction({ file_id: row.id });
+      addBanner(
+        "success",
+        `Restored ${row.original_filename ?? row.path}`,
+      );
+      refetchList();
+      refetchUsage();
+      refetchDeleted();
+    } catch (err: any) {
+      addBanner(
+        "error",
+        `Restore failed: ${err?.message ?? "error"}`,
+      );
+    } finally {
+      setRestoringId(null);
     }
   }
 
@@ -679,8 +732,11 @@ export default function FilesPage() {
                             : "transparent",
                         }}
                       >
-                        <td className="py-2 pr-3 truncate max-w-[260px]">
-                          {row.original_filename ?? row.path}
+                        <td className="py-2 pr-3 max-w-[300px]">
+                          <span className="truncate inline-block align-bottom max-w-[200px]">
+                            {row.original_filename ?? row.path}
+                          </span>
+                          <AlfredReadBadge row={row} />
                         </td>
                         <td
                           className="py-2 pr-3 text-right font-mono text-[11px]"
@@ -778,6 +834,109 @@ export default function FilesPage() {
           </aside>
         </div>
 
+        {/* Recently deleted — collapsed-by-default expander. The query
+            fires only when expanded so a quiet /files page doesn't pay
+            for an extra round-trip. Each row gets a Restore button that
+            calls POST /api/v1/files/restore/:file_id. Issue #114 §7. */}
+        <div className="border-t border-rule pt-6 mt-8">
+          <button
+            type="button"
+            onClick={() => setShowDeleted((v) => !v)}
+            className="flex items-baseline gap-2 font-mono text-[10px] uppercase tracking-[0.22em]"
+            style={{ color: "var(--marginalia)" }}
+            aria-expanded={showDeleted}
+            data-testid="files-recently-deleted-toggle"
+          >
+            <span style={{ color: "var(--brass)" }}>
+              {showDeleted ? "▾" : "▸"}
+            </span>
+            <span>Recently deleted</span>
+            {showDeleted && deletedData ? (
+              <span style={{ color: "var(--marginalia)" }}>
+                ({(deletedData as any).total ?? deletedRows.length} within 30 days)
+              </span>
+            ) : null}
+          </button>
+          {showDeleted && (
+            <div className="mt-3 border border-rule p-3">
+              {deletedRows.length === 0 ? (
+                <p
+                  className="font-body italic text-[14px]"
+                  style={{ color: "var(--marginalia)" }}
+                >
+                  Nothing recently deleted.
+                </p>
+              ) : (
+                <table className="w-full font-body text-[13px]">
+                  <thead>
+                    <tr
+                      className="font-mono text-[10px] uppercase tracking-[0.18em]"
+                      style={{ color: "var(--marginalia)" }}
+                    >
+                      <th className="text-left py-2 pr-3">Name</th>
+                      <th className="text-right py-2 pr-3">Size</th>
+                      <th className="text-left py-2 pr-3">Deleted</th>
+                      <th className="text-left py-2 pr-3">SHA-256</th>
+                      <th className="w-24"></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {deletedRows.map((row) => (
+                      <tr
+                        key={row.id}
+                        style={{ borderTop: "1px solid var(--rule)" }}
+                        data-testid={`files-deleted-row-${row.id}`}
+                      >
+                        <td className="py-2 pr-3 truncate max-w-[260px]">
+                          {row.original_filename ?? row.path}
+                        </td>
+                        <td
+                          className="py-2 pr-3 text-right font-mono text-[11px]"
+                          style={{ color: "var(--marginalia)" }}
+                        >
+                          {formatBytes(row.size_bytes)}
+                        </td>
+                        <td
+                          className="py-2 pr-3 font-mono text-[11px]"
+                          style={{ color: "var(--marginalia)" }}
+                        >
+                          {row.deleted_at
+                            ? formatUploadedAt(row.deleted_at)
+                            : ""}
+                        </td>
+                        <td
+                          className="py-2 pr-3 font-mono text-[11px]"
+                          style={{ color: "var(--marginalia)" }}
+                        >
+                          {shortSha(row.sha256)}
+                        </td>
+                        <td>
+                          <button
+                            type="button"
+                            onClick={() => onRestore(row)}
+                            disabled={restoringId === row.id}
+                            className="font-mono text-[10px] uppercase tracking-[0.22em]"
+                            style={{
+                              color:
+                                restoringId === row.id
+                                  ? "var(--marginalia)"
+                                  : "var(--brass)",
+                            }}
+                            data-testid={`files-restore-${row.id}`}
+                            title="Restore this file"
+                          >
+                            {restoringId === row.id ? "Restoring…" : "↩ Restore"}
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          )}
+        </div>
+
         {/* Banners */}
         {banners.length > 0 && (
           <div className="fixed bottom-6 right-6 space-y-2 z-40">
@@ -807,6 +966,96 @@ export default function FilesPage() {
 }
 
 // ── upload row ─────────────────────────────────────────────────────────────
+
+// #114 Lane B — the "Alfred read it" badge.
+//
+// State machine (deriveBadgeState):
+//   * settled — brass pill, summary tooltip on hover.
+//   * pending — soft pulse + "Reading…" label (≤2 min after upload).
+//   * stale   — render nothing (a row Alfred never got around to).
+//   * errored — muted "Couldn't read" pill, reason_code on hover.
+//
+// Kept as a separate component so the row table stays readable.
+function AlfredReadBadge({ row }: { row: FileRow }) {
+  const state: BadgeState = deriveBadgeState(row);
+  if (state === "stale") return null;
+  const label = badgeLabel(state);
+  const tooltip =
+    state === "settled"
+      ? row.summary ?? "Alfred read this file."
+      : state === "errored"
+        ? `Couldn't read: ${row.extraction_error ?? "unknown reason"}`
+        : "Alfred is reading this file…";
+  const bg =
+    state === "settled"
+      ? "color-mix(in oklab, var(--brass) 14%, transparent)"
+      : state === "errored"
+        ? "color-mix(in oklab, var(--marginalia) 18%, transparent)"
+        : "color-mix(in oklab, var(--brass) 8%, transparent)";
+  const fg =
+    state === "settled"
+      ? "var(--brass)"
+      : state === "errored"
+        ? "var(--marginalia)"
+        : "var(--brass)";
+  const pulse = state === "pending" ? "animate-pulse" : "";
+  return (
+    <span
+      className={`inline-flex items-center px-1.5 py-[1px] ml-2 font-mono text-[9px] uppercase tracking-[0.18em] rounded-sm ${pulse}`}
+      style={{ background: bg, color: fg }}
+      title={tooltip}
+    >
+      {label}
+    </span>
+  );
+}
+
+// #114 Lane B — side-panel summary block.
+//
+// Renders the full extraction summary (settled) or a short reason
+// line (errored). Hidden for `pending`/`stale` rows — the badge in
+// the row already carries the affordance and the side panel stays
+// quiet until Alfred has something to say.
+function AlfredReadSummary({ row }: { row: FileRow }) {
+  const state: BadgeState = deriveBadgeState(row);
+  if (state === "settled" && row.summary) {
+    return (
+      <div className="border border-rule px-3 py-2 mt-3" style={{ borderColor: "var(--rule)" }}>
+        <div
+          className="font-mono text-[9px] uppercase tracking-[0.22em] mb-1"
+          style={{ color: "var(--brass)" }}
+        >
+          Alfred read it
+        </div>
+        <p className="font-body text-[13px] leading-snug" style={{ color: "var(--ink)" }}>
+          {row.summary}
+        </p>
+      </div>
+    );
+  }
+  if (state === "errored") {
+    return (
+      <div
+        className="border border-dashed px-3 py-2 mt-3"
+        style={{ borderColor: "var(--rule)" }}
+      >
+        <div
+          className="font-mono text-[9px] uppercase tracking-[0.22em] mb-1"
+          style={{ color: "var(--marginalia)" }}
+        >
+          Couldn't read
+        </div>
+        <p
+          className="font-mono text-[11px]"
+          style={{ color: "var(--marginalia)" }}
+        >
+          {row.extraction_error}
+        </p>
+      </div>
+    );
+  }
+  return null;
+}
 
 function UploadRow({ item }: { item: UploadItem }) {
   const pct = Math.round(uploadPercent(item));
@@ -872,6 +1121,12 @@ function PreviewPane({
       <div className="font-mono text-[11px]" style={{ color: "var(--marginalia)" }}>
         {formatBytes(stat_size)} · {formatUploadedAt(stat_uploaded)}
       </div>
+
+      {/* #114 Lane B — "Alfred read it" affordance. The badge appears
+          inline in the row; the side panel surfaces the full summary
+          (when present) and the reason code (when extraction failed). */}
+      <AlfredReadSummary row={stat ?? row} />
+
 
       {mode === "image" && (
         <img

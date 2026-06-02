@@ -13,6 +13,7 @@ import path from "node:path";
 
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError, NotFoundError } from "../errors.js";
+import { resolveProfileEnvPath } from "../../db/agentProfiles.js";
 
 const AGENTMAIL_API = "https://api.agentmail.to/v0";
 const FALLBACK_FILE =
@@ -65,7 +66,59 @@ async function ensureInboundWebhook(creds: AgentMailCreds): Promise<boolean> {
   }
 }
 
-function getCreds(): AgentMailCreds {
+// Read per-profile AgentMail creds from /hermes-state/profiles/<slug>/.env.
+// Returns null when the .env is missing or has no AGENTMAIL_INBOX_ID. Used
+// by getCreds() when a `?profile=<slug>` query is present on the outbound
+// routes — Lane Vb2 per-profile email.
+function readProfileCreds(slug: string): AgentMailCreds | null {
+  let envPath: string;
+  try {
+    envPath = resolveProfileEnvPath(slug);
+  } catch {
+    return null;
+  }
+  let raw: string;
+  try {
+    raw = fs.readFileSync(envPath, "utf-8");
+  } catch {
+    return null;
+  }
+  const map: Record<string, string> = {};
+  for (const line of raw.split("\n")) {
+    const t = line.replace(/^﻿/, "").trim();
+    if (!t || t.startsWith("#")) continue;
+    const eq = t.indexOf("=");
+    if (eq <= 0) continue;
+    const k = t.slice(0, eq).trim();
+    let v = t.slice(eq + 1);
+    if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
+      v = v.slice(1, -1);
+    }
+    map[k] = v;
+  }
+  const apiKey = (map.AGENTMAIL_API_KEY || "").trim();
+  const inboxId = (map.AGENTMAIL_INBOX_ID || "").trim();
+  const address = (map.AGENTMAIL_INBOX_ADDRESS || "").trim();
+  if (!apiKey || !inboxId) return null;
+  return { api_key: apiKey, inbox_id: inboxId, inbox_address: address };
+}
+
+function getCreds(profileSlug?: string | null): AgentMailCreds {
+  // Lane Vb2: when an explicit profile is supplied, read its per-profile
+  // .env first. Fall back to the legacy env/file path so existing callers
+  // (the alfred-email-channel skill, the SaaS provision route) still work.
+  if (profileSlug && profileSlug.trim()) {
+    const slug = profileSlug.trim();
+    const perProfile = readProfileCreds(slug);
+    if (perProfile) return perProfile;
+    // Explicit profile but no per-profile inbox → don't silently fall back
+    // to main's creds (that would send Sentinel's reply with main's "from").
+    if (slug !== "main") {
+      throw new ValidationError(
+        `profile '${slug}' has no AgentMail inbox provisioned — call POST /api/v1/channels/email/provision?profile=${slug} first`,
+      );
+    }
+  }
   const envKey = (process.env.AGENTMAIL_API_KEY || "").trim();
   const envInboxId = (process.env.AGENTMAIL_INBOX_ID || "").trim();
   const envAddress = (process.env.AGENTMAIL_INBOX_ADDRESS || "").trim();
@@ -87,8 +140,14 @@ function getCreds(): AgentMailCreds {
   } catch {
     /* fallthrough */
   }
+  // Main profile may have its inbox in /hermes-state/profiles/main/.env too
+  // (Lane Vb2 provisioning persists there). Try as a last resort.
+  if (!profileSlug || profileSlug === "main") {
+    const mainProfile = readProfileCreds("main");
+    if (mainProfile) return mainProfile;
+  }
   throw new ValidationError(
-    "AgentMail is not configured on this tenant. Set AGENTMAIL_API_KEY and AGENTMAIL_INBOX_ID in /opt/alfred/compose/.env.",
+    "AgentMail is not configured on this tenant. Set AGENTMAIL_API_KEY and AGENTMAIL_INBOX_ID in /opt/alfred/compose/.env, or call POST /api/v1/channels/email/provision?profile=<slug>.",
   );
 }
 
@@ -203,7 +262,8 @@ export function registerEmailRoutes(): void {
   // Send a new message (new thread).
   // Body: { to, subject, text, html?, cc?, bcc?, reply_to?, labels?, attachments? }
   // attachments: Array<{content: base64, filename?, content_type?}>
-  addRoute("POST", "/api/v1/email/send", async ({ res, body }) => {
+  // Query: ?profile=<slug> — Lane Vb2; sends with the profile's inbox creds.
+  addRoute("POST", "/api/v1/email/send", async ({ res, body, query }) => {
     const b = (body ?? {}) as Record<string, unknown>;
     const to = stringArray(b.to);
     if (!to || to.length === 0) throw new ValidationError("`to` is required");
@@ -212,7 +272,7 @@ export function registerEmailRoutes(): void {
     if (typeof b.text !== "string" || !b.text)
       throw new ValidationError("`text` is required");
 
-    const creds = getCreds();
+    const creds = getCreds(query.get("profile"));
     const payload: Record<string, unknown> = { to, subject: b.subject, text: b.text };
     if (typeof b.html === "string") payload.html = b.html;
     const cc = stringArray(b.cc);
@@ -231,14 +291,15 @@ export function registerEmailRoutes(): void {
 
   // Reply to a message (same thread).
   // Body: { message_id, text, html?, reply_all?: boolean, attachments? }
-  addRoute("POST", "/api/v1/email/reply", async ({ res, body }) => {
+  // Query: ?profile=<slug> — Lane Vb2.
+  addRoute("POST", "/api/v1/email/reply", async ({ res, body, query }) => {
     const b = (body ?? {}) as Record<string, unknown>;
     if (typeof b.message_id !== "string" || !b.message_id)
       throw new ValidationError("`message_id` is required");
     if (typeof b.text !== "string" || !b.text)
       throw new ValidationError("`text` is required");
 
-    const creds = getCreds();
+    const creds = getCreds(query.get("profile"));
     const payload: Record<string, unknown> = { text: b.text };
     if (typeof b.html === "string") payload.html = b.html;
     if (Array.isArray(b.attachments)) payload.attachments = b.attachments;
@@ -253,14 +314,15 @@ export function registerEmailRoutes(): void {
 
   // Forward a message.
   // Body: { message_id, to, subject?, text?, html?, attachments? }
-  addRoute("POST", "/api/v1/email/forward", async ({ res, body }) => {
+  // Query: ?profile=<slug> — Lane Vb2.
+  addRoute("POST", "/api/v1/email/forward", async ({ res, body, query }) => {
     const b = (body ?? {}) as Record<string, unknown>;
     if (typeof b.message_id !== "string" || !b.message_id)
       throw new ValidationError("`message_id` is required");
     const to = stringArray(b.to);
     if (!to || to.length === 0) throw new ValidationError("`to` is required");
 
-    const creds = getCreds();
+    const creds = getCreds(query.get("profile"));
     const payload: Record<string, unknown> = { to };
     if (typeof b.subject === "string") payload.subject = b.subject;
     if (typeof b.text === "string") payload.text = b.text;
@@ -279,10 +341,11 @@ export function registerEmailRoutes(): void {
 
   // Fetch a single message — used by the channel handler to pull full
   // body when the webhook payload was >1MB and text/html were stripped.
-  addRoute("GET", "/api/v1/email/message/:message_id", async ({ res, params }) => {
+  // Query: ?profile=<slug> — Lane Vb2.
+  addRoute("GET", "/api/v1/email/message/:message_id", async ({ res, params, query }) => {
     const messageId = decodeURIComponent(params["message_id"] ?? "");
     if (!messageId) throw new ValidationError("message_id required");
-    const creds = getCreds();
+    const creds = getCreds(query.get("profile"));
     const r = await am(
       creds,
       "GET",
@@ -295,10 +358,11 @@ export function registerEmailRoutes(): void {
 
   // Fetch a full thread — Alfred uses this to assemble context before
   // composing replies.
-  addRoute("GET", "/api/v1/email/thread/:thread_id", async ({ res, params }) => {
+  // Query: ?profile=<slug> — Lane Vb2.
+  addRoute("GET", "/api/v1/email/thread/:thread_id", async ({ res, params, query }) => {
     const threadId = decodeURIComponent(params["thread_id"] ?? "");
     if (!threadId) throw new ValidationError("thread_id required");
-    const creds = getCreds();
+    const creds = getCreds(query.get("profile"));
     const r = await am(
       creds,
       "GET",
@@ -310,12 +374,13 @@ export function registerEmailRoutes(): void {
   });
 
   // Download an attachment by id.
+  // Query: ?profile=<slug> — Lane Vb2.
   addRoute(
     "GET",
     "/api/v1/email/attachment/:message_id/:attachment_id",
-    async ({ req, res, params }) => {
+    async ({ req, res, params, query }) => {
       void req;
-      const creds = getCreds();
+      const creds = getCreds(query.get("profile"));
       const messageId = decodeURIComponent(params["message_id"] ?? "");
       const attachmentId = decodeURIComponent(params["attachment_id"] ?? "");
       if (!messageId || !attachmentId)

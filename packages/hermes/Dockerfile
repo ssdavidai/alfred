@@ -178,6 +178,36 @@ RUN python3 /tmp/patch_openai_sdk.py \
  && rm /tmp/patch_openai_sdk.py
 
 # =============================================================================
+# Patch: profile-dir-aware parent chmod in hermes_cli/auth.py.
+#
+# Upstream Hermes' _save_auth_store (and the qwen + nous shared-store
+# variants) hard-codes `os.chmod(<path>.parent, 0o700)` on every save —
+# token refresh, provider login, write-back of cached creds. In
+# alfred-black HERMES_HOME points at a *profile* dir
+# (e.g. /hermes-state/profiles/codex-builder) whose mode is owned by the
+# init container. PR #118 set the codex-builder profile dir to 0o711 so
+# the paperclip-hermes adapter (uid 1000) can traverse to .env for the
+# gateway's API_SERVER_KEY; an auth-store save then resets it back to
+# 0o700 and the next paperclip → :18793 dispatch 401s with
+# hermes_auth_failed / invalid_api_key (GH #119). The companion fix —
+# HERMES_HOME_MODE=0711 in the codex-builder profile .env — handles the
+# `_secure_dir(home)` path that fires at every CLI startup; this patch
+# handles the auth-save path that fires at every token write.
+#
+# See patch_upstream_hermes_auth.py for the full rationale. The patch is
+# idempotent + tripwire'd; a future HERMES_REF bump that moves any of
+# the three needles fails the build loudly.
+#
+# Sir 2026-05-30 — durable fix for GH #119.
+COPY packages/hermes/patch_upstream_hermes_auth.py /tmp/patch_upstream_hermes_auth.py
+RUN python3 /tmp/patch_upstream_hermes_auth.py \
+ && grep -q "alfred-black: profile-dir-aware chmod" \
+        /usr/local/lib/python3.12/site-packages/hermes_cli/auth.py \
+ && grep -q "_alfred_is_profile_dir" \
+        /usr/local/lib/python3.12/site-packages/hermes_cli/auth.py \
+ && rm /tmp/patch_upstream_hermes_auth.py
+
+# =============================================================================
 # Bake the hermes-lcm plugin (lossless cross-session context engine).
 # =============================================================================
 # The `stephenschoettler/hermes-lcm` plugin enables Hermes' LCM context engine
@@ -311,6 +341,29 @@ RUN chmod +x /usr/local/bin/codex-builder-setup-egress.sh \
 # This is the agent identity Sir's Paperclip persona references. The
 # init container copies it into the profile dir (PR 5).
 COPY packages/hermes/SOUL.codex-builder.md /opt/hermes-assets/SOUL.codex-builder.md
+
+# =============================================================================
+# Self-render renderer scripts (#120 Lane IIb).
+# =============================================================================
+# When ctrl-api registers a new user-facing profile AFTER init has exited,
+# the supervisor's SIGUSR1 reconciler needs to render that profile dir
+# inline — no operator step, no init re-run. We bake the SAME two renderer
+# scripts the init container runs (render_hermes.py + render_mcp_servers.py)
+# plus the two .njk templates into the runtime image, so the runtime self-
+# render is byte-identical to a boot-time render.
+#
+# jinja2 + ruamel.yaml are required by render_hermes.py (template render)
+# and render_mcp_servers.py (round-trip YAML mutator). pinned to the same
+# versions the init image uses for byte-stable output across re-renders.
+#
+# render_registry.py is NOT baked here — supervisor reads the registry JSON
+# ctrl-api already wrote (no state.db mount in the hermes runtime).
+RUN pip install --no-cache-dir "jinja2==3.1.6" "ruamel.yaml==0.18.6"
+COPY packages/hermes/init/render_hermes.py       /opt/hermes-init/render_hermes.py
+COPY packages/hermes/init/render_mcp_servers.py  /opt/hermes-init/render_mcp_servers.py
+COPY packages/hermes/hermes-config.yaml.njk      /opt/hermes-init/templates/hermes-config.yaml.njk
+COPY packages/hermes/hermes-profile.env.njk      /opt/hermes-init/templates/hermes-profile.env.njk
+RUN chmod 0755 /opt/hermes-init/render_hermes.py /opt/hermes-init/render_mcp_servers.py
 
 # =============================================================================
 # Supervisor entrypoint.

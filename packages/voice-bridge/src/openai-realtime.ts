@@ -96,8 +96,15 @@ export class OpenAIRealtimeClient {
   // response` error we hit on Sir's 2026-05-27 home call.
   private activeResponseId: string | null = null;
 
-  constructor(callId: string) {
+  // #120 Lane Vb — optional per-profile OpenAI key override. Threaded in
+  // from voice-call.ts so per-profile credentials route the Realtime
+  // session to the right account. Null/undefined keeps the boot-time
+  // `config.openaiApiKey` behaviour.
+  private apiKeyOverride: string | null;
+
+  constructor(callId: string, opts: { apiKeyOverride?: string | null } = {}) {
     this.callId = callId;
+    this.apiKeyOverride = opts.apiKeyOverride ?? null;
   }
 
   get isOpen(): boolean {
@@ -126,9 +133,10 @@ export class OpenAIRealtimeClient {
       // GA endpoint does NOT want the `OpenAI-Beta: realtime=v1` header — it
       // silently flips the session into a compat mode that rejects GA-shape
       // session.update payloads.
+      const apiKey = this.apiKeyOverride || config.openaiApiKey;
       const ws = new WsSocket(url, {
         headers: {
-          Authorization: `Bearer ${config.openaiApiKey}`,
+          Authorization: `Bearer ${apiKey}`,
         },
       });
       this.ws = ws;

@@ -73,6 +73,10 @@ export interface AuditQuery {
   actor?: string | null;
   source?: string | null;
   target_path?: string | null;
+  /** #120 Lane V — prefix-match on target_path (LIKE 'value%'). When set,
+   * `target_path` is ignored. Tightens the channels/<kind>/* slice query the
+   * /profiles/:slug/channels page wants. */
+  target_path_prefix?: string | null;
   subject_ref?: string | null;
   mode?: string | null;
   since?: string | null;
@@ -113,6 +117,12 @@ export function queryAuditCrossTier(q: AuditQuery): CrossTierResult {
         where.push(`${col} = ?`);
         args.push(val);
       }
+    }
+    // #120 Lane V — target_path prefix match. Ignored when target_path is also
+    // set (exact-match wins).
+    if (q.target_path_prefix && !q.target_path) {
+      where.push("target_path LIKE ?");
+      args.push(`${q.target_path_prefix}%`);
     }
     if (q.since) {
       where.push("ts >= ?");

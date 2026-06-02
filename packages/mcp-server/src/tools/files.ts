@@ -10,7 +10,7 @@
 // archives, spreadsheets, audio, video — anything the principal drops
 // into Store 5).
 //
-// Tool list (9):
+// Tool list (12 — 9 from PR 2 + 3 from Lane D₁ of #114):
 //   * list        — paginated metadata (optionally filtered by prefix)
 //   * stat        — metadata for ONE blob (by path)
 //   * read_text   — fetch a text blob's contents as a UTF-8 string
@@ -18,11 +18,19 @@
 //   * search      — filename + principal_label keyword scan (PR 4 adds
 //                   full content indexing; PR 2 ships the metadata cut)
 //   * usage       — bytes + counts + soft/hard caps
-//   * describe    — set the principal_label field on an existing blob
+//   * set_label   — set/clear the principal_label field on an existing blob
+//                   (was named `describe` in PR 2; renamed by Lane D₁ so
+//                   `describe` is free for the richer metadata-getter)
 //   * create      — upload a small blob via base64 (multipart for big
 //                   uploads is owned by the dashboard; this is the
 //                   programmatic surface for agent-generated artefacts)
 //   * delete      — soft-delete (tombstone + unlink)
+//   * move        — rename or relocate a blob in one round-trip (Lane D₁)
+//   * describe    — rich metadata getter: name, size, mime, created_at,
+//                   updated_at, alfred_read_at, deleted_at, summary
+//                   (Lane D₁; summary surfaces Lane B's extraction output)
+//   * hard_delete — permanently purge a soft-deleted blob (Lane D₁;
+//                   refuses if the row isn't already soft-deleted)
 //
 // What it is NOT
 // --------------
@@ -279,24 +287,103 @@ const usageTool: ToolDef = {
   }),
 };
 
-// ─── 9. describe ───────────────────────────────────────────────────────────
+// ─── 9. set_label ──────────────────────────────────────────────────────────
+//
+// Renamed from `describe` in Lane D₁ of #114. The original PR 2 tool was
+// a SETTER (it overwrote principal_label), which conflicts with the
+// natural reading of "describe this file for me" — a GETTER. To free up
+// the `describe` name for the metadata-getter that Lane D₁ adds below,
+// the setter has moved here. The wire shape is unchanged (PATCH on the
+// same route with `{principal_label}`); only the MCP tool name has
+// changed.
 
-const describeTool: ToolDef = {
-  name: "describe",
+const setLabelTool: ToolDef = {
+  name: "set_label",
   description:
-    "Set (or clear) the `principal_label` on a stored file — a short, principal-facing description of what's in it. Surfaces in `list` / `search` / `/files` and is what makes 'find that PDF about Q3 contracts' work without content extraction. Use when the principal tells you what a file is for ('that's the receipt from Pizza Place'), when an agent generates an artefact and the agent knows its purpose ('weekly digest for 2026-05-29'), or to overwrite a stale label. Pass an empty string to CLEAR an existing label. Returns the full updated row. Idempotent — re-setting the same label is a no-op. Backing: PATCH /api/v1/files/<path> with `{principal_label}`.",
+    "Set (or clear) the `principal_label` on a stored file — a short, principal-facing description of what's in it. Surfaces in `list` / `search` / `/files` and is what makes 'find that PDF about Q3 contracts' work without content extraction. Use when the principal tells you what a file is for ('that's the receipt from Pizza Place'), when an agent generates an artefact and the agent knows its purpose ('weekly digest for 2026-05-29'), or to overwrite a stale label. Pass an empty string to CLEAR an existing label. Returns the full updated row. Idempotent — re-setting the same label is a no-op. Was named `describe` in PR 2; renamed so `describe` can be the metadata-getter (Lane D₁ of #114). Backing: PATCH /api/v1/files/<path> with `{principal_label}`.",
   inputSchema: z.object({
     path: FilePath,
-    description: z
+    label: z
       .string()
       .describe(
         "Principal-facing one-liner. Examples: 'Q3 Acme contract draft', 'screenshot of Sir's Tailscale logs', 'weekly digest 2026-W22'. Empty string clears the label.",
       ),
   }),
-  buildRequest: ({ path, description }) => ({
+  buildRequest: ({ path, label }) => ({
     method: "PATCH",
     path: `/api/v1/files/${path}`,
-    body: { principal_label: description },
+    body: { principal_label: label },
+  }),
+};
+
+// ─── 10. move (Lane D₁ of #114) ────────────────────────────────────────────
+
+const moveTool: ToolDef = {
+  name: "move",
+  description:
+    "Rename or relocate a stored file in one round-trip. Use when the principal says 'rename that to draft.md' or when an agent wants to give a generated artefact a cleaner name. The `new_path` arg accepts TWO shapes: (1) a bare basename — `better-name.pdf` — which keeps the existing `<ULID>` dir and just renames the on-disk file, OR (2) a full `<ULID>/<safe-name>` pair which moves across ULID dirs (rare; usually a basename is what you want). The handler refuses the move with a 409 if the row's bytes are shared via dedupe (`ref_count > 1`) — in that case delete + re-upload under the new name; the dedupe layer will skip the second upload. Cold-archived blobs also 409 — restore first, then move. Returns the full updated row (`stat` shape). Audit row written. Backing: POST /api/v1/files/:file_id/move with `{path}`.",
+  inputSchema: z.object({
+    file_id: z
+      .string()
+      .min(1)
+      .describe(
+        "The `id` field from `list` / `stat` / `describe` (a 26-char ULID). NOT the path — `move` is keyed by id because the path is exactly what's changing.",
+      ),
+    new_path: z
+      .string()
+      .min(1)
+      .describe(
+        "The new path. Either a bare basename (`final-draft.pdf` — keeps the same ULID dir) or a full `<ULID>/<safe-name>` pair (rare). No leading slash, no `..`. The backend sanitizes filenames the same way as upload.",
+      ),
+  }),
+  buildRequest: ({ file_id, new_path }) => ({
+    method: "POST",
+    path: `/api/v1/files/${file_id}/move`,
+    body: { path: new_path },
+  }),
+};
+
+// ─── 11. describe (Lane D₁ of #114) ────────────────────────────────────────
+//
+// The richer cousin of `stat`. Returns a metadata projection tuned for
+// the conversational "tell me about this file" surface: name, mime,
+// size, the three timestamps (created_at / updated_at / alfred_read_at),
+// `deleted_at` (so the principal can ask "did I delete that?"), the
+// principal_label, and a `summary` (populated by Lane B's extraction
+// pipeline; null while pending). Unlike `stat`, `describe` returns
+// soft-deleted rows with `deleted_at` populated — useful for "did I
+// delete the Q3 contract last week?" recall.
+
+const describeTool: ToolDef = {
+  name: "describe",
+  description:
+    "Return metadata for ONE stored file in a conversation-friendly shape: `{id, name, path, size_bytes, mime, principal_label, summary, created_at, updated_at, alfred_read_at, deleted_at}`. Use whenever the principal asks 'tell me about that PDF' / 'when did I last open this' / 'what's the size of the contract Alfred read?' — the response is shaped for narration, not the audit-ledger shape `stat` returns. `summary` surfaces Lane B's FileExtractionWorkflow output (null while extraction is pending). Unlike `stat`, soft-deleted rows are RETURNED with `deleted_at` populated (so 'did I delete that?' answers cleanly). Read-only, cheap, idempotent. Backing: GET /api/v1/files/describe/<path>.",
+  inputSchema: z.object({
+    path: FilePath,
+  }),
+  buildRequest: ({ path }) => ({
+    method: "GET",
+    path: `/api/v1/files/describe/${path}`,
+  }),
+};
+
+// ─── 12. hard_delete (Lane D₁ of #114) ─────────────────────────────────────
+
+const hardDeleteTool: ToolDef = {
+  name: "hard_delete",
+  description:
+    "Permanently purge a soft-deleted file — the 'really empty the recycle bin' step. REFUSES (409 PURGE_REQUIRES_SOFT_DELETE) if the file is not already soft-deleted; the two-stage gate (soft-delete first, then purge) is by design so a single conversational slip can't wipe an artefact. CONFIRM WITH SIR before calling unless he EXPLICITLY asked to permanently delete — once purged the on-disk bytes are unlinked and the row is removed (the audit ledger keeps the breadcrumb). Returns `{id, path, purged_at}`. If the bytes were shared via dedupe (`ref_count > 1`) only the per-file row is deleted; the canonical bytes stay for the other references. Audit row written. Backing: POST /api/v1/files/:file_id/purge.",
+  inputSchema: z.object({
+    file_id: z
+      .string()
+      .min(1)
+      .describe(
+        "The `id` field from `list` / `describe` (a 26-char ULID). Use `describe` on a soft-deleted path first to confirm `deleted_at` is set — `hard_delete` refuses to purge a live row.",
+      ),
+  }),
+  buildRequest: ({ file_id }) => ({
+    method: "POST",
+    path: `/api/v1/files/${file_id}/purge`,
   }),
 };
 
@@ -311,5 +398,8 @@ export const ALL_FILES_TOOLS: ToolDef[] = [
   deleteTool,
   createTool,
   usageTool,
+  setLabelTool,
+  moveTool,
   describeTool,
+  hardDeleteTool,
 ];

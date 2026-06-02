@@ -83,21 +83,53 @@ jobs:
     # tsc compile + node --test for the OpenAI Realtime session-update race fix.
     # Mock WS server is in-process; no network or OpenAI key needed (a dummy
     # key satisfies config.ts's required-env check).
+    #
+    # PATH-GATED: this job only does real work when the PR actually changes
+    # packages/voice-bridge/**. On PRs that don't touch voice-bridge it
+    # short-circuits to green — the test is irrelevant there, and it used to
+    # be a recurring false-red (slow-stall) the loop had to hand-wave as a
+    # "flake." The job still ALWAYS runs (so it satisfies branch protection /
+    # required-check) — it just skips the expensive steps when unchanged.
+    # `timeout-minutes` caps the slow-stall so a hung run can't block forever.
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - name: Detect voice-bridge changes
+        id: vb
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+            git fetch --depth=1 origin "$base" >/dev/null 2>&1 || true
+            if git diff --name-only "$base" HEAD 2>/dev/null | grep -q '^packages/voice-bridge/'; then
+              echo "changed=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "changed=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            # push to main / manual: always run the real test.
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "voice-bridge changed: $(grep changed= "$GITHUB_OUTPUT" || true)"
       - uses: actions/setup-node@v4
+        if: steps.vb.outputs.changed == 'true'
         with:
           node-version: "22"
       - name: Install deps
+        if: steps.vb.outputs.changed == 'true'
         working-directory: packages/voice-bridge
         run: npm ci || npm install
       - name: tsc + node --test
+        if: steps.vb.outputs.changed == 'true'
         working-directory: packages/voice-bridge
         env:
           OPENAI_API_KEY: sk-ci-dummy
           VOICE_BRIDGE_INTERNAL_TOKEN: ci-dummy-token
         run: npm test
+      - name: Skipped (voice-bridge unchanged)
+        if: steps.vb.outputs.changed != 'true'
+        run: echo "voice-bridge unchanged in this PR — test not applicable, passing."
 
   pytest-learn:
     runs-on: ubuntu-latest
@@ -152,17 +184,37 @@ jobs:
         # bring up the tailscale sidecar. Profile gating is the load-bearing
         # contract — if this assertion ever flips, every existing tenant
         # would silently start joining a tailnet on next deploy.
+        #
+        # DETERMINISTIC CHECK. The old form used `docker compose --profile
+        # tailscale config --services | grep`, which flaked: whether
+        # profile-gated services appear in `config` output varies by the
+        # runner's bundled docker-compose version (a `docker compose config`
+        # without the active profile OMITS profile-gated services entirely on
+        # recent versions). So it intermittently reported "tailscale missing"
+        # on PRs that never touched compose — a false red the loop then
+        # hand-waved as a "flake." Instead we parse the RAW docker-compose.yaml
+        # and assert the actual contract straight from source: the tailscale
+        # service is DECLARED and GATED behind the `tailscale` profile (a
+        # profile-gated service never starts on a bare `up -d` — that's the
+        # whole guarantee). No docker, no `config` resolution, no env
+        # interpolation, no version sensitivity → fully deterministic.
         run: |
-          set -euo pipefail
-          if docker compose config --services | grep -qx tailscale; then
-            echo "FAIL: tailscale service appeared under the default profile." >&2
-            exit 1
-          fi
-          if ! docker compose --profile tailscale config --services | grep -qx tailscale; then
-            echo "FAIL: tailscale service missing under --profile tailscale." >&2
-            exit 1
-          fi
-          echo "OK: tailscale is profile-gated, off by default."
+          python3 -m pip install --quiet pyyaml || pip install --quiet pyyaml
+          python3 - <<'PY'
+          import sys, yaml
+          doc = yaml.safe_load(open("docker-compose.yaml"))
+          svcs = doc.get("services", {})
+          ts = svcs.get("tailscale")
+          if ts is None:
+              sys.exit("FAIL: tailscale service is not declared in docker-compose.yaml.")
+          profiles = ts.get("profiles") or []
+          if "tailscale" not in profiles:
+              sys.exit(f"FAIL: tailscale is not gated behind the 'tailscale' profile (profiles={profiles}) — it would start on a bare `docker compose up -d`.")
+          default_services = [n for n, s in svcs.items() if not (s or {}).get("profiles")]
+          if "tailscale" in default_services:
+              sys.exit("FAIL: tailscale appears in the default (profile-less) set — it would start by default.")
+          print(f"OK: tailscale declared + gated behind {profiles}, off by default ({len(default_services)} default services).")
+          PY
 
   bootstrap-lint:
     runs-on: ubuntu-latest

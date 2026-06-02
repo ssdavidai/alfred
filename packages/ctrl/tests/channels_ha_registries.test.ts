@@ -222,14 +222,10 @@ globalThis.fetch = (async (input: any, init?: any) => {
     const id = objMatch[1];
     const item = vaultStore.find((i) => i.id === id);
     if (!item) return makeJsonResponse({ success: false, message: "not found" }, 404);
-    return makeJsonResponse({
-      success: true,
-      data: {
-        ...item,
-        // Embed double-wrapped login.password for ha_ws_client's readHaLlat.
-        data: { login: { password: item.login.password } },
-      },
-    });
+    // vault-cli (`bw serve`) returns single-wrapped `{success,data:<item>}`
+    // for GET /object/item/:id. Post-#155 fix, ha_ws_client.readHaLlat
+    // reads `j.data.login.password` (matching channels_ha.ts:readHaLlat).
+    return makeJsonResponse({ success: true, data: item });
   }
   if (url.endsWith("/object/item") && method === "POST") {
     const b = JSON.parse(bodyRaw ?? "{}");

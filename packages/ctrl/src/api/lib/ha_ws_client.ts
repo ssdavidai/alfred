@@ -131,6 +131,18 @@ function haWsUrlFromHttp(haUrl: string): string {
  * Mirrors `channels_ha.ts:readHaLlat` but is duplicated here to keep the
  * lib free of cross-file imports (channels_ha.ts imports this file via
  * channels_ha_ws.ts, the inverse would be a cycle).
+ *
+ * SHAPE CONTRACT — vault-cli (`bw serve`) returns single-wrapped
+ * `{success, data: {id, login, ...}}` for GET /object/item/:id, NOT
+ * double-wrapped. The previous double-wrap shape was a copy-paste from
+ * the LIST endpoint (which IS `{data:{data:[…]}}`); live-verified wrong
+ * 2026-05-29 on home — `ws/registries` 502'd with `LLAT read failed:
+ * vault-cli GET <id> returned HTTP 400` (vault locked) but even after
+ * unlock the double-wrap path returned undefined and the WS client
+ * failed `not authed within 10000ms`. Mirrors the fix in
+ * `channels_ha.ts:readHaLlat` (which had the same bug, fixed earlier).
+ * Closes #155 — HaBootstrapWorkflow's WS-bridge call to
+ * `/api/v1/channels/ha/ws/registries` can now actually authenticate.
  */
 async function readHaLlat(vaultItemId: string): Promise<string> {
   const vaultUrl = process.env.VAULT_CLI_URL ?? "http://vault-cli:8087";
@@ -141,9 +153,9 @@ async function readHaLlat(vaultItemId: string): Promise<string> {
     throw new Error(`vault-cli GET ${vaultItemId} returned HTTP ${r.status}`);
   }
   const j = (await r.json()) as {
-    data?: { data?: { login?: { password?: string } } };
+    data?: { login?: { password?: string } };
   };
-  const pw = j?.data?.data?.login?.password;
+  const pw = j?.data?.login?.password;
   if (typeof pw !== "string" || pw.length === 0) {
     throw new Error("vault-cli returned an HA item without a login.password");
   }

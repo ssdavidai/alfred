@@ -98,8 +98,8 @@ export default function PrivacyPolicyPage() {
                 <p className="font-body text-[15px] mt-1" style={{ color: "var(--marginalia)" }}>Your AI instance runs on dedicated virtual machines hosted by Hetzner Cloud GmbH. Hetzner processes data under EU data protection law (GDPR). Data center locations: EU (Germany, Finland) by default.</p>
               </div>
               <div>
-                <p className="font-display italic text-lg">Networking (Tailscale)</p>
-                <p className="font-body text-[15px] mt-1" style={{ color: "var(--marginalia)" }}>Your instance connects to a private Tailscale VPN network for secure, encrypted remote access. Tailscale does not have access to the content of your traffic.</p>
+                <p className="font-display italic text-lg">Networking (Tailscale — optional, principal-owned)</p>
+                <p className="font-body text-[15px] mt-1" style={{ color: "var(--marginalia)" }}>Optionally, you may connect your Alfred instance to <em>your own</em> Tailscale tailnet via the in-product Connect button on the Channels page. When you do, Tailscale Inc. provides the coordination service for the resulting WireGuard mesh; Alfred neither hosts your tailnet nor sees its membership. The connection is opt-in, you authenticate against your own Tailscale account, and you can disconnect at any time. Tailscale does not have access to the content of your traffic.</p>
               </div>
               <div>
                 <p className="font-display italic text-lg">Payments (Polar)</p>
@@ -160,7 +160,7 @@ export default function PrivacyPolicyPage() {
             <ul className="list-disc list-inside mt-3 space-y-2" style={{ color: "var(--marginalia)" }}>
               <li>TLS encryption for all data in transit</li>
               <li>AES-256 encryption for stored credentials</li>
-              <li>Private Tailscale VPN network isolating your instance</li>
+              <li>Optional Tailscale tailnet you control — you join your instance to your own tailnet from the Channels page if and when you choose</li>
               <li>Per-instance SSH keypairs with no shared credentials</li>
               <li>Regular security updates to instance software</li>
             </ul>

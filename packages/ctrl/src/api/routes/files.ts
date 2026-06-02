@@ -60,6 +60,49 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError, NotFoundError, ApiError } from "../errors.js";
 import { getStateDb } from "../../db/state.js";
+import { appendAudit } from "./state.js";
+import { dockerExec } from "../helpers.js";
+
+// ── Actor-derivation contract ──────────────────────────────────────────────
+//
+// Every mutation in /api/v1/files/* writes one row to the `audit` ledger
+// via appendAudit (the same plumbing decisions.ts, attention.ts, and
+// stateChanges.ts already use — there is no parallel audit path here).
+// The `actor` field follows the same convention the rest of the codebase
+// uses:
+//
+//   * `principal` — Sir clicked through the /files dashboard. Default
+//     when the body/header carries nothing else.
+//   * `alfred`    — an MCP tool fired the call (files__write, etc.).
+//   * `system`    — a cron/workflow ran (cold-archive sweep).
+//   * arbitrary   — the caller explicitly named themselves (e.g.
+//     "chore:weekly-statements").
+//
+// Resolution order: explicit `body.actor` > header `x-alfred-actor` >
+// `principal`. The bridge layer (SaaS proxyToTenant) is free to attach
+// the header; MCP-driven callers attach the body field. The upload
+// path keeps the legacy `uploaded_by` text-field name for backwards
+// compatibility but folds it into the same actor-resolution.
+
+const VALID_ACTOR_RE = /^[a-zA-Z0-9_:.-]{1,64}$/;
+
+function resolveActor(
+  req: IncomingMessage,
+  bodyField: unknown,
+  fallback = "principal",
+): string {
+  const headerRaw = req.headers["x-alfred-actor"];
+  const headerStr = Array.isArray(headerRaw) ? headerRaw[0] : headerRaw;
+  const candidates: unknown[] = [bodyField, headerStr];
+  for (const v of candidates) {
+    if (typeof v !== "string") continue;
+    const trimmed = v.trim();
+    if (!trimmed) continue;
+    if (!VALID_ACTOR_RE.test(trimmed)) continue;
+    return trimmed;
+  }
+  return fallback;
+}
 
 // ── Configuration ──────────────────────────────────────────────────────────
 
@@ -233,6 +276,15 @@ interface FileRow {
   deleted_at: number | null;
   cold_promoted_at: number | null;
   ref_count: number;
+  // #114 Lane B — content-extraction columns. `alfred_read_at` flips
+  // from null → unix-ms when the FileExtractionWorkflow finishes;
+  // drives the "Alfred read it" badge on /files. `summary` is the
+  // one-paragraph description (null while pending OR on error).
+  // `extraction_error` is a short reason code (`unsupported_mime`,
+  // `extractor_failed`, `summariser_failed`); null on success.
+  alfred_read_at: number | null;
+  summary: string | null;
+  extraction_error: string | null;
 }
 
 function rowFromDb(raw: Record<string, unknown>): FileRow {
@@ -254,6 +306,13 @@ function rowFromDb(raw: Record<string, unknown>): FileRow {
     cold_promoted_at:
       raw.cold_promoted_at == null ? null : Number(raw.cold_promoted_at),
     ref_count: raw.ref_count == null ? 1 : Number(raw.ref_count),
+    // #114 Lane B — extraction columns. These three are nullable on
+    // the SQL side; coerce in the same defensive shape as the rest.
+    alfred_read_at:
+      raw.alfred_read_at == null ? null : Number(raw.alfred_read_at),
+    summary: raw.summary == null ? null : String(raw.summary),
+    extraction_error:
+      raw.extraction_error == null ? null : String(raw.extraction_error),
   };
 }
 
@@ -625,7 +684,70 @@ function rowToJson(row: FileRow): Record<string, unknown> {
     last_accessed_at: row.last_accessed_at,
     deleted_at: row.deleted_at,
     cold_promoted_at: row.cold_promoted_at,
+    // #114 Lane B — extraction surface for the /files badge.
+    alfred_read_at: row.alfred_read_at,
+    summary: row.summary,
+    extraction_error: row.extraction_error,
   };
+}
+
+// ── extraction trigger (#114 Lane B) ─────────────────────────────────────
+//
+// After a successful upload, fire-and-forget a one-shot FileExtractionWorkflow
+// run on the alfred-learn task queue. The workflow reads the blob via
+// GET /api/v1/files/blob/:path, picks the right extractor by mime, calls
+// the workers gateway for a summary, and PATCHes us back via
+// `/api/v1/files/:id/extraction`. The upload response NEVER blocks on
+// this — the badge appears asynchronously on the /files page.
+//
+// `docker compose exec temporal temporal workflow start` is the same
+// out-of-process trigger pattern the HA-bootstrap route already uses
+// (channels_ha.ts → `POST /channels/ha/registry/refresh`). Failures
+// are logged and swallowed: a missed extraction is far less bad than a
+// failed upload from the principal's view.
+//
+// Set `FILES_EXTRACTION_ENABLED=false` to short-circuit (useful for
+// the ctrl-api test harness, where the temporal CLI isn't available).
+const FILES_EXTRACTION_ENABLED =
+  (process.env.FILES_EXTRACTION_ENABLED ?? "true").toLowerCase() !== "false";
+
+function triggerFileExtraction(fileId: string, contentType: string | null): void {
+  if (!FILES_EXTRACTION_ENABLED) return;
+  // Skip extraction for mime types we know we cannot summarise. Saves a
+  // round trip + a "unsupported_mime" stamp on every screenshot.
+  // The workflow itself enforces the same gate; this is an early-out.
+  const ct = (contentType ?? "").toLowerCase();
+  const KNOWN_BINARY_NOOPS = ["application/zip", "application/x-tar", "application/gzip"];
+  if (KNOWN_BINARY_NOOPS.includes(ct)) return;
+
+  // Workflow-id includes the file id so a re-fire on the same upload
+  // (e.g. operator-driven retry) is idempotent on Temporal's side.
+  const workflowId = `file-extract-${fileId}`;
+  const input = JSON.stringify({ file_id: fileId });
+  // Fire-and-forget. The shell-out to `docker compose exec temporal` is
+  // ~500ms on a warm tenant; we explicitly do NOT `await` the promise.
+  void dockerExec("temporal", [
+    "temporal",
+    "workflow",
+    "start",
+    "--type",
+    "FileExtractionWorkflow",
+    "--task-queue",
+    "alfred-learn",
+    "--workflow-id",
+    workflowId,
+    "--input",
+    input,
+  ]).catch((err) => {
+    // ALREADY_EXISTS is fine — the workflow id is dedup-keyed, a duplicate
+    // start is a no-op from the principal's view. Anything else is logged
+    // so the operator can see it in the ctrl-api journal.
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes("ALREADY_EXISTS") || msg.includes("workflow execution already started")) {
+      return;
+    }
+    console.warn(`[files] FileExtractionWorkflow start failed for ${fileId}: ${msg}`);
+  });
 }
 
 // ── bootstrap ─────────────────────────────────────────────────────────────
@@ -867,6 +989,36 @@ export function registerFilesRoutes(): void {
       now,
     );
 
+    // §8 audit ledger — every files mutation writes one row through the
+    // shared appendAudit helper (best-effort; the upload's primary write
+    // is the `files` INSERT above, so a failed audit mirror logs +
+    // swallows rather than aborting the request). The actor here is the
+    // legacy `uploaded_by` text field so the uploader's identity (Sir,
+    // an MCP tool, a chore) flows into both `files.uploaded_by` AND
+    // `audit.actor`. `target_path` is the canonical files surface
+    // (`files/<ULID>`) so a downstream `GET /api/v1/state/audit?target=files/<id>`
+    // round-trips. Issue #114 §14 step 8 — "verify every read + write
+    // is in the audit ledger".
+    appendAudit({
+      action_type: "files_upload",
+      actor: uploadedBy,
+      source: "ctrl-api",
+      target_path: `files/${id}`,
+      target_kind: "file",
+      subject_ref: relPath,
+      summary: `files_upload: ${originalFilename} (${parsed.size} bytes${deduped ? ", deduped" : ""})`,
+      payload: {
+        id,
+        path: relPath,
+        size_bytes: parsed.size,
+        sha256: parsed.sha256,
+        content_type: contentType,
+        original_filename: originalFilename,
+        principal_label: principalLabel,
+        deduped,
+      },
+    });
+
     sendJson(res, 201, {
       id,
       path: relPath,
@@ -879,9 +1031,163 @@ export function registerFilesRoutes(): void {
       uploaded_at: now,
       deduped,
     });
+
+    // #114 Lane B — fire-and-forget extraction. Runs after the response
+    // is sent so a slow temporal CLI dispatch can never tax the upload
+    // path. The workflow's workflow_id is keyed on file_id, so a
+    // duplicate start surfaces as ALREADY_EXISTS and is silently
+    // ignored. Cheapest defensible posture: trigger on every upload.
+    triggerFileExtraction(id, contentType);
   });
 
-  // GET /api/v1/files/list?prefix=&q=&limit=&offset=
+  // PATCH /api/v1/files/:file_id/extraction
+  //
+  // #114 Lane B — the FileExtractionWorkflow's write-back surface. The
+  // alfred-learn workflow extracts the file's text, calls the workers
+  // gateway for a one-paragraph summary, and POSTs the result here so
+  // the /files page can render the "Alfred read it" badge.
+  //
+  // Body:
+  //   {
+  //     "alfred_read_at"   : <unix-ms> | null,
+  //     "summary"          : string | null,
+  //     "extraction_error" : string | null
+  //   }
+  //
+  // Semantics:
+  //   * success path → workflow sends `alfred_read_at = <now>`,
+  //     `summary = "<paragraph>"`, `extraction_error = null`.
+  //   * failure path → workflow sends `alfred_read_at = null`,
+  //     `summary = null`, `extraction_error = "<reason_code>"`.
+  //
+  // The route is keyed by `file_id` (not the `<ULID>/<name>` path) so
+  // the workflow doesn't have to know about dedupe path rewrites.
+  // Soft-deleted rows are rejected — a tombstoned upload has no
+  // principal-facing surface, so the workflow shouldn't be stamping it.
+  //
+  // Registration order matters: the wildcard PATCH `/api/v1/files/*`
+  // (principal_label edit, PR 2) is registered later in this function
+  // and would otherwise eat this route's matches. Keeping this one
+  // here, right after upload, makes the specific path win.
+  addRoute("PATCH", "/api/v1/files/:file_id/extraction", async ({ res, params, body }) => {
+    const fileId = params.file_id ?? "";
+    if (!fileId) throw new ValidationError("file_id is required");
+    const db = getStateDb();
+    const raw = db
+      .prepare(`SELECT * FROM files WHERE id = ? LIMIT 1`)
+      .get(fileId) as Record<string, unknown> | undefined;
+    if (!raw) throw new NotFoundError(`file not found: ${fileId}`);
+    const row = rowFromDb(raw);
+    if (row.deleted_at != null) {
+      throw new ApiError(
+        409,
+        "TOMBSTONED",
+        `cannot stamp extraction on a tombstoned file: ${fileId}`,
+      );
+    }
+
+    const patch =
+      body && typeof body === "object" && !Array.isArray(body)
+        ? (body as Record<string, unknown>)
+        : {};
+
+    // Partial-replacing: a missing key in the body leaves the
+    // corresponding column unchanged (lets future pipelines stamp one
+    // column at a time without re-sending the others).
+    let nextReadAt: number | null = row.alfred_read_at;
+    let nextSummary: string | null = row.summary;
+    let nextError: string | null = row.extraction_error;
+    let touched = false;
+
+    if (Object.prototype.hasOwnProperty.call(patch, "alfred_read_at")) {
+      const v = patch.alfred_read_at;
+      if (v === null || v === undefined || v === "") {
+        nextReadAt = null;
+      } else if (typeof v === "number" && Number.isFinite(v) && v >= 0) {
+        nextReadAt = Math.floor(v);
+      } else {
+        throw new ValidationError("alfred_read_at must be a non-negative number or null");
+      }
+      touched = true;
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, "summary")) {
+      const v = patch.summary;
+      if (v === null || v === undefined) {
+        nextSummary = null;
+      } else if (typeof v === "string") {
+        const trimmed = v.trim();
+        // Hard cap matches the spec §8 "one-paragraph summary"; 4 KiB
+        // is comfortably above a long English paragraph and well below
+        // the SQLite per-cell ceiling.
+        if (trimmed.length > 4096) {
+          throw new ValidationError("summary exceeds 4 KiB cap");
+        }
+        nextSummary = trimmed === "" ? null : trimmed;
+      } else {
+        throw new ValidationError("summary must be a string or null");
+      }
+      touched = true;
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, "extraction_error")) {
+      const v = patch.extraction_error;
+      if (v === null || v === undefined) {
+        nextError = null;
+      } else if (typeof v === "string") {
+        const trimmed = v.trim();
+        if (trimmed.length > 256) {
+          throw new ValidationError("extraction_error exceeds 256-char cap");
+        }
+        nextError = trimmed === "" ? null : trimmed;
+      } else {
+        throw new ValidationError("extraction_error must be a string or null");
+      }
+      touched = true;
+    }
+
+    if (touched) {
+      db.prepare(
+        `UPDATE files
+            SET alfred_read_at = ?, summary = ?, extraction_error = ?
+          WHERE id = ?`,
+      ).run(nextReadAt, nextSummary, nextError, row.id);
+    }
+
+    const after = db
+      .prepare(`SELECT * FROM files WHERE id = ? LIMIT 1`)
+      .get(row.id) as Record<string, unknown>;
+    sendJson(res, 200, rowToJson(rowFromDb(after)));
+  });
+
+  // POST /api/v1/files/:file_id/extract
+  //
+  // #114 Lane B — operator re-fire of the extraction workflow. If a
+  // file has `extraction_error` set, this endpoint lets the operator
+  // (or an MCP-triggered re-try) restart the FileExtractionWorkflow.
+  // The workflow's id is keyed on file_id, so an in-flight run rejects
+  // with ALREADY_EXISTS (the trigger swallows that) — the route still
+  // returns 202.
+  addRoute("POST", "/api/v1/files/:file_id/extract", async ({ res, params }) => {
+    const fileId = params.file_id ?? "";
+    if (!fileId) throw new ValidationError("file_id is required");
+    const db = getStateDb();
+    const raw = db
+      .prepare(`SELECT * FROM files WHERE id = ? LIMIT 1`)
+      .get(fileId) as Record<string, unknown> | undefined;
+    if (!raw) throw new NotFoundError(`file not found: ${fileId}`);
+    const row = rowFromDb(raw);
+    if (row.deleted_at != null) {
+      throw new ApiError(409, "TOMBSTONED", `cannot extract a tombstoned file: ${fileId}`);
+    }
+    // Clear any prior error so the UI's "subtle error state" stops
+    // showing the moment a retry starts.
+    db.prepare(
+      `UPDATE files SET extraction_error = NULL WHERE id = ?`,
+    ).run(row.id);
+    triggerFileExtraction(row.id, row.content_type);
+    sendJson(res, 202, { ok: true, file_id: row.id, eta: "30s" });
+  });
+
+  // GET /api/v1/files/list?prefix=&q=&limit=&offset=&include_deleted=&only_deleted=
   //
   // Paginated, deleted_at-aware list. Three orthogonal filters, each
   // optional and combined with AND:
@@ -892,6 +1198,12 @@ export function registerFilesRoutes(): void {
   //                the `files__search` MCP tool. Content indexing comes
   //                in PR 4.
   //   * `limit` / `offset` — pagination (limit default 100, max 1000)
+  //   * `include_deleted=true`  — return live AND soft-deleted rows together
+  //   * `only_deleted=true`     — return ONLY soft-deleted rows whose
+  //                                `deleted_at` falls within the last
+  //                                `trash_window_ms` (default 30 days).
+  //                                Powers the /files "Recently deleted"
+  //                                expander + the §7 restore round-trip.
   //
   // PR 1 doesn't yet expose a virtual `parent_dir` (that's PR 3).
   addRoute("GET", "/api/v1/files/list", async ({ res, query }) => {
@@ -899,6 +1211,23 @@ export function registerFilesRoutes(): void {
     const q = (query.get("q") ?? "").trim();
     const limitRaw = Number(query.get("limit") ?? "100");
     const offsetRaw = Number(query.get("offset") ?? "0");
+    const includeDeleted = /^(1|true|yes)$/i.test(
+      String(query.get("include_deleted") ?? ""),
+    );
+    const onlyDeleted = /^(1|true|yes)$/i.test(
+      String(query.get("only_deleted") ?? ""),
+    );
+    // 30-day default trash window — matches the §11 "hard-delete after
+    // 30d" spec line. The window is configurable per request so an
+    // operator querying for "everything in the last year" doesn't have
+    // to swallow the default.
+    const trashWindowRaw = Number(
+      query.get("trash_window_ms") ?? String(30 * 24 * 60 * 60 * 1000),
+    );
+    const trashWindowMs =
+      Number.isFinite(trashWindowRaw) && trashWindowRaw >= 0
+        ? trashWindowRaw
+        : 30 * 24 * 60 * 60 * 1000;
     const limit =
       Number.isFinite(limitRaw) && limitRaw > 0
         ? Math.min(1000, Math.floor(limitRaw))
@@ -906,14 +1235,26 @@ export function registerFilesRoutes(): void {
     const offset =
       Number.isFinite(offsetRaw) && offsetRaw >= 0 ? Math.floor(offsetRaw) : 0;
 
-    // Build the WHERE clause dynamically — `deleted_at IS NULL` is always
-    // present; prefix and q each contribute an additional clause +
-    // bound parameter. SQLite's LIKE is case-sensitive by default for
+    // Build the WHERE clause dynamically — `deleted_at IS NULL` is the
+    // default. `include_deleted=true` drops that filter; `only_deleted=true`
+    // flips it and adds a `deleted_at >= cutoff` window so a stale
+    // tombstone (after the 30d hard-delete sweep lands) doesn't pollute
+    // the recycle bin. SQLite's LIKE is case-sensitive by default for
     // BLOBs and case-insensitive for TEXT; we go belt-and-braces by
     // lower()'ing both sides for the `q` keyword scan so principal
     // labels written in mixed case still match.
-    const clauses: string[] = ["deleted_at IS NULL"];
+    const clauses: string[] = [];
+    if (onlyDeleted) {
+      const cutoff = Date.now() - trashWindowMs;
+      clauses.push("deleted_at IS NOT NULL");
+      clauses.push("deleted_at >= ?");
+    } else if (!includeDeleted) {
+      clauses.push("deleted_at IS NULL");
+    }
     const args: unknown[] = [];
+    if (onlyDeleted) {
+      args.push(Date.now() - trashWindowMs);
+    }
     if (prefix) {
       clauses.push("path LIKE ?");
       args.push(`${prefix}%`);
@@ -925,14 +1266,21 @@ export function registerFilesRoutes(): void {
       );
       args.push(needle, needle, needle);
     }
-    const where = clauses.join(" AND ");
+    // `include_deleted=true` with no other filters yields an empty
+    // clause list — fall back to `1=1` so the WHERE remains syntactically
+    // valid without forcing a per-branch SQL template.
+    const where = clauses.length === 0 ? "1=1" : clauses.join(" AND ");
+    // Trash-bin views sort by `deleted_at DESC` so the most recently
+    // tombstoned row is on top (matches the "Recently deleted" UX). The
+    // default live view keeps the existing `uploaded_at DESC` order.
+    const orderBy = onlyDeleted ? "deleted_at DESC" : "uploaded_at DESC";
 
     const db = getStateDb();
     const rows = db
       .prepare(
         `SELECT * FROM files
           WHERE ${where}
-          ORDER BY uploaded_at DESC
+          ORDER BY ${orderBy}
           LIMIT ? OFFSET ?`,
       )
       .all(...args, limit, offset) as Record<string, unknown>[];
@@ -1092,7 +1440,7 @@ export function registerFilesRoutes(): void {
   //
   // Returns the full updated row. Soft-deleted rows are not patchable
   // (404, mirroring stat / blob).
-  addRoute("PATCH", "/api/v1/files/*", async ({ res, params, body }) => {
+  addRoute("PATCH", "/api/v1/files/*", async ({ req, res, params, body }) => {
     const relPath = params.path ?? "";
     if (!relPath) throw new ValidationError("path is required");
     const db = getStateDb();
@@ -1129,6 +1477,22 @@ export function registerFilesRoutes(): void {
         nextLabel,
         row.id,
       );
+      // §8 audit ledger — `file_patch` carries the before/after of every
+      // writable column so /study#audit's UI can render the diff. We
+      // only emit when something actually changed; a no-op PATCH (which
+      // still 200s for forward-compat) leaves the ledger quiet.
+      appendAudit({
+        action_type: "files_patch",
+        actor: resolveActor(req, patch.actor),
+        source: "ctrl-api",
+        target_path: `files/${row.id}`,
+        target_kind: "file",
+        subject_ref: row.path,
+        summary: `files_patch: principal_label on ${row.original_filename ?? row.path}`,
+        changes: {
+          principal_label: { before: row.principal_label, after: nextLabel },
+        },
+      });
     }
 
     const after = db
@@ -1145,9 +1509,16 @@ export function registerFilesRoutes(): void {
   // live `files.id` rows would suddenly point at a missing blob. The
   // `files` row stays for the audit trail either way.
   //
+  // The soft-delete is REVERSIBLE for as long as another `files` row
+  // shares the sha256 (the bytes are still on disk) — see the
+  // /restore/:file_id route below. If this was the sole reference, the
+  // blob has been reaped and only the row's metadata can be undeleted;
+  // the restore route 410s in that case rather than fabricating a
+  // missing blob.
+  //
   // Cold blobs are unlinked from FILES_COLD_ROOT instead of
   // FILES_ROOT when their ref_count hits zero.
-  addRoute("DELETE", "/api/v1/files/*", async ({ res, params }) => {
+  addRoute("DELETE", "/api/v1/files/*", async ({ req, res, params, body }) => {
     const relPath = params.path ?? "";
     if (!relPath) throw new ValidationError("path is required");
     const db = getStateDb();
@@ -1161,6 +1532,12 @@ export function registerFilesRoutes(): void {
     const now = Date.now();
     // Soft-delete the principal-facing row.
     db.prepare(`UPDATE files SET deleted_at = ? WHERE id = ?`).run(now, row.id);
+    const actor = resolveActor(
+      req,
+      body && typeof body === "object" && !Array.isArray(body)
+        ? (body as Record<string, unknown>).actor
+        : undefined,
+    );
     // Decrement the canonical blob's ref_count, then physically unlink
     // only if it just hit zero. INSERT-or-IGNORE on upload guarantees
     // exactly one `file_blobs` row per sha256, so this UPDATE +
@@ -1205,7 +1582,539 @@ export function registerFilesRoutes(): void {
       }
       db.prepare(`DELETE FROM file_blobs WHERE sha256 = ?`).run(row.sha256);
     }
+    // §8 audit ledger — `files_soft_delete` is the principal-visible
+    // tombstone event. The `undo` recipe points at the restore route
+    // (added in this PR) so a future "Undo" pill on the Desk audit feed
+    // can roll it back without the operator having to memorise the
+    // inverse URL. The `payload.blob_reaped` flag lets a reader detect
+    // "the bytes are gone, restore will 410" before they try.
+    const blobReaped = !!(blob && blob.ref_count <= 0);
+    appendAudit({
+      action_type: "files_soft_delete",
+      actor,
+      source: "ctrl-api",
+      target_path: `files/${row.id}`,
+      target_kind: "file",
+      subject_ref: row.path,
+      summary: `files_soft_delete: ${row.original_filename ?? row.path}`,
+      changes: { deleted_at: { before: null, after: now } },
+      undo: {
+        method: "POST",
+        path: `/api/v1/files/restore/${row.id}`,
+      },
+      payload: {
+        id: row.id,
+        path: row.path,
+        sha256: row.sha256,
+        size_bytes: row.size_bytes,
+        blob_reaped: blobReaped,
+      },
+    });
     sendJson(res, 200, { id: row.id, path: row.path, deleted_at: now });
+  });
+
+  // GET /api/v1/files/describe/* — rich metadata getter (issue #114 Lane D₁).
+  //
+  // Unlike `stat`, `describe` ALWAYS returns the row even if soft-deleted,
+  // and includes a `summary` slot for the (not-yet-shipped) extraction
+  // pipeline. The principal-facing fields are projected to a compact shape
+  // that mirrors the Lane D₁ MCP tool contract:
+  //
+  //   { id, name, path, size_bytes, mime, principal_label, summary,
+  //     created_at, updated_at, alfred_read_at, deleted_at }
+  //
+  // Where:
+  //   * `name`           ← original_filename
+  //   * `mime`           ← content_type
+  //   * `created_at`     ← uploaded_at (ms)
+  //   * `updated_at`     ← max(uploaded_at, last_accessed_at) (ms)
+  //   * `alfred_read_at` ← last_accessed_at (ms or null)
+  //   * `summary`        ← null today; populated when the extraction
+  //                        pipeline lands (#114 PR §13 PR5).
+  //
+  // Soft-deleted rows return 200 with `deleted_at` populated so the
+  // principal can ask Alfred "did I delete that file last week?" and get
+  // a sensible answer instead of a 404.
+  addRoute("GET", "/api/v1/files/describe/*", async ({ res, params }) => {
+    const relPath = params.path ?? "";
+    if (!relPath) throw new ValidationError("path is required");
+    const raw = getStateDb()
+      .prepare(`SELECT * FROM files WHERE path = ? LIMIT 1`)
+      .get(relPath) as Record<string, unknown> | undefined;
+    if (!raw) throw new NotFoundError(`file not found: ${relPath}`);
+    const row = rowFromDb(raw);
+    const updatedAt =
+      row.last_accessed_at != null && row.last_accessed_at > row.uploaded_at
+        ? row.last_accessed_at
+        : row.uploaded_at;
+    sendJson(res, 200, {
+      id: row.id,
+      name: row.original_filename,
+      path: row.path,
+      size_bytes: row.size_bytes,
+      mime: row.content_type,
+      principal_label: row.principal_label,
+      summary: null,
+      created_at: row.uploaded_at,
+      updated_at: updatedAt,
+      alfred_read_at: row.last_accessed_at,
+      deleted_at: row.deleted_at,
+    });
+  });
+
+  // POST /api/v1/files/:file_id/move — rename or move a file (issue #114 Lane D₁).
+  //
+  // Body: { path: "<new-relative-path>" } where `<new-relative-path>` is
+  // either:
+  //   * a bare basename ("better-name.pdf") — keeps the existing ULID dir
+  //     and re-points the on-disk file under it, OR
+  //   * a full "<ULID>/<safe-name>" pair — moves to a different ULID dir.
+  //
+  // Path sanitization mirrors upload: directory traversal is rejected
+  // (resolveBlobPath catches `..`), the filename is sanitized via the
+  // existing sanitizeFilename helper, and the on-disk file is renamed
+  // atomically with fs.renameSync. The `files.path` column is updated
+  // in lockstep.
+  //
+  // Dedupe interaction. If the row's sha256 has `ref_count > 1` (another
+  // upload has dedupe-pointed at the same blob), we DON'T rename the
+  // on-disk file — that would break the other references. Instead we
+  // 409 with a clear hint that the principal should `delete` + re-upload
+  // under the new name. The path in `files.path` stays canonical to the
+  // shared blob.
+  //
+  // Cold-promoted blobs are also refused with 409 — the cold filename is
+  // the ULID + .zst suffix and changing it would desync the file_blobs
+  // pointer. Operator-only `cold-restore` first, then move.
+  //
+  // Returns the full row (post-rename) under the same shape `stat` uses.
+  addRoute("POST", "/api/v1/files/:file_id/move", async ({ res, params, body }) => {
+    const fileId = params.file_id ?? "";
+    if (!fileId) throw new ValidationError("file_id is required");
+    const db = getStateDb();
+    const raw = db
+      .prepare(`SELECT * FROM files WHERE id = ? AND deleted_at IS NULL LIMIT 1`)
+      .get(fileId) as Record<string, unknown> | undefined;
+    if (!raw) throw new NotFoundError(`file not found: ${fileId}`);
+    const row = rowFromDb(raw);
+
+    const patch =
+      body && typeof body === "object" && !Array.isArray(body)
+        ? (body as Record<string, unknown>)
+        : {};
+    const requestedRaw = patch.path;
+    if (typeof requestedRaw !== "string" || !requestedRaw.trim()) {
+      throw new ValidationError("body.path is required (non-empty string)");
+    }
+    const requested = requestedRaw.trim().replace(/^\/+/, "");
+    if (requested.includes("..")) {
+      throw new ValidationError("path may not contain `..`");
+    }
+
+    // Cold + shared-blob refuse paths.
+    if (isColdPath(row.path)) {
+      throw new ApiError(
+        409,
+        "COLD_BLOB",
+        "cannot move a cold-archived file; restore it first with POST /cold-restore/:file_id",
+      );
+    }
+    const blobRow = db
+      .prepare(`SELECT ref_count, path FROM file_blobs WHERE sha256 = ?`)
+      .get(row.sha256) as { ref_count: number; path: string } | undefined;
+    if (blobRow && blobRow.ref_count > 1) {
+      throw new ApiError(
+        409,
+        "SHARED_BLOB",
+        `cannot move a file whose bytes are shared via dedupe (ref_count=${blobRow.ref_count}); delete + re-upload under the new name instead`,
+      );
+    }
+
+    // Resolve the requested path. Two shapes:
+    //   - basename only: keep the existing ULID dir, change the filename
+    //   - "<ULID>/<name>": full path (allows moving across ULID dirs)
+    const slashIdx = requested.indexOf("/");
+    let newRelPath: string;
+    let newOriginalFilename = row.original_filename;
+    if (slashIdx < 0) {
+      // basename-only: preserve the row's current ULID dir.
+      const currentUlid = row.path.split("/")[0];
+      if (!/^[0-9A-HJKMNP-TV-Z]{26}$/.test(currentUlid)) {
+        throw new ApiError(
+          500,
+          "INVALID_CURRENT_PATH",
+          `existing path does not start with a ULID: ${row.path}`,
+        );
+      }
+      const safeName = sanitizeFilename(requested);
+      newRelPath = path.posix.join(currentUlid, safeName);
+      newOriginalFilename = requested;
+    } else {
+      const [reqUlid, ...rest] = requested.split("/");
+      const tail = rest.join("/");
+      if (!/^[0-9A-HJKMNP-TV-Z]{26}$/.test(reqUlid)) {
+        throw new ValidationError(
+          `path's first segment must be a 26-char ULID (got ${reqUlid})`,
+        );
+      }
+      const safeName = sanitizeFilename(tail || "file");
+      newRelPath = path.posix.join(reqUlid, safeName);
+      newOriginalFilename = tail || row.original_filename;
+    }
+
+    if (newRelPath === row.path) {
+      // No-op. Return the existing row unchanged.
+      sendJson(res, 200, rowToJson(row));
+      return;
+    }
+
+    // Collision check: another live row must not already own the target path.
+    const collision = db
+      .prepare(
+        `SELECT id FROM files WHERE path = ? AND deleted_at IS NULL AND id != ? LIMIT 1`,
+      )
+      .get(newRelPath, row.id) as { id: string } | undefined;
+    if (collision) {
+      throw new ApiError(
+        409,
+        "PATH_TAKEN",
+        `another file already lives at ${newRelPath}`,
+      );
+    }
+
+    // Rename the bytes on disk. Create the destination ULID dir if it
+    // doesn't exist (only possible on the cross-ULID move shape).
+    const oldAbs = resolveBlobPath(row.path);
+    const newAbs = resolveBlobPath(newRelPath);
+    if (!fs.existsSync(oldAbs)) {
+      throw new ApiError(
+        410,
+        "BLOB_MISSING",
+        `the row exists but the blob at ${row.path} is gone`,
+      );
+    }
+    fs.mkdirSync(path.dirname(newAbs), { recursive: true });
+    fs.renameSync(oldAbs, newAbs);
+
+    // Reap the source ULID dir if it's now empty (basename-only moves
+    // keep the same dir, so this is mostly a cross-ULID move concern).
+    const oldDir = path.dirname(oldAbs);
+    if (oldDir !== path.dirname(newAbs)) {
+      try {
+        fs.rmdirSync(oldDir);
+      } catch {
+        /* dir not empty / not ours — fine. */
+      }
+    }
+
+    // Update the canonical blob path + the per-file row in a single tx.
+    db.exec("BEGIN");
+    try {
+      db.prepare(`UPDATE file_blobs SET path = ? WHERE sha256 = ?`).run(
+        newRelPath,
+        row.sha256,
+      );
+      db.prepare(
+        `UPDATE files SET path = ?, original_filename = ? WHERE id = ?`,
+      ).run(newRelPath, newOriginalFilename, row.id);
+      db.exec("COMMIT");
+    } catch (err) {
+      db.exec("ROLLBACK");
+      // Best-effort: swap the file back so the DB and disk agree.
+      try {
+        fs.renameSync(newAbs, oldAbs);
+      } catch {
+        /* if this fails the operator must reconcile by hand */
+      }
+      throw err;
+    }
+
+    appendAudit({
+      action_type: "files_move",
+      actor: "principal",
+      source: "ctrl-api",
+      target_path: newRelPath,
+      target_kind: "file",
+      subject_ref: row.id,
+      summary: `moved file ${row.path} → ${newRelPath}`,
+      changes: { path: { from: row.path, to: newRelPath } },
+      payload: {
+        id: row.id,
+        sha256: row.sha256,
+        original_filename_from: row.original_filename,
+        original_filename_to: newOriginalFilename,
+      },
+    });
+
+    const after = db
+      .prepare(`SELECT * FROM files WHERE id = ? LIMIT 1`)
+      .get(row.id) as Record<string, unknown>;
+    sendJson(res, 200, rowToJson(rowFromDb(after)));
+  });
+
+  // POST /api/v1/files/:file_id/purge — hard delete (issue #114 Lane D₁).
+  //
+  // The principal-facing "permanently empty the recycle bin" surface.
+  // Refuses to purge a row that is NOT already soft-deleted — the
+  // soft-delete step is a deliberate two-stage gate (one click to send
+  // to recycle bin, a second to flush) and the MCP tool mirrors that
+  // shape.
+  //
+  // Behaviour:
+  //   * 409 PURGE_REQUIRES_SOFT_DELETE if the row's `deleted_at IS NULL`.
+  //   * 404 if the id doesn't exist at all.
+  //   * 200 + `{id, path, purged_at}` on success.
+  //
+  // On success the `files` row is DELETED outright (the principal said
+  // "really, get rid of it"). The audit row stays — the audit ledger
+  // outlives the file. If the file's sha256 was the last reference and
+  // its bytes are still on-disk (we soft-delete with ref_count
+  // bookkeeping, so this is the common case), the bytes are unlinked
+  // and the `file_blobs` row deleted too. If the bytes are shared
+  // (ref_count > 1 — possible when a duplicate upload pointed at the
+  // same canonical blob), the on-disk bytes stay and only the
+  // per-file row vanishes.
+  // POST /api/v1/files/restore/:file_id — undo a soft-delete.
+  //
+  // The symmetric inverse of the DELETE route. Steps:
+  //
+  //   1. Look the row up by id (no `deleted_at IS NULL` filter — we're
+  //      looking for tombstoned rows here).
+  //   2. Refuse with 409 NOT_DELETED if the row isn't actually
+  //      tombstoned (an idempotent no-op would be friendlier but masks
+  //      operator mistakes — the explicit 409 lets a caller retry-safely
+  //      and the UI banner is unambiguous).
+  //   3. If the canonical `file_blobs` row still exists, the bytes are
+  //      live on disk — clear `deleted_at`, bump `file_blobs.ref_count`
+  //      back up, return the restored row.
+  //   4. If the `file_blobs` row is gone, the blob was reaped at delete
+  //      time and the bytes are unrecoverable. Return 410 BLOB_REAPED
+  //      so the caller surfaces a clear "this can't be restored" rather
+  //      than a half-restored ghost row pointing at nothing on disk.
+  //
+  // The undelete is dedupe-safe: if a duplicate was uploaded after the
+  // tombstone landed, that upload's `INSERT OR IGNORE` already raced
+  // the canonical blob back into existence with `ref_count = 1`. The
+  // restore here just bumps it to 2 and clears the tombstone — both
+  // `files` rows now point at the shared blob.
+  //
+  // Audit (§8): every restore writes a `files_restore` row with the
+  // inverse `undo` recipe pointing back at DELETE so the audit feed
+  // tells a clean two-event story (delete → restore) the principal can
+  // read at /study#audit. Issue #114 §14 step 7.
+  addRoute("POST", "/api/v1/files/restore/:file_id", async ({ req, res, params, body }) => {
+    const fileId = params.file_id ?? "";
+    if (!fileId) throw new ValidationError("file_id is required");
+    const db = getStateDb();
+    const raw = db
+      .prepare(`SELECT * FROM files WHERE id = ? LIMIT 1`)
+      .get(fileId) as Record<string, unknown> | undefined;
+    if (!raw) throw new NotFoundError(`file not found: ${fileId}`);
+    const row = rowFromDb(raw);
+    if (row.deleted_at == null) {
+      throw new ApiError(
+        409,
+        "NOT_DELETED",
+        `file ${fileId} is not soft-deleted (nothing to restore)`,
+      );
+    }
+    const blob = db
+      .prepare(
+        `SELECT path, ref_count, cold_promoted_at, size_bytes
+           FROM file_blobs WHERE sha256 = ?`,
+      )
+      .get(row.sha256) as
+      | {
+          path: string;
+          ref_count: number;
+          cold_promoted_at: number | null;
+          size_bytes: number;
+        }
+      | undefined;
+    if (!blob) {
+      // The bytes were reaped when the last reference dropped on the
+      // original DELETE — there is nothing on disk to restore.
+      throw new ApiError(
+        410,
+        "BLOB_REAPED",
+        `file ${fileId} cannot be restored: the underlying blob was reaped on delete (no remaining references at the time)`,
+      );
+    }
+    // Belt-and-braces: even if the SQL row exists, double-check the on-disk
+    // blob is actually present. A missing file here means a previous
+    // unlink failed but the SQL state survived — surface it cleanly.
+    const abs = isColdPath(blob.path)
+      ? resolveColdBlobPath(blob.path)
+      : resolveBlobPath(blob.path);
+    if (!fs.existsSync(abs)) {
+      throw new ApiError(
+        410,
+        "BLOB_MISSING",
+        `file ${fileId} cannot be restored: the blob at ${blob.path} is gone from disk`,
+      );
+    }
+
+    const restoredAt = Date.now();
+    const previousDeletedAt = row.deleted_at;
+    // Atomic restore: clear the tombstone + bump ref_count in one txn so
+    // a crash between the two leaves the row consistent with the blob's
+    // reference count. SQLite's serializable per-statement semantics
+    // make BEGIN/COMMIT around these two writes sufficient.
+    db.exec("BEGIN");
+    try {
+      db.prepare(`UPDATE files SET deleted_at = NULL WHERE id = ?`).run(row.id);
+      db.prepare(
+        `UPDATE file_blobs SET ref_count = ref_count + 1 WHERE sha256 = ?`,
+      ).run(row.sha256);
+      db.exec("COMMIT");
+    } catch (err) {
+      db.exec("ROLLBACK");
+      throw err;
+    }
+
+    const actor = resolveActor(
+      req,
+      body && typeof body === "object" && !Array.isArray(body)
+        ? (body as Record<string, unknown>).actor
+        : undefined,
+    );
+    appendAudit({
+      action_type: "files_restore",
+      actor,
+      source: "ctrl-api",
+      target_path: `files/${row.id}`,
+      target_kind: "file",
+      subject_ref: row.path,
+      summary: `files_restore: ${row.original_filename ?? row.path}`,
+      changes: { deleted_at: { before: previousDeletedAt, after: null } },
+      undo: {
+        method: "DELETE",
+        path: `/api/v1/files/${row.path}`,
+      },
+      payload: {
+        id: row.id,
+        path: row.path,
+        sha256: row.sha256,
+        previous_deleted_at: previousDeletedAt,
+        restored_at: restoredAt,
+      },
+    });
+
+    // Return the fresh row so the UI can swap the deleted row for the
+    // restored one without a separate fetch.
+    const after = db
+      .prepare(`SELECT * FROM files WHERE id = ? LIMIT 1`)
+      .get(row.id) as Record<string, unknown>;
+    sendJson(res, 200, {
+      ...rowToJson(rowFromDb(after)),
+      restored_at: restoredAt,
+      previous_deleted_at: previousDeletedAt,
+    });
+  });
+
+  // POST /api/v1/files/:file_id/purge — hard delete (issue #114 Lane D₁).
+  //
+  // The principal-facing "permanently empty the recycle bin" surface.
+  // Refuses to purge a row that is NOT already soft-deleted — the
+  // soft-delete step is a deliberate two-stage gate (one click to send
+  // to recycle bin, a second to flush) and the MCP tool mirrors that
+  // shape.
+  //
+  // Behaviour:
+  //   * 409 PURGE_REQUIRES_SOFT_DELETE if the row's `deleted_at IS NULL`.
+  //   * 404 if the id doesn't exist at all.
+  //   * 200 + `{id, path, purged_at}` on success.
+  //
+  // On success the `files` row is DELETED outright (the principal said
+  // "really, get rid of it"). The audit row stays — the audit ledger
+  // outlives the file. If the file's sha256 was the last reference and
+  // its bytes are still on-disk (we soft-delete with ref_count
+  // bookkeeping, so this is the common case), the bytes are unlinked
+  // and the `file_blobs` row deleted too. If the bytes are shared
+  // (ref_count > 1 — possible when a duplicate upload pointed at the
+  // same canonical blob), the on-disk bytes stay and only the
+  // per-file row vanishes.
+  addRoute("POST", "/api/v1/files/:file_id/purge", async ({ req, res, params, body }) => {
+    const fileId = params.file_id ?? "";
+    if (!fileId) throw new ValidationError("file_id is required");
+    const db = getStateDb();
+    const raw = db
+      .prepare(`SELECT * FROM files WHERE id = ? LIMIT 1`)
+      .get(fileId) as Record<string, unknown> | undefined;
+    if (!raw) throw new NotFoundError(`file not found: ${fileId}`);
+    const row = rowFromDb(raw);
+    if (row.deleted_at == null) {
+      throw new ApiError(
+        409,
+        "PURGE_REQUIRES_SOFT_DELETE",
+        "the file must be soft-deleted (DELETE /api/v1/files/<path>) before it can be purged",
+      );
+    }
+
+    // Drop the principal-facing row.
+    db.prepare(`DELETE FROM files WHERE id = ?`).run(row.id);
+
+    // Reap the on-disk bytes IFF this row was holding the last reference.
+    // The soft-delete path already decremented ref_count; the canonical
+    // row may have been removed entirely (ref_count == 0 → DELETE FROM
+    // file_blobs in the soft-delete handler). If it's still around with
+    // ref_count > 0 the bytes are shared and we leave them alone.
+    const blob = db
+      .prepare(
+        `SELECT path, ref_count, cold_promoted_at FROM file_blobs WHERE sha256 = ?`,
+      )
+      .get(row.sha256) as
+      | { path: string; ref_count: number; cold_promoted_at: number | null }
+      | undefined;
+    if (blob && blob.ref_count <= 0) {
+      try {
+        if (isColdPath(blob.path)) {
+          const abs = resolveColdBlobPath(blob.path);
+          if (fs.existsSync(abs)) fs.unlinkSync(abs);
+        } else {
+          const abs = resolveBlobPath(blob.path);
+          if (fs.existsSync(abs)) fs.unlinkSync(abs);
+          const parentDir = path.dirname(abs);
+          try {
+            fs.rmdirSync(parentDir);
+          } catch {
+            /* dir not empty / not ours — fine. */
+          }
+        }
+      } catch (err) {
+        console.warn(
+          `[files] purge: could not unlink ${blob.path}: ${(err as Error).message}`,
+        );
+      }
+      db.prepare(`DELETE FROM file_blobs WHERE sha256 = ?`).run(row.sha256);
+    }
+
+    const purgedAt = Date.now();
+    // §8 audit ledger — `files_purge` is a permanent, principal-driven
+    // event. Actor defaults to `principal` (this is the explicit
+    // "empty recycle bin" click); MCP-driven calls can name themselves.
+    const actor = resolveActor(
+      req,
+      body && typeof body === "object" && !Array.isArray(body)
+        ? (body as Record<string, unknown>).actor
+        : undefined,
+    );
+    appendAudit({
+      action_type: "files_purge",
+      actor,
+      source: "ctrl-api",
+      target_path: `files/${row.id}`,
+      target_kind: "file",
+      subject_ref: row.path,
+      summary: `files_purge: ${row.original_filename ?? row.path}`,
+      payload: {
+        id: row.id,
+        sha256: row.sha256,
+        size_bytes: row.size_bytes,
+        soft_deleted_at: row.deleted_at,
+      },
+    });
+    sendJson(res, 200, { id: row.id, path: row.path, purged_at: purgedAt });
   });
 
   // GET /api/v1/files/cold-candidates?older_than_ms=…
@@ -1276,7 +2185,7 @@ export function registerFilesRoutes(): void {
   // row (`cold_promoted_at IS NOT NULL`) and the orphan can be reaped
   // by ops. Better that than rolling back the DB and re-promoting on
   // every sweep tick.
-  addRoute("POST", "/api/v1/files/cold-promote/:file_id", async ({ res, params }) => {
+  addRoute("POST", "/api/v1/files/cold-promote/:file_id", async ({ req, res, params, body }) => {
     const fileId = params.file_id ?? "";
     if (!fileId) throw new ValidationError("file_id is required");
     const db = getStateDb();
@@ -1424,6 +2333,36 @@ export function registerFilesRoutes(): void {
         `[files] cold-promote: could not unlink live ${liveAbs}: ${(err as Error).message}`,
       );
     }
+    // §8 audit ledger — cold-promote is system-driven (the daily
+    // workflow), so the default actor is `system` unless an operator
+    // passed something explicit. Logs both the live → cold path swap
+    // and the bytes-saved ratio so /study#audit can show "Alfred
+    // archived these N files today, saved X MB".
+    appendAudit({
+      action_type: "files_cold_promote",
+      actor: resolveActor(
+        req,
+        body && typeof body === "object" && !Array.isArray(body)
+          ? (body as Record<string, unknown>).actor
+          : undefined,
+        "system",
+      ),
+      source: "ctrl-api",
+      target_path: `files/${row.id}`,
+      target_kind: "file",
+      subject_ref: coldRelPath,
+      summary: `files_cold_promote: ${row.original_filename ?? row.path} (${blob.size_bytes} → ${compressedSize} bytes)`,
+      changes: {
+        path: { before: blob.path, after: coldRelPath },
+        cold_promoted_at: { before: null, after: promotedAt },
+      },
+      payload: {
+        id: row.id,
+        sha256: row.sha256,
+        live_bytes: blob.size_bytes,
+        cold_bytes: compressedSize,
+      },
+    });
     sendJson(res, 200, {
       id: row.id,
       sha256: row.sha256,
@@ -1447,7 +2386,7 @@ export function registerFilesRoutes(): void {
   // This is operator-only; the read path (GET /blob/*) intentionally
   // does NOT auto-restore on access so cold-promoted files stay cold
   // until the operator explicitly opts in.
-  addRoute("POST", "/api/v1/files/cold-restore/:file_id", async ({ res, params }) => {
+  addRoute("POST", "/api/v1/files/cold-restore/:file_id", async ({ req, res, params, body }) => {
     const fileId = params.file_id ?? "";
     if (!fileId) throw new ValidationError("file_id is required");
     const db = getStateDb();
@@ -1555,6 +2494,35 @@ export function registerFilesRoutes(): void {
         `[files] cold-restore: could not unlink cold ${coldAbs}: ${(err as Error).message}`,
       );
     }
+    // §8 audit ledger — symmetric to cold-promote. `system` is the
+    // default actor when an automated workflow trips this (no such
+    // workflow exists today; cold-restore is operator-driven). The
+    // changes diff captures the path swap so /study#audit can render
+    // "this file moved back from cold storage".
+    appendAudit({
+      action_type: "files_cold_restore",
+      actor: resolveActor(
+        req,
+        body && typeof body === "object" && !Array.isArray(body)
+          ? (body as Record<string, unknown>).actor
+          : undefined,
+        "principal",
+      ),
+      source: "ctrl-api",
+      target_path: `files/${row.id}`,
+      target_kind: "file",
+      subject_ref: liveRelPath,
+      summary: `files_cold_restore: ${row.original_filename ?? row.path}`,
+      changes: {
+        path: { before: blob.path, after: liveRelPath },
+        cold_promoted_at: { before: blob.cold_promoted_at, after: null },
+      },
+      payload: {
+        id: row.id,
+        sha256: row.sha256,
+        restored_bytes: blob.size_bytes,
+      },
+    });
     sendJson(res, 200, {
       id: row.id,
       sha256: row.sha256,
@@ -1563,6 +2531,7 @@ export function registerFilesRoutes(): void {
       restored_bytes: blob.size_bytes,
     });
   });
+
 }
 
 // ── private: blob stream (split out for the tests + future PR 2 reuse) ─────

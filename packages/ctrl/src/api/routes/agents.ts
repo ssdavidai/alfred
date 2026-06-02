@@ -1,10 +1,12 @@
 import { spawn } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import yaml from "js-yaml";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError } from "../errors.js";
 import { execAsync, dockerExec, dockerComposeCmd, HERMES_CMD, HERMES_CONTAINER } from "../helpers.js";
 import { resolveDeliveryTarget } from "../hermes-sessions.js";
+import { getStateDb } from "../../db/state.js";
 
 // alfred daemon config (the surveyor lives here, not in the Hermes config).
 const ALFRED_DATA_DIR = process.env.ALFRED_DATA_DIR ?? "/alfred-data";
@@ -166,6 +168,124 @@ async function getAgentModelStatus(agentDef: typeof AGENTS[number]): Promise<Rec
     providers,
     missingProviders,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Tool disposition (Phase B — runtime-flippable DIRECT vs DELEGATED per MCP
+// server). Source of truth: state.db.tool_disposition (migration 0014).
+//
+// Two reads + one mutator drive the surface:
+//   * GET  /api/v1/agents/tool-disposition         — dashboard + LLM "what's
+//                                                    current?" probe
+//   * POST /api/v1/agents/tool-disposition         — Sir/Alfred flip via the
+//                                                    dashboard toggle OR the
+//                                                    set_tool_disposition MCP
+//                                                    tool. Triggers a
+//                                                    debounced 10s Hermes
+//                                                    restart so a flurry of
+//                                                    flips coalesces into a
+//                                                    single profile reload.
+//   * POST /api/v1/agents/focused-subagent         — the `delegate_to_focused
+//                                                    _agent` MCP tool's
+//                                                    backing. Spawns a
+//                                                    workers-profile session
+//                                                    keyed by domain + hash,
+//                                                    loads the right skill,
+//                                                    returns plain-text.
+//
+// The 9 known servers mirror migration 0014's seed. Anything outside this
+// allowlist is rejected — "files" still needs to be added by migration before
+// it can be flipped, etc. ---------------------------------------------------
+const KNOWN_MCP_SERVERS = [
+  "alfred-ctrl",
+  "alfred",
+  "sure",
+  "plane",
+  "vaultwarden",
+  "execute",
+  "paperclip",
+  "hass",
+  "files",
+] as const;
+type KnownServer = (typeof KNOWN_MCP_SERVERS)[number];
+const KNOWN_SERVER_SET: ReadonlySet<string> = new Set(KNOWN_MCP_SERVERS);
+
+const VALID_DISPOSITIONS = ["direct", "delegated"] as const;
+type Disposition = (typeof VALID_DISPOSITIONS)[number];
+const VALID_DISPOSITION_SET: ReadonlySet<string> = new Set(VALID_DISPOSITIONS);
+
+const VALID_UPDATED_BY = ["sir", "alfred", "init"] as const;
+const VALID_UPDATED_BY_SET: ReadonlySet<string> = new Set(VALID_UPDATED_BY);
+
+// Debounce window for the Hermes restart triggered after a disposition flip.
+// A burst of flips inside this window coalesces into one `docker compose
+// restart hermes` invocation (pay the ~10s cost once, not N times).
+const HERMES_RESTART_DEBOUNCE_MS = 10_000;
+let _hermesRestartTimer: NodeJS.Timeout | null = null;
+
+/** Debounce coalesces flurries into one restart. Pulled out for test mocking. */
+function scheduleDebouncedHermesRestart(): void {
+  if (_hermesRestartTimer) clearTimeout(_hermesRestartTimer);
+  _hermesRestartTimer = setTimeout(() => {
+    _hermesRestartTimer = null;
+    dockerComposeCmd(["restart", HERMES_CONTAINER]).catch(() => {
+      // Best effort — operator can `docker compose restart hermes` manually
+      // if needed; the disposition row is already persisted.
+    });
+  }, HERMES_RESTART_DEBOUNCE_MS);
+  // unref so the timer doesn't keep the process alive on test teardown.
+  _hermesRestartTimer.unref?.();
+}
+
+/** Test hook: cancel any pending debounced restart. */
+export function _resetHermesRestartDebounceForTests(): void {
+  if (_hermesRestartTimer) {
+    clearTimeout(_hermesRestartTimer);
+    _hermesRestartTimer = null;
+  }
+}
+
+/** Test hook: is there a pending restart queued? */
+export function _hermesRestartPendingForTests(): boolean {
+  return _hermesRestartTimer !== null;
+}
+
+// Workers-profile gateway URL (focused-subagent target). The :18790 default
+// matches the compose-template binding (see render_hermes.py + helpers.ts's
+// HERMES_WORKERS_GATEWAY_URL fallback).
+const HERMES_WORKERS_GATEWAY_URL =
+  process.env.HERMES_WORKERS_GATEWAY_URL ?? "http://hermes:18790";
+
+/** Read API_SERVER_KEY for the workers profile out of its rendered .env.
+ *
+ *  Same key-resolution pattern as channels_paperclip.ts /
+ *  channels_ha.ts / hermes.ts — the /opt/alfred/.env's
+ *  HERMES_API_SERVER_KEY is a *seed* for first-boot; render_hermes.py
+ *  may regenerate per-profile keys, so the live key lives in
+ *  /hermes-state/profiles/workers/.env's API_SERVER_KEY. */
+function readWorkersApiKey(): string | null {
+  const envPath = `${HERMES_CONFIG_DIR}/workers/.env`;
+  let raw: string;
+  try {
+    raw = fs.readFileSync(envPath, "utf-8");
+  } catch {
+    return null;
+  }
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eq = trimmed.indexOf("=");
+    if (eq < 0) continue;
+    if (trimmed.slice(0, eq).trim() === "API_SERVER_KEY") {
+      return trimmed.slice(eq + 1).trim();
+    }
+  }
+  return null;
+}
+
+/** Sanitise an arbitrary string into a session-key-safe slug. */
+function _domainSlug(domain: string): string {
+  return domain.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 32) || "any";
 }
 
 /** Get surveyor config from config.yaml. */
@@ -446,5 +566,231 @@ export function registerAgentRoutes(): void {
       const message = err instanceof Error ? err.message : String(err);
       sendJson(res, 500, { status: "error", error: message });
     }
+  });
+
+  // ─── Tool disposition (Phase B) ──────────────────────────────────────────
+  //
+  // GET  /api/v1/agents/tool-disposition           — list all dispositions
+  // POST /api/v1/agents/tool-disposition           — flip one server
+  // POST /api/v1/agents/focused-subagent           — delegate task to workers
+
+  addRoute("GET", "/api/v1/agents/tool-disposition", async ({ res }) => {
+    const db = getStateDb();
+    const rows = db
+      .prepare(
+        "SELECT server, disposition, updated_at, updated_by FROM tool_disposition ORDER BY server",
+      )
+      .all() as Array<{
+        server: string;
+        disposition: string;
+        updated_at: string;
+        updated_by: string | null;
+      }>;
+    sendJson(res, 200, { dispositions: rows });
+  });
+
+  addRoute("POST", "/api/v1/agents/tool-disposition", async ({ res, body }) => {
+    const b = body as Record<string, unknown> | undefined;
+    if (!b || typeof b.server !== "string") {
+      throw new ValidationError("`server` is required (string)");
+    }
+    if (typeof b.disposition !== "string") {
+      throw new ValidationError("`disposition` is required (string)");
+    }
+
+    const server = b.server as string;
+    const disposition = b.disposition as string;
+    const updatedBy = typeof b.updated_by === "string" ? (b.updated_by as string) : "alfred";
+
+    if (!KNOWN_SERVER_SET.has(server)) {
+      throw new ValidationError(
+        `Unknown server: ${server}. Known servers: ${[...KNOWN_MCP_SERVERS].join(", ")}`,
+      );
+    }
+    if (!VALID_DISPOSITION_SET.has(disposition)) {
+      throw new ValidationError(
+        `Invalid disposition: ${disposition}. Must be one of: ${[...VALID_DISPOSITIONS].join(", ")}`,
+      );
+    }
+    if (!VALID_UPDATED_BY_SET.has(updatedBy)) {
+      throw new ValidationError(
+        `Invalid updated_by: ${updatedBy}. Must be one of: ${[...VALID_UPDATED_BY].join(", ")}`,
+      );
+    }
+
+    const db = getStateDb();
+    const now = new Date().toISOString();
+    db.prepare(
+      `INSERT INTO tool_disposition (server, disposition, updated_at, updated_by)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(server) DO UPDATE SET
+         disposition = excluded.disposition,
+         updated_at  = excluded.updated_at,
+         updated_by  = excluded.updated_by`,
+    ).run(server, disposition as Disposition, now, updatedBy);
+
+    const row = db
+      .prepare(
+        "SELECT server, disposition, updated_at, updated_by FROM tool_disposition WHERE server = ?",
+      )
+      .get(server) as
+        | { server: string; disposition: string; updated_at: string; updated_by: string | null }
+        | undefined;
+
+    // Debounced Hermes restart — the disposition change only takes effect
+    // after init re-runs render_mcp_servers.py at boot, which is driven by
+    // the compose restart. Coalesce a flurry into one.
+    scheduleDebouncedHermesRestart();
+
+    sendJson(res, 200, {
+      ok: true,
+      row,
+      restart_scheduled: true,
+      restart_debounce_ms: HERMES_RESTART_DEBOUNCE_MS,
+    });
+  });
+
+  // POST /api/v1/agents/focused-subagent
+  //
+  // Spawn a short-lived focused subagent on the workers profile. Sister of
+  // the existing `dispatch_action_to_agent` in alfred-learn — but synchronous,
+  // and reachable from the LLM via the `delegate_to_focused_agent` MCP tool.
+  //
+  // Body:
+  //   task:    string  required — what the subagent should do (plain prose)
+  //   domain:  string  required — the tool surface label (sure / plane /
+  //                               vaultwarden / paperclip / hass / files /
+  //                               execute / alfred / alfred-ctrl OR a
+  //                               composio toolkit like googlecalendar /
+  //                               gmail / notion / linear / slack).
+  //   context: string  optional — 1-2 sentences from the parent turn.
+  //
+  // Returns plain-text body — the subagent's reply, intended to be relayed
+  // verbatim by the calling LLM.
+  addRoute("POST", "/api/v1/agents/focused-subagent", async ({ res, body }) => {
+    const b = body as Record<string, unknown> | undefined;
+    if (!b || typeof b.task !== "string" || !(b.task as string).trim()) {
+      throw new ValidationError("`task` is required (non-empty string)");
+    }
+    if (typeof b.domain !== "string" || !(b.domain as string).trim()) {
+      throw new ValidationError("`domain` is required (non-empty string)");
+    }
+    const task = (b.task as string).trim();
+    const domain = (b.domain as string).trim();
+    const context = typeof b.context === "string" ? (b.context as string).trim() : "";
+
+    // Session key shape: `focus-<sanitised-domain>-<short-hash>`
+    // Hash incorporates a UUID slice so two simultaneous delegations on the
+    // same domain don't share a session key (and the workers profile's
+    // per-session memory isn't accidentally polluted).
+    const slug = _domainSlug(domain);
+    const shortHash = crypto.randomBytes(4).toString("hex");
+    const sessionKey = `focus-${slug}-${shortHash}`;
+
+    // Skill directive — instructs the subagent to load the right skill for
+    // the domain (either a per-MCP-server skill like alfred-sure-skill or a
+    // composio toolkit skill). The workers profile resolves these from
+    // /hermes-state/profiles/workers/skills/ (rendered at init time).
+    const skillHint = `LOAD skill alfred-${slug}-skill.md OR alfred-composio-${slug}-skill.md if present; if neither exists, proceed with the workers-profile defaults.`;
+
+    const persona = [
+      "You are a focused subagent spawned by Alfred Black to handle ONE specific task.",
+      "Identity + memory: same as Alfred main, but this session is one-shot.",
+      "Reply in plain text — no JSON envelopes, no markdown decoration unless the answer truly needs it.",
+      "The calling agent will relay your reply VERBATIM. Be concise, direct, and accurate.",
+      skillHint,
+    ].join("\n");
+
+    const userMessage = context
+      ? `Context from the parent turn:\n${context}\n\nTask:\n${task}`
+      : `Task:\n${task}`;
+
+    const workersKey = readWorkersApiKey();
+    if (!workersKey) {
+      sendJson(res, 500, {
+        ok: false,
+        error: "HERMES_WORKERS_KEY_MISSING",
+        detail: `Hermes workers API key not found at ${HERMES_CONFIG_DIR}/workers/.env — has hermes-init run?`,
+      });
+      return;
+    }
+
+    const url = `${HERMES_WORKERS_GATEWAY_URL}/v1/responses`;
+    const init: RequestInit & { signal: AbortSignal } = {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${workersKey}`,
+        "X-Hermes-Session-Key": sessionKey,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        input: [
+          { role: "system", content: persona },
+          { role: "user", content: userMessage },
+        ],
+      }),
+      // 60s timeout — the subagent should complete within that for most
+      // tool-heavy fanouts.
+      signal: AbortSignal.timeout(60_000),
+    };
+
+    let resp: Response;
+    try {
+      resp = await fetch(url, init);
+    } catch (err: any) {
+      sendJson(res, 504, {
+        ok: false,
+        error: "HERMES_WORKERS_UNREACHABLE",
+        detail: String(err?.message ?? err).slice(0, 300),
+        session_key: sessionKey,
+      });
+      return;
+    }
+
+    const rawText = await resp.text();
+    if (!resp.ok) {
+      sendJson(res, resp.status === 401 ? 502 : resp.status, {
+        ok: false,
+        error: "HERMES_WORKERS_ERROR",
+        status: resp.status,
+        detail: rawText.slice(0, 500),
+        session_key: sessionKey,
+      });
+      return;
+    }
+
+    // Extract plain-text reply. Hermes /v1/responses returns an OpenAI-style
+    // envelope with `output` items; for a simple text reply the message body
+    // lives at output[].content[].text. Fall back to dumping the raw envelope
+    // if the shape is unfamiliar (better to surface SOMETHING than nothing).
+    let reply = "";
+    try {
+      const env = JSON.parse(rawText);
+      // shape 1 — Hermes-style envelope with output messages
+      if (Array.isArray(env?.output)) {
+        for (const item of env.output) {
+          if (Array.isArray(item?.content)) {
+            for (const part of item.content) {
+              if (typeof part?.text === "string") reply += part.text;
+            }
+          } else if (typeof item?.text === "string") {
+            reply += item.text;
+          }
+        }
+      }
+      // shape 2 — explicit top-level reply
+      if (!reply && typeof env?.reply === "string") reply = env.reply;
+      // shape 3 — explicit top-level text
+      if (!reply && typeof env?.text === "string") reply = env.text;
+    } catch {
+      reply = rawText;
+    }
+
+    sendJson(res, 200, {
+      ok: true,
+      reply: reply.trim() || "(subagent returned empty reply)",
+      session_key: sessionKey,
+      domain,
+    });
   });
 }

@@ -12,7 +12,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  badgeLabel,
   buildPrefixTree,
+  deriveBadgeState,
   deriveQuotaView,
   derivePreviewMode,
   filterByPrefix,
@@ -20,6 +22,7 @@ import {
   formatUploadedAt,
   labelDraftFor,
   makeDebounceController,
+  PENDING_STALE_AFTER_MS,
   reduceLabelEdit,
   shortSha,
   shouldRejectUpload,
@@ -353,6 +356,50 @@ test("shortSha: 12-char column display, safe on short or null-ish inputs", () =>
   assert.equal(shortSha("deadbeefcafebabe1234"), "deadbeefcafe");
   assert.equal(shortSha("abc"), "abc");
   assert.equal(shortSha(""), "");
+});
+
+// ── #114 Lane B — "Alfred read it" badge derivation ───────────────────────
+
+test("deriveBadgeState: alfred_read_at flips the row to settled", () => {
+  const now = FROZEN_NOW.getTime();
+  const row = rowAt(now - 60_000, "01/a.txt", {
+    alfred_read_at: now - 50_000,
+    summary: "A short prose paragraph.",
+  });
+  assert.equal(deriveBadgeState(row, now), "settled");
+  assert.equal(badgeLabel("settled"), "Alfred read it");
+});
+
+test("deriveBadgeState: extraction_error trumps fresh-row pulse", () => {
+  const now = FROZEN_NOW.getTime();
+  const row = rowAt(now - 10_000, "01/img.png", {
+    extraction_error: "unsupported_mime",
+  });
+  assert.equal(deriveBadgeState(row, now), "errored");
+  assert.equal(badgeLabel("errored"), "Couldn't read");
+});
+
+test("deriveBadgeState: a fresh, unstamped row is pending", () => {
+  const now = FROZEN_NOW.getTime();
+  const row = rowAt(now - 30_000, "01/p.txt");
+  assert.equal(deriveBadgeState(row, now), "pending");
+  assert.equal(badgeLabel("pending"), "Reading…");
+});
+
+test("deriveBadgeState: an old unstamped row is stale (no pulse)", () => {
+  const now = FROZEN_NOW.getTime();
+  const row = rowAt(now - (PENDING_STALE_AFTER_MS + 1000), "01/o.txt");
+  assert.equal(deriveBadgeState(row, now), "stale");
+  assert.equal(badgeLabel("stale"), "");
+});
+
+test("deriveBadgeState: row exactly at the stale-after boundary stays pending", () => {
+  // Equality with the threshold is treated as pending; the +1ms case
+  // tips to stale. This is the contract the React layer relies on so
+  // a row uploaded "right at the boundary" doesn't flicker.
+  const now = FROZEN_NOW.getTime();
+  const row = rowAt(now - PENDING_STALE_AFTER_MS, "01/edge.txt");
+  assert.equal(deriveBadgeState(row, now), "pending");
 });
 
 test("formatUploadedAt: relative buckets up to a week, then ISO date", () => {

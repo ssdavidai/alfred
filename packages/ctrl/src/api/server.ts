@@ -58,6 +58,7 @@ import { registerVoiceRoutes } from "./routes/voice.js";
 import { registerVoiceEsphomeRoutes } from "./routes/voice_esphome.js";
 import { registerOmiChannelRoutes } from "./routes/channels_omi.js";
 import { registerPaperclipChannelRoutes } from "./routes/channels_paperclip.js";
+import { registerPaperclipEvidenceRoutes } from "./routes/paperclipEvidence.js";
 import {
   registerChannelsRecallRoutes,
   registerRecallWebhookRoute,
@@ -71,6 +72,8 @@ import { registerAlfredJournalRoutes } from "./routes/alfredJournal.js";
 import { registerAlfredDeliverRoutes } from "./routes/alfredDeliver.js";
 import { registerFilesRoutes } from "./routes/files.js";
 import { registerChannelsTailscaleRoutes } from "./routes/channels_tailscale.js";
+import { registerProfileRoutes } from "./routes/profiles.js";
+import { registerChannelIdentityRoutes } from "./routes/channel_identity.js";
 
 export interface RouteParams {
   [key: string]: string;
@@ -191,6 +194,7 @@ export function createApiServer(): http.Server {
   registerVoiceEsphomeRoutes();
   registerOmiChannelRoutes();
   registerPaperclipChannelRoutes();
+  registerPaperclipEvidenceRoutes();
   // /api/v1/channels/recall/* + /api/v1/webhooks/recall — Recall.ai
   // meeting-bot channel (#113 PR2). Card-driven config + inbound
   // Svix-signed webhook. The card UI lands in PR3a/3b; the alfred-learn
@@ -235,6 +239,14 @@ export function createApiServer(): http.Server {
   // PR 3 wires the /connections web card; PR 4 the Caddy + Serve story.
   // See docs/specs/issue-109-tailscale-via-ui.md.
   registerChannelsTailscaleRoutes();
+  // Multi-profile Hermes registry (#120 Lane I). Registry-only — no
+  // Hermes-side activation yet (Lane II); no channel-route rewiring (Lane IV).
+  // See packages/ctrl/src/db/migrations/0017_agent_profiles.sql.
+  registerProfileRoutes();
+  // Per-(profile, channel_kind) display_name + avatar (#206 Q6 Lane I).
+  // Consumed by Lane IV adapters at send time via resolveChannelIdentity().
+  // See packages/ctrl/src/db/migrations/0018_channel_identity.sql.
+  registerChannelIdentityRoutes();
 
   const server = http.createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const start = Date.now();
@@ -301,7 +313,17 @@ export function createApiServer(): http.Server {
         // keyed on RECALL_WEBHOOK_SECRET). Same posture as the Composio
         // entry above — the HMAC validator lives in
         // routes/channels_recall.ts and needs the exact bytes.
-        pathname === "/api/v1/webhooks/recall";
+        pathname === "/api/v1/webhooks/recall" ||
+        // #120 Lane Vb — ctrl-api's voice-inbound TwiML landing pad. The
+        // principal can configure Twilio to point at this URL (alongside
+        // the more-direct voice-bridge /twiml/inbound). The route only
+        // emits routing-decision TwiML — no secrets read, no profile
+        // mutation. In production Sir should still set TWILIO_AUTH_TOKEN
+        // per profile so the receiving side (voice-bridge) validates
+        // X-Twilio-Signature on the same body. Smoke endpoints accept the
+        // ?format=json shape so the routing decision can be asserted
+        // without going through Twilio.
+        pathname === "/api/v1/channels/voice/inbound";
       if (!isPublic) {
         // Pass method+pathname so the scoped-token path can check the
         // route allowlist (see auth.ts VOICE_BRIDGE_ALLOWLIST). The master

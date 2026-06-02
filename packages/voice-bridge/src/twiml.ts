@@ -57,12 +57,32 @@ import { config } from "./config.js";
 export const TWIML_INBOUND_PATH = "/twiml/inbound";
 
 /**
- * Tenant id used on this VM. alfred-black is single-VM, so the WSS path
- * `/voice/<id>` doesn't actually scope multi-tenancy — but it still has to
- * be a non-empty segment. Use the canonical principal slug for symmetry
+ * Default tenant id used on this VM. alfred-black is single-VM, so the WSS
+ * path `/voice/<id>` doesn't actually scope multi-tenancy — but it still has
+ * to be a non-empty segment. Use the canonical principal slug for symmetry
  * with the alfred_journal binding ("owner").
+ *
+ * #120 Lane Vb — when the inbound webhook URL carries `?profile=<slug>`,
+ * we route to `/voice/<slug>` instead so the WSS handler can resolve the
+ * profile context (per-profile OPENAI key + Twilio creds + persona) at
+ * session-open time. The "owner" default applies only to the pre-Vb wire
+ * shape where no profile hint is present.
  */
-const TENANT_ID = "owner";
+const DEFAULT_TENANT_ID = "owner";
+
+/**
+ * Validate a slug pulled out of the inbound URL. Mirrors the server-side
+ * regex in ctrl-api's agentProfiles.validateSlug — refuse anything that
+ * doesn't look like a kebab-case lowercase slug so the WSS path segment
+ * remains a safe identifier (no path traversal, no special chars).
+ */
+const _SLUG_RE = /^[a-z][a-z0-9-]{1,30}$/;
+function safeSlug(s: string | null | undefined): string | null {
+  if (!s) return null;
+  const t = s.trim();
+  if (!t) return null;
+  return _SLUG_RE.test(t) ? t : null;
+}
 
 interface TwilioCallParams {
   From: string;
@@ -278,14 +298,27 @@ export async function handleTwimlInbound(
     return;
   }
 
+  // #120 Lane Vb — per-profile routing. The principal configures the
+  // Twilio webhook URL as
+  //   https://voice.<domain>/twiml/inbound?profile=<slug>
+  // so the slug arrives in the URL query (parsed off req.url). When
+  // absent we fall back to the "owner" tenant id, which the WSS handler
+  // resolves to the `main` profile via the channel_profile_binding
+  // default. The sig is HMAC over whatever slug we routed to — so a
+  // profile rebinding in ctrl-api cannot mint a valid sig for the wrong
+  // routing key.
+  const reqUrl = new URL(req.url ?? "/", "http://localhost");
+  const profileFromQuery = safeSlug(reqUrl.searchParams.get("profile"));
+  const tenantId = profileFromQuery ?? DEFAULT_TENANT_ID;
+
   // Build the wss URL. Twilio strips query strings from <Stream url=...>,
   // so the sig must travel inside <Parameter>, not the URL.
   const host =
     (req.headers["x-forwarded-host"] as string | undefined) ||
     (req.headers.host as string | undefined) ||
     "voice.example";
-  const wssUrl = `wss://${host}/voice/${TENANT_ID}`;
-  const sig = generateSig(TENANT_ID);
+  const wssUrl = `wss://${host}/voice/${tenantId}`;
+  const sig = generateSig(tenantId);
   const twiml = renderTwiml({
     wssUrl,
     sig,
@@ -294,7 +327,7 @@ export async function handleTwimlInbound(
   });
 
   console.log(
-    `[twiml] inbound call from=${callParams.From} to=${callParams.To} sid=${callParams.CallSid} → ${wssUrl}`,
+    `[twiml] inbound call from=${callParams.From} to=${callParams.To} sid=${callParams.CallSid} profile=${tenantId} → ${wssUrl}`,
   );
 
   res.writeHead(200, { "Content-Type": "application/xml; charset=utf-8" });

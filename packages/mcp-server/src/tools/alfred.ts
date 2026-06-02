@@ -612,6 +612,98 @@ const briefDecisionTools: ToolDef[] = [
   },
 ];
 
+// ─── tool disposition + focused subagent delegation (Phase B) ───────────────
+//
+// Sir's "both tracks" architecture (see plan i-want-you-to-snazzy-pixel.md §B):
+// every MCP server registered on the main profile carries a runtime-flippable
+// DIRECT-or-DELEGATED disposition. DIRECT = LLM calls native tools. DELEGATED
+// = tools hidden on main; LLM uses `delegate_to_focused_agent` instead. Sir
+// flips via dashboard or voice ("Alfred, demote sure to delegated") through
+// `set_tool_disposition`; Alfred glances the current map via
+// `list_tool_dispositions` at session start.
+//
+// The catalogue of 9 servers mirrors migration 0014's seed.
+
+const DISPOSITION_SERVERS = [
+  "alfred-ctrl",
+  "alfred",
+  "sure",
+  "plane",
+  "vaultwarden",
+  "execute",
+  "paperclip",
+  "hass",
+  "files",
+] as const;
+
+const dispositionTools: ToolDef[] = [
+  {
+    name: "list_tool_dispositions",
+    description:
+      "List the current direct-or-delegated disposition for each of Sir's 9 MCP servers (alfred-ctrl, alfred, sure, plane, vaultwarden, execute, paperclip, hass, files). DIRECT = the server's tools are in your catalogue this turn (call them natively, e.g. `sure_list_accounts`). DELEGATED = its tools are HIDDEN from your catalogue; you reach them only through `delegate_to_focused_agent({domain:'sure',...})` which spawns a one-shot workers-profile subagent that loads the right skill and returns plain text. Use at the top of a session if you're not sure of the current map — disposition can change between turns (Sir flips via dashboard or voice). Cheap and idempotent. Returns `{dispositions: [{server, disposition, updated_at, updated_by}, ...]}`. Backing: GET /api/v1/agents/tool-disposition.",
+    inputSchema: z.object({}),
+    buildRequest: () => ({ method: "GET", path: "/api/v1/agents/tool-disposition" }),
+  },
+  {
+    name: "set_tool_disposition",
+    description:
+      "Flip one MCP server between DIRECT (native tools available on main, ~2-4k tokens per turn each) and DELEGATED (tools hidden from main; accessed via `delegate_to_focused_agent`; saves tokens but adds ~3-5s per tool use). Use when Sir says 'demote X to delegated', 'promote X to direct', 'hide the sure tools', 'bring paperclip back to main', or when you notice tokens-per-turn climbing and want to suggest the flip yourself. Triggers a ~10s debounced Hermes restart (a burst of flips coalesces into one restart). After the restart the new disposition is live; tell Sir 'I've queued the restart — give it about 10 seconds'.\n" +
+      "\n" +
+      "SELF-PROTECTION RULE — these three servers control Alfred's own self-management surface and a careless DELEGATE could brick the very tools you'd need to undo it: `alfred-ctrl` (admin/agents/state/health), `alfred` (vault + decisions + briefings + this very disposition surface), `execute` (Composio gateway). NEVER flip any of these three without Sir's explicit confirmation phrase: \"yes, change my Alfred's tool disposition\" (case-insensitive, must appear verbatim in his most recent message). If Sir asks to demote one of these and hasn't said the confirmation phrase, push back: 'Sir, flipping `alfred-ctrl` to delegated would hide your own self-management tools. Confirm with \"yes, change my Alfred's tool disposition\" if you really want this.' Same pattern as the alfred-ha self-destruct guard.\n" +
+      "\n" +
+      "Backing: POST /api/v1/agents/tool-disposition. NOT idempotent in side effects (every call re-arms the debounce timer); idempotent in steady-state (calling set('sure','delegated') twice leaves sure at delegated).",
+    inputSchema: z.object({
+      server: z.enum(DISPOSITION_SERVERS).describe(
+        "MCP server to flip. The 9 servers exactly mirror what ships on main: alfred-ctrl, alfred, sure, plane, vaultwarden, execute, paperclip, hass, files.",
+      ),
+      disposition: z.enum(["direct", "delegated"]).describe(
+        "Target disposition. `direct` = native tools available on main. `delegated` = tools hidden on main; reachable via delegate_to_focused_agent.",
+      ),
+      updated_by: z.enum(["sir", "alfred"]).optional().describe(
+        "Audit attribution. `sir` when Sir explicitly asked for the flip (voice or dashboard); `alfred` when you initiated the suggestion yourself. Defaults to `alfred`.",
+      ),
+    }),
+    buildRequest: (args) => ({
+      method: "POST",
+      path: "/api/v1/agents/tool-disposition",
+      body: {
+        server: args.server,
+        disposition: args.disposition,
+        updated_by: args.updated_by ?? "alfred",
+      },
+    }),
+  },
+  {
+    name: "delegate_to_focused_agent",
+    description:
+      "Spawn a short-lived focused subagent on the workers profile (cheaper model, same Alfred identity + same vault memory) to handle ONE task that needs a heavy tool surface. Use this when:\n" +
+      "  (1) the target server is currently DELEGATED in tool_disposition — `list_tool_dispositions` shows the live map; you have no native tools from that server this turn so delegation is the ONLY path.\n" +
+      "  (2) you're doing a tool-heavy fanout (gmail batch over many messages, calendar across multiple calendars, paperclip multi-issue update, sure transaction triage across N transactions) — even if the server is DIRECT, fanning out 10-20 calls inline blows the context budget and stalls Voice PE; delegating bundles the work into one round-trip.\n" +
+      "\n" +
+      "How it works: ctrl-api builds a workers-profile session key `focus-<domain>-<hash>`, attaches a skill-load directive (`alfred-<domain>-skill.md` OR `alfred-composio-<domain>-skill.md`), posts to Hermes workers :18790/v1/responses with your task + optional context, and returns the subagent's plain-text reply. Cost: ~3-5s spawn + the subagent's actual work (typically 5-30s for tool-heavy fanouts).\n" +
+      "\n" +
+      "RELAY THE SUBAGENT'S REPLY VERBATIM. Don't summarize, don't reformat unless the channel truly demands it. The subagent's wording is calibrated for direct relay; rewriting it dilutes correctness and burns tokens.\n" +
+      "\n" +
+      "Backing: POST /api/v1/agents/focused-subagent. 60s timeout. Returns `{ok, reply, session_key, domain}`. NOT idempotent — each call spawns a fresh session.",
+    inputSchema: z.object({
+      task: z.string().min(1).describe(
+        "What the subagent should do, in plain language. BE SPECIFIC — the subagent doesn't see this conversation, only your task + the optional context. Include any record paths, vault slugs, recipient handles, time windows, etc.",
+      ),
+      domain: z.string().min(1).describe(
+        "Which tool surface the subagent needs. For MCP servers, use the server name: `sure` / `plane` / `vaultwarden` / `paperclip` / `hass` / `files` / `execute` / `alfred` / `alfred-ctrl`. For a Composio toolkit, use the toolkit slug: `googlecalendar` / `gmail` / `notion` / `linear` / `slack` / etc. The subagent uses this label to load the right skill.",
+      ),
+      context: z.string().optional().describe(
+        "Optional 1-2 sentences from this conversation that help the subagent ground its answer (e.g. 'Sir's primary calendar is the one called Personal, id <calendar-id>.'). Keep it tight — long context blows the same token budget you're trying to save by delegating.",
+      ),
+    }),
+    buildRequest: (args) => ({
+      method: "POST",
+      path: "/api/v1/agents/focused-subagent",
+      body: args,
+    }),
+  },
+];
+
 // ─── channels (notify the principal via main openclaw) ──────────────────────
 
 // Outbound channels (Telegram, Slack, …) belong to the MAIN Hermes profile
@@ -675,5 +767,6 @@ export const ALL_ALFRED_TOOLS: ToolDef[] = [
   ...openclawTools,
   ...deviceTools,
   ...briefDecisionTools,
+  ...dispositionTools,
   ...channelTools,
 ];

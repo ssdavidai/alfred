@@ -118,3 +118,59 @@ does.
 - `FLEET_SSH_KEY` — repo-level GitHub Actions secret; the private half of
   `~/.ssh/alfred-black-verify`. Authorised on every tenant's `root@`
   account.
+
+## Enabling Tailscale on an existing tenant (#109)
+
+The Tailscale sidecar is off by default — `docker compose up -d` will
+not start it on any tenant. To enable on a tenant whose principal wants
+to join their own tailnet:
+
+```bash
+# 1. SSH to the tenant.
+ssh -o IdentityAgent=none -i ~/.ssh/alfred-black-verify \
+    root@<tenant>.alfred.black
+
+# 2. Flip the env flag.
+cd /opt/alfred
+sed -i 's/^TAILSCALE_ENABLED=false$/TAILSCALE_ENABLED=true/' .env
+
+# 3. Start the sidecar (still authenticated to nothing).
+docker compose --profile tailscale up -d tailscale
+
+# 4. Hand control to the principal — they open the dashboard at
+#    https://<tenant>.alfred.black/channels, find the Tailscale card,
+#    and either:
+#      • paste a tskey-auth-… key generated in their Tailscale admin
+#        console (the "Advanced" path), or
+#      • click "Use device auth URL" — the card surfaces a
+#        login.tailscale.com/a/<code> URL they open in a new tab and
+#        approve against their own Tailscale account.
+
+# 5. Once the card shows "Connected" with a 100.x IP, the operator can
+#    provision the tailnet hostname's LE cert + bind it into Caddy:
+TAILNET_HOST=$(docker exec alfred-black-tailscale-1 \
+    tailscale status --json | \
+    python3 -c 'import json,sys;print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))')
+AAS_API_KEY=$(grep -E '^AAS_API_KEY=' /opt/alfred/.env | cut -d= -f2)
+docker exec alfred-black-ctrl-api-1 sh -c \
+    "curl -s -X POST -H 'Authorization: Bearer $AAS_API_KEY' \
+     -H 'Content-Type: application/json' \
+     -d '{\"domain\":\"$TAILNET_HOST\"}' \
+     http://127.0.0.1:3100/api/v1/channels/tailscale/cert"
+```
+
+Verify by opening `https://<tailnet-host>` from any device on the
+principal's tailnet — should load the dashboard with a valid LE cert.
+
+Caveats:
+- The public `<tenant>.alfred.black` hostname keeps working unchanged.
+  Tailscale is additive.
+- If `caddy_reload_ok` returns `false` from the cert call, check the
+  Caddy container's `pids_limit` (`docker inspect alfred-black-caddy-1
+  --format '{{.HostConfig.PidsLimit}}'`) — the reload spawns ~50
+  goroutines and the historical 1024 cap can starve newer Go runtimes.
+  PR #159 raised the limit; a `docker compose up -d caddy` re-applies
+  the new value on existing tenants.
+- Outbound MagicDNS from inside Alfred containers (e.g. the Hermes
+  agent calling `homeassistant.tail-xxxx.ts.net`) is NOT wired by
+  default — open a follow-up issue if the principal needs that surface.

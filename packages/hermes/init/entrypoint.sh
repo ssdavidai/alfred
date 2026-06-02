@@ -42,18 +42,78 @@ HERMES_RUNTIME_HOME="${HERMES_RUNTIME_HOME:-/opt/data}"
 # ENABLE_CODEX_BUILDER=true in the runtime container env. Home flips that
 # flag true; rj/joe/zsolt/miguel leave it unset.
 #
-# PROFILES holds the "regular" profiles that get the full deploy treatment:
-# skills/, MCP bundle, AGENTS.md, SOUL.md. codex-builder is rendered (config
-# + .env + dir scaffold) but does NOT receive any of those — it is a sealed
-# runtime with no MCP catalogue and no skill library. See PROFILES_RENDERED
-# below for the broader set the renderer iterates over.
-PROFILES=(main workers heavy)
+# #120 Lane II — replaced the previous hard-coded
+#     PROFILES=(main workers heavy)
+#     PROFILES_RENDERED=(main workers heavy codex-builder)
+# with a query against state.db. Two derived lists below:
+#   * PROFILES_RENDERED     — every live profile from agent_profile.
+#   * PROFILES_FULL_DEPLOY  — that list minus codex-builder (the sealed
+#                              runtime gets config+.env but no skills/MCP).
+#
 # Every profile we render config + .env for. Each one gets profile_dir +
 # workspace/ + mcp/ created; codex-builder additionally gets its own
 # .codex/ + .ssh/ + workspace/runs/ tree but skips the skills + MCP-bundle
 # deploys further down. The supervisor reads ENABLE_CODEX_BUILDER to decide
 # whether to launch a gateway against the codex-builder dir.
-PROFILES_RENDERED=(main workers heavy codex-builder)
+#
+# #120 Lane II — PROFILES_RENDERED is now sourced from state.db via
+# render_registry.py (the agent_profile table, populated by ctrl-api's
+# 0017 migration + any user-facing POST). Each entry is a `slug:port:model`
+# tuple — entrypoint.sh splits the tuple into PROFILE_NAMES /
+# PROFILE_PORTS / PROFILE_MODELS parallel arrays so the existing
+# `for profile in "${PROFILES_RENDERED[@]}"` loops keep their shape.
+#
+# Fallback path: when state.db is unreachable (fresh tenant, pre-migration,
+# RO mount missing), render_registry.py emits the four reserved profiles
+# with their canonical ports — so this script ALWAYS produces a valid
+# 4-profile render even when ctrl-api hasn't booted yet.
+#
+# render_registry.py ALSO writes the `_registry.json` the supervisor reads
+# at boot. ctrl-api re-writes the same file on every profile create/archive
+# (packages/ctrl/src/hermes/supervisor.ts) and SIGUSR1's the hermes
+# container so the supervisor picks up the change without a full restart.
+echo "[init] Enumerating Hermes profiles from agent_profile registry..."
+mapfile -t PROFILE_TUPLES < <(
+    STATE_DB_PATH="${STATE_DB_PATH:-/ctrl-data/alfred-state.db}" \
+    HERMES_DATA_DIR="${HERMES_DATA_DIR:-/hermes-data}" \
+        python3 /setup/render_registry.py
+)
+if (( ${#PROFILE_TUPLES[@]} == 0 )); then
+    echo "[init] FATAL: render_registry.py returned no profiles — refusing to continue"
+    exit 1
+fi
+PROFILES_RENDERED=()
+declare -A PROFILE_PORTS=()
+declare -A PROFILE_MODELS=()
+for tuple in "${PROFILE_TUPLES[@]}"; do
+    # `slug:port:model` — model is the last field; everything to the right
+    # of the second colon is the model (which CAN contain forward slashes,
+    # not colons, per OpenRouter's `vendor/model` convention).
+    slug="${tuple%%:*}"
+    rest="${tuple#*:}"
+    port="${rest%%:*}"
+    model="${rest#*:}"
+    if [[ -z "$slug" || -z "$port" ]]; then
+        echo "[init] WARN: skipping malformed registry tuple: ${tuple}"
+        continue
+    fi
+    PROFILES_RENDERED+=("$slug")
+    PROFILE_PORTS["$slug"]="$port"
+    PROFILE_MODELS["$slug"]="$model"
+done
+echo "[init] Profiles to render: ${PROFILES_RENDERED[*]}"
+
+# PROFILES_FULL_DEPLOY — the subset that gets skills, MCP bundle, AGENTS.md,
+# TOOLS.md, SOUL.md. codex-builder is excluded by design (sealed runtime,
+# no MCP catalogue, no skill library). Lane II — user-facing profiles get
+# the same conversational kit as `main` (they ARE Alfred variants on a
+# different channel binding), so they ARE in this list.
+PROFILES_FULL_DEPLOY=()
+for slug in "${PROFILES_RENDERED[@]}"; do
+    [[ "$slug" == "codex-builder" ]] && continue
+    PROFILES_FULL_DEPLOY+=("$slug")
+done
+echo "[init] Profiles for full deploy (skills + MCP + AGENTS.md): ${PROFILES_FULL_DEPLOY[*]}"
 
 # Resolve bundled paths via the installed alfred Python package.
 SCAFFOLD_DIR=$(python3 -c "from alfred._data import get_scaffold_dir; print(get_scaffold_dir())")
@@ -138,7 +198,7 @@ done
 # at the Hermes-native location only; this block migrates leftover
 # composio dirs from older deployments and removes the empty parallel
 # tree so it can never re-divide the catalogue.
-for profile in "${PROFILES[@]}"; do
+for profile in "${PROFILES_FULL_DEPLOY[@]}"; do
     LEGACY_SKILLS_DIR="$HERMES_DATA_DIR/profiles/$profile/workspace/skills"
     CANONICAL_SKILLS_DIR="$HERMES_DATA_DIR/profiles/$profile/skills"
     if [[ -d "$LEGACY_SKILLS_DIR" ]]; then
@@ -165,7 +225,7 @@ done
 # From the `alfred` Python package — for the vault-worker daemons. Deployed
 # into BOTH profiles (the workers profile runs them; main carries them too
 # so the user-facing agent can read what they do).
-for profile in "${PROFILES[@]}"; do
+for profile in "${PROFILES_FULL_DEPLOY[@]}"; do
     SKILLS_DST="$HERMES_DATA_DIR/profiles/$profile/skills"
     for skill in vault-curator vault-janitor vault-distiller; do
         SRC_HASH=$(find "$SKILLS_SRC_DIR/$skill" -type f -exec md5sum {} \; | sort | md5sum | cut -d' ' -f1)
@@ -186,7 +246,7 @@ done
 # alfred-prime-federation skill is Prime-only.
 MAIN_SKILLS_SRC="/setup/workspace-template/skills"
 if [[ -d "$MAIN_SKILLS_SRC" ]]; then
-    for profile in "${PROFILES[@]}"; do
+    for profile in "${PROFILES_FULL_DEPLOY[@]}"; do
         SKILLS_DST="$HERMES_DATA_DIR/profiles/$profile/skills"
         for skill_dir in "$MAIN_SKILLS_SRC"/*/; do
             [[ -d "$skill_dir" ]] || continue
@@ -219,7 +279,7 @@ fi
 WORKSPACE_DOCS_SRC="/setup/workspace-template/docs/TOOLS.md"
 if [[ -f "$WORKSPACE_DOCS_SRC" ]]; then
     SRC_HASH=$(md5sum "$WORKSPACE_DOCS_SRC" | cut -d' ' -f1)
-    for profile in "${PROFILES[@]}"; do
+    for profile in "${PROFILES_FULL_DEPLOY[@]}"; do
         WS_DIR="$HERMES_DATA_DIR/profiles/$profile/workspace"
         mkdir -p "$WS_DIR"
         HASH_FILE="$WS_DIR/.TOOLS.md.content-hash"
@@ -237,7 +297,7 @@ fi
 MCP_SRC="/setup/mcp/ctrl-server.mjs"
 if [[ -f "$MCP_SRC" ]]; then
     SRC_HASH=$(md5sum "$MCP_SRC" | cut -d' ' -f1)
-    for profile in "${PROFILES[@]}"; do
+    for profile in "${PROFILES_FULL_DEPLOY[@]}"; do
         MCP_DST="$HERMES_DATA_DIR/profiles/$profile/mcp"
         mkdir -p "$MCP_DST"
         HASH_FILE="$MCP_DST/.ctrl-server.content-hash"
@@ -276,7 +336,7 @@ fi
 # AGENTS.md, SOUL.md — is a build artifact and re-syncs from the image.
 MCP_STDIO_SRC="/setup/mcp-stdio"
 if [[ -d "$MCP_STDIO_SRC" ]]; then
-    for profile in "${PROFILES[@]}"; do
+    for profile in "${PROFILES_FULL_DEPLOY[@]}"; do
         MCP_STDIO_DST="$HERMES_DATA_DIR/profiles/$profile/mcp-stdio"
         mkdir -p "$MCP_STDIO_DST"
         rsync -a --delete "$MCP_STDIO_SRC/" "$MCP_STDIO_DST/"
@@ -292,7 +352,7 @@ fi
 AGENTS_SRC="/setup/AGENTS.md"
 if [[ -f "$AGENTS_SRC" ]]; then
     AGENTS_HASH=$(md5sum "$AGENTS_SRC" | cut -d' ' -f1)
-    for profile in "${PROFILES[@]}"; do
+    for profile in "${PROFILES_FULL_DEPLOY[@]}"; do
         PROFILE_DIR="$HERMES_DATA_DIR/profiles/$profile"
         HASH_FILE="$PROFILE_DIR/.agents-md.content-hash"
         if [[ -f "$HASH_FILE" ]] && [[ "$(cat "$HASH_FILE")" == "$AGENTS_HASH" ]]; then
@@ -329,7 +389,7 @@ else
 fi
 if [[ -n "$SOUL_SRC" ]]; then
     SOUL_HASH=$(md5sum "$SOUL_SRC" | cut -d' ' -f1)
-    for profile in "${PROFILES[@]}"; do
+    for profile in "${PROFILES_FULL_DEPLOY[@]}"; do
         PROFILE_DIR="$HERMES_DATA_DIR/profiles/$profile"
         DST="$PROFILE_DIR/SOUL.md"
         HASH_FILE="$PROFILE_DIR/.soul-md.content-hash"
@@ -500,14 +560,24 @@ for profile in "${PROFILES_RENDERED[@]}"; do
     RUNTIME_PROFILE_DIR="$HERMES_RUNTIME_HOME/profiles/$profile"
     mkdir -p "$INIT_PROFILE_DIR"
 
+    # #120 Lane II — pass the registry-allocated port + model through to
+    # render_hermes.py. For the four reserved profiles these are identical
+    # to the hard-coded fallbacks in render_hermes.py (back-compat); for
+    # user-facing profiles created via ctrl-api they're the dynamically
+    # allocated 18794..18799 port + the operator's chosen model.
+    PROFILE_PORT="${PROFILE_PORTS[$profile]:-}"
+    PROFILE_MODEL="${PROFILE_MODELS[$profile]:-}"
+
     HERMES_VAULT_PATH="/vault" \
     HERMES_RUNTIME_PROFILE_DIR="$RUNTIME_PROFILE_DIR" \
+    HERMES_RENDER_PORT="$PROFILE_PORT" \
+    HERMES_RENDER_MODEL="$PROFILE_MODEL" \
         python3 /setup/render_hermes.py \
             "$profile" \
             "$INIT_PROFILE_DIR" \
             /setup \
             "$GATEWAY_TOKEN"
-    echo "[init] Rendered Hermes profile: $profile"
+    echo "[init] Rendered Hermes profile: $profile (port=$PROFILE_PORT model=$PROFILE_MODEL)"
 
     # --- 6a. Backfill required mcp_servers entries -----------------------
     # render_hermes.py preserves an existing operator-owned config.yaml.
@@ -522,6 +592,7 @@ for profile in "${PROFILES_RENDERED[@]}"; do
         PROFILE_DIR="$INIT_PROFILE_DIR" \
         HERMES_RUNTIME_PROFILE_DIR="$RUNTIME_PROFILE_DIR" \
         CTRL_API_URL="${CTRL_API_URL:-http://ctrl-api:3100}" \
+        STATE_DB_PATH="${STATE_DB_PATH:-/ctrl-data/alfred-state.db}" \
             python3 /setup/render_mcp_servers.py "$profile" \
             || echo "[init] WARN: render_mcp_servers.py failed for $profile (non-fatal)"
 
@@ -791,7 +862,16 @@ EOF
             setfacl -m u:10001:--- /alfred-data/.gateway-token 2>/dev/null \
                 && echo "[init] [codex-builder] denied uid 10001 read on /alfred-data/.gateway-token (ACL)"
         fi
-        for p in main workers heavy; do
+        # #120 Lane II — every non-codex-builder profile (reserved infra +
+        # user-facing) gets the same ACL deny. PROFILES_RENDERED is sourced
+        # from state.db so user-facing profiles created via ctrl-api are
+        # covered automatically — without this, a freshly created sentinel
+        # profile would leave a uid-10001-readable .env on disk and the
+        # sandbox would be effective only for the original 4 profiles.
+        for p in "${PROFILES_RENDERED[@]}"; do
+            if [[ "$p" == "codex-builder" ]]; then
+                continue  # owned by uid 10001 — see comment above
+            fi
             P_ENV="$HERMES_DATA_DIR/profiles/$p/.env"
             if [[ -f "$P_ENV" ]]; then
                 setfacl -m u:10001:--- "$P_ENV" 2>/dev/null \
@@ -846,7 +926,10 @@ EOF
             echo "[init] [codex-builder] FAIL: uid 10001 can read /alfred-data/.gateway-token"
             ASSERT_FAILS=$((ASSERT_FAILS + 1))
         fi
-        for p in main workers heavy; do
+        for p in "${PROFILES_RENDERED[@]}"; do
+            if [[ "$p" == "codex-builder" ]]; then
+                continue
+            fi
             P_ENV="$HERMES_DATA_DIR/profiles/$p/.env"
             if [[ -f "$P_ENV" ]] && setpriv --reuid 10001 --regid 10001 --clear-groups \
                    cat "$P_ENV" > /dev/null 2>&1; then

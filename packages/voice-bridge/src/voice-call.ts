@@ -126,7 +126,12 @@ export class VoiceCall {
     this.voiceCtx = await fetchVoiceContext(this.tenantCtx);
 
     // Open OpenAI Realtime and wire its events.
-    this.realtime = new OpenAIRealtimeClient(this.callId);
+    // #120 Lane Vb — thread the per-profile OPENAI_API_KEY (if any) into
+    // the client so the Realtime session bills against the resolved
+    // profile's OpenAI account, not the boot-time instance default.
+    this.realtime = new OpenAIRealtimeClient(this.callId, {
+      apiKeyOverride: this.tenantCtx.openaiApiKey ?? null,
+    });
     this.realtime.on((event) => this.onRealtimeEvent(event));
     const voiceMcpTools = getVoiceMcpToolDefs();
     const totalTools = ALL_TOOLS.length + FILES_TOOLS.length + voiceMcpTools.length;
