@@ -87,6 +87,12 @@ export interface VoiceContextBundle {
   // `execute__list_composio_tools` on demand if it ever needs to enumerate.
   skills?: Array<{ name: string; description: string; body: string }>;
   generatedAt: string;
+  // #226 — IANA timezone name for the principal's calendar (e.g.
+  // "Europe/Budapest"). Populated by Lane I (ctrl-api) from the cached
+  // Google Calendar primary-calendar timeZone. Falls back to "UTC" when
+  // absent. Used by the voice-bridge to inject a per-call current-time
+  // anchor so the Realtime model stops guessing UTC for +02:00 events.
+  timeZone?: string;
 }
 
 /**

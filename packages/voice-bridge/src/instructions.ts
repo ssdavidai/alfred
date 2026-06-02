@@ -154,7 +154,75 @@ const VOICE_GUARDRAILS = [
   "7. **Files: respect `too_large`.** If `files__read_text` returns `{too_large: true, ...}`, the file's contents are NOT in your context. Tell Sir the file is too large to read aloud (or that it's binary) and offer the dashboard — never recite contents you didn't actually receive.",
 ].join("\n");
 
-export function buildInstructions(ctx: InstructionContext): string {
+/**
+ * Build a per-call current-time anchor string that tells the Realtime model
+ * the exact local time in the principal's IANA timezone. Called on every
+ * `buildInstructions` invocation so the time is never stale from a cached
+ * bundle (the bundle's 60s TTL would make a baked timestamp wrong).
+ *
+ * `now` is injectable for deterministic testing — pass a fixed Date in tests,
+ * omit in production to get `new Date()`.
+ *
+ * DST is handled automatically by `Intl.DateTimeFormat`. Do NOT hardcode
+ * offsets — Europe/Budapest is UTC+01:00 in winter (CET) and UTC+02:00 in
+ * summer (CEST). Intl picks the correct one for the given instant.
+ *
+ * Exported so tests can call it directly without building a full context.
+ */
+export function buildTimeAnchor(timeZone: string, now: Date = new Date()): string {
+  // Resolve DST-correct offset via Intl. We use "longOffset" (e.g.
+  // "GMT+02:00") and strip the "GMT" prefix to get "+02:00".
+  const offsetFmt = new Intl.DateTimeFormat("en-GB", {
+    timeZone,
+    timeZoneName: "longOffset",
+  });
+  const offsetParts = offsetFmt.formatToParts(now);
+  const rawOffset =
+    offsetParts.find((p) => p.type === "timeZoneName")?.value ?? "GMT+00:00";
+  // "GMT+02:00" → "+02:00"; "GMT" alone (UTC) → "+00:00"
+  const utcOffset = rawOffset === "GMT" ? "+00:00" : rawOffset.replace("GMT", "");
+
+  // Current local time formatted as ISO-ish with the offset
+  const localTimeFmt = new Intl.DateTimeFormat("en-GB", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+  const timeParts = Object.fromEntries(
+    localTimeFmt.formatToParts(now).map((p) => [p.type, p.value]),
+  ) as Record<string, string>;
+  const localIso =
+    `${timeParts.year}-${timeParts.month}-${timeParts.day}` +
+    `T${timeParts.hour}:${timeParts.minute}:${timeParts.second}${utcOffset}`;
+
+  // Today's and tomorrow's weekday+date in the principal's zone
+  const dayFmt = new Intl.DateTimeFormat("en-GB", {
+    timeZone,
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+  });
+  const todayStr = dayFmt.format(now);
+  const tomorrowStr = dayFmt.format(new Date(now.getTime() + 86_400_000));
+
+  // Display name for UTC zones: keep "UTC" when offset is +00:00, otherwise
+  // show the IANA name.
+  const zoneDisplay = timeZone === "UTC" ? "UTC" : timeZone;
+
+  return [
+    `Current time: ${localIso} (${zoneDisplay}, UTC${utcOffset}).`,
+    `Today is ${todayStr}; tomorrow is ${tomorrowStr}.`,
+    "When calling calendar/email tools, build time ranges in this timezone and report times in it.",
+  ].join("\n");
+}
+
+export function buildInstructions(ctx: InstructionContext, now: Date = new Date()): string {
   const persona =
     ctx.initiator === "alfred"
       ? outboundIntent(ctx.intent)
@@ -170,7 +238,15 @@ export function buildInstructions(ctx: InstructionContext): string {
     ? `\n\nCaller: ${ctx.callerNumber} (use this number for any SMS the caller asks you to send).`
     : "";
 
+  // #226 — per-call timezone anchor. Computed fresh every call (not cached
+  // with the bundle) so it's always accurate. Falls back to UTC when the
+  // bundle doesn't carry a timeZone (pre-Lane-I deploys, or cache miss).
+  const timeZone = ctx.voiceContext?.timeZone || "UTC";
+  const timeAnchor = buildTimeAnchor(timeZone, now);
+
   // Order matters — guardrails LAST so recency-weighted attention favours
   // them over the (also-load-bearing-but-not-as-load-bearing) primer.
-  return `${persona}${callerLine}${primer}\n${VOICE_GUARDRAILS}`;
+  // Time anchor goes right after persona / caller line so the model always
+  // sees the current time before the context primer and guardrails.
+  return `${persona}${callerLine}\n\n## Current time\n\n${timeAnchor}${primer}\n${VOICE_GUARDRAILS}`;
 }
