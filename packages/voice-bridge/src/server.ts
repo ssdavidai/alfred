@@ -209,16 +209,13 @@ httpServer.on("upgrade", (req, socket, head) => {
       return;
     }
     const tenantId = decodeURIComponent(match[1]);
-    // Sig arrives in the Twilio `start` event (customParameters) — NOT in the
-    // WS URL query string, since Twilio strips query params from Stream URLs.
-    // VoiceCall verifies it before any billable work.
-    const initiator =
-      url.searchParams.get("initiator") === "alfred" ? "alfred" : "user";
-    const intent = url.searchParams.get("intent") ?? undefined;
+    // Sig, initiator and intent arrive in Twilio `start.customParameters` —
+    // NOT in the WS URL query string, since Twilio strips query params from
+    // <Stream> URLs. VoiceCall reads them before opening Realtime.
     bumpMetric("callsAccepted");
 
     wss.handleUpgrade(req, socket, head, (ws) => {
-      const call = new VoiceCall(ws, { tenantId, initiator, intent });
+      const call = new VoiceCall(ws, { tenantId, initiator: "user" });
       call.start().catch((err) => {
         console.error("[server] VoiceCall.start failed", err);
         try {
