@@ -8,7 +8,8 @@
     "build": "node build.mjs",
     "dev": "node build.mjs --watch",
     "start": "node --experimental-sqlite dist/api.mjs",
-    "test": "node --experimental-sqlite --experimental-test-module-mocks --import tsx/esm --experimental-loader ./tests/text-loader.mjs --test tests/*.test.ts"
+    "test": "node --experimental-sqlite --experimental-test-module-mocks --import tsx/esm --experimental-loader ./tests/text-loader.mjs --test tests/*.test.ts",
+    "evidence:paperclip-github": "tsx scripts/paperclip-github-evidence.ts"
   },
   "dependencies": {
     "commander": "^13.1.0",
