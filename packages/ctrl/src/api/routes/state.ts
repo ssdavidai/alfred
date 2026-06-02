@@ -275,12 +275,22 @@ export function registerStateRoutes(): void {
   addRoute("GET", "/api/v1/state/observations", async ({ res, query }) => {
     const limit = clampLimit(query);
     const offset = Math.max(0, parseInt(query.get("offset") ?? "0", 10) || 0);
+    // `status=unprocessed` is a SEMANTIC filter, not a literal value: rows are
+    // written `status='open'` (POST default) and only become `'processed'` once
+    // ReflectionWorkflow consumes them. An equality match on "unprocessed" would
+    // return nothing, which is exactly what silently starved the learning loop
+    // (ReflectionWorkflow.fetch_unprocessed_observations asks for "unprocessed",
+    // got 0 rows every run, never distilled any instinct). Map it to "anything
+    // not yet processed" so producer (open) and consumer (unprocessed) agree.
+    const statusParam = query.get("status");
+    const unprocessed = statusParam === "unprocessed";
     const r = queryCrossTier("observation", {
       filters: {
         kind: query.get("kind"),
         subject: query.get("subject"),
-        status: query.get("status"),
+        status: unprocessed ? null : statusParam,
       },
+      not: unprocessed ? { col: "status", value: "processed" } : null,
       since: query.get("since"),
       until: query.get("until"),
       limit,

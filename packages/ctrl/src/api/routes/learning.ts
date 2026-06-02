@@ -485,7 +485,12 @@ export function registerLearningRoutes(): void {
       enabled,
       observations: {
         total: observations.length,
-        unprocessed: observations.filter((r) => r.status === "unprocessed").length,
+        // "unprocessed" is semantic (anything reflection hasn't consumed), not a
+        // stored status — rows are written 'open'. Count by exclusion so this
+        // matches the GET /observations?status=unprocessed contract.
+        unprocessed: observations.filter(
+          (r) => r.status !== "processed" && r.status !== "invalid",
+        ).length,
         processed: observations.filter((r) => r.status === "processed").length,
         invalid: observations.filter((r) => r.status === "invalid").length,
       },

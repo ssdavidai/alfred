@@ -267,6 +267,14 @@ export interface GenericQuery {
   // Optional OR-of-equality predicate: matches when ANY listed column equals
   // `value`. Used by the link route's `ref` param ("all edges touching X").
   anyOf?: { cols: string[]; value: string } | null;
+  // Optional negated-equality predicate: matches rows whose `col` is NOT
+  // `value` (NULLs treated as not-equal so they're included). Used by the
+  // observations route's `status=unprocessed` semantic filter — "unprocessed"
+  // is NOT a stored status value (rows are written `status='open'` and only
+  // become `'processed'` once ReflectionWorkflow consumes them), so an equality
+  // match on it returns nothing. This expresses the real intent: "everything
+  // reflection hasn't processed yet."
+  not?: { col: string; value: string } | null;
   limit: number;
   offset: number;
 }
@@ -309,6 +317,12 @@ export function queryCrossTier(table: string, q: GenericQuery): CrossTierResult 
         where.push("(" + cols.map((c) => `${c} = ?`).join(" OR ") + ")");
         for (const _ of cols) args.push(q.anyOf.value);
       }
+    }
+    if (q.not && cfg.filterCols.includes(q.not.col)) {
+      // COALESCE so NULL statuses are treated as "not equal" (included),
+      // matching SQLite's three-valued-logic where `col != ?` would drop NULLs.
+      where.push(`COALESCE(${q.not.col}, '') != ?`);
+      args.push(q.not.value);
     }
     return { sql: where.length ? "WHERE " + where.join(" AND ") : "", args };
   }
