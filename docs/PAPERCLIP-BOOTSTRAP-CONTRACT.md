@@ -58,8 +58,15 @@ All write routes: on Paperclip 4xx that isn't an idempotent-exists case, return
 ## C2 — mcp-server paperclip tools (consumer; Lane MCP, `packages/mcp-server/**`)
 
 New `packages/mcp-server/src/tools/paperclip.ts` exporting `ALL_PAPERCLIP_TOOLS: ToolDef[]`,
-registered in `registry.ts` (AppId `"paperclip"`, add to `SUPPORTED_APPS` + `REGISTRY`).
-Each tool `buildRequest` proxies to the C1 routes (standard `proxyToCtrl`, Bearer AAS_API_KEY).
+registered in `registry.ts` under AppId **`"paperclip-admin"`** (add to `SUPPORTED_APPS` +
+`REGISTRY`). Each tool `buildRequest` proxies to the C1 routes (standard `proxyToCtrl`,
+Bearer AAS_API_KEY).
+
+> **NAME COLLISION (frozen decision):** the config key `paperclip` is already taken by the
+> UPSTREAM `@paperclipai/mcp-server` (board-key, ~40 operational tools the
+> `alfred-paperclip-operations` skill uses). The new admin bundle is a DIFFERENT binary,
+> so its AppId / config-server key / stdio arg are all **`paperclip-admin`**. The TOOL
+> NAMES below stay `paperclip_*` (the skill references those, not the server key).
 
 Tools (names frozen — the SKILL depends on them):
 - `paperclip_create_company {name, description}` → C1 #1
@@ -111,11 +118,13 @@ init render still parses). No code build.
 
 ## C5 — profile registration & toolset exposure (Lane CONFIG, `packages/hermes/init/render_mcp_servers.py`)
 
-- Add a `_PAPERCLIP_BLOCK` (stdio: `node {mcp_stdio_dir}/dist/bin/stdio-app.js paperclip`,
-  env `CTRL_API_URL`,`AAS_API_KEY`, timeout 120) and register `paperclip` on the `main`
-  profile (the profile the paperclip `hermes_local` runtime + DM agent hit).
-- #247: ensure the full toolset is present on `workers`/`heavy` where agents run (audit +
-  add missing). Idempotent, operator-safe (add-only), per the existing mutator pattern.
+- Add a `_PAPERCLIP_ADMIN_BLOCK` (stdio: `node {mcp_stdio_dir}/dist/bin/stdio-app.js
+  paperclip-admin`, env `CTRL_API_URL`,`AAS_API_KEY`, timeout 120) and register server key
+  **`paperclip-admin`** (NOT `paperclip` — that key is the upstream ops server) on the
+  `main` AND `workers` profiles (where `hermes_local` agents run). `heavy` is
+  background-reasoning with no MCP servers today → leave out.
+- Idempotent, operator-safe (add-only), per the existing mutator pattern. Because the key
+  is new (`paperclip-admin`), the add-only mutator lands cleanly with no collision.
 - VERIFY: `cd packages/ctrl && npm run build` is N/A; for init python use
   `python3 -c "import ast; ast.parse(open('packages/hermes/init/render_mcp_servers.py').read())"`
   plus any existing pytest under `packages/hermes`.
