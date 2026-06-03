@@ -440,7 +440,7 @@ Hermes speaks the **OpenAI Responses API natively** — no shim:
 - `POST http://hermes:18790/v1/runs` (workers — ephemeral runs)
 - `POST http://hermes:18791/v1/responses` (heavy)
 
-All calls carry `Authorization: Bearer ${HERMES_API_SERVER_KEY}` (the
+All calls carry `Authorization: Bearer ${HERM...EY}` (the
 gateway token from `/alfred-data/.gateway-token`).
 
 ### 9.2 MCP servers
@@ -661,11 +661,17 @@ On the VM:
 | `/opt/alfred/caddy/Caddyfile` | Caddy reverse-proxy config |
 | `/opt/alfred/.env` | Required + auto-generated env vars (bootstrap.sh manages this) |
 | `/var/lib/docker/volumes/alfred-black_vault_data/_data/` | The vault (markdown files) |
+| `/var/lib/docker/volumes/alfred-black_files_data/_data/` | Principal-facing uploaded blobs |
 | `/var/lib/docker/volumes/alfred-black_state_data/_data/` | alfred-state.db + WAL |
 | `/var/lib/docker/volumes/alfred-black_ingest_data/_data/` | ingest.db + WAL |
 | `/var/lib/docker/volumes/alfred-black_alfred_data/_data/` | Shared scratch (.gateway-token, settings.json, .hermes-* etc.) |
 | `/var/lib/docker/volumes/alfred-black_hermes_data/_data/` | $HERMES_HOME (profiles, SOUL.md, sessions, plugins) |
 | `/var/lib/docker/volumes/alfred-black_caddy_data/_data/` | LE certs (PRESERVE across redeploys to avoid rate limits) |
+| `/var/lib/docker/volumes/alfred-black_web_db_data/_data/` | Dashboard auth/API keys |
+| `/var/lib/docker/volumes/alfred-black_vaultwarden_data/_data/` | Vaultwarden secret vault |
+| `/var/lib/docker/volumes/alfred-black_paperclip_data/_data/` | Paperclip company/issues/runs |
+| `/var/lib/docker/volumes/alfred-black_plane_pgdata/_data/` | Plane issue database |
+| `/var/lib/docker/volumes/alfred-black_sure_pgdata/_data/` | Sure finance database |
 
 **Deploy via**: `docker compose pull && docker compose up -d` after a
 relevant image rebuilds in CI. Rsync the Caddyfile / compose file from
@@ -699,8 +705,8 @@ scenes:
    `parent_matter`, `matter_ref`, `state: pending`, `status: todo`,
    `signal_sources`, `closure_predicate`.
 7. **Day-one seeding** — `seed_day_one_desk_cards` activity picks
-   time-anchored matters + `activity_score` + key_people count for
-   the principal's first /desk landing (#196).
+   time-anchored matters + `activity_score` + key_people count for the
+   principal's first /desk landing (#196).
 8. **Brief composition** — `write_brief_opus` writes the first brief
    (intro paragraph + "This week, on your plate" actionable bulleted list
    pulled from matters with `next_action_due` + open chores + payment-failure signals).
@@ -797,14 +803,19 @@ the `IdentityAgent=none` opt.
 
 ### 15.10 Backups
 
-`vault_data` is the principal's published surface — back it up.
-`caddy_data` holds LE certs — back it up to avoid rate limits on rebuild.
-`state_data` / `ingest_data` / `alfred_data` / `hermes_data` are
-recoverable but contain history — back them up if you care about the
-audit trail / observations / instinct training data.
-`tailscale_data` (when the optional Tailscale sidecar is on — §15.11)
-holds the `tailscaled.state` node identity; lose it and the principal
-has to re-approve the device on `login.tailscale.com`.
+The supported backup contract is `docs/operators/backup-and-restore.md`. In
+short: use an encrypted off-host application-level backup of `/opt/alfred` plus
+Docker named-volume `_data` directories, then prove restore before treating a
+tenant as protected. Hetzner/provider snapshots are secondary cover unless they
+are explicitly scheduled, documented, and restore-tested for the tenant.
+
+Critical volumes: `vault_data`, `files_data`, `state_data`, `hermes_data`,
+`alfred_data`, `web_db_data`, `vaultwarden_data`, `paperclip_data`,
+`plane_pgdata`, `sure_pgdata`, and `caddy_data`. Preserve SQLite DB/WAL pairs
+and service database volumes as whole-volume restores. `tailscale_data` (when the
+optional Tailscale sidecar is on — §15.11) holds the `tailscaled.state` node
+identity; lose it and the principal has to re-approve the device on
+`login.tailscale.com`.
 
 ### 15.11 Optional Tailscale opt-in (#109)
 

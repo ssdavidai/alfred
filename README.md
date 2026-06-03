@@ -382,6 +382,15 @@ surface is bundled.
 Docker volumes and TLS certificates persist in `caddy_data`, so no re-bootstrap
 is needed and Let's Encrypt is not re-hit.
 
+### Backups
+
+Before running a production tenant, configure the encrypted off-host backup and
+restore drill in `docs/operators/backup-and-restore.md`. The minimum protected
+set is `/opt/alfred` plus the principal-facing and state-bearing Docker volumes:
+`vault_data`, `files_data`, `state_data`, `hermes_data`, `alfred_data`,
+`web_db_data`, `vaultwarden_data`, `paperclip_data`, `plane_pgdata`,
+`sure_pgdata`, and `caddy_data`.
+
 ---
 
 ## The cloud version
