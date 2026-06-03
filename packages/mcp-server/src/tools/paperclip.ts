@@ -71,6 +71,22 @@ export const ALL_PAPERCLIP_TOOLS: ToolDef[] = [
     }),
   },
 
+  // ── grant the principal company access (membership) ─────────────────────
+  {
+    name: "paperclip_grant_company_access",
+    description:
+      "Grant a registered Paperclip user company-scoped MEMBERSHIP of a company so they can actually open it (e.g. /<COMPANY>/inbox/mine). Required: companyId (from paperclip_create_company) + email (the principal you registered with paperclip_register_user). Without this, a freshly registered user signs in but sees \"No company access\" — register_user creates the login but NOT membership of the company the seed identity owns. Adds an 'operator' membership; it is ADDITIVE (never removes the user's other memberships) and idempotent (re-running returns alreadyMember:true). Call this AFTER paperclip_register_user, as the access-grant step of the bootstrap. Returns {userId, companyId, granted, alreadyMember}. Backing: POST /api/v1/paperclip/admin/companies/:companyId/access.",
+    inputSchema: z.object({
+      companyId: z.string().min(1).describe("The company id from paperclip_create_company"),
+      email: z.string().min(1).describe("The registered principal's email (must already exist — register first)"),
+    }),
+    buildRequest: ({ companyId, ...body }) => ({
+      method: "POST",
+      path: `/api/v1/paperclip/admin/companies/${encodeURIComponent(companyId)}/access`,
+      body,
+    }),
+  },
+
   // ── list companies (read-back) ──────────────────────────────────────────
   {
     name: "paperclip_list_companies",

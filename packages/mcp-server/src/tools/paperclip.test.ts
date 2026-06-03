@@ -21,6 +21,7 @@ function getTool(name: string) {
 const createCompany = getTool("paperclip_create_company");
 const createAgent = getTool("paperclip_create_agent");
 const registerUser = getTool("paperclip_register_user");
+const grantAccess = getTool("paperclip_grant_company_access");
 const listCompanies = getTool("paperclip_list_companies");
 const listAgents = getTool("paperclip_list_agents");
 
@@ -31,12 +32,13 @@ test("registry · paperclip-admin is a supported app", () => {
   assert.ok((SUPPORTED_APPS as Set<string>).has("paperclip-admin"));
 });
 
-test("registry · getToolsForApp('paperclip-admin') returns the 5 frozen tools", () => {
+test("registry · getToolsForApp('paperclip-admin') returns the 6 frozen tools", () => {
   const tools = getToolsForApp("paperclip-admin" as never);
   const names = tools.map((t) => t.name).sort();
   assert.deepEqual(names, [
     "paperclip_create_agent",
     "paperclip_create_company",
+    "paperclip_grant_company_access",
     "paperclip_list_agents",
     "paperclip_list_companies",
     "paperclip_register_user",
@@ -181,6 +183,44 @@ test("paperclip_register_user · password forwarded when set", () => {
     password: "supersecret123",
   });
   assert.equal((req.body as any).password, "supersecret123");
+});
+
+// ─── paperclip_grant_company_access ──────────────────────────────────────────
+
+test("paperclip_grant_company_access · companyId + email required", () => {
+  assert.equal(
+    grantAccess.inputSchema.safeParse({ email: "a@b.com" }).success,
+    false,
+    "companyId required",
+  );
+  assert.equal(
+    grantAccess.inputSchema.safeParse({ companyId: "c1" }).success,
+    false,
+    "email required",
+  );
+  assert.equal(
+    grantAccess.inputSchema.safeParse({ companyId: "c1", email: "a@b.com" }).success,
+    true,
+  );
+});
+
+test("paperclip_grant_company_access · POST nested path; companyId stripped from body", () => {
+  const req = grantAccess.buildRequest({ companyId: "c1", email: "a@b.com" });
+  assert.equal(req.method, "POST");
+  assert.equal(req.path, "/api/v1/paperclip/admin/companies/c1/access");
+  assert.deepEqual(req.body, { email: "a@b.com" });
+  assert.equal((req.body as any).companyId, undefined);
+});
+
+test("paperclip_grant_company_access · companyId is URL-encoded in path", () => {
+  const req = grantAccess.buildRequest({
+    companyId: "weird/id with space",
+    email: "a@b.com",
+  });
+  assert.equal(
+    req.path,
+    "/api/v1/paperclip/admin/companies/weird%2Fid%20with%20space/access",
+  );
 });
 
 // ─── paperclip_list_companies ────────────────────────────────────────────────

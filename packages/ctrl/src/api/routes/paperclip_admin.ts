@@ -531,6 +531,91 @@ export function registerPaperclipAdminRoutes(): void {
     });
   }));
 
+  // 3b. POST /companies/:companyId/access — grant a registered user
+  //     company-scoped membership so they can open /<COMPANY>/inbox/mine.
+  //
+  // Why this exists (#246): register-user (#3) creates a Better-Auth account
+  // but it has NO membership of the company the bootstrap just stood up — the
+  // company is owned by the seed identity. Logging in then shows "No company
+  // access". This route grants the registered principal an *operator*
+  // membership of the named company via Paperclip's instance-admin surface.
+  //
+  // Mechanism (discovered on a live tenant — see #246 comment):
+  //   GET  /api/admin/users?query=<email>            → resolve the userId
+  //   GET  /api/admin/users/<userId>/company-access  → current companyIds
+  //   PUT  /api/admin/users/<userId>/company-access  {companyIds:[...]}
+  //     · Paperclip ADDS any new id (membershipRole "operator", status
+  //       "active") and ARCHIVES any company NOT in the list. It is a
+  //       full-set REPLACE — so we UNION the target id with the user's
+  //       existing companyIds, never shrinking their access.
+  //
+  // Auth: the seed cookie session is an INSTANCE ADMIN — accepting the
+  // bootstrap_ceo invite (bootstrap-paperclip.sh step 7) calls
+  // promoteInstanceAdmin server-side — so it clears assertInstanceAdmin on
+  // the /api/admin/* routes. If a tenant's seed account somehow isn't an
+  // instance admin, those calls 401/403 and we surface 502 (the caller can
+  // fall back to the manual invite path).
+  //
+  // Idempotent: re-running with the same (email, companyId) is a no-op (the
+  // union already contains the id) → granted:true, alreadyMember:true.
+  addRoute(
+    "POST",
+    "/api/v1/paperclip/admin/companies/:companyId/access",
+    withPaperclipErrors(async ({ res, params, body }) => {
+      const companyId = requireString(params.companyId, "companyId");
+      const b = (body ?? {}) as Record<string, unknown>;
+      const email = requireString(b.email, "email");
+      const session = await establishSession();
+
+      // 1. Resolve the user id from their email. /api/admin/users?query=<q>
+      //    filters name+email substrings; we match the exact email
+      //    (case-insensitive) so a substring collision can't pick the wrong
+      //    account.
+      const userId = await resolveUserIdByEmail(session, email);
+      if (!userId) {
+        // The principal hasn't been registered yet (call register_user
+        // first). 404 is the honest signal — distinct from a Paperclip 502.
+        throw new ApiError(
+          404,
+          "PAPERCLIP_USER_NOT_FOUND",
+          "no paperclip user with that email — register the user first",
+          { detail: email },
+        );
+      }
+
+      // 2. Read current company access so the PUT (a full-set replace)
+      //    doesn't archive any membership the user already has.
+      const existingIds = await loadUserCompanyIds(session, userId);
+      const alreadyMember = existingIds.includes(companyId);
+      const target = alreadyMember
+        ? existingIds
+        : [...existingIds, companyId];
+
+      // 3. PUT the union. Even when alreadyMember, we re-PUT the same set —
+      //    it's a no-op server-side and keeps the response shape uniform.
+      const put = await session.call(
+        "PUT",
+        `/api/admin/users/${encodeURIComponent(userId)}/company-access`,
+        { companyIds: target },
+      );
+      if (put.status < 200 || put.status >= 300) {
+        throw new ApiError(
+          502,
+          "PAPERCLIP_GRANT_FAILED",
+          "paperclip company-access grant failed",
+          { detail: bodyDetail(put.body) },
+        );
+      }
+
+      sendJson(res, 200, {
+        userId,
+        companyId,
+        granted: true,
+        alreadyMember,
+      });
+    }),
+  );
+
   // 4. GET /companies — read-back.
   addRoute("GET", "/api/v1/paperclip/admin/companies", withPaperclipErrors(async ({ res }) => {
     const session = await establishSession();
@@ -602,4 +687,84 @@ async function markVerified(
   } catch {
     /* non-fatal — no mailer; verification may be a no-op on this build */
   }
+}
+
+/** Resolve a Paperclip user id from their email via the instance-admin
+ *  user-search endpoint. `query` does a substring match across name+email,
+ *  so we filter the returned page down to an EXACT (case-insensitive) email
+ *  match — a substring collision must never grant the wrong account access.
+ *  Returns null when no user with that email exists (caller → 404). Throws
+ *  502 on a Paperclip error so a flaky board fails loudly. */
+async function resolveUserIdByEmail(
+  session: PaperclipSession,
+  email: string,
+): Promise<string | null> {
+  const resp = await session.call(
+    "GET",
+    `/api/admin/users?query=${encodeURIComponent(email)}`,
+    null,
+  );
+  if (resp.status < 200 || resp.status >= 300) {
+    throw new ApiError(
+      502,
+      "PAPERCLIP_USER_LOOKUP_FAILED",
+      "paperclip user lookup failed",
+      { detail: bodyDetail(resp.body) },
+    );
+  }
+  const want = email.trim().toLowerCase();
+  for (const u of asList(resp.body)) {
+    const e = u.email;
+    const id = u.id;
+    if (
+      typeof e === "string" &&
+      e.toLowerCase() === want &&
+      typeof id === "string" &&
+      id
+    ) {
+      return id;
+    }
+  }
+  return null;
+}
+
+/** Read a user's CURRENT active company memberships (the company ids) via
+ *  GET /api/admin/users/<id>/company-access. The response is
+ *  `{user, companyAccess:[{companyId, status, ...}]}`. We need this because
+ *  setUserCompanyAccess (the PUT) is a full-set REPLACE — passing only the
+ *  new id would archive every other membership. Returns the de-duped list
+ *  of company ids the user already belongs to. Throws 502 on error. */
+async function loadUserCompanyIds(
+  session: PaperclipSession,
+  userId: string,
+): Promise<string[]> {
+  const resp = await session.call(
+    "GET",
+    `/api/admin/users/${encodeURIComponent(userId)}/company-access`,
+    null,
+  );
+  if (resp.status < 200 || resp.status >= 300) {
+    throw new ApiError(
+      502,
+      "PAPERCLIP_ACCESS_LOOKUP_FAILED",
+      "paperclip company-access lookup failed",
+      { detail: bodyDetail(resp.body) },
+    );
+  }
+  const out = new Set<string>();
+  let rows: Record<string, unknown>[] = [];
+  if (typeof resp.body === "object" && resp.body !== null) {
+    const ca = (resp.body as Record<string, unknown>).companyAccess;
+    if (Array.isArray(ca)) {
+      rows = ca.filter(
+        (x): x is Record<string, unknown> =>
+          typeof x === "object" && x !== null,
+      );
+    }
+  }
+  for (const row of rows) {
+    const cid = row.companyId;
+    if (typeof cid === "string" && cid) out.add(cid);
+  }
+  return [...out];
 }

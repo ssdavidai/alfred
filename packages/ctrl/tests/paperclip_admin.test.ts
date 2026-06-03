@@ -470,3 +470,175 @@ describe("paperclip admin — users", () => {
     assert.equal(r.status, 502);
   });
 });
+
+describe("paperclip admin — company access grant (#246)", () => {
+  // Helper: a responder that resolves a user by email and tracks the PUT.
+  function accessResponder(opts: {
+    users?: { id: string; email: string }[];
+    existingCompanyIds?: string[];
+    putStatus?: number;
+  }): Responder {
+    const users = opts.users ?? [{ id: "usr1", email: "p@admintest.alfred.black" }];
+    const existing = opts.existingCompanyIds ?? [];
+    return (c) => {
+      if (c.path === "/api/auth/sign-in/email") {
+        return { status: 200, body: {}, setCookies: ["s=1"] };
+      }
+      if (c.method === "GET" && c.path.startsWith("/api/admin/users?query=")) {
+        return { status: 200, body: users };
+      }
+      if (
+        c.method === "GET" &&
+        /\/api\/admin\/users\/[^/]+\/company-access$/.test(c.path)
+      ) {
+        return {
+          status: 200,
+          body: {
+            user: { id: "usr1" },
+            companyAccess: existing.map((id) => ({
+              companyId: id,
+              status: "active",
+            })),
+          },
+        };
+      }
+      if (
+        c.method === "PUT" &&
+        /\/api\/admin\/users\/[^/]+\/company-access$/.test(c.path)
+      ) {
+        return { status: opts.putStatus ?? 200, body: { companyAccess: [] } };
+      }
+      return { status: 200, body: {} };
+    };
+  }
+
+  it("grants access: unions the new companyId, PUTs it, returns granted:true", async () => {
+    installMock(accessResponder({ existingCompanyIds: [] }));
+    const r = await invokeRoute(
+      "POST",
+      "/api/v1/paperclip/admin/companies/cmpA/access",
+      { email: "p@admintest.alfred.black" },
+    );
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.payload, {
+      userId: "usr1",
+      companyId: "cmpA",
+      granted: true,
+      alreadyMember: false,
+    });
+    const put = calls.find(
+      (c) => c.method === "PUT" && c.path.endsWith("/company-access"),
+    );
+    assert.ok(put, "a PUT to company-access must be issued");
+    assert.deepEqual(put!.body, { companyIds: ["cmpA"] });
+  });
+
+  it("preserves existing memberships (union, never shrink)", async () => {
+    installMock(accessResponder({ existingCompanyIds: ["cmpExisting"] }));
+    const r = await invokeRoute(
+      "POST",
+      "/api/v1/paperclip/admin/companies/cmpA/access",
+      { email: "p@admintest.alfred.black" },
+    );
+    assert.equal(r.status, 200);
+    const put = calls.find(
+      (c) => c.method === "PUT" && c.path.endsWith("/company-access"),
+    );
+    assert.deepEqual(put!.body, { companyIds: ["cmpExisting", "cmpA"] });
+  });
+
+  it("idempotent: already a member → alreadyMember:true, set unchanged", async () => {
+    installMock(accessResponder({ existingCompanyIds: ["cmpA", "cmpB"] }));
+    const r = await invokeRoute(
+      "POST",
+      "/api/v1/paperclip/admin/companies/cmpA/access",
+      { email: "p@admintest.alfred.black" },
+    );
+    assert.equal(r.status, 200);
+    assert.equal(r.payload.alreadyMember, true);
+    const put = calls.find(
+      (c) => c.method === "PUT" && c.path.endsWith("/company-access"),
+    );
+    assert.deepEqual(put!.body, { companyIds: ["cmpA", "cmpB"] });
+  });
+
+  it("URL-encodes the resolved userId in the access paths", async () => {
+    installMock(
+      accessResponder({
+        users: [{ id: "weird/id", email: "p@admintest.alfred.black" }],
+        existingCompanyIds: [],
+      }),
+    );
+    await invokeRoute(
+      "POST",
+      "/api/v1/paperclip/admin/companies/cmpA/access",
+      { email: "p@admintest.alfred.black" },
+    );
+    const put = calls.find((c) => c.method === "PUT");
+    assert.equal(put!.path, "/api/admin/users/weird%2Fid/company-access");
+  });
+
+  it("matches email exactly (case-insensitive), ignoring substring collisions", async () => {
+    installMock(
+      accessResponder({
+        users: [
+          { id: "other", email: "other-p@admintest.alfred.black" },
+          { id: "target", email: "P@admintest.alfred.black" },
+        ],
+        existingCompanyIds: [],
+      }),
+    );
+    const r = await invokeRoute(
+      "POST",
+      "/api/v1/paperclip/admin/companies/cmpA/access",
+      { email: "p@admintest.alfred.black" },
+    );
+    assert.equal(r.payload.userId, "target");
+  });
+
+  it("404 when no user matches the email (register first)", async () => {
+    installMock(accessResponder({ users: [], existingCompanyIds: [] }));
+    const r = await invokeRoute(
+      "POST",
+      "/api/v1/paperclip/admin/companies/cmpA/access",
+      { email: "ghost@admintest.alfred.black" },
+    );
+    assert.equal(r.status, 404);
+    assert.ok(
+      !calls.some((c) => c.method === "PUT"),
+      "no PUT when the user can't be resolved",
+    );
+  });
+
+  it("email is required", async () => {
+    installMock(accessResponder({}));
+    const r = await invokeRoute(
+      "POST",
+      "/api/v1/paperclip/admin/companies/cmpA/access",
+      {},
+    );
+    assert.equal(r.status, 400);
+  });
+
+  it("returns 502 when the PUT grant fails", async () => {
+    installMock(accessResponder({ existingCompanyIds: [], putStatus: 403 }));
+    const r = await invokeRoute(
+      "POST",
+      "/api/v1/paperclip/admin/companies/cmpA/access",
+      { email: "p@admintest.alfred.black" },
+    );
+    assert.equal(r.status, 502);
+  });
+
+  it("503 paperclip_not_seeded when creds are absent", async () => {
+    removeSeed();
+    installMock(accessResponder({}));
+    const r = await invokeRoute(
+      "POST",
+      "/api/v1/paperclip/admin/companies/cmpA/access",
+      { email: "p@admintest.alfred.black" },
+    );
+    assert.equal(r.status, 503);
+    assert.deepEqual(r.payload, { error: "paperclip_not_seeded" });
+  });
+});

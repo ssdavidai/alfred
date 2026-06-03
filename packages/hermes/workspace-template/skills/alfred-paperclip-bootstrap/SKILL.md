@@ -85,6 +85,18 @@ infrastructure — never conjure it from an unconfirmed reading of a document.
   password comes back from the register step — relay it to Sir once, over the
   channel he's on, and don't echo it into any vault record or comment.
 
+- **Reusing an existing board login.** The principal may already have a
+  Paperclip account on this tenant (a previous bootstrap, or a login the seed
+  flow created). When you present the spec, if you have reason to believe the
+  principal email already exists — or Sir mentions an account he already signs
+  in with — **offer to reuse it** rather than minting a fresh one: *"You already
+  have a Paperclip login for that email — I'll just grant it access to the new
+  company instead of creating a new account. Good?"* On yes, **skip the register
+  step** in Deliver and go straight to the access grant (step 4) with that
+  email. `paperclip_register_user` is idempotent anyway — if you do call it and
+  it returns `created:false`, treat that as "reuse the existing login" and carry
+  on to the grant; never present a password you don't have.
+
 ## Deliver
 
 Only after Sir's explicit yes, run the creation sequence in this order. Each
@@ -100,22 +112,38 @@ tool name below is exact — call them as named:
    All land as `hermes_local` (forced server-side). Collect the returned
    `agentId` for each.
 
-3. **Register the principal login.**
-   `paperclip_register_user({ email, name })` — from `principal`. Omit
-   `password` to have a strong one generated and returned. The identity comes
-   back verified (tenants have no mailer). Keep the returned `loginUrl` and the
-   one-time `password`.
+3. **Register the principal login** — *unless they already have one* (see
+   "Reusing an existing board login" below). `paperclip_register_user({ email,
+   name })` — from `principal`. Omit `password` to have a strong one generated
+   and returned. The identity comes back verified (tenants have no mailer).
+   Keep the returned `loginUrl` and the one-time `password`. If the response is
+   `created:false` the account already existed — that's fine; you won't have a
+   password to report (don't invent one), just point them at the `loginUrl`
+   with their existing credentials.
 
-4. **Read back to confirm.**
+4. **Grant the principal access to the company.** This is the step that makes
+   the login actually *usable* — registering an account does NOT give it
+   membership of the company you just created (that's owned by the system seed
+   identity), so without this the principal signs in and sees "No company
+   access".
+   `paperclip_grant_company_access({ companyId, email })` — same `email` you
+   registered. It adds an operator membership; it's additive (won't touch any
+   other company the principal already belongs to) and idempotent
+   (`alreadyMember:true` on a re-run is success, not an error). Do this for
+   the principal even when they reused an existing login.
+
+5. **Read back to confirm.**
    `paperclip_list_agents({ companyId })` and check the roster you intended is
    actually present. (Optionally `paperclip_list_companies({})` to confirm the
    company.)
 
-5. **Report to Sir.** One clean summary:
+6. **Report to Sir.** One clean summary:
    - the company (name + id),
    - the agents that now exist (name — title — role), from the read-back,
-   - the login: the `loginUrl`, the principal email, and the generated
-     password (once, plainly, with a "change it after first sign-in" nudge).
+   - the login: the `loginUrl`, the principal email, and — only for a freshly
+     created account — the generated password (once, plainly, with a "change it
+     after first sign-in" nudge). For a reused login, just confirm they can now
+     open the company with their existing credentials.
 
 Don't narrate each call as you go — do the sequence, then report the result in
 one message.
@@ -144,12 +172,14 @@ updated spec, and ask again. Sir: "Perfect, go."
 
 → Now you run the sequence: `paperclip_create_company` → four
 `paperclip_create_agent` calls (Ada, Bee, Cleo, Dot, CEO first) →
-`paperclip_register_user` → `paperclip_list_agents`. Then:
+`paperclip_register_user` → `paperclip_grant_company_access({ companyId, email:
+"sir@example.com" })` → `paperclip_list_agents`. Then:
 
 > "Done. **Acme Pick** is live (4 agents: Ada — Chief Executive, Bee — Lead
 > Engineer, Cleo — Head of Marketing, Dot — Operations). Log in at
 > `https://paperclip.<DOMAIN>` as sir@example.com — temporary password
-> `<generated>`; change it on first sign-in."
+> `<generated>`; change it on first sign-in. You have access to the company,
+> so it'll open straight to its inbox."
 
 If Sir had said *"no, not yet"* at the first prompt, you'd have created nothing
 and simply waited.
