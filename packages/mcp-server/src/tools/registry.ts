@@ -11,6 +11,7 @@ import { ALL_EXECUTE_TOOLS } from "./execute.js";
 import { ALL_HERMES_TOOLS } from "./hermes.js";
 import { ALL_HASS_TOOLS } from "./hass.js";
 import { ALL_FILES_TOOLS } from "./files.js";
+import { ALL_PAPERCLIP_TOOLS } from "./paperclip.js";
 
 // `hermes` — 6th MCP server (added 2026-05-26). Surfaces the Hermes runtime
 // itself (scheduling, run delegation, model selection) so the voice agent
@@ -28,6 +29,14 @@ import { ALL_FILES_TOOLS } from "./files.js";
 // search, read, describe, create, and delete files the principal dropped
 // in via /files. The voice-bridge catalogue subset is deferred to PR 5 of
 // issue #114 (read-only tools only on voice).
+//
+// `paperclip` — 9th MCP server (added 2026-06-03 / epic #242). Surfaces the
+// per-tenant Paperclip company/agent bootstrap admin surface (create company,
+// create agent, register principal user, plus read-backs). Tools proxy to
+// ctrl-api /api/v1/paperclip/admin/* which performs the privileged Paperclip
+// calls server-side via the seed-credential cookie session. The skill
+// `alfred-paperclip-bootstrap` drives these (confirm-first flow). Contract:
+// docs/PAPERCLIP-BOOTSTRAP-CONTRACT.md C2.
 export type AppId =
   | "sure"
   | "plane"
@@ -36,7 +45,8 @@ export type AppId =
   | "execute"
   | "hermes"
   | "hass"
-  | "files";
+  | "files"
+  | "paperclip";
 
 export const SUPPORTED_APPS: ReadonlySet<AppId> = new Set([
   "sure",
@@ -47,6 +57,7 @@ export const SUPPORTED_APPS: ReadonlySet<AppId> = new Set([
   "hermes",
   "hass",
   "files",
+  "paperclip",
 ]);
 
 export function isAppId(value: string): value is AppId {
@@ -62,6 +73,7 @@ const REGISTRY: Record<AppId, ToolDef[]> = {
   hermes: ALL_HERMES_TOOLS,
   hass: ALL_HASS_TOOLS,
   files: ALL_FILES_TOOLS,
+  paperclip: ALL_PAPERCLIP_TOOLS,
 };
 
 export function getToolsForApp(app: AppId): ToolDef[] {
