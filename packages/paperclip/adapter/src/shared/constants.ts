@@ -51,3 +51,22 @@ export type HermesProfileName = "main" | "codex-builder";
 
 /** Session-key prefix used to derive a stable Hermes session per Paperclip agent. */
 export const SESSION_KEY_PREFIX = "paperclip-";
+
+/**
+ * Profile whose skills the Paperclip UI surfaces. The user-facing Hermes
+ * agent runs the `main` profile, so its `skills/` directory is what an
+ * operator expects to see in Paperclip. (`workers` / `heavy` share the same
+ * skill set at deploy time, but `main` is the canonical reference.)
+ */
+export const DEFAULT_SKILLS_PROFILE: HermesProfileName = "main";
+
+/**
+ * Per-profile skills subdirectory, relative to a profile dir under
+ * DEFAULT_HERMES_CONFIG_DIR. The hermes-init container deploys each
+ * `<slug>/SKILL.md` here, and the paperclip container mounts
+ * `hermes_data:/hermes-state:ro` so this path is readable (read-only)
+ * from inside paperclip — see DESIGN.md "Compose changes".
+ *
+ * Resolves to e.g. `/hermes-state/profiles/main/skills`.
+ */
+export const SKILLS_SUBDIR = "skills";
