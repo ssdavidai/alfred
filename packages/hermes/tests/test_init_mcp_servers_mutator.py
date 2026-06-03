@@ -287,6 +287,13 @@ def test_noop_when_all_required_already_present(tmp_path: Path, render_module):
         "timeout": 120,
         "connect_timeout": 60,
     }
+    data["mcp_servers"]["paperclip-admin"] = {
+        "command": "node",
+        "args": ["/opt/data/profiles/main/mcp-stdio/dist/bin/stdio-app.js", "paperclip-admin"],
+        "env": {"CTRL_API_URL": "http://ctrl-api:3100", "AAS_API_KEY": "${AAS_API_KEY}"},
+        "timeout": 120,
+        "connect_timeout": 60,
+    }
     with config.open("w") as f:
         yaml.dump(data, f)
     before = config.read_text()
@@ -469,8 +476,8 @@ def test_required_server_names_per_profile(render_module):
     """Pin the per-profile required-server lists so a future refactor can't
     silently drop hass/files or graft them onto the wrong profile.
     """
-    assert list(render_module._required_server_names("main")) == ["hass", "files"]
-    assert list(render_module._required_server_names("workers")) == ["files"]
+    assert list(render_module._required_server_names("main")) == ["hass", "files", "paperclip-admin"]
+    assert list(render_module._required_server_names("workers")) == ["files", "paperclip-admin"]
     assert list(render_module._required_server_names("heavy")) == []
     assert list(render_module._required_server_names("codex-builder")) == []
 

@@ -26,13 +26,13 @@ const listAgents = getTool("paperclip_list_agents");
 
 // ─── registry wiring ─────────────────────────────────────────────────────────
 
-test("registry · paperclip is a supported app", () => {
-  assert.ok(isAppId("paperclip"));
-  assert.ok((SUPPORTED_APPS as Set<string>).has("paperclip"));
+test("registry · paperclip-admin is a supported app", () => {
+  assert.ok(isAppId("paperclip-admin"));
+  assert.ok((SUPPORTED_APPS as Set<string>).has("paperclip-admin"));
 });
 
-test("registry · getToolsForApp('paperclip') returns the 5 frozen tools", () => {
-  const tools = getToolsForApp("paperclip" as never);
+test("registry · getToolsForApp('paperclip-admin') returns the 5 frozen tools", () => {
+  const tools = getToolsForApp("paperclip-admin" as never);
   const names = tools.map((t) => t.name).sort();
   assert.deepEqual(names, [
     "paperclip_create_agent",

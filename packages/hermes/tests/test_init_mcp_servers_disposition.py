@@ -124,6 +124,14 @@ mcp_servers:
       AAS_API_KEY: ${AAS_API_KEY}
     timeout: 120
     connect_timeout: 60
+  paperclip-admin:
+    command: node
+    args: ["/opt/data/profiles/main/mcp-stdio/dist/bin/stdio-app.js", "paperclip-admin"]
+    env:
+      CTRL_API_URL: http://ctrl-api:3100
+      AAS_API_KEY: ${AAS_API_KEY}
+    timeout: 120
+    connect_timeout: 60
 """
 
 
@@ -293,7 +301,10 @@ def test_disposition_on_operator_disabled_block_is_skipped(
         "    args: [/opt/data/profiles/main/mcp-stdio/dist/bin/stdio-app.js, hass]\n"
         "  files:\n"
         "    command: node\n"
-        "    args: [/opt/data/profiles/main/mcp-stdio/dist/bin/stdio-app.js, files]\n",
+        "    args: [/opt/data/profiles/main/mcp-stdio/dist/bin/stdio-app.js, files]\n"
+        "  paperclip-admin:\n"
+        "    command: node\n"
+        "    args: [/opt/data/profiles/main/mcp-stdio/dist/bin/stdio-app.js, paperclip-admin]\n",
         encoding="utf-8",
     )
     state_db = tmp_path / "alfred-state.db"

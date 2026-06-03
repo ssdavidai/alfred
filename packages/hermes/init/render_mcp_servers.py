@@ -101,9 +101,27 @@ _FILES_BLOCK = {
 # in the operator-owned config.yaml's `mcp_servers:` map. The mutator
 # walks the list, checks each name against the live config, and inserts
 # missing ones verbatim (with templating applied to the args + env paths).
+# `paperclip-admin` — agent-driven Paperclip company bootstrap (epic #242).
+# DISTINCT from the upstream `paperclip` ops server (@paperclipai/mcp-server,
+# board-key, ~40 camelCase tools) already seeded in hermes-config.yaml.njk —
+# this is the alfred bundle's admin surface (AAS-key) exposing the 5
+# paperclip_* tools that proxy to ctrl-api /api/v1/paperclip/admin/*. The
+# `alfred-paperclip-bootstrap` skill drives them (confirm-first). main +
+# workers, where hermes_local agents run; NOT heavy/codex-builder.
+_PAPERCLIP_ADMIN_BLOCK = {
+    "command": "node",
+    "args_template": ["{mcp_stdio_dir}/dist/bin/stdio-app.js", "paperclip-admin"],
+    "env": {
+        "CTRL_API_URL": "{ctrl_api_url}",
+        "AAS_API_KEY": "${AAS_API_KEY}",
+    },
+    "timeout": 120,
+    "connect_timeout": 60,
+}
+
 _REQUIRED_MCP_SERVERS: dict[str, list[tuple[str, dict]]] = {
-    "main":    [("hass", _HASS_BLOCK), ("files", _FILES_BLOCK)],
-    "workers": [("files", _FILES_BLOCK)],
+    "main":    [("hass", _HASS_BLOCK), ("files", _FILES_BLOCK), ("paperclip-admin", _PAPERCLIP_ADMIN_BLOCK)],
+    "workers": [("files", _FILES_BLOCK), ("paperclip-admin", _PAPERCLIP_ADMIN_BLOCK)],
     # heavy:        — no required additions (sticks with the 7 baseline servers).
     # codex-builder — sealed runtime, mcp_servers: {} by design; the mutator
     #                 skips this profile entirely (see profile guard below).

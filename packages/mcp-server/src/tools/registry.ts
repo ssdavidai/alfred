@@ -46,7 +46,7 @@ export type AppId =
   | "hermes"
   | "hass"
   | "files"
-  | "paperclip";
+  | "paperclip-admin";
 
 export const SUPPORTED_APPS: ReadonlySet<AppId> = new Set([
   "sure",
@@ -57,7 +57,7 @@ export const SUPPORTED_APPS: ReadonlySet<AppId> = new Set([
   "hermes",
   "hass",
   "files",
-  "paperclip",
+  "paperclip-admin",
 ]);
 
 export function isAppId(value: string): value is AppId {
@@ -73,7 +73,7 @@ const REGISTRY: Record<AppId, ToolDef[]> = {
   hermes: ALL_HERMES_TOOLS,
   hass: ALL_HASS_TOOLS,
   files: ALL_FILES_TOOLS,
-  paperclip: ALL_PAPERCLIP_TOOLS,
+  "paperclip-admin": ALL_PAPERCLIP_TOOLS,
 };
 
 export function getToolsForApp(app: AppId): ToolDef[] {

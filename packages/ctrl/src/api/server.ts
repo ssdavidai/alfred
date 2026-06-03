@@ -31,6 +31,7 @@ import { registerChannelsEmailRoutes } from "./routes/channelsEmail.js";
 import { registerChannelsAttachmentRoutes } from "./routes/channelsAttachment.js";
 import { registerPlaneRoutes } from "./routes/plane.js";
 import { registerSureRoutes } from "./routes/sure.js";
+import { registerPaperclipAdminRoutes } from "./routes/paperclip_admin.js";
 import { registerSureAssistantRoutes } from "./routes/sureAssistant.js";
 import { registerAppsRoutes } from "./routes/apps.js";
 import { registerVaultwardenRoutes } from "./routes/vaultwarden.js";
@@ -161,6 +162,7 @@ export function createApiServer(): http.Server {
   registerChannelsAttachmentRoutes();
   registerPlaneRoutes();
   registerSureRoutes();
+  registerPaperclipAdminRoutes();
   registerSureAssistantRoutes();
   registerAppsRoutes();
   registerVaultwardenRoutes();
