@@ -676,6 +676,8 @@ describe("paperclip admin — company access grant (#246)", () => {
   });
 
 
+});
+
 describe("paperclip admin — Vaultwarden secret sync", () => {
   it("syncs selected Vaultwarden folder items to Paperclip without returning values", async () => {
     vaultFolders = [{ id: "folder-paperclip", name: "paperclip" }];

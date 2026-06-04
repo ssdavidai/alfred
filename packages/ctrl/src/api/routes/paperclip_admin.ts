@@ -487,7 +487,7 @@ async function upsertPaperclipSecret(
     if (created.status < 200 || created.status >= 300) {
       throw new ApiError(502, "PAPERCLIP_SECRET_UPSERT_FAILED", "paperclip secret create failed", {
         key,
-        detail: bodyDetail(created.body),
+        status: created.status,
       });
     }
     const createdBody = created.body as Record<string, unknown>;
@@ -506,7 +506,7 @@ async function upsertPaperclipSecret(
   if (rotated.status < 200 || rotated.status >= 300) {
     throw new ApiError(502, "PAPERCLIP_SECRET_UPSERT_FAILED", "paperclip secret rotate failed", {
       key,
-      detail: bodyDetail(rotated.body),
+      status: rotated.status,
     });
   }
   const rotatedBody = rotated.body as Record<string, unknown>;
