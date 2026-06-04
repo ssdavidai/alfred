@@ -29,9 +29,12 @@
 # canonical ports (:18789 / :18790 / :18791 / :18793) directly, so callers
 # speak the Hermes /v1 API natively — there is no compat layer to supervise.
 #
-# SessionStore housekeeping is no longer a supervised process: Hermes
-# v2026.5.16 natively prunes its SQLite session store and VACUUMs, driven
-# by the `session_reset` block in each profile's config.yaml.
+# SessionStore housekeeping: Hermes' `session_reset` block bounds active
+# conversation context, but it does not delete old profile session artifacts
+# or compact the per-profile SQLite stores on disk. This supervisor also runs
+# `hermes-maintenance.sh`, which prunes profiles/*/sessions, checkpoints /
+# VACUUMs state.db files, and emits a disk alert before the shared tenant
+# volume reaches 100%.
 #
 # tini is PID 1 (see Dockerfile ENTRYPOINT) and reaps zombies; this script
 # runs as tini's single child, owns the workers, restarts any that die,
@@ -863,10 +866,24 @@ else
     log "codex-builder gateway disabled (ENABLE_CODEX_BUILDER!=1) — profile dir is rendered but no process launched"
 fi
 
+# --- Hermes profile disk maintenance (GH #241) -------------------------------
+# Bounds profiles/*/sessions and profiles/*/state.db growth independently of
+# the gateways. Default retention is intentionally conservative (2 days) and
+# operator-tunable via HERMES_SESSION_RETENTION_DAYS / HERMES_*_INTERVAL_*.
+case "${HERMES_MAINTENANCE_ENABLED:-true}" in
+    false|0|no|off)
+        log "hermes maintenance watchdog disabled (HERMES_MAINTENANCE_ENABLED=${HERMES_MAINTENANCE_ENABLED})"
+        ;;
+    *)
+        start_proc "hermes-maintenance" \
+            "exec /opt/hermes-supervisor/hermes-maintenance.sh"
+        ;;
+esac
+
 # =============================================================================
 # Supervise — restart any worker that exits while we are not shutting down.
 # =============================================================================
-log "all gateway processes running — entering supervise loop"
+log "all gateway/maintenance processes running — entering supervise loop"
 while true; do
     # Block until SOME child exits. `wait -n` returns that child's status.
     wait -n
