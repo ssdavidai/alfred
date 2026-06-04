@@ -709,7 +709,6 @@ describe("paperclip admin — Vaultwarden secret sync", () => {
       {},
     );
 
-    if (r.status !== 200) console.error(JSON.stringify(r.payload));
     assert.equal(r.status, 200);
     assert.equal(r.payload.synced, 2);
     assert.deepEqual(r.payload.keys, ["OPENAI_API_KEY", "PAPERCLIP_ONLY"]);
