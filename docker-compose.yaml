@@ -306,16 +306,26 @@ services:
   # Hermes /v1 API directly.
   hermes:
     image: ssdavidai00/alfred-black-hermes:latest
-    # No `ports:` — hermes binds 0.0.0.0 inside the container on the four
-    # reserved ports (18789/18790/18791/18793) PLUS any registry-allocated
-    # user-facing profile port (18794..18799 per #120 Lane II). All of
-    # these are reachable ONLY via the compose default network as
-    # `http://hermes:<port>` from sibling containers (ctrl-api, paperclip,
-    # alfred-learn, voice-bridge). They are intentionally NOT host-published
-    # so the only external surface is Caddy ingress on :443, which in turn
-    # routes through ctrl-api's auth-gated proxy. Adding user-facing profile
-    # ports to a `ports:` block would expose them on the VM's public IP
-    # without any TLS or auth wrapping.
+    # Gateway ports bind 0.0.0.0 inside the container on the four reserved
+    # ports (18789/18790/18791/18793) PLUS any registry-allocated user-facing
+    # profile port (18794..18799 per #120 Lane II). These are reachable via
+    # the compose default network as `http://hermes:<port>` from sibling
+    # containers (ctrl-api, paperclip, alfred-learn, voice-bridge). They are
+    # NOT published on the VM's public interface — the only external surface
+    # is Caddy ingress on :443 through ctrl-api's auth-gated proxy. Binding
+    # user-facing profile ports to the public IP would expose them with no
+    # TLS or auth wrapping.
+    #
+    # EXCEPTION — the `main` gateway (18789) is published on the HOST LOOPBACK
+    # only (127.0.0.1). This lets an operator/principal reach the main chat
+    # profile from their own machine via an SSH local-forward — e.g.
+    # `ssh -L 8642:localhost:18789 root@<host>` then point Hermes Desktop at
+    # http://localhost:8642/v1 — without chasing the container's bridge IP
+    # (which changes on restart). 127.0.0.1 binding keeps it off the public
+    # interface: reachable only from on the VM (i.e. through SSH), never from
+    # the internet, and the gateway still requires the Bearer API_SERVER_KEY.
+    ports:
+      - "127.0.0.1:18789:18789"
     depends_on:
       init:
         condition: service_completed_successfully

@@ -394,6 +394,13 @@ COPY packages/hermes/SOUL.codex-builder.md /opt/hermes-assets/SOUL.codex-builder
 # render_registry.py is NOT baked here — supervisor reads the registry JSON
 # ctrl-api already wrote (no state.db mount in the hermes runtime).
 RUN pip install --no-cache-dir "jinja2==3.1.6" "ruamel.yaml==0.18.6"
+
+# edge-tts — text-to-speech (Microsoft Edge online voices) used by the voice
+# surface. Previously pip-installed by hand into running hermes containers
+# (observed hot-installed on zsolt 2026-06), so it vanished on every image
+# redeploy. Baked here so it survives recreates. `edge-playback` ships in the
+# same package. Pinned to the version that was running in the field.
+RUN pip install --no-cache-dir "edge-tts==7.2.7"
 COPY packages/hermes/init/render_hermes.py       /opt/hermes-init/render_hermes.py
 COPY packages/hermes/init/render_mcp_servers.py  /opt/hermes-init/render_mcp_servers.py
 COPY packages/hermes/hermes-config.yaml.njk      /opt/hermes-init/templates/hermes-config.yaml.njk
