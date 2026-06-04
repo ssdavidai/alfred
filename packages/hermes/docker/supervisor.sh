@@ -29,9 +29,10 @@
 # canonical ports (:18789 / :18790 / :18791 / :18793) directly, so callers
 # speak the Hermes /v1 API natively — there is no compat layer to supervise.
 #
-# SessionStore housekeeping is no longer a supervised process: Hermes
-# v2026.5.16 natively prunes its SQLite session store and VACUUMs, driven
-# by the `session_reset` block in each profile's config.yaml.
+# SessionStore housekeeping is a lightweight side loop: Hermes' session_reset
+# block resets active conversations, while hermes-session-maintenance.py bounds
+# persisted profile sessions, maintains workers/state.db, and sends early disk
+# alerts before tenant volumes hit 100%.
 #
 # tini is PID 1 (see Dockerfile ENTRYPOINT) and reaps zombies; this script
 # runs as tini's single child, owns the workers, restarts any that die,
@@ -64,6 +65,28 @@ esac
 RESTART_DELAY="${HERMES_RESTART_DELAY:-5}"
 
 log() { echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) [supervisor] $*"; }
+
+# --- Session retention / disk alert loop ------------------------------------
+# Runs outside PIDS[] and is disowned so wait -n only reacts to gateway deaths.
+run_session_maintenance_loop() {
+    local interval="${HERMES_SESSION_MAINTENANCE_INTERVAL_SECONDS:-3600}"
+    if [[ "${HERMES_SESSION_MAINTENANCE_DISABLED:-}" =~ ^(1|true|yes|on)$ ]]; then
+        log "session maintenance disabled (HERMES_SESSION_MAINTENANCE_DISABLED=${HERMES_SESSION_MAINTENANCE_DISABLED})"
+        return
+    fi
+    (
+        while true; do
+            if python3 /opt/hermes-supervisor/hermes-session-maintenance.py; then
+                :
+            else
+                log "WARN: session maintenance tick failed (exit $?)"
+            fi
+            sleep "$interval"
+        done
+    ) &
+    disown
+    log "session maintenance loop started (interval=${interval}s, retention=${HERMES_SESSION_RETENTION_DAYS:-2}d, disk_alert=${HERMES_DISK_ALERT_PERCENT:-80}%)"
+}
 
 # --- PID bookkeeping ---------------------------------------------------------
 declare -A PIDS          # name → pid
@@ -866,6 +889,7 @@ fi
 # =============================================================================
 # Supervise — restart any worker that exits while we are not shutting down.
 # =============================================================================
+run_session_maintenance_loop
 log "all gateway processes running — entering supervise loop"
 while true; do
     # Block until SOME child exits. `wait -n` returns that child's status.

@@ -363,6 +363,16 @@ services:
       - HERMES_CODEX_BUILDER_MODEL=${HERMES_CODEX_BUILDER_MODEL:-gpt-5-codex}
       - NODE_OPTIONS=--max-old-space-size=3072
       - CTRL_API_URL=http://ctrl-api:3100
+      # Lets the Hermes session-maintenance side loop deliver high-urgency
+      # disk alerts via ctrl-api /api/v1/notifications before tenant volumes
+      # reach the Postgres-fatal 100% failure mode from GH #241.
+      - AAS_API_KEY=${AAS_API_KEY}
+      # Session retention / disk guardrails (GH #241). Defaults keep workers
+      # artifacts bounded; operators can tune in .env without image changes.
+      - HERMES_SESSION_RETENTION_DAYS=${HERMES_SESSION_RETENTION_DAYS:-2}
+      - HERMES_SESSION_MAINTENANCE_INTERVAL_SECONDS=${HERMES_SESSION_MAINTENANCE_INTERVAL_SECONDS:-3600}
+      - HERMES_DISK_ALERT_PERCENT=${HERMES_DISK_ALERT_PERCENT:-80}
+      - HERMES_DISK_ALERT_COOLDOWN_SECONDS=${HERMES_DISK_ALERT_COOLDOWN_SECONDS:-21600}
       # Per-job timeout (seconds) Hermes applies to every `cron` job. This is
       # the cron analogue of the Temporal `execution_timeout` the `learn`
       # schedules set today. Issue #56 audited every workflow in the

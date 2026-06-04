@@ -404,7 +404,9 @@ RUN chmod 0755 /opt/hermes-init/render_hermes.py /opt/hermes-init/render_mcp_ser
 # Supervisor entrypoint.
 # =============================================================================
 COPY packages/hermes/docker/supervisor.sh /opt/hermes-supervisor/supervisor.sh
-RUN chmod +x /opt/hermes-supervisor/supervisor.sh
+COPY packages/hermes/docker/hermes-session-maintenance.py /opt/hermes-supervisor/hermes-session-maintenance.py
+RUN chmod +x /opt/hermes-supervisor/supervisor.sh \
+             /opt/hermes-supervisor/hermes-session-maintenance.py
 
 # Hermes resolves all profile state under HERMES_HOME. /opt/data is the
 # mounted volume (named volume `hermes_data` in docker-compose). Profiles

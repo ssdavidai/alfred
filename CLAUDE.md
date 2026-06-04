@@ -665,7 +665,15 @@ On the VM:
 | `/var/lib/docker/volumes/alfred-black_ingest_data/_data/` | ingest.db + WAL |
 | `/var/lib/docker/volumes/alfred-black_alfred_data/_data/` | Shared scratch (.gateway-token, settings.json, .hermes-* etc.) |
 | `/var/lib/docker/volumes/alfred-black_hermes_data/_data/` | $HERMES_HOME (profiles, SOUL.md, sessions, plugins) |
+| `/var/lib/docker/volumes/alfred-black_hermes_data/_data/profiles/<profile>/sessions/` | Hermes per-profile session artifacts; workers is high-churn and pruned by `hermes-session-maintenance.py` |
+| `/var/lib/docker/volumes/alfred-black_hermes_data/_data/profiles/workers/state.db` | Hermes workers gateway SQLite session store; maintenance runs WAL checkpoint / optimize / VACUUM best-effort |
 | `/var/lib/docker/volumes/alfred-black_caddy_data/_data/` | LE certs (PRESERVE across redeploys to avoid rate limits) |
+
+**Hermes session-retention runbook (GH #241)**:
+- Normal path: the hermes supervisor starts `/opt/hermes-supervisor/hermes-session-maintenance.py` hourly. Defaults: `HERMES_SESSION_RETENTION_DAYS=2`, `HERMES_DISK_ALERT_PERCENT=80`, six-hour alert cooldown. Tune those in `/opt/alfred/.env`.
+- Manual safe prune while Hermes is running: `docker compose exec hermes python3 /opt/hermes-supervisor/hermes-session-maintenance.py`. It removes only stale `profiles/*/sessions/*` artifacts by mtime and logs counts/bytes, never contents.
+- Emergency cleanup when disk is already critical: `docker compose stop hermes`, remove old `profiles/workers/sessions/*`, optionally move aside `profiles/workers/state.db` if it is enormous/corrupt, then `docker compose up -d hermes`. Stopping Hermes first avoids deleting active in-flight sessions.
+- Alert path: the maintenance helper posts a high-urgency `/api/v1/notifications` message through ctrl-api when the `hermes_data` filesystem crosses the threshold.
 
 **Deploy via**: `docker compose pull && docker compose up -d` after a
 relevant image rebuilds in CI. Rsync the Caddyfile / compose file from
