@@ -323,6 +323,200 @@ function requireString(v: unknown, field: string): string {
   return v;
 }
 
+
+
+// ── Vaultwarden → Paperclip secret sync ─────────────────────────────────────
+
+const VAULT_CLI_URL = process.env.VAULT_CLI_URL || "http://vault-cli:8087";
+const PAPERCLIP_SECRET_FOLDER = process.env.PAPERCLIP_SECRET_SYNC_FOLDER || "paperclip";
+
+async function vaultFetch(path: string, init: RequestInit = {}): Promise<{ status: number; body: unknown }> {
+  const r = await fetch(`${VAULT_CLI_URL}${path}`, {
+    ...init,
+    headers: {
+      "content-type": "application/json",
+      ...(init.headers ?? {}),
+    },
+    signal: AbortSignal.timeout(15_000),
+  });
+  const text = await r.text();
+  let body: unknown = text;
+  try {
+    body = text ? JSON.parse(text) : null;
+  } catch {
+    // keep raw text
+  }
+  return { status: r.status, body };
+}
+
+function unwrapVault(body: unknown): unknown {
+  if (typeof body !== "object" || body === null) return body;
+  const env = body as Record<string, unknown>;
+  if (env.success === false) {
+    const message = typeof env.message === "string" ? env.message : "vault-cli error";
+    throw new ApiError(502, "VAULTWARDEN_SYNC_FAILED", message);
+  }
+  if (env.success === true && "data" in env) return env.data;
+  return body;
+}
+
+function listFromVault(body: unknown): Record<string, unknown>[] {
+  const data = unwrapVault(body);
+  if (Array.isArray(data)) {
+    return data.filter((x): x is Record<string, unknown> => typeof x === "object" && x !== null);
+  }
+  if (typeof data === "object" && data !== null) {
+    const nested = (data as Record<string, unknown>).data;
+    if (Array.isArray(nested)) {
+      return nested.filter((x): x is Record<string, unknown> => typeof x === "object" && x !== null);
+    }
+  }
+  return [];
+}
+
+function paperclipSecretKeyForItem(name: string, companyId: string): string | null {
+  const trimmed = name.trim();
+  if (!trimmed) return null;
+  const slash = trimmed.indexOf("/");
+  if (slash >= 0) {
+    const prefix = trimmed.slice(0, slash).trim();
+    const key = trimmed.slice(slash + 1).trim();
+    if (prefix !== companyId) return null;
+    return key || null;
+  }
+  return trimmed;
+}
+
+function validatePaperclipSecretKey(key: string): void {
+  if (!/^[A-Za-z_][A-Za-z0-9_.-]{0,127}$/.test(key)) {
+    throw new ValidationError(`invalid Paperclip secret key: ${key}`);
+  }
+}
+
+function vaultItemPassword(item: Record<string, unknown>): string | null {
+  const login = item.login;
+  if (typeof login === "object" && login !== null) {
+    const password = (login as Record<string, unknown>).password;
+    if (typeof password === "string" && password.length > 0) return password;
+  }
+  return null;
+}
+
+interface PaperclipSecretRecord extends Record<string, unknown> {
+  id?: string;
+  name?: string;
+  key?: string;
+  latestVersion?: number;
+  providerMetadata?: Record<string, unknown> | null;
+}
+
+interface VaultSecretSource {
+  itemId: string;
+  itemName: string;
+  revisionDate: string | null;
+}
+
+function paperclipSecretSyncMetadata(source: VaultSecretSource, paperclipLatestVersion: number | null): Record<string, unknown> {
+  return {
+    source: "vaultwarden",
+    sourceFolder: PAPERCLIP_SECRET_FOLDER,
+    vaultwardenItemId: source.itemId,
+    vaultwardenItemName: source.itemName,
+    vaultwardenRevisionDate: source.revisionDate,
+    paperclipLatestVersion,
+    syncedBy: "alfred.ctrl.paperclip_secret_sync",
+  };
+}
+
+async function listPaperclipSecrets(session: PaperclipSession, companyId: string): Promise<PaperclipSecretRecord[]> {
+  const resp = await session.call("GET", `/api/companies/${encodeURIComponent(companyId)}/secrets`);
+  if (resp.status < 200 || resp.status >= 300) {
+    throw new ApiError(502, "PAPERCLIP_SECRET_LIST_FAILED", "paperclip secret list failed", {
+      detail: bodyDetail(resp.body),
+    });
+  }
+  return asList(resp.body) as PaperclipSecretRecord[];
+}
+
+async function patchPaperclipSecretMetadata(
+  session: PaperclipSession,
+  secretId: string,
+  metadata: Record<string, unknown>,
+): Promise<void> {
+  const patched = await session.call("PATCH", `/api/secrets/${encodeURIComponent(secretId)}`, {
+    providerMetadata: metadata,
+  });
+  if (patched.status < 200 || patched.status >= 300) {
+    throw new ApiError(502, "PAPERCLIP_SECRET_METADATA_FAILED", "paperclip secret metadata update failed", {
+      detail: bodyDetail(patched.body),
+    });
+  }
+}
+
+async function upsertPaperclipSecret(
+  session: PaperclipSession,
+  companyId: string,
+  existingSecrets: PaperclipSecretRecord[],
+  key: string,
+  value: string,
+  source: VaultSecretSource,
+): Promise<"created" | "rotated" | "unchanged"> {
+  const existing = existingSecrets.find((s) => s.key === key || s.name === key);
+  const metadata = existing?.providerMetadata && typeof existing.providerMetadata === "object"
+    ? existing.providerMetadata
+    : {};
+  const metadataMatches =
+    metadata.source === "vaultwarden" &&
+    metadata.vaultwardenItemId === source.itemId &&
+    metadata.vaultwardenRevisionDate === source.revisionDate &&
+    metadata.paperclipLatestVersion === existing?.latestVersion;
+  if (existing?.id && metadataMatches) {
+    return "unchanged";
+  }
+
+  if (!existing) {
+    const created = await session.call("POST", `/api/companies/${encodeURIComponent(companyId)}/secrets`, {
+      name: key,
+      key,
+      provider: "local_encrypted",
+      managedMode: "paperclip_managed",
+      value,
+      description: `Replicated from Vaultwarden folder ${PAPERCLIP_SECRET_FOLDER}. Vaultwarden is authoritative.`,
+      providerMetadata: paperclipSecretSyncMetadata(source, null),
+    });
+    if (created.status < 200 || created.status >= 300) {
+      throw new ApiError(502, "PAPERCLIP_SECRET_UPSERT_FAILED", "paperclip secret create failed", {
+        key,
+        detail: bodyDetail(created.body),
+      });
+    }
+    const createdBody = created.body as Record<string, unknown>;
+    const secretId = typeof createdBody.id === "string" ? createdBody.id : null;
+    const latestVersion = typeof createdBody.latestVersion === "number" ? createdBody.latestVersion : 1;
+    if (secretId) {
+      await patchPaperclipSecretMetadata(session, secretId, paperclipSecretSyncMetadata(source, latestVersion));
+    }
+    return "created";
+  }
+
+  if (typeof existing.id !== "string") {
+    throw new ApiError(502, "PAPERCLIP_BAD_RESPONSE", "paperclip secret list returned a secret without id", { key });
+  }
+  const rotated = await session.call("POST", `/api/secrets/${encodeURIComponent(existing.id)}/rotate`, { value });
+  if (rotated.status < 200 || rotated.status >= 300) {
+    throw new ApiError(502, "PAPERCLIP_SECRET_UPSERT_FAILED", "paperclip secret rotate failed", {
+      key,
+      detail: bodyDetail(rotated.body),
+    });
+  }
+  const rotatedBody = rotated.body as Record<string, unknown>;
+  const latestVersion = typeof rotatedBody.latestVersion === "number"
+    ? rotatedBody.latestVersion
+    : (typeof existing.latestVersion === "number" ? existing.latestVersion + 1 : null);
+  await patchPaperclipSecretMetadata(session, existing.id, paperclipSecretSyncMetadata(source, latestVersion));
+  return "rotated";
+}
+
 // ── routes ────────────────────────────────────────────────────────────────────
 
 /** Wrap a handler so a PaperclipNotSeededError surfaces the exact C1 503
@@ -658,6 +852,108 @@ export function registerPaperclipAdminRoutes(): void {
       sendJson(res, 200, { agents });
     }),
   );
+
+  // 6. POST /companies/:companyId/secrets/sync — one-way Vaultwarden → Paperclip.
+  addRoute(
+    "POST",
+    "/api/v1/paperclip/admin/companies/:companyId/secrets/sync",
+    withPaperclipErrors(async ({ res, params, body }) => {
+      const companyId = requireString(params.companyId, "companyId");
+      const b = (body ?? {}) as Record<string, unknown>;
+      const dryRun = b.dry_run === true;
+      if (b.prune === true) {
+        throw new ValidationError("prune=true is intentionally not supported by this additive sync route");
+      }
+
+      const foldersResp = await vaultFetch("/list/object/folders");
+      if (foldersResp.status >= 500) {
+        throw new ApiError(502, "VAULTWARDEN_UNREACHABLE", "vault-cli unreachable");
+      }
+      const folders = listFromVault(foldersResp.body);
+      const folder = folders.find((f) => f.name === PAPERCLIP_SECRET_FOLDER);
+      const folderId = typeof folder?.id === "string" ? folder.id : null;
+      if (!folderId) {
+        sendJson(res, 200, {
+          ok: true,
+          companyId,
+          folder: PAPERCLIP_SECRET_FOLDER,
+          dry_run: dryRun,
+          synced: 0,
+          skipped: [{ reason: "folder_not_found", folder: PAPERCLIP_SECRET_FOLDER }],
+          keys: [],
+        });
+        return;
+      }
+
+      const itemsResp = await vaultFetch(`/list/object/items?folderid=${encodeURIComponent(folderId)}`);
+      if (itemsResp.status >= 500) {
+        throw new ApiError(502, "VAULTWARDEN_UNREACHABLE", "vault-cli unreachable");
+      }
+      const items = listFromVault(itemsResp.body);
+      const session = dryRun ? null : await establishSession();
+      const existingSecrets = session ? await listPaperclipSecrets(session, companyId) : [];
+      const keys: string[] = [];
+      const skipped: Record<string, unknown>[] = [];
+      const actions: Record<string, unknown>[] = [];
+      const seenKeys = new Set<string>();
+      let synced = 0;
+
+      for (const it of items) {
+        const id = typeof it.id === "string" ? it.id : "";
+        const name = typeof it.name === "string" ? it.name : "";
+        const key = paperclipSecretKeyForItem(name, companyId);
+        if (!id || !key) {
+          skipped.push({ name, reason: "not_for_company" });
+          continue;
+        }
+        validatePaperclipSecretKey(key);
+        if (seenKeys.has(key)) {
+          skipped.push({ name, key, reason: "duplicate_selected_key" });
+          continue;
+        }
+        seenKeys.add(key);
+        const fullResp = await vaultFetch(`/object/item/${encodeURIComponent(id)}`);
+        if (fullResp.status >= 500) {
+          throw new ApiError(502, "VAULTWARDEN_UNREACHABLE", "vault-cli unreachable");
+        }
+        const full = unwrapVault(fullResp.body);
+        if (typeof full !== "object" || full === null) {
+          skipped.push({ name, key, reason: "bad_vault_item" });
+          continue;
+        }
+        const fullItem = full as Record<string, unknown>;
+        const value = vaultItemPassword(fullItem);
+        if (!value) {
+          skipped.push({ name, key, reason: "missing_login_password" });
+          continue;
+        }
+        const revisionDate = typeof fullItem.revisionDate === "string" ? fullItem.revisionDate : null;
+        keys.push(key);
+        let action: "dry_run" | "created" | "rotated" | "unchanged" = "dry_run";
+        if (!dryRun && session) {
+          action = await upsertPaperclipSecret(session, companyId, existingSecrets, key, value, {
+            itemId: id,
+            itemName: name,
+            revisionDate,
+          });
+        }
+        actions.push({ key, action, vaultwarden_item_id: id, vaultwarden_revision_date: revisionDate });
+        synced += action === "unchanged" ? 0 : 1;
+      }
+
+      sendJson(res, 200, {
+        ok: true,
+        companyId,
+        folder: PAPERCLIP_SECRET_FOLDER,
+        dry_run: dryRun,
+        synced,
+        skipped,
+        keys,
+        actions,
+      });
+    }),
+  );
+
 }
 
 /** Pull a user id out of a Better-Auth sign-up response. Tolerates both the
