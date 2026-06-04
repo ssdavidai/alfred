@@ -33,6 +33,7 @@ process.env.STATE_DB_PATH = path.join(tmp, "alfred-state.db");
 process.env.SQLITE_VEC_PATH = "";
 process.env.DOMAIN = "admintest.alfred.black";
 process.env.PAPERCLIP_INTERNAL_URL = "http://paperclip:3100";
+process.env.VAULT_CLI_URL = "http://vault-cli.test";
 
 const seedCredentialsFile = path.join(tmp, "paperclip-seed-credentials.json");
 process.env.PAPERCLIP_SEED_CREDENTIALS_FILE = seedCredentialsFile;
@@ -76,6 +77,33 @@ type Responder = (c: MockCall) => {
   setCookies?: string[];
 };
 let responder: Responder = () => ({ status: 200, body: {} });
+
+const originalFetch = globalThis.fetch;
+const vaultItems: Record<string, any> = {};
+let vaultFolders: Record<string, any>[] = [];
+let vaultListItems: Record<string, any>[] = [];
+const vaultFetches: { url: string; method: string }[] = [];
+
+globalThis.fetch = (async (input: any, init?: any) => {
+  const url = typeof input === "string" ? input : (input?.url ?? String(input));
+  const method = (init?.method ?? "GET").toUpperCase();
+  if (url.startsWith("http://vault-cli.test")) {
+    vaultFetches.push({ url, method });
+    const u = new URL(url);
+    if (u.pathname === "/list/object/folders") {
+      return new Response(JSON.stringify({ success: true, data: vaultFolders }), { status: 200 });
+    }
+    if (u.pathname === "/list/object/items") {
+      return new Response(JSON.stringify({ success: true, data: vaultListItems }), { status: 200 });
+    }
+    const itemMatch = u.pathname.match(/^\/object\/item\/(.+)$/);
+    if (itemMatch) {
+      const item = vaultItems[decodeURIComponent(itemMatch[1])];
+      return new Response(JSON.stringify({ success: true, data: item ?? null }), { status: item ? 200 : 404 });
+    }
+  }
+  return originalFetch(input, init);
+}) as typeof fetch;
 
 function installMock(r: Responder): void {
   responder = r;
@@ -127,10 +155,15 @@ async function invokeRoute(
 
 beforeEach(() => {
   calls = [];
+  vaultFolders = [];
+  vaultListItems = [];
+  for (const k of Object.keys(vaultItems)) delete vaultItems[k];
+  vaultFetches.length = 0;
   writeSeed();
 });
 after(() => {
   _setPaperclipTransportForTests(null);
+  globalThis.fetch = originalFetch;
 });
 
 describe("paperclip admin — seeding gate", () => {
@@ -640,5 +673,91 @@ describe("paperclip admin — company access grant (#246)", () => {
     );
     assert.equal(r.status, 503);
     assert.deepEqual(r.payload, { error: "paperclip_not_seeded" });
+  });
+
+
+describe("paperclip admin — Vaultwarden secret sync", () => {
+  it("syncs selected Vaultwarden folder items to Paperclip without returning values", async () => {
+    vaultFolders = [{ id: "folder-paperclip", name: "paperclip" }];
+    vaultListItems = [
+      { id: "item1", name: "OPENAI_API_KEY" },
+      { id: "item2", name: "other-company/IGNORED" },
+      { id: "item3", name: "cmp_secret/PAPERCLIP_ONLY" },
+      { id: "item4", name: "NO_PASSWORD" },
+    ];
+    vaultItems.item1 = { id: "item1", name: "OPENAI_API_KEY", revisionDate: "2026-06-04T10:00:00Z", login: { password: "secret-value-one" } };
+    vaultItems.item3 = { id: "item3", name: "cmp_secret/PAPERCLIP_ONLY", revisionDate: "2026-06-04T10:01:00Z", login: { password: "secret-value-two" } };
+    vaultItems.item4 = { id: "item4", name: "NO_PASSWORD", login: { username: "x" } };
+    installMock((c) => {
+      if (c.path === "/api/auth/sign-in/email") return { status: 200, body: {}, setCookies: ["s=1"] };
+      if (c.method === "GET" && c.path === "/api/companies/cmp_secret/secrets") {
+        return { status: 200, body: [] };
+      }
+      if (c.method === "POST" && c.path === "/api/companies/cmp_secret/secrets") {
+        const key = (c.body as Record<string, unknown>).key as string;
+        return { status: 201, body: { id: `sec_${key}`, key, name: key, latestVersion: 1 } };
+      }
+      if (c.method === "PATCH" && c.path.startsWith("/api/secrets/sec_")) {
+        return { status: 200, body: { ok: true } };
+      }
+      return { status: 500, body: { unexpected: c.path } };
+    });
+
+    const r = await invokeRoute(
+      "POST",
+      "/api/v1/paperclip/admin/companies/cmp_secret/secrets/sync",
+      {},
+    );
+
+    if (r.status !== 200) console.error(JSON.stringify(r.payload));
+    assert.equal(r.status, 200);
+    assert.equal(r.payload.synced, 2);
+    assert.deepEqual(r.payload.keys, ["OPENAI_API_KEY", "PAPERCLIP_ONLY"]);
+    const wire = JSON.stringify(r.payload);
+    assert.equal(wire.includes("secret-value-one"), false);
+    assert.equal(wire.includes("secret-value-two"), false);
+
+    const creates = calls.filter((c) => c.method === "POST" && c.path === "/api/companies/cmp_secret/secrets");
+    assert.equal(creates.length, 2);
+    assert.equal((creates[0].body as Record<string, unknown>).key, "OPENAI_API_KEY");
+    assert.equal((creates[0].body as Record<string, unknown>).provider, "local_encrypted");
+    assert.equal((creates[0].body as Record<string, unknown>).managedMode, "paperclip_managed");
+    assert.equal((creates[0].body as Record<string, unknown>).value, "secret-value-one");
+    assert.equal((creates[1].body as Record<string, unknown>).key, "PAPERCLIP_ONLY");
+    assert.equal((creates[1].body as Record<string, unknown>).value, "secret-value-two");
+    const metadataPatches = calls.filter((c) => c.method === "PATCH" && c.path.startsWith("/api/secrets/sec_"));
+    assert.equal(metadataPatches.length, 2);
+    assert.equal(
+      ((metadataPatches[0].body as Record<string, any>).providerMetadata as Record<string, unknown>).source,
+      "vaultwarden",
+    );
+  });
+
+  it("supports dry_run without signing into or writing Paperclip", async () => {
+    vaultFolders = [{ id: "folder-paperclip", name: "paperclip" }];
+    vaultListItems = [{ id: "item1", name: "OPENAI_API_KEY" }];
+    vaultItems.item1 = { id: "item1", login: { password: "secret-value-one" } };
+    installMock(() => ({ status: 500, body: { should_not_call: true } }));
+
+    const r = await invokeRoute(
+      "POST",
+      "/api/v1/paperclip/admin/companies/cmp_secret/secrets/sync",
+      { dry_run: true },
+    );
+
+    assert.equal(r.status, 200);
+    assert.equal(r.payload.synced, 1);
+    assert.equal(r.payload.dry_run, true);
+    assert.equal(calls.length, 0);
+  });
+
+  it("is additive-only and rejects prune=true", async () => {
+    installMock(() => ({ status: 200, body: {} }));
+    const r = await invokeRoute(
+      "POST",
+      "/api/v1/paperclip/admin/companies/cmp_secret/secrets/sync",
+      { prune: true },
+    );
+    assert.equal(r.status, 400);
   });
 });
