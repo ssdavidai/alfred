@@ -63,6 +63,7 @@ describe("resolveProfileContextForChannel — Lane IV", () => {
     const db = freshDb();
     const ctx = resolveProfileContextForChannel(db, "telegram", null);
     assert.equal(ctx.slug, "main");
+    assert.equal(ctx.deployment_shape, "supervised");
     assert.equal(ctx.bound_slug, "main");
     assert.equal(ctx.cascaded, false);
     assert.equal(ctx.api_server_port, 18789);
@@ -96,6 +97,41 @@ describe("resolveProfileContextForChannel — Lane IV", () => {
     assert.equal(ctx.api_server_port, 18794); // first user-facing port
     assert.equal(ctx.api_server_key, "sentinel-secret");
     assert.equal(ctx.journal_scope_key, "sentinel");
+    db.close();
+  });
+
+  it("sibling-container profile carries deployment_shape='sibling'", () => {
+    const db = freshDb();
+    // Sibling-container profiles (e.g. cratchit) are registered out-of-band
+    // by Lane VI's tooling, not via createProfile (which rejects 'sibling').
+    // Insert the registry row directly the way that tooling does.
+    const now = Date.now();
+    db.prepare(
+      `INSERT INTO agent_profile
+         (slug, label, description, model, deployment_shape,
+          api_server_port, persona_template, status,
+          is_user_facing, is_reserved, created_at, updated_at)
+       VALUES (?, ?, NULL, ?, 'sibling', 18792, NULL, 'running', 1, 0, ?, ?)`,
+    ).run("cratchit", "Cratchit", "x-ai/grok-4.3", now, now);
+    bindChannel(db, {
+      channel_kind: "email",
+      channel_identity: "cratchit@example.com",
+      profile_slug: "cratchit",
+    });
+    writeProfileEnv("cratchit", "API_SERVER_KEY=cratchit-secret\n");
+
+    const ctx = resolveProfileContextForChannel(
+      db,
+      "email",
+      "cratchit@example.com",
+    );
+    assert.equal(ctx.slug, "cratchit");
+    // The bug: this MUST be 'sibling' so the channel-route URL builder
+    // targets hermes-cratchit:18792 (its own container) instead of
+    // hermes:18792 (the main container — connection refused).
+    assert.equal(ctx.deployment_shape, "sibling");
+    assert.equal(ctx.api_server_port, 18792);
+    assert.equal(ctx.api_server_key, "cratchit-secret");
     db.close();
   });
 

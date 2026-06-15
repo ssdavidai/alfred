@@ -598,6 +598,12 @@ export function bindChannel(
 export interface ProfileChannelContext {
   /** Final resolved profile slug (after archived-target cascade). */
   slug: string;
+  /** Deployment shape of the resolved profile. 'supervised' profiles run as
+   *  gateway processes inside the ONE main `hermes` container (addressed via
+   *  HERMES_HOST, port-varied); 'sibling' profiles run in their own container
+   *  reachable at the `hermes-<slug>` network alias. The channel-route URL
+   *  builders branch on this — see hermesBaseUrlFor in the channel routes. */
+  deployment_shape: DeploymentShape;
   /** The profile slug the binding pointed at BEFORE the archived cascade.
    *  Equal to `slug` on the happy path. Useful for diagnostics. */
   bound_slug: string;
@@ -674,12 +680,16 @@ export function resolveProfileContextForChannel(
   // really "should never happen"), surface a synthetic 18789-on-main shape
   // so the caller can fail honestly downstream rather than crashing here.
   const port = row?.api_server_port ?? 18789;
+  // 'main' (and the other 18789..18793 infra rows) are always supervised; if
+  // the row is missing we synthesize a supervised/main shape downstream.
+  const shape: DeploymentShape = row?.deployment_shape ?? "supervised";
   const baseDir = HERMES_PROFILE_BASE_DIR();
   const profileDir = `${baseDir}/${slug}`;
   const apiKey = readHermesProfileApiKey(profileDir);
 
   return {
     slug,
+    deployment_shape: shape,
     bound_slug: boundSlug,
     cascaded,
     api_server_port: port,

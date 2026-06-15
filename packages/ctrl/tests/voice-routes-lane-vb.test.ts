@@ -140,6 +140,7 @@ mock.module("../src/db/agentProfiles.js", {
       identity: any,
     ) => ({
       slug: "main",
+      deployment_shape: "supervised",
       bound_slug: "main",
       cascaded: false,
       api_server_port: 18789,

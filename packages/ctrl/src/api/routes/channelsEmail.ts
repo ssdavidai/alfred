@@ -152,7 +152,14 @@ function gatewayTokenFor(ctx: ProfileChannelContext): string {
 }
 
 function hermesBaseUrlFor(ctx: ProfileChannelContext): string {
-  return `${HERMES_PROTOCOL}//${HERMES_HOST}:${ctx.api_server_port}`;
+  // 'sibling' profiles run in their OWN container (e.g. cratchit at the
+  // `hermes-cratchit` network alias), NOT inside the main `hermes` container.
+  // Addressing them at HERMES_HOST would only vary the port and POST to the
+  // wrong container (connection refused — the run is silently dropped by the
+  // fire-and-forget .catch). Supervised/core profiles stay on HERMES_HOST.
+  const host =
+    ctx.deployment_shape === "sibling" ? `hermes-${ctx.slug}` : HERMES_HOST;
+  return `${HERMES_PROTOCOL}//${host}:${ctx.api_server_port}`;
 }
 
 /**

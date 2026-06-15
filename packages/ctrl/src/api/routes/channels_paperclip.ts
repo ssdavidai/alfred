@@ -340,9 +340,16 @@ function resolvePaperclipContext(
   );
 }
 
-/** Build the Hermes /v1 base URL for a resolved profile. */
+/** Build the Hermes /v1 base URL for a resolved profile.
+ *
+ * 'sibling' profiles run in their OWN container (e.g. cratchit at the
+ * `hermes-cratchit` network alias), NOT inside the main `hermes` container,
+ * so addressing them at HERMES_HOST would POST to the wrong container.
+ * Supervised/core profiles keep HERMES_HOST (port-varied). */
 function hermesBaseUrlFor(ctx: ProfileChannelContext): string {
-  return `${HERMES_PROTOCOL}//${HERMES_HOST}:${ctx.api_server_port}`;
+  const host =
+    ctx.deployment_shape === "sibling" ? `hermes-${ctx.slug}` : HERMES_HOST;
+  return `${HERMES_PROTOCOL}//${host}:${ctx.api_server_port}`;
 }
 
 async function callHermes(
