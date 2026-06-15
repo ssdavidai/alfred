@@ -181,7 +181,12 @@ const httpServer = http.createServer((req, res) => {
   // Twilio "A CALL COMES IN" webhook — returns TwiML pointing at the
   // WSS endpoint below. See twiml.ts for the full handler + the security
   // model (X-Twilio-Signature verification, fail-soft when token unset).
-  if (req.url === TWIML_INBOUND_PATH) {
+  // Match on pathname only — Twilio's VoiceUrl carries a `?profile=<slug>`
+  // query string (per-profile voice routing), which `handleTwimlInbound`
+  // reads via `searchParams.get("profile")`. Comparing the full `req.url`
+  // (incl. query) against the bare path would 404 every profile-scoped call
+  // before it reached the handler. Mirrors the `/voice/<id>` WSS route below.
+  if (new URL(req.url ?? "/", "http://localhost").pathname === TWIML_INBOUND_PATH) {
     handleTwimlInbound(req, res).catch((err) => {
       console.error("[twiml] handler error", err);
       bumpMetric("errors");
