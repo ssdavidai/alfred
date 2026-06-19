@@ -24,9 +24,27 @@
 
 name: alfred-black
 
+# ── Log rotation (fleet-wide) ───────────────────────────────────────────────
+# Docker's default json-file log driver has NO size cap, so a chatty container
+# (e.g. the Hermes gateway in a stuck background-agent loop) can grow its
+# `*-json.log` without bound until it fills the host disk. Live evidence
+# (2026-06-19): per-container json.log of 19 G (rami), 5.4 G (rj), 3.4 G (joe),
+# 7.2 G (miguel). This anchor caps every service at 5 files × 50 MB = 250 MB
+# max per container and is attached to each service below via
+# `logging: *default-logging`. It is the per-service equivalent of a host
+# /etc/docker/daemon.json default — but it ships through the existing
+# deploy-compose.yml sync, so it reaches every tenant the same way an image
+# change does (no out-of-band per-host edit required).
+x-default-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "50m"
+    max-file: "5"
+
 services:
   # ── Caddy — public ingress + automatic Let's Encrypt TLS ────────────
   caddy:
+    logging: *default-logging
     image: caddy:2-alpine
     restart: unless-stopped
     depends_on:
@@ -75,6 +93,7 @@ services:
 
   # ── web-db — Postgres for the Wasp web app (auth, ApiKey, OAuth) ────
   web-db:
+    logging: *default-logging
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
@@ -96,6 +115,7 @@ services:
   # ── web — the Wasp dashboard (SPA + API server) ─────────────────────
   # Wasp runs `prisma migrate deploy` against web-db on container start.
   web:
+    logging: *default-logging
     image: ssdavidai00/alfred-web:latest
     restart: unless-stopped
     depends_on:
@@ -136,6 +156,7 @@ services:
   # image serves the static bundle with SPA history-fallback. Caddy routes
   # the apex domain here and api.<domain> to the `web` server.
   web-client:
+    logging: *default-logging
     image: ssdavidai00/alfred-web-client:latest
     restart: unless-stopped
     depends_on:
@@ -159,6 +180,7 @@ services:
   # profile configs, writes /alfred-data/.gateway-token. Every long-running
   # service that needs a scaffolded vault/config gates on this completing.
   init:
+    logging: *default-logging
     image: ssdavidai00/alfred-init:latest
     restart: "no"
     volumes:
@@ -217,6 +239,7 @@ services:
 
   # ── temporal — workflow engine for alfred-learn ─────────────────────
   temporal:
+    logging: *default-logging
     # blobSize / historySize bumps from defaults (2MB warn / 4MB error blob,
     # 50MB / 50K events history) up to 16MB / 8MB blob and 200MB / 100K
     # history — driven by composio_pull returning full-HTML Gmail bodies
@@ -271,6 +294,7 @@ services:
 
   # ── ollama — local embedding server (nomic-embed-text) ──────────────
   ollama:
+    logging: *default-logging
     image: ollama/ollama:latest
     entrypoint: ["/bin/sh", "-c"]
     command:
@@ -305,6 +329,7 @@ services:
   # hermes-shim compat layer was retired in issue #40 — callers speak the
   # Hermes /v1 API directly.
   hermes:
+    logging: *default-logging
     image: ssdavidai00/alfred-black-hermes:latest
     # Gateway ports bind 0.0.0.0 inside the container on the four reserved
     # ports (18789/18790/18791/18793) PLUS any registry-allocated user-facing
@@ -465,6 +490,7 @@ services:
 
   # ── alfred — the vault daemon (curator / janitor / distiller / surveyor) ─
   alfred:
+    logging: *default-logging
     image: ssdavidai00/alfred-worker:latest
     depends_on:
       hermes:
@@ -518,6 +544,7 @@ services:
 
   # ── ctrl-api — the dashboard backend / tenant API (:3100) ───────────
   ctrl-api:
+    logging: *default-logging
     image: ssdavidai00/alfred-ctrl-api:latest
     depends_on:
       init:
@@ -633,6 +660,7 @@ services:
 
   # ── alfred-learn — the Temporal intelligence worker ─────────────────
   alfred-learn:
+    logging: *default-logging
     image: ssdavidai00/alfred-learn:latest
     # Run as uid 1000 to match the bind-mount ownership convention.
     user: "1000:1000"
@@ -726,6 +754,7 @@ services:
   # phase landed. /api/v1/channels/voice/status (ctrl-api) exposes
   # deploy-readiness to the UI's PhoneCard Voice section.
   voice-bridge:
+    logging: *default-logging
     image: ssdavidai00/alfred-voice-bridge:latest
     restart: unless-stopped
     depends_on:
@@ -837,6 +866,7 @@ services:
 
   # ── mcp-server — MCP HTTP server for Claude Custom Connectors (:8787) ─
   mcp-server:
+    logging: *default-logging
     image: ssdavidai00/alfred-mcp-server:latest
     restart: unless-stopped
     depends_on:
@@ -857,6 +887,7 @@ services:
 
   # ── vaultwarden — the user-facing secrets manager ───────────────────
   vaultwarden:
+    logging: *default-logging
     image: vaultwarden/server:latest
     restart: unless-stopped
     environment:
@@ -897,6 +928,7 @@ services:
   # Runs the Bitwarden registration crypto (bootstrap-signup.mjs, baked
   # into the image) so vault-cli has an account to `bw login` with.
   vault-signup:
+    logging: *default-logging
     image: ssdavidai00/alfred-vault-init:latest
     restart: "no"
     depends_on:
@@ -934,6 +966,7 @@ services:
   # Holds an unlocked bw session; ctrl-api proxies the Vaultwarden MCP
   # tool calls here over http://vault-cli:8087.
   vault-cli:
+    logging: *default-logging
     image: ssdavidai00/alfred-vault-init:latest
     restart: unless-stopped
     env_file:
@@ -959,6 +992,7 @@ services:
 
   # ── Plane — self-hosted project management ──────────────────────────
   plane-db:
+    logging: *default-logging
     image: postgres:15.7-alpine
     restart: unless-stopped
     environment:
@@ -978,6 +1012,7 @@ services:
     pids_limit: 512
 
   plane-redis:
+    logging: *default-logging
     image: valkey/valkey:7.2.11-alpine
     restart: unless-stopped
     command: ["valkey-server", "--requirepass", "${REDIS_PASSWORD}", "--appendonly", "yes"]
@@ -993,6 +1028,7 @@ services:
     pids_limit: 512
 
   plane-mq:
+    logging: *default-logging
     image: rabbitmq:3.13-management-alpine
     restart: unless-stopped
     environment:
@@ -1011,6 +1047,7 @@ services:
     pids_limit: 512
 
   plane-minio:
+    logging: *default-logging
     image: minio/minio:latest
     restart: unless-stopped
     command: ["server", "/export", "--console-address", ":9090"]
@@ -1031,6 +1068,7 @@ services:
   # One-shot migrator — Plane factors migrations into a dedicated service
   # so the api/worker/beat don't deadlock racing to migrate on boot (#555).
   plane-migrator:
+    logging: *default-logging
     image: makeplane/plane-backend:stable
     restart: "no"
     depends_on:
@@ -1058,6 +1096,7 @@ services:
     pids_limit: 512
 
   plane-api:
+    logging: *default-logging
     image: makeplane/plane-backend:stable
     restart: unless-stopped
     depends_on:
@@ -1117,6 +1156,7 @@ services:
     pids_limit: 512
 
   plane-worker:
+    logging: *default-logging
     image: makeplane/plane-backend:stable
     restart: unless-stopped
     depends_on:
@@ -1152,6 +1192,7 @@ services:
     pids_limit: 512
 
   plane-beat:
+    logging: *default-logging
     image: makeplane/plane-backend:stable
     restart: unless-stopped
     depends_on:
@@ -1180,6 +1221,7 @@ services:
     pids_limit: 512
 
   plane-web:
+    logging: *default-logging
     # plane-frontend:stable is nginx serving a static Next.js export on
     # :3000 (the image's own nginx.conf — do not override CMD).
     image: makeplane/plane-frontend:stable
@@ -1204,6 +1246,7 @@ services:
     pids_limit: 512
 
   plane-space:
+    logging: *default-logging
     # plane-space:stable runs react-router-serve on :3000 — don't override CMD.
     image: makeplane/plane-space:stable
     restart: unless-stopped
@@ -1221,6 +1264,7 @@ services:
     pids_limit: 512
 
   plane-admin:
+    logging: *default-logging
     # plane-admin:stable is nginx on :80, same pattern as plane-web.
     image: makeplane/plane-admin:stable
     restart: unless-stopped
@@ -1238,6 +1282,7 @@ services:
     pids_limit: 512
 
   plane-live:
+    logging: *default-logging
     image: makeplane/plane-live:stable
     restart: unless-stopped
     depends_on:
@@ -1256,6 +1301,7 @@ services:
     pids_limit: 512
 
   plane-proxy:
+    logging: *default-logging
     image: makeplane/plane-proxy:stable
     restart: unless-stopped
     depends_on:
@@ -1286,6 +1332,7 @@ services:
 
   # ── Sure — self-hosted personal finance ─────────────────────────────
   sure-db:
+    logging: *default-logging
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
@@ -1305,6 +1352,7 @@ services:
     pids_limit: 512
 
   sure-redis:
+    logging: *default-logging
     image: valkey/valkey:7.2.11-alpine
     restart: unless-stopped
     command: ["valkey-server", "--requirepass", "${SURE_REDIS_PASSWORD}", "--appendonly", "yes"]
@@ -1320,6 +1368,7 @@ services:
     pids_limit: 512
 
   sure-web:
+    logging: *default-logging
     image: ghcr.io/we-promise/sure:stable
     restart: unless-stopped
     depends_on:
@@ -1355,6 +1404,7 @@ services:
     pids_limit: 512
 
   sure-worker:
+    logging: *default-logging
     image: ghcr.io/we-promise/sure:stable
     restart: unless-stopped
     depends_on:
@@ -1385,6 +1435,7 @@ services:
   # sign-up is CSRF-guarded). Idempotent. Uses plane-backend image so
   # Django settings live on PYTHONPATH for free.
   plane-init:
+    logging: *default-logging
     image: makeplane/plane-backend:stable
     restart: "no"
     depends_on:
@@ -1435,6 +1486,7 @@ services:
   # One-shot bootstrap. Reuses the sure-web image; idempotent — bootstrap.rb
   # short-circuits if /alfred-data/.sure-api-key already exists.
   sure-init:
+    logging: *default-logging
     image: ghcr.io/we-promise/sure:stable
     restart: "no"
     depends_on:
@@ -1477,6 +1529,7 @@ services:
   # 2026-05-26). If a future Paperclip release ships /api/health, switch
   # to `curl -fsS http://127.0.0.1:3100/api/health` for a tighter signal.
   paperclip:
+    logging: *default-logging
     # alfred-black-paperclip: upstream ghcr.io/paperclipai/paperclip image
     # overlaid with our patched hermes-paperclip-adapter (HTTP-mode execute()
     # against the tenant's local hermes container at :18789). See
@@ -1544,6 +1597,7 @@ services:
   # Idempotent: re-runs are a no-op once the invite file + paperclip's
   # config.json are both present.
   paperclip-init:
+    logging: *default-logging
     image: ssdavidai00/alfred-init:latest
     restart: "no"
     depends_on:
@@ -1616,6 +1670,7 @@ services:
   # logout / down` via `docker exec`; PR 3 the /connections card; PR 4
   # `tailscale cert` + `tailscale serve` for inbound from the tailnet.
   tailscale:
+    logging: *default-logging
     image: tailscale/tailscale:stable
     profiles: ["tailscale"]
     hostname: "${TAILSCALE_HOSTNAME_PREFIX:-${DOMAIN}}"
