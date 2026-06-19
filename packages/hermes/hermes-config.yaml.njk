@@ -174,7 +174,41 @@ cron:
       schedule: "13 3 * * *"
       command: "find /work/runs -maxdepth 1 -mindepth 1 -type d -mtime +7 -exec rm -rf {} +"
 {%- else %}
-# Workers profile: no cron consumers — cron is left at Hermes defaults.
+# Background profiles (workers / heavy) — disk-bloat GC.
+#
+# These profiles run high-volume autonomous agents (clerk / curator / janitor
+# / distiller on workers; onboarding / chore reasoning on heavy). Every run
+# writes a `sessions/session_*.json` transcript (and, when a tool errors with
+# debug dumps on, a `sessions/request_dump_*.json`), and appends to the
+# profile's `state.db`. Nothing prunes either, so they grow without bound.
+#
+# Live evidence (2026-06-19): zsolt.alfred.black workers state.db = 111 G and
+# sessions/ = 140 G across 312,875 files filled the disk to 100% and took the
+# whole tenant down. joe state.db 52 G, rj 59 G, rami sessions 37 G/92 k files,
+# home sessions 19 G/54 k files — the bloat is fleet-wide.
+#
+# Two jobs, both nightly, both off-peak:
+#   * prune-old-sessions — delete session_* and request_dump_* files older than
+#     7 days. Worker sessions are one-shot (session_reset idle 30m) so a file
+#     older than a day is already dead; 7 days keeps a forensic window.
+#   * vacuum-state-db — reclaim free pages the prune leaves behind. SQLite does
+#     not shrink the file on DELETE; VACUUM rewrites it compactly. Uses python3
+#     (always present in the image) rather than the sqlite3 CLI (not installed).
+#
+# wrap_response: false — no channel consumer; these run silently.
+#
+# NOTE: this block is also backfilled onto already-seeded tenants by the
+# idempotent converger init/render_workers_pruning.py (config.yaml is
+# operator-owned and only seeded once — see render_mcp_servers.py docstring).
+cron:
+  wrap_response: false
+  jobs:
+    - name: prune-old-sessions
+      schedule: "23 3 * * *"
+      command: "find {{ runtime_profile_dir }}/sessions -maxdepth 1 -type f \\( -name 'session_*.json' -o -name 'request_dump_*.json' \\) -mtime +7 -delete"
+    - name: vacuum-state-db
+      schedule: "43 3 * * *"
+      command: "python3 -c \"import sqlite3,os; p='{{ runtime_profile_dir }}/state.db'; (sqlite3.connect(p).execute('VACUUM').connection.close()) if os.path.exists(p) else None\""
 {%- endif %}
 
 # =============================================================================

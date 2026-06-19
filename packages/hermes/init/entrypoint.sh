@@ -605,6 +605,19 @@ for profile in "${PROFILES_RENDERED[@]}"; do
         PROFILE_DIR="$INIT_PROFILE_DIR" \
             python3 /setup/migrate_main_profile_tool_trim.py "$profile" \
             || echo "[init] WARN: migrate_main_profile_tool_trim.py failed for $profile (non-fatal)"
+
+        # --- 6a-ter. Background-profile disk-bloat GC cron (workers/heavy) ---
+        # config.yaml is operator-owned and only seeded once, so the GC cron
+        # block added to hermes-config.yaml.njk for the background profiles
+        # never reaches an already-seeded tenant. render_workers_pruning.py is
+        # an idempotent ADD-only mutator that backfills the prune-old-sessions
+        # + vacuum-state-db jobs (preserving any operator-tuned job). No-op on
+        # main / codex-builder. Motivated by the 2026-06-19 zsolt disk
+        # exhaustion (workers state.db 111G + sessions 140G).
+        PROFILE_DIR="$INIT_PROFILE_DIR" \
+        HERMES_RUNTIME_PROFILE_DIR="$RUNTIME_PROFILE_DIR" \
+            python3 /setup/render_workers_pruning.py "$profile" \
+            || echo "[init] WARN: render_workers_pruning.py failed for $profile (non-fatal)"
     fi
 done
 

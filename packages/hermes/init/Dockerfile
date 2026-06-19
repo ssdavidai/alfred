@@ -95,6 +95,13 @@ COPY packages/hermes/init/render_mcp_servers.py ./render_mcp_servers.py
 # inlining 321 MCP tool schemas (~67k input tokens per turn). Workers/
 # heavy/codex-builder are unaffected (no-op). Sibling of render_mcp_servers.
 COPY packages/hermes/init/migrate_main_profile_tool_trim.py ./migrate_main_profile_tool_trim.py
+# render_workers_pruning.py — idempotent ADD-only mutator that backfills the
+# disk-bloat GC cron (prune-old-sessions + vacuum-state-db) onto the
+# background profiles' (workers/heavy) operator-owned config.yaml. Motivated
+# by the 2026-06-19 zsolt disk exhaustion (workers state.db 111G + sessions/
+# 140G across 312,875 files). No-op on main/codex-builder. Sibling of
+# render_mcp_servers.
+COPY packages/hermes/init/render_workers_pruning.py ./render_workers_pruning.py
 # Paperclip auto-bootstrap. Invoked as the entrypoint of the sibling
 # `paperclip-init` compose service (see docker-compose.yaml). Not run by
 # this image's default entrypoint.sh — keeps the main init container
