@@ -234,10 +234,22 @@ Channels via Hermes' native adapters. Background work uses the **workers**
 gateway; `notify_principal` bridges ephemeral agents → main message tool.
 
 **Failure modes**
-- **☣ [S1] Session store growth / leak.** OpenClaw's per-agent `.jsonl` leak
-  CPU-pegged the box (10k+ files, memory). Hermes' SQLite SessionStore *should*
-  make that structurally impossible — **must be verified under load**, not
-  assumed.
+- **☣ [S1] Session store growth / leak. ⟵ REALIZED 2026-06-19.** OpenClaw's
+  per-agent `.jsonl` leak CPU-pegged the box (10k+ files, memory). Hermes' SQLite
+  SessionStore *should* make that structurally impossible — but the **workers**
+  profile does NOT use the SQLite SessionStore for transcripts: it writes one
+  `sessions/session_*.json` (+ `request_dump_*.json` on tool error) file per run
+  AND an unbounded `state.db`, and nothing pruned either. The exact "verify under
+  load" failure landed: `zsolt.alfred.black` hit 100% disk (workers state.db
+  111G, sessions/ 140G across 312,875 files) and took the whole tenant down
+  (docker exec failed → all healthchecks unhealthy → sure-web 500). Fleet-wide:
+  joe state.db 52G, rj 59G, rami sessions 37G/92k files, home 19G/54k files.
+  Compounded by (a) no Docker log rotation (a 19G `*-json.log` on rami) and (b) a
+  cross-session curator retry loop the per-run `tool_loop_guardrails` can't stop.
+  **Fixes:** nightly `prune-old-sessions` + `vacuum-state-db` cron on the
+  background profiles (template + idempotent `render_workers_pruning.py`
+  backfill) and an `x-default-logging` cap in compose; cleanup runbook +
+  upstream loop follow-up at `debug/2026-06-19/workers-disk-bloat-runbook.md`.
 - **☣ [S2] Memory parity gap.** Recall depends on the surveyor embedding the
   vault into sqlite-vec; if the embedder lags or the vector store drifts, Alfred
   "forgets" recent context and answers thinly.
