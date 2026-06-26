@@ -65,21 +65,34 @@ jobs:
           export PATH="$HOME/.local/bin:$PATH"
           wasp build
 
-      - name: Generate Prisma baseline migration
-        # The repo ships no migration files (the multi-tenant SaaS history
-        # was dropped). Generate a baseline `0_init` from the Wasp-expanded
-        # schema so the web container's `prisma migrate deploy` creates the
-        # full schema on a fresh database.
-        working-directory: packages/web/.wasp/build/db
+      - name: Stage Prisma baseline migration
+        # The web container runs `prisma migrate deploy` against the committed
+        # migrations on boot. On an EXISTING tenant, a regenerated baseline
+        # whose checksum drifts from the one recorded in `_prisma_migrations`
+        # aborts the deploy and the web container never starts (finding B4).
+        #
+        # So: if a baseline `0_init` is committed under packages/web/migrations/,
+        # use it VERBATIM (stable checksum). Only generate one from the
+        # Wasp-expanded schema when none is committed (fresh-repo bootstrap).
+        working-directory: packages/web
         run: |
-          mkdir -p migrations/0_init
-          npx -y prisma@5.19.1 migrate diff \
-            --from-empty \
-            --to-schema-datamodel schema.prisma \
-            --script > migrations/0_init/migration.sql
-          printf 'provider = "postgresql"\n' > migrations/migration_lock.toml
-          echo "baseline migration: $(wc -l < migrations/0_init/migration.sql) lines"
-          head -3 migrations/0_init/migration.sql
+          BUILD_DB="$GITHUB_WORKSPACE/packages/web/.wasp/build/db"
+          if [ -f migrations/0_init/migration.sql ]; then
+            echo "Using committed baseline migration (stable checksum)."
+            mkdir -p "$BUILD_DB/migrations/0_init"
+            cp migrations/0_init/migration.sql "$BUILD_DB/migrations/0_init/migration.sql"
+            cp migrations/migration_lock.toml "$BUILD_DB/migrations/migration_lock.toml"
+          else
+            echo "No committed baseline — generating one from the Wasp-expanded schema."
+            mkdir -p "$BUILD_DB/migrations/0_init"
+            npx -y prisma@5.19.1 migrate diff \
+              --from-empty \
+              --to-schema-datamodel "$BUILD_DB/schema.prisma" \
+              --script > "$BUILD_DB/migrations/0_init/migration.sql"
+            printf 'provider = "postgresql"\n' > "$BUILD_DB/migrations/migration_lock.toml"
+          fi
+          echo "baseline migration: $(wc -l < "$BUILD_DB/migrations/0_init/migration.sql") lines"
+          head -3 "$BUILD_DB/migrations/0_init/migration.sql"
 
       - name: Build the Wasp SPA client
         # The Wasp client is an npm-workspace project — building it inside a
