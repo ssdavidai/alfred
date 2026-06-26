@@ -82,6 +82,12 @@ def _run_distiller(raw: dict[str, Any], skills_dir: str, suppress_stdout: bool =
 
 _MISSING_DEPS_EXIT = 78  # exit code signaling missing optional dependencies
 
+# A child that has run stably for at least this many seconds since its last
+# (re)start has its lifetime restart budget reset to 0 — the 5-restart cap is
+# meant to catch rapid crash loops, not transient restarts spaced hours/days
+# apart (which would otherwise silently accumulate to the cap over weeks).
+_STABLE_RUNTIME_RESET_SECONDS = 300
+
 
 def _run_surveyor(raw: dict[str, Any], suppress_stdout: bool = False) -> None:
     """Surveyor daemon process entry point."""
@@ -204,6 +210,9 @@ def run_all(
 
     processes: dict[str, multiprocessing.Process] = {}
     restart_counts: dict[str, int] = {}
+    # Monotonic timestamp of each child's last (re)start, used to decay the
+    # lifetime restart budget once a child has run stably (see restart loop).
+    last_start: dict[str, float] = {}
     # Permanently-dropped workers (exceeded restart limit / missing deps).
     # Kept here so they remain visible in workers.json after removal from `tools`.
     dropped: dict[str, dict[str, Any]] = {}
@@ -228,6 +237,7 @@ def run_all(
             time.sleep(10)
         processes[tool] = start_process(tool)
         restart_counts[tool] = 0
+        last_start[tool] = time.monotonic()
 
     # Sentinel file path — ``alfred down`` creates this to signal shutdown
     sentinel_path = pid_path.parent / "alfred.stop" if pid_path else None
@@ -311,10 +321,16 @@ def run_all(
                             tools = [t for t in tools if t != tool]
                             _write_workers_json()  # durable marker, don't wait for the tick
                             continue
+                        # Decay the lifetime budget: a child that ran stably
+                        # since its last (re)start isn't in a crash loop, so
+                        # reset the counter and only count this fresh failure.
+                        if time.monotonic() - last_start.get(tool, 0.0) >= _STABLE_RUNTIME_RESET_SECONDS:
+                            restart_counts[tool] = 0
                         restart_counts[tool] += 1
                         if restart_counts[tool] <= 5:
                             print(f"  [{tool}] exited ({exit_code}), restarting ({restart_counts[tool]}/5)...")
                             processes[tool] = start_process(tool)
+                            last_start[tool] = time.monotonic()
                         else:
                             print(f"  [{tool}] exceeded restart limit, giving up")
                             dropped[tool] = {
