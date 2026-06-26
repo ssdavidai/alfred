@@ -82,6 +82,7 @@ def _mock_client() -> tuple[MagicMock, MagicMock]:
     handle = MagicMock()
     handle.describe = AsyncMock()
     handle.delete = AsyncMock()
+    handle.update = AsyncMock()
     client.get_schedule_handle = MagicMock(return_value=handle)
     return client, handle
 
@@ -114,12 +115,12 @@ class TestRegisterPlaneSyncEnabled:
         # Workflow reads its own env — no args.
         assert list(action.args) == []
 
-        # Spec: single 15s interval
+        # Spec: single 15-minute interval
         spec = schedule.spec
         assert len(spec.intervals) == 1
         interval = spec.intervals[0]
         assert isinstance(interval, ScheduleIntervalSpec)
-        assert interval.every == timedelta(seconds=15)
+        assert interval.every == timedelta(minutes=15)
         assert not spec.calendars
 
         # Policy: SKIP overlap
@@ -127,16 +128,18 @@ class TestRegisterPlaneSyncEnabled:
         assert isinstance(policy, SchedulePolicy)
         assert policy.overlap == ScheduleOverlapPolicy.SKIP
 
-    def test_already_exists_is_tolerated(self):
-        client, _handle = _mock_client()
+    def test_already_exists_reconciles_interval(self):
+        client, handle = _mock_client()
         client.create_schedule.side_effect = _rpc_error(
             RPCStatusCode.ALREADY_EXISTS
         )
 
-        # Must not raise — idempotent.
+        # Must not raise — on ALREADY_EXISTS it reconciles the interval
+        # in place (so existing tenants pick up the new 15-min cadence).
         asyncio.run(register_plane_sync(client, "alfred-learn"))
 
         client.create_schedule.assert_awaited_once()
+        handle.update.assert_awaited_once()
 
     def test_already_exists_string_match_tolerated(self):
         """Non-RPCError paths (e.g. wrapper exceptions) still match by substring."""
@@ -253,7 +256,7 @@ class TestRegisterPlaneReverseSyncEnabled:
     def enable_flag(self, monkeypatch):
         monkeypatch.setenv("PLANE_SYNC_ENABLED", "true")
 
-    def test_creates_schedule_with_10s_interval_and_skip_overlap(self):
+    def test_creates_schedule_with_15min_interval_and_skip_overlap(self):
         client, _handle = _mock_client()
 
         asyncio.run(register_plane_reverse_sync(client, "alfred-learn"))
@@ -271,20 +274,21 @@ class TestRegisterPlaneReverseSyncEnabled:
 
         spec = schedule.spec
         assert len(spec.intervals) == 1
-        assert spec.intervals[0].every == timedelta(seconds=10)
+        assert spec.intervals[0].every == timedelta(minutes=15)
         assert not spec.calendars
 
         policy = schedule.policy
         assert isinstance(policy, SchedulePolicy)
         assert policy.overlap == ScheduleOverlapPolicy.SKIP
 
-    def test_already_exists_is_tolerated(self):
-        client, _handle = _mock_client()
+    def test_already_exists_reconciles_interval(self):
+        client, handle = _mock_client()
         client.create_schedule.side_effect = _rpc_error(
             RPCStatusCode.ALREADY_EXISTS
         )
         asyncio.run(register_plane_reverse_sync(client, "alfred-learn"))
         client.create_schedule.assert_awaited_once()
+        handle.update.assert_awaited_once()
 
     def test_real_temporal_error_propagates(self):
         client, _handle = _mock_client()

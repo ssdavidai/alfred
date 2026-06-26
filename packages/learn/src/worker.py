@@ -15,7 +15,6 @@ from src.workflows.event_processor import EventProcessorWorkflow
 from src.workflows.session_tracker import SessionTrackerWorkflow
 from src.workflows.learning import LearningWorkflow
 from src.workflows.reflection import ReflectionWorkflow
-from src.workflows.judgment import JudgmentWorkflow
 from src.workflows.media_ingestion import MediaIngestionWorkflow
 from src.workflows.task_runner import TaskRunnerWorkflow
 from src.workflows.stream_puller import StreamPullerWorkflow, StreamSweepWorkflow
@@ -50,8 +49,6 @@ from src.workflows.defer_resurface import DeferResurfaceWorkflow
 from src.workflows.task_closure import TaskClosureWatcherWorkflow
 from src.workflows.scheduled_dispatch import ScheduledDispatchWorkflow
 from src.workflows.decay_watcher import DecayWatcherWorkflow
-from src.workflows.meeting_capture import MeetingCaptureWorkflow
-from src.workflows.transcript_intake import TranscriptIntakeWorkflow
 from src.workflows.signals import SignalExtractWorkflow
 from src.workflows.signal_router import (
     SignalRouterWorkflow,
@@ -226,7 +223,7 @@ from src.activities.session import (
 )
 
 # Activities — notify
-from src.activities.notify import notify_digest_ready, notify_eod_prompt, escalate_to_user
+from src.activities.notify import notify_digest_ready, notify_eod_prompt
 
 # Activities — observe
 from src.activities.observe import (
@@ -243,13 +240,6 @@ from src.activities.observe import (
 from src.activities.reflect import validate_proposals
 
 # Activities — judge
-from src.activities.judge import (
-    attempt_judgment,
-    execute_route,
-    fetch_unrouted_inputs,
-    load_intuition_index,
-    score_instincts,
-)
 
 # Activities — onboarding v2
 from src.activities.onboarding import (
@@ -505,20 +495,6 @@ from src.activities.state_mutator import (
 # by name. See ``docs/STATE-MUTATION.md`` §6.1+§6.2.
 import src.activities.archival_sweep  # noqa: F401 — register archival_sweep.cold
 
-# Steward Phase 4 (#840) — Vexa transcript intake. Activities back the
-# MeetingCaptureWorkflow + TranscriptIntakeWorkflow. NO direct Plane
-# writes from these — every action becomes a Steward signal of kind
-# ``transcript:action_candidate`` for Phase 3's apply_state_change to
-# consume on the relevant matter's next tick.
-from src.activities.transcript import (
-    apply_transcript_action,
-    extract_actions_from_transcript,
-    find_upcoming_meet_events,
-    list_unprocessed_transcript_events,
-    mark_transcript_event_processed,
-    vexa_get_transcript,
-    vexa_join_meeting,
-)
 
 # Steward Phase 6 (RFC #842 / T6.0.5) — signal extraction. Activities
 # back the SignalExtractWorkflow which runs every 5 minutes (registered
@@ -727,7 +703,6 @@ _STATIC_WORKFLOWS = [
     SessionTrackerWorkflow,
     LearningWorkflow,
     ReflectionWorkflow,
-    JudgmentWorkflow,
     MediaIngestionWorkflow,
     TaskRunnerWorkflow,
     # StreamPullerWorkflow kept registered as a tombstone (#53): no
@@ -760,8 +735,6 @@ _STATIC_WORKFLOWS = [
     TaskClosureWatcherWorkflow,
     ScheduledDispatchWorkflow,
     DecayWatcherWorkflow,
-    MeetingCaptureWorkflow,
-    TranscriptIntakeWorkflow,
     SignalExtractWorkflow,
     SignalRouterWorkflow,
     StreamEventPurgeWorkflow,
@@ -863,7 +836,6 @@ ALL_ACTIVITIES = [
     # Notify
     notify_digest_ready,
     notify_eod_prompt,
-    escalate_to_user,
     # Observe
     clear_observation_queue,
     execute_alfred_instructions,
@@ -874,12 +846,6 @@ ALL_ACTIVITIES = [
     validate_observation,
     # Reflect
     validate_proposals,
-    # Judge
-    attempt_judgment,
-    execute_route,
-    fetch_unrouted_inputs,
-    load_intuition_index,
-    score_instincts,
     # Tasks
     assemble_task_context,
     check_task_prerequisites,
@@ -1073,14 +1039,6 @@ ALL_ACTIVITIES = [
     apply_state_change_v2,
     state_mutator_read_target,
     state_mutator_gather_observed,
-    # Steward Phase 4 (#840) — Vexa transcript intake activities.
-    find_upcoming_meet_events,
-    vexa_join_meeting,
-    vexa_get_transcript,
-    extract_actions_from_transcript,
-    apply_transcript_action,
-    list_unprocessed_transcript_events,
-    mark_transcript_event_processed,
     # Steward Phase 6 (RFC #842 / T6.0.5) — signal extraction. The
     # SignalExtractWorkflow drives these; the schedule that triggers
     # the workflow is gated on STEWARD_SIGNAL_EXTRACT_ENABLED at

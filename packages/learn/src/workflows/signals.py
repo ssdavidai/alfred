@@ -1,6 +1,6 @@
 """SignalExtractWorkflow — stream events → signal records (T6.0.5).
 
-Schedule: every 5 minutes (registered in ``scripts/register_schedules.py``
+Schedule: every 10 minutes (registered in ``scripts/register_schedules.py``
 as ``al-signal-extract`` with overlap=SKIP).
 
 Gated at registration time on ``STEWARD_SIGNAL_EXTRACT_ENABLED=true``.
@@ -33,7 +33,7 @@ Pipeline per tick:
         frontmatter with ``signal_extracted_at = now`` so the next tick
         of ``list_unprocessed_stream_events`` skips it. We mark
         processed even when the extractor returned ``None`` (noise) so
-        we don't re-LLM the same noise event every 5 minutes — the
+        we don't re-LLM the same noise event every 10 minutes — the
         whole point of the pre-filter cache.
 
   Per-event try/except: a single bad event (transient ctrl-api error,
@@ -126,7 +126,7 @@ class SignalExtractResult:
 class SignalExtractWorkflow:
     """Stream events → signal records (Phase 6 T6.0.5).
 
-    Schedule: every 5 minutes via ``al-signal-extract``. Gated on
+    Schedule: every 10 minutes via ``al-signal-extract``. Gated on
     ``STEWARD_SIGNAL_EXTRACT_ENABLED`` at registration time only —
     re-reading the env inside ``@workflow.run`` would break Temporal
     determinism.

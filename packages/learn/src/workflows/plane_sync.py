@@ -1,6 +1,6 @@
 """PlaneSyncWorkflow — one-way vault → Plane sync (#536 B4).
 
-Runs every 15 seconds. Reads the tenant's vault (canonical source),
+Runs every 15 minutes. Reads the tenant's vault (canonical source),
 upserts the mirrored Plane workspace (projects for matters, issues for
 tasks). Two-way sync (Plane → vault) lands in B7; this workflow is
 strictly write-only toward Plane.
@@ -88,7 +88,7 @@ class PlaneSyncResult:
 
 @workflow.defn(name="PlaneSyncWorkflow")
 class PlaneSyncWorkflow:
-    """Vault → Plane one-way sync. Schedule: every 15 seconds."""
+    """Vault → Plane one-way sync. Schedule: every 15 minutes."""
 
     @workflow.run
     async def run(self) -> PlaneSyncResult:

@@ -1,6 +1,14 @@
-"""Workflow 2: Session Tracker — rolling 5-minute state machine.
+"""Workflow 2: Session Tracker — rolling session state machine.
 
-Flow every 5 minutes:
+Schedule: every 15 minutes via ``al-session-tracker``.
+
+NOTE (cadence/lookback gap): the schedule is 15 min but the idle check
+below queries only the last 5 minutes of records (``args=[5]``). At the
+15-min cadence each tick is blind to ~10 min of activity. Either widen
+the lookback to match the interval or tighten the schedule to 5 min —
+flagged, not changed here, since it alters behaviour.
+
+Flow each run:
 1. Check: any new vault records in the last 5 minutes?
    NO → Mark current session as IDLE
         If idle for >30 min → close session (status: "paused")

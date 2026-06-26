@@ -101,18 +101,12 @@ STREAM_SWEEP_SCHEDULE_ID = "al-stream-sweep"
 STREAM_SWEEP_WORKFLOW = "StreamSweepWorkflow"
 STREAM_SWEEP_INTERVAL = timedelta(minutes=2)
 
-# Steward Phase 4 (#840) — Vexa transcript intake. Two singleton
-# schedules: MeetingCapture polls the gcal stream and dispatches the
-# Vexa bot for upcoming Meet events; TranscriptIntake polls Vexa's
-# webhook stream and feeds extracted action items back into Steward.
-# Both are gated on ``VEXA_ENABLED=true`` — david-only initially.
-MEETING_CAPTURE_SCHEDULE_ID = "al-meeting-capture"
-MEETING_CAPTURE_WORKFLOW = "MeetingCaptureWorkflow"
-MEETING_CAPTURE_INTERVAL = timedelta(seconds=60)
-
-TRANSCRIPT_INTAKE_SCHEDULE_ID = "al-transcript-intake"
-TRANSCRIPT_INTAKE_WORKFLOW = "TranscriptIntakeWorkflow"
-TRANSCRIPT_INTAKE_INTERVAL = timedelta(seconds=60)
+# Vexa transcript intake (#840 Phase 4) was RETIRED — superseded by
+# Recall.ai (RecallDispatcherWorkflow, al-recall-dispatcher). The Vexa
+# constants/registrars/workflows were removed in the vexa-judgment-plane
+# cleanup. The orphaned al-meeting-capture / al-transcript-intake
+# schedules are deleted on existing tenants by
+# _delete_retired_schedules() below.
 
 # Steward Phase 6 (RFC #842) — signal extraction. Polls the stream
 # vault for unprocessed events, runs the LLM extractor, and persists
@@ -121,7 +115,11 @@ TRANSCRIPT_INTAKE_INTERVAL = timedelta(seconds=60)
 # fleet rollout at T6.fleet.3.
 SIGNAL_EXTRACT_SCHEDULE_ID = "al-signal-extract"
 SIGNAL_EXTRACT_WORKFLOW = "SignalExtractWorkflow"
-SIGNAL_EXTRACT_INTERVAL = timedelta(minutes=5)
+# Widened 5m → 10m to roughly halve per-event LLM call volume (the
+# extractor makes one LLM call per stream event). 10m keeps signal
+# latency acceptable; register_signal_extract reconciles existing
+# tenants in place via handle.update.
+SIGNAL_EXTRACT_INTERVAL = timedelta(minutes=10)
 
 # Steward Phase 6 (RFC #842 / T6.3.3) — signal router. Reads
 # unrouted signal records every 2 minutes and dispatches each one
@@ -178,11 +176,11 @@ INTERVAL_SCHEDULES = [
         "workflow": "LearningWorkflow",
         "interval": timedelta(minutes=15),
     },
-    {
-        "id": "al-judgment",
-        "workflow": "JudgmentWorkflow",
-        "interval": timedelta(minutes=15),
-    },
+    # al-judgment (JudgmentWorkflow) RETIRED — gen-1 routing engine
+    # superseded by the Steward signal pipeline (SignalExtract →
+    # SignalRouter → DecisionRouter). Its vault-markdown `status:unrouted`
+    # input population is dead (signals moved to state.db, cutover #27).
+    # Orphaned al-judgment schedule deleted by _delete_retired_schedules().
     {
         "id": "al-task-runner",
         "workflow": "TaskRunnerWorkflow",
@@ -495,7 +493,7 @@ async def register_plane_sync(client: Client, task_queue: str) -> None:
         run_timeout=timedelta(minutes=5),
     )
     spec = ScheduleSpec(
-        intervals=[ScheduleIntervalSpec(every=timedelta(seconds=15))],
+        intervals=[ScheduleIntervalSpec(every=timedelta(minutes=15))],
     )
     policy = SchedulePolicy(overlap=ScheduleOverlapPolicy.SKIP)
 
@@ -505,14 +503,25 @@ async def register_plane_sync(client: Client, task_queue: str) -> None:
             Schedule(action=action, spec=spec, policy=policy),
         )
         logger.info(
-            "Created schedule: %s → %s (15s, SKIP overlap)",
+            "Created schedule: %s → %s (15min, SKIP overlap)",
             PLANE_SYNC_SCHEDULE_ID,
             PLANE_SYNC_WORKFLOW,
         )
     except RPCError as e:
         if e.status == RPCStatusCode.ALREADY_EXISTS:
+            # Reconcile interval on existing tenants: the schedule was
+            # created at the old 15s cadence; update it to 15min in place.
+            async def _updater(inp: ScheduleUpdateInput) -> ScheduleUpdate:
+                return ScheduleUpdate(
+                    schedule=Schedule(action=action, spec=spec, policy=policy)
+                )
+
+            await client.get_schedule_handle(
+                PLANE_SYNC_SCHEDULE_ID
+            ).update(_updater)
             logger.info(
-                "Schedule already exists: %s (skipping)", PLANE_SYNC_SCHEDULE_ID
+                "Reconciled schedule interval to 15min: %s",
+                PLANE_SYNC_SCHEDULE_ID,
             )
             return
         logger.error(
@@ -574,7 +583,7 @@ async def register_plane_reverse_sync(client: Client, task_queue: str) -> None:
         run_timeout=timedelta(minutes=5),
     )
     spec = ScheduleSpec(
-        intervals=[ScheduleIntervalSpec(every=timedelta(seconds=10))],
+        intervals=[ScheduleIntervalSpec(every=timedelta(minutes=15))],
     )
     policy = SchedulePolicy(overlap=ScheduleOverlapPolicy.SKIP)
 
@@ -584,14 +593,24 @@ async def register_plane_reverse_sync(client: Client, task_queue: str) -> None:
             Schedule(action=action, spec=spec, policy=policy),
         )
         logger.info(
-            "Created schedule: %s → %s (10s, SKIP overlap)",
+            "Created schedule: %s → %s (15min, SKIP overlap)",
             PLANE_REVERSE_SYNC_SCHEDULE_ID,
             PLANE_REVERSE_SYNC_WORKFLOW,
         )
     except RPCError as e:
         if e.status == RPCStatusCode.ALREADY_EXISTS:
+            # Reconcile interval on existing tenants: created at the old
+            # 10s cadence; update it to 15min in place.
+            async def _updater(inp: ScheduleUpdateInput) -> ScheduleUpdate:
+                return ScheduleUpdate(
+                    schedule=Schedule(action=action, spec=spec, policy=policy)
+                )
+
+            await client.get_schedule_handle(
+                PLANE_REVERSE_SYNC_SCHEDULE_ID
+            ).update(_updater)
             logger.info(
-                "Schedule already exists: %s (skipping)",
+                "Reconciled schedule interval to 15min: %s",
                 PLANE_REVERSE_SYNC_SCHEDULE_ID,
             )
             return
@@ -776,22 +795,6 @@ async def register_fleet_audit(client: Client, task_queue: str) -> None:
         raise
 
 
-# ---------------------------------------------------------------------------
-# Vexa transcript intake (#840 Phase 4) — singleton schedule registration
-# ---------------------------------------------------------------------------
-
-def _vexa_enabled() -> bool:
-    """Feature flag for Vexa transcript intake (#840).
-
-    Default OFF. Tenants opt in by setting ``VEXA_ENABLED=true``. Phase 4
-    initially enables this only on david — the compose template's vexa
-    block is also gated on the same flag, so flipping the env var alone
-    isn't enough to start the bot stack on a tenant that wasn't
-    provisioned with it.
-    """
-    return os.environ.get("VEXA_ENABLED", "").strip().lower() == "true"
-
-
 def _signal_extract_enabled() -> bool:
     """Feature flag for Phase 6 signal extraction (RFC #842).
 
@@ -940,32 +943,6 @@ async def _register_or_delete_singleton_schedule(
             "Failed to create schedule %s: %s", schedule_id, e,
         )
         raise
-
-
-async def register_meeting_capture(client: Client, task_queue: str) -> None:
-    """Create-or-delete ``al-meeting-capture`` based on ``VEXA_ENABLED``."""
-    await _register_or_delete_singleton_schedule(
-        client,
-        MEETING_CAPTURE_SCHEDULE_ID,
-        MEETING_CAPTURE_WORKFLOW,
-        task_queue,
-        MEETING_CAPTURE_INTERVAL,
-        _vexa_enabled(),
-        label="meeting_capture",
-    )
-
-
-async def register_transcript_intake(client: Client, task_queue: str) -> None:
-    """Create-or-delete ``al-transcript-intake`` based on ``VEXA_ENABLED``."""
-    await _register_or_delete_singleton_schedule(
-        client,
-        TRANSCRIPT_INTAKE_SCHEDULE_ID,
-        TRANSCRIPT_INTAKE_WORKFLOW,
-        task_queue,
-        TRANSCRIPT_INTAKE_INTERVAL,
-        _vexa_enabled(),
-        label="transcript_intake",
-    )
 
 
 async def register_signal_extract(client: Client, task_queue: str) -> None:
@@ -1341,6 +1318,39 @@ async def _delete_legacy_stream_pull_schedules(client: Client) -> int:
                 "register_stream_sweep: delete legacy %s failed: %s",
                 sid, exc,
             )
+    return deleted
+
+
+# Schedules for workflows that have been removed from the worker. Listing
+# them here makes the deletion one-time + idempotent: once gone, later
+# boots find nothing. Workers no longer register these workflow classes,
+# so a surviving schedule would only buffer un-runnable executions.
+_RETIRED_SCHEDULE_IDS = (
+    "al-judgment",          # gen-1 routing engine, superseded by Steward
+    "al-meeting-capture",   # Vexa, superseded by Recall.ai
+    "al-transcript-intake",  # Vexa, superseded by Recall.ai
+)
+
+
+async def _delete_retired_schedules(client: Client) -> int:
+    """Delete schedules whose workflows were removed (Vexa, Judgment).
+
+    Best-effort, idempotent one-time cleanup mirroring
+    ``_delete_legacy_stream_pull_schedules``. A failed individual delete
+    is logged and never aborts the boot sequence.
+    """
+    deleted = 0
+    for sid in _RETIRED_SCHEDULE_IDS:
+        try:
+            await client.get_schedule_handle(sid).delete()
+            logger.info("Deleted retired schedule %s", sid)
+            deleted += 1
+        except RPCError as exc:
+            if exc.status == RPCStatusCode.NOT_FOUND:
+                continue  # already gone — nothing to do
+            logger.warning("Delete retired schedule %s failed: %s", sid, exc)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Delete retired schedule %s failed: %s", sid, exc)
     return deleted
 
 
@@ -1762,6 +1772,11 @@ async def register_stream_sweep_schedule(client: Client) -> None:
         deleted,
     )
 
+    # One-time cleanup: delete schedules for retired workflows (Vexa,
+    # Judgment) whose classes the worker no longer registers.
+    retired = await _delete_retired_schedules(client)
+    logger.info("retired schedules deleted=%d", retired)
+
 
 async def register_all() -> None:
     config = load_config()
@@ -1827,17 +1842,6 @@ async def register_all() -> None:
     # schedule; this call also does the one-time cleanup of the legacy
     # per-stream schedules.
     await register_stream_sweep_schedule(client)
-    # Steward Phase 4 (#840) — Vexa transcript intake. VEXA_ENABLED-gated
-    # at registration time so a tenant without Vexa never gets these
-    # schedules created. Both workflows tick every 60s; the
-    # MeetingCapture path drives bot dispatch from gcal events and
-    # TranscriptIntake processes Vexa's post-meeting webhook into
-    # Steward signals. Neither workflow writes to Plane directly —
-    # actions land in streams/steward-signals.jsonl as
-    # ``transcript:action_candidate`` for Phase 3 to consume on the
-    # relevant matter's next tick.
-    await register_meeting_capture(client, config.task_queue)
-    await register_transcript_intake(client, config.task_queue)
     # Steward Phase 6 (RFC #842) — signal extraction. Polls the stream
     # vault every 5 minutes for unprocessed events, runs the LLM
     # extractor, and persists one ``signal/`` record per non-noise

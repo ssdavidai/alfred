@@ -1,8 +1,8 @@
 """Workflow: Task Runner — picks up queued tasks, executes them, writes results.
 
-Runs on a 2-minute Temporal schedule. Scans for vault tasks with
-status=queued and owner=alfred, then executes them via OpenClaw
-sessions_spawn with full tool access.
+Runs on a 15-minute Temporal schedule (``al-task-runner``). Scans for
+vault tasks with status=queued and owner=alfred, then executes them via
+OpenClaw sessions_spawn with full tool access.
 """
 
 from __future__ import annotations
