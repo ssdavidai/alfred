@@ -13,7 +13,7 @@ from src.config import load_config
 # Workflows
 from src.workflows.event_processor import EventProcessorWorkflow
 from src.workflows.session_tracker import SessionTrackerWorkflow
-from src.workflows.learning import LearningWorkflow
+from src.workflows.instruction_and_capture import InstructionAndCaptureWorkflow
 from src.workflows.reflection import ReflectionWorkflow
 from src.workflows.media_ingestion import MediaIngestionWorkflow
 from src.workflows.task_runner import TaskRunnerWorkflow
@@ -701,7 +701,7 @@ logger = logging.getLogger("alfred-learn")
 _STATIC_WORKFLOWS = [
     EventProcessorWorkflow,
     SessionTrackerWorkflow,
-    LearningWorkflow,
+    InstructionAndCaptureWorkflow,
     ReflectionWorkflow,
     MediaIngestionWorkflow,
     TaskRunnerWorkflow,

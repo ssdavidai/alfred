@@ -1,7 +1,17 @@
-"""Workflow 4: Learning — processes observation queue and alfred_instructions into observation records.
+"""InstructionAndCaptureWorkflow — executes alfred_instructions and captures
+observations (formerly "LearningWorkflow"; renamed for clarity, since the
+gen-1 "intuition engine" framing was misleading — the routing half was
+JudgmentWorkflow, now retired. This workflow is a distinct utility:
+instruction execution + observation capture, NOT routing).
 
 Entry Point A: observation queue (from chat hook)
 Entry Point B: alfred_instructions watcher (from vault records)
+Entry Point C: chore-run-history seeding
+
+The Temporal wire name stays "LearningWorkflow" so the existing
+``al-learning`` schedule and any in-flight runs keep resolving without a
+schedule migration. Renaming the wire name too would require reconciling
+the schedule (handle.update) — deferred as optional.
 """
 
 from __future__ import annotations
@@ -26,16 +36,18 @@ with workflow.unsafe.imports_passed_through():
 
 
 @dataclass
-class LearningResult:
+class InstructionAndCaptureResult:
     observations: int = 0
     instructions_executed: int = 0
     chore_runs_seeded: int = 0
 
 
+# Wire name pinned to the legacy "LearningWorkflow" so the al-learning
+# schedule + in-flight runs keep resolving (see module docstring).
 @workflow.defn(name="LearningWorkflow")
-class LearningWorkflow:
+class InstructionAndCaptureWorkflow:
     @workflow.run
-    async def run(self) -> LearningResult:
+    async def run(self) -> InstructionAndCaptureResult:
         observations_created = 0
         instructions_executed = 0
         chore_runs_seeded = 0
@@ -56,7 +68,7 @@ class LearningWorkflow:
                 observations_created += chore_runs_seeded
         except Exception as exc:
             workflow.logger.warning(
-                "LearningWorkflow: seed_observations_from_chore_runs raised: %s — continuing",
+                "InstructionAndCaptureWorkflow: seed_observations_from_chore_runs raised: %s — continuing",
                 exc,
             )
 
@@ -135,7 +147,7 @@ class LearningWorkflow:
                 start_to_close_timeout=timedelta(seconds=10),
             )
 
-        return LearningResult(
+        return InstructionAndCaptureResult(
             observations=observations_created,
             instructions_executed=instructions_executed,
             chore_runs_seeded=chore_runs_seeded,
