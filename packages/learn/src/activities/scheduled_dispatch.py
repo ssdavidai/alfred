@@ -11,8 +11,11 @@ This activity, driven by ``ScheduledDispatchWorkflow`` on a 15-minute
 cadence, scans scheduled decisions and triggers the actual dispatch
 when their time arrives.
 
-Idempotent: once we trigger dispatch the decision transitions to
-``state: executing`` and is no longer in the scan set.
+Idempotent (claim-before-act, #55 idiom): we flip the decision to the
+non-terminal ``state: dispatching`` *before* the dispatch POST, so a
+worker restart (every deploy) mid-activity no longer re-presents it in
+the ``state=scheduled`` scan set and cannot re-fire. On a clean fire it
+then transitions ``dispatching → executing``.
 """
 from __future__ import annotations
 
@@ -82,6 +85,34 @@ async def fire_due_scheduled_dispatches() -> dict[str, Any]:
             na_id = (
                 source_record.removeprefix("needs_attention/").removesuffix(".md")
             )
+
+            # Claim-before-act (#55 idiom, mirrored from
+            # decision_router.route_decision). The dispatch POST below
+            # re-arms the source signal and triggers a real agent run — a
+            # non-idempotent side effect. Flip the decision off the
+            # ``scheduled`` scan set to the non-terminal ``dispatching``
+            # state BEFORE dispatching, so a worker restart mid-activity
+            # does not re-present this decision (the scan filters
+            # ``state=scheduled``) and re-fire. A crash between this mark
+            # and the dispatch strands the decision in ``dispatching`` — a
+            # visible, sweepable state (recover_stuck_dispatching), strictly
+            # safer than a silent double dispatch. If the mark write fails
+            # we skip without dispatching; the decision stays ``scheduled``
+            # and the next scan retries.
+            try:
+                claim_resp = await client.patch(
+                    f"/api/v1/decisions/{decision_id}",
+                    json={"state": "dispatching"},
+                )
+                claim_resp.raise_for_status()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "scheduled_dispatch: pre-dispatch 'dispatching' mark "
+                    "failed for %s: %s — skipping (no dispatch)",
+                    decision_id, exc,
+                )
+                continue
+
             try:
                 dispatch_resp = await client.post(
                     f"/api/v1/admin/needs-attention/{na_id}/dispatch",

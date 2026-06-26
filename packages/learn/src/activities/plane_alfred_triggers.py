@@ -60,6 +60,7 @@ logger = logging.getLogger("alfred-learn")
 _SELF_COMMENTS_RELATIVE = "state/plane_self_comments.json"
 _PENDING_APPROVALS_RELATIVE = "state/plane_pending_approvals.json"
 _PLANE_SYNC_CURSOR_RELATIVE = "state/plane_sync_cursor.json"
+_SPAWNED_TRIGGERS_RELATIVE = "state/plane_spawned_triggers.json"
 
 # Bootstrap-context caps. These bound prompt growth so a pathological
 # issue (100+ comments, 50kb matter body) can't blow past the openclaw
@@ -73,6 +74,13 @@ _PROMPT_COMMENT_CHARS = 600
 # activity without growing the file unbounded; entries are FIFO-evicted
 # in insertion order.
 _SELF_COMMENTS_CAP = 500
+
+# Cap on the spawned-triggers idempotency ledger. Mirrors the self-comment
+# ledger — 500 keys cover many reverse-sync re-runs (the workflow only
+# advances its cursor after the FULL event loop, so an overrun run that
+# times out mid-batch re-feeds already-spawned events on the next tick);
+# entries are FIFO-evicted in insertion order.
+_SPAWNED_TRIGGERS_CAP = 500
 
 # Pending approvals auto-expire after this many seconds (24h) so a
 # forgotten approval request doesn't pin state forever.
@@ -114,6 +122,10 @@ def _pending_approvals_path() -> Path:
 
 def _plane_sync_cursor_path() -> Path:
     return _alfred_data_dir() / _PLANE_SYNC_CURSOR_RELATIVE
+
+
+def _spawned_triggers_path() -> Path:
+    return _alfred_data_dir() / _SPAWNED_TRIGGERS_RELATIVE
 
 
 def _matter_slug_for_project(project_id: str) -> str:
@@ -194,6 +206,41 @@ def _save_self_comments(path: Path, ids: list[str]) -> None:
     if len(ids) > _SELF_COMMENTS_CAP:
         ids = ids[-_SELF_COMMENTS_CAP:]
     payload = json.dumps(ids, separators=(",", ":"))
+    _atomic_write(path, payload)
+
+
+def _spawn_dedup_key(issue_id: str, comment_id: str) -> str:
+    """Stable idempotency key for a spawn, on (issue_id, comment_id).
+
+    A mention carries a unique Plane comment id so the pair pins the
+    exact event. An assignment has no comment id (key ``"<issue>|"``) —
+    one assignment spawn per issue, consistent with the detector's
+    existing "double-spawning is worse than a missed trigger" bias.
+    """
+    return f"{issue_id}|{comment_id}"
+
+
+def _load_spawned_keys(path: Path) -> list[str]:
+    if not path.exists():
+        return []
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            raw = json.load(fh)
+        if isinstance(raw, list):
+            return [str(x) for x in raw if isinstance(x, (str, int))]
+        return []
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "plane_alfred_triggers: spawned-triggers ledger unreadable (%s) — empty",
+            exc,
+        )
+        return []
+
+
+def _save_spawned_keys(path: Path, keys: list[str]) -> None:
+    if len(keys) > _SPAWNED_TRIGGERS_CAP:
+        keys = keys[-_SPAWNED_TRIGGERS_CAP:]
+    payload = json.dumps(keys, separators=(",", ":"))
     _atomic_write(path, payload)
 
 
@@ -844,7 +891,34 @@ async def spawn_alfred_for_plane_trigger(
     trigger = dict(trigger or {})
     issue_id = str(trigger.get("issue_id") or "")
     project_id = str(trigger.get("project_id") or "")
+    comment_id = str(trigger.get("comment_id") or "")
     requires_approval = bool(trigger.get("requires_approval"))
+
+    # Idempotency guard (A2). PlaneReverseSyncWorkflow ticks every 15 min
+    # and only persists its cursor after the FULL event loop, so a run
+    # that overruns its 5-min timeout mid-batch leaves the cursor
+    # un-advanced and the next tick re-feeds events we already spawned
+    # for. Vault patches are hash-deduped downstream, but an agent
+    # dispatch is not — re-spawning re-runs Alfred on a trigger he has
+    # already handled. Skip any (issue_id, comment_id) pair we have
+    # already spawned for.
+    dedup_key = _spawn_dedup_key(issue_id, comment_id)
+    spawned_path = _spawned_triggers_path()
+    spawned_keys = _load_spawned_keys(spawned_path)
+    if dedup_key in set(spawned_keys):
+        activity.logger.info(
+            "spawn_alfred_for_plane_trigger: already spawned for "
+            "issue=%s comment=%s — skipping (idempotent)",
+            issue_id, comment_id,
+        )
+        return {
+            "spawned": False,
+            "deduped": True,
+            "session_key": "",
+            "prompt_chars": 0,
+            "requires_approval": requires_approval,
+            "error": "",
+        }
 
     # Best-effort full-context fetch. If Plane is temporarily unreachable
     # we still try to spawn with whatever we have in the trigger payload
@@ -987,6 +1061,21 @@ async def spawn_alfred_for_plane_trigger(
         )
 
     spawned = bool(session_key) and not error
+
+    # Record the idempotency key so a reverse-sync re-run (cursor not yet
+    # advanced past an overrun batch) does not re-dispatch this trigger.
+    # Only on a successful spawn — a failed spawn must stay retryable.
+    if spawned:
+        try:
+            spawned_keys.append(dedup_key)
+            _save_spawned_keys(spawned_path, spawned_keys)
+        except Exception as exc:  # noqa: BLE001
+            # Ledger write failures must not break the spawn path; worst
+            # case a later re-run re-spawns (the pre-existing behaviour).
+            activity.logger.warning(
+                "spawn_alfred_for_plane_trigger: spawned-ledger save failed: %s",
+                exc,
+            )
 
     # Record the pending-approval entry so a later @alfred approved can
     # resolve it. Only for actually-gated spawns.

@@ -96,6 +96,11 @@ class PlaneReverseSyncResult:
     alfred_triggers_seen: int = 0
     alfred_sessions_spawned: int = 0
     alfred_spawns_failed: int = 0
+    # A2 — spawns the activity skipped because the (issue_id, comment_id)
+    # pair was already dispatched (a reverse-sync re-run after a mid-batch
+    # timeout re-feeds events whose cursor never advanced). Counted apart
+    # from failures so the idempotent skip doesn't look like an error.
+    alfred_spawns_deduped: int = 0
     alfred_approvals_resolved: int = 0
     alfred_spawn_session_keys: list[str] = field(default_factory=list)
 
@@ -761,6 +766,14 @@ class PlaneReverseSyncWorkflow:
                 trigger.get("issue_id"),
                 sk[:12] if sk else "",
                 bool(trigger.get("requires_approval")),
+            )
+        elif spawn_outcome and spawn_outcome.get("deduped"):
+            # Already-spawned trigger re-fed by a re-run — not an error.
+            result.alfred_spawns_deduped += 1
+            workflow.logger.info(
+                "plane_reverse_sync: alfred spawn skipped (idempotent) "
+                "type=%s issue=%s",
+                trigger_type, trigger.get("issue_id"),
             )
         else:
             result.alfred_spawns_failed += 1

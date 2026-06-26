@@ -10,9 +10,11 @@ This activity runs daily, groups the principal's recent decisions by
 matter_ref, and for any matter that's accumulated three or more
 decisions in the lookback window asks the clerk to extract the
 recurring reasoning. Each pattern lands as a
-``decision_pattern/<ts>-<short>.md`` vault record with
-``status: proposed`` so the principal can review and accept on /study
-or /instincts. Once accepted they can become real standing rules
+``kind="pattern_proposal"`` observation in ``alfred-state.db`` (via
+``StateClient.create_observation`` — the ``decision_pattern`` vault
+type is not in ctrl's promotion-contract allowlist) so the principal
+can review and accept on /study or /instincts. Once accepted they can
+become real standing rules
 ("expenses always filed by month") or instincts ("Slack billing →
 auto-update card").
 
@@ -21,8 +23,6 @@ matter the activity returns without calling the clerk.
 """
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
 import os
 from collections import defaultdict
@@ -122,13 +122,12 @@ async def extract_decision_patterns() -> dict[str, Any]:
 
     # Lazy-import clerk so the worker registration stays fast.
     from src.activities.clerk import _call_clerk
-    from src.utils.vault_client import VaultClient
+    from src.utils.signal_state import StateClient
 
     cfg = load_config()
-    vault = VaultClient(cfg)
     patterns_written = 0
 
-    try:
+    async with StateClient(cfg) as sc:
         for matter_ref, ds in eligible.items():
             matter_name = matter_ref.removeprefix("matter/").removesuffix(".md")
             # Build a compact decision block; only the parts the clerk
@@ -175,37 +174,37 @@ async def extract_decision_patterns() -> dict[str, Any]:
                 evidence = str(p.get("evidence") or "").strip()
                 proposed_action = str(p.get("proposed_action") or "").strip()
                 now_iso = datetime.now(timezone.utc).isoformat()
-                ts = now_iso.replace(":", "-").replace(".", "-")[:19] + "Z"
-                short = hashlib.sha256(
-                    f"{matter_ref}\x00{rule}".encode("utf-8")
-                ).hexdigest()[:8]
-                name = f"decision_pattern/{ts}-{short}.md"
-                fm_lines = [
-                    "---",
-                    'type: "decision_pattern"',
-                    f'created: "{now_iso}"',
-                    f'matter_ref: {json.dumps(matter_ref)}',
-                    f'rule: {json.dumps(rule)}',
-                    f'evidence: {json.dumps(evidence)}',
-                    f'proposed_action: {json.dumps(proposed_action)}',
-                    f'decisions_seen: {len(ds)}',
-                    f'lookback_days: {LOOKBACK_DAYS}',
-                    'status: "proposed"',
-                    "---",
-                    "",
-                    f"# Pattern proposal: {rule}",
+                # Human-readable body — the prose the principal reads when
+                # reviewing the proposal. Mirrors the old vault record body.
+                detail_lines = [
+                    f"Pattern proposal: {rule}",
                     "",
                     f"Drawn from {len(ds)} recent decisions on `{matter_ref}` over the last {LOOKBACK_DAYS} days.",
                     "",
-                    f"**Evidence:** {evidence}" if evidence else "",
-                    f"**If adopted:** {proposed_action}" if proposed_action else "",
+                    f"Evidence: {evidence}" if evidence else "",
+                    f"If adopted: {proposed_action}" if proposed_action else "",
                 ]
-                content = "\n".join([line for line in fm_lines if line != ""]) + "\n"
+                detail = "\n".join(line for line in detail_lines if line != "")
+                # Structured fields ride in the observation payload — the
+                # decision_pattern shape that used to live in vault frontmatter.
+                payload = {
+                    "source_kind": "decision_pattern",
+                    "matter_ref": matter_ref,
+                    "rule": rule,
+                    "evidence": evidence,
+                    "proposed_action": proposed_action,
+                    "decisions_seen": len(ds),
+                    "lookback_days": LOOKBACK_DAYS,
+                    "status": "proposed",
+                }
                 try:
-                    await vault.write_record(
-                        record_type="decision_pattern",
-                        name=name.removeprefix("decision_pattern/"),
-                        content=content,
+                    await sc.create_observation(
+                        subject=matter_ref,
+                        kind="pattern_proposal",
+                        summary=rule,
+                        detail=detail,
+                        ts=now_iso,
+                        payload=payload,
                     )
                     patterns_written += 1
                 except Exception as exc:  # noqa: BLE001
@@ -213,8 +212,6 @@ async def extract_decision_patterns() -> dict[str, Any]:
                         "decision_patterns: write failed for %s: %s",
                         matter_ref, exc,
                     )
-    finally:
-        await vault.close()
 
     logger.info(
         "decision_patterns: checked %d matters, wrote %d proposed patterns",

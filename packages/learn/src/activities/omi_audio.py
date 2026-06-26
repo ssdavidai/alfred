@@ -631,6 +631,13 @@ async def ingest_omi_transcription(
         headers=headers,
     ) as client:
         try:
+            # Idempotent on (stream_id, source_ref): ctrl-api's
+            # /streams/ingest dedups on this pair (streams.ts hasSourceRef →
+            # {status: "duplicate"}). ``source_ref`` is deterministic for a
+            # given conversation group (omi-audio:<uid>:<first_ts>), so a
+            # worker restart between this POST and _move_to_processed() below
+            # re-POSTs the same source_ref and is dropped as a duplicate — no
+            # re-ingest. This is why the file move can safely follow the POST.
             resp = await client.post(
                 "/api/v1/streams/ingest",
                 json={
