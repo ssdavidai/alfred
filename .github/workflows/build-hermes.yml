@@ -10,7 +10,16 @@ on:
   push:
     branches: [main]
     paths:
+      # Real build inputs under the hermes package. Top-level docs/examples
+      # (README.md, CONTRACT.md, MODELS.md, the dev-only docker-compose.yml)
+      # are NOT baked into the image, so editing/deleting one shouldn't kick
+      # off the heavy multi-arch build. SOUL.codex-builder.md IS baked in
+      # (Dockerfile COPY), so it's re-included after the *.md exclusion.
       - "packages/hermes/**"
+      - "!packages/hermes/*.md"
+      - "!packages/hermes/*.yaml"
+      - "!packages/hermes/*.yml"
+      - "packages/hermes/SOUL.codex-builder.md"
       - ".github/workflows/build-hermes.yml"
   workflow_dispatch:
 

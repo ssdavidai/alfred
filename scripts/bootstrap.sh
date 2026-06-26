@@ -101,7 +101,7 @@ green "All required fields present."
 # ── 1b. recommended fields (warn, don't fail) ───────────────────────
 # OWNER_EMAIL is the canonical owner-identity var the code reads (pull.py,
 # first_brief_email.py, fleet_audit.py, init step 9, sure-bootstrap.rb;
-# compose also mirrors it into ALFRED_OWNER_EMAIL for transcript.py). It is
+# compose also mirrors it into the legacy ALFRED_OWNER_EMAIL alias). It is
 # not strictly required to boot, but leaving it blank fails the first-brief
 # email open and disables the cross-tenant ingest guard — so warn loudly.
 if [[ -z "$(env_get OWNER_EMAIL | tr -d '[:space:]')" ]]; then
@@ -121,6 +121,7 @@ AUTO_SECRETS=(
 	VAULTWARDEN_ADMIN_TOKEN
 	VAULTWARDEN_BW_PASSWORD
 	MCP_APPROVAL_SECRET
+	VOICE_BRIDGE_INTERNAL_TOKEN
 	DJANGO_SECRET_KEY
 	POSTGRES_PASSWORD
 	REDIS_PASSWORD

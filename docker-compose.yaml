@@ -721,8 +721,8 @@ services:
       - HOME=/tmp
       - WORKERS_OPENCLAW_CONFIG=/hermes-state/profiles/workers/config.yaml
       # Owner identity. The code reads OWNER_EMAIL (pull.py, first_brief_email.py,
-      # fleet_audit.py, init step 9, sure-bootstrap.rb); transcript.py still
-      # reads ALFRED_OWNER_EMAIL. Set BOTH from the same .env OWNER_EMAIL so the
+      # fleet_audit.py, init step 9, sure-bootstrap.rb); the legacy
+      # ALFRED_OWNER_EMAIL alias is still honoured. Set BOTH from the same .env OWNER_EMAIL so the
       # cross-tenant ingest guard, first-brief sender allowlist, and meeting-bot
       # attendee match all see the principal's address. (C9: canonical=OWNER_EMAIL.)
       - OWNER_EMAIL=${OWNER_EMAIL:-}
@@ -756,6 +756,11 @@ services:
   voice-bridge:
     logging: *default-logging
     image: ssdavidai00/alfred-voice-bridge:latest
+    # Off by default — gated behind the `voice` profile (mirrors `tailscale`).
+    # The bridge requires OPENAI_API_KEY + VOICE_BRIDGE_INTERNAL_TOKEN, so a
+    # plain `docker compose up -d` must NOT start it (it would crash-loop).
+    # Enable per-tenant: `docker compose --profile voice up -d voice-bridge`.
+    profiles: ["voice"]
     restart: unless-stopped
     depends_on:
       ctrl-api:
@@ -1538,6 +1543,12 @@ services:
     # upstream version drift.
     image: ssdavidai00/alfred-black-paperclip:latest
     restart: unless-stopped
+    # Wait for hermes to be healthy — the patched HTTP adapter reads hermes'
+    # API_SERVER_KEY from profiles/main/.env (rendered by hermes init), so a
+    # heartbeat that fires before init lands 401s against the gateway.
+    depends_on:
+      hermes:
+        condition: service_healthy
     env_file:
       - .env
     environment:
