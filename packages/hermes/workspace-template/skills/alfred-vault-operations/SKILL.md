@@ -22,7 +22,7 @@ The vault is Sir's personal knowledge graph. Every important fact, relationship,
 | `event` | `event/` | Point-in-time records of something that happened (meeting, email, digest delivered). |
 | `person` / `org` | `person/`, `org/` | People and organizations in Sir's network. Linked via wikilinks from other records. |
 | `observation` | `observation/` | Atomic behavioral signals extracted from streams — the raw material for instincts. |
-| `reflection` | `reflection/` | Synthesized insights from the learning pipeline's judgment step. |
+| `reflection` | `reflection/` | Synthesized insights from the learning pipeline's reflection workflow. |
 | `note` / `decision` / `project` / `asset` / ... | various | General knowledge entries. |
 
 ## How to call vault operations
@@ -60,7 +60,7 @@ The split matters because it's the difference between a reminder for Sir and a j
 - "Draft the…", "Send a note…", "Schedule the…", "Can you look into…" → `owner: alfred`
 - Ambiguous → ask. Don't guess.
 
-If the task needs human approval before execution (either because the instinct has `requires_approval: true` or because Sir's trust band says so), set `owner: alfred` and leave `approved: false` — JudgmentWorkflow's trust gate will surface it on the dashboard for Sir to green-light.
+If the task needs human approval before execution (either because the instinct has `requires_approval: true` or because Sir's trust band says so), set `owner: alfred` and leave `approved: false` — the Steward signal router's discretion gate will surface it as a needs-attention card on /desk for Sir to green-light.
 
 ## Good behavior
 

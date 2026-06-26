@@ -40,7 +40,7 @@ Sir's Alfred instance is a Docker stack running on a dedicated VPS. When somethi
 
 | Container | What it does | When to look at its logs |
 |---|---|---|
-| `alfred-learn` | Python Temporal worker that runs onboarding, chores, learning workflows, reflection, judgment | Chore didn't fire, digest missing, learning not updating |
+| `alfred-learn` | Python Temporal worker that runs onboarding, chores, learning workflows, reflection, the Steward signal pipeline (extract → route → decide) | Chore didn't fire, digest missing, learning not updating |
 | `openclaw` | AI gateway — routes agent calls to LLM providers, handles Slack/Telegram/etc channels | DMs not arriving, agent replies delayed, model errors |
 | `openclaw-workers` | Background agent runtime — hosts curator/janitor/distiller/surveyor agents | Inbox piling up, vault quality issues, no new observations |
 | `ctrl-api` | Tenant HTTP API on `:3100` — the layer between openclaw/alfred-learn and the Docker socket | Any `self` call returning 500, TUI dashboard broken |

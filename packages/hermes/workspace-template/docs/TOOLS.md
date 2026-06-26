@@ -74,7 +74,7 @@ self({ endpoint: "/api/v1/streams/events", query: { status: "unprocessed" } })
 
 | Endpoint | What it does |
 |---|---|
-| `GET /api/v1/learning/status` | Counts + last run times for learning / reflection / judgment. |
+| `GET /api/v1/learning/status` | Counts + last run times for learning / reflection / signal routing. |
 | `GET /api/v1/learning/queue` | What's waiting for the next cycle. |
 | `GET /api/v1/learning/observations` | Observations extracted from streams and conversations. |
 | `GET /api/v1/learning/instincts` | Learned routing rules with confidence scores. |

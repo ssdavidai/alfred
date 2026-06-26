@@ -15,7 +15,7 @@ The learning system is Alfred's self-improvement loop. It has five parts that al
 2. **instinct** — learned routing rules derived from many observations. Example: "Route Acme Tools community emails to the inner-circle priority queue". Each instinct has a `confidence_score`, a `discretion_threshold`, and a `matching_weights` block that determines how it fires.
 3. **reflection** — weekly synthesis of patterns across many instincts and observations, produced by the reflection workflow. Example: "Sir's afternoon peak email window has shifted earlier by ~90 min since the second baby news".
 4. **sessions** — the learning system's tracking of individual conversation sessions (who Sir talked to, when, duration, summary).
-5. **queue** — items waiting for the next learning/reflection/judgment workflow cycle.
+5. **queue** — items waiting for the next learning/reflection/signal-routing workflow cycle.
 
 ## Endpoints
 
@@ -51,7 +51,7 @@ The learning system is Alfred's self-improvement loop. It has five parts that al
 
 ### Discretion threshold
 
-Each instinct has a `discretion_threshold` (0.0–1.0). If the judgment step's confidence about applying this instinct is below the threshold, it skips the action. Higher threshold = more conservative. Sir can tune this.
+Each instinct has a `discretion_threshold` (0.0–1.0). If the signal router's discretion gate confidence about applying this instinct is below the threshold, it skips the action. Higher threshold = more conservative. Sir can tune this.
 
 ### observation_count
 
