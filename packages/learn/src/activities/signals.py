@@ -1558,6 +1558,7 @@ async def extract_signal_from_event(
             if noise_instincts and event_fm_for_match:
                 matched = event_matches_noise_instinct(
                     event_fm_for_match, noise_instincts,
+                    event_body=_event_body(event),
                 )
                 if matched is not None:
                     logger.info(
@@ -2202,6 +2203,7 @@ async def extract_signals_from_event(
             if noise_instincts and event_fm_for_match:
                 matched = event_matches_noise_instinct(
                     event_fm_for_match, noise_instincts,
+                    event_body=_event_body(event),
                 )
                 if matched is not None:
                     logger.info(

@@ -408,14 +408,18 @@ _NOISE_INSTINCT_CACHE: dict[str, Any] = {"loaded_at": 0.0, "instincts": []}
 
 
 async def load_noise_instincts() -> list[dict[str, Any]]:
-    """Return active instincts whose ``intent_key`` is ``noise``.
+    """Return active instincts that mean "keep this off the Desk".
+
+    Includes BOTH ``intent_key: noise`` (OBS-5 machine-generated) and
+    ``routing_rule.destination_type: hold`` (reflection/hand-authored).
 
     Result entries:
-      ``{"path": <vault path>, "sender_domains": [<glob>...]}``
+      ``{"path": <vault path>, "sender_domains": [<glob>...],
+         "subject_keywords": [<kw>...]}``
 
     Empty list when none are present, when ctrl-api list fails, or
-    when an instinct has no sender_domains (a noise instinct with no
-    domain anchors can't filter anything).
+    when an instinct has no anchors (neither sender_domains nor
+    subject_keywords — can't filter anything).
     """
     import time
     now = time.time()
@@ -447,27 +451,46 @@ async def load_noise_instincts() -> list[dict[str, Any]]:
             continue
         if str(fm.get("status") or "").strip().lower() != "active":
             continue
-        if str(fm.get("intent_key") or "").strip().lower() != "noise":
+        # A noise/suppress instinct is one whose intent is to keep the
+        # signal off the Desk. Two encodings exist in the wild:
+        #   * OBS-5 machine-generated: top-level ``intent_key: noise``
+        #   * reflection / hand-authored: ``routing_rule.destination_type: hold``
+        # Honour BOTH — a maxed-confidence "hold" rule (e.g.
+        # suppress-ci-github-workflow-noise) carried only the routing_rule
+        # and was invisible to the intent_key-only gate, so it never
+        # suppressed despite matching (BUG 3).
+        intent_key = str(fm.get("intent_key") or "").strip().lower()
+        rr = fm.get("routing_rule") or {}
+        dest_type = ""
+        if isinstance(rr, dict):
+            dest_type = str(rr.get("destination_type") or "").strip().lower()
+        if intent_key != "noise" and dest_type != "hold":
             continue
-        # Pull sender_domains from input_patterns (preferred) or
-        # legacy signals.domain_patterns mirror.
+        # Pull sender_domains from input_patterns (preferred) or legacy
+        # signals.domain_patterns mirror; also collect subject_keywords —
+        # a CI/PR instinct anchors on the subject, not just the domain.
         ip = fm.get("input_patterns") or {}
         sender_domains: list[str] = []
+        subject_keywords: list[str] = []
         if isinstance(ip, dict):
             v = ip.get("sender_domains") or []
             if isinstance(v, list):
                 sender_domains.extend(str(x) for x in v if isinstance(x, str))
+            k = ip.get("subject_keywords") or []
+            if isinstance(k, list):
+                subject_keywords.extend(str(x) for x in k if isinstance(x, str))
         if not sender_domains:
             sigs = fm.get("signals") or {}
             if isinstance(sigs, dict):
                 v = sigs.get("domain_patterns") or []
                 if isinstance(v, list):
                     sender_domains.extend(str(x) for x in v if isinstance(x, str))
-        if not sender_domains:
+        if not sender_domains and not subject_keywords:
             continue  # Noise instinct without anchors — can't filter
         out.append({
             "path": str(r.get("path") or ""),
             "sender_domains": sender_domains,
+            "subject_keywords": subject_keywords,
         })
 
     _NOISE_INSTINCT_CACHE["loaded_at"] = now
@@ -479,35 +502,59 @@ async def load_noise_instincts() -> list[dict[str, Any]]:
 def event_matches_noise_instinct(
     event_fm: dict[str, Any],
     noise_instincts: list[dict[str, Any]],
+    event_body: str | None = None,
 ) -> dict[str, Any] | None:
     """Return the first matching noise instinct (or None).
 
-    We use the event's derived signature (gmail sender, gcal organiser,
-    etc.) as the comparison key and match each instinct's
-    ``sender_domains`` glob list against it. Same fnmatch semantics
-    the deterministic scorer uses, so a noise instinct adopted from a
-    cluster (OBS-5) fires here identically to how it would fire on a
-    full signal-routing pass — except cheaper, since we short-circuit
-    the LLM call.
+    Matches on TWO anchors:
+      * sender-domain globs vs the event's derived signature (gmail
+        sender / gcal organiser / slack user);
+      * subject_keywords substrings vs the event subject/title.
+
+    ``event_body`` is forwarded to ``derive_signature`` so the sender is
+    recoverable from a ``**From**:`` header in the rendered body (the
+    composio-gmail curator often does not stamp a top-level ``from``).
+    Bare (wildcard-free) sender globs are also tried as ``*glob*`` so a
+    hand-authored ``github.com`` anchor matches ``x@notifications.github.com``.
     """
     if not noise_instincts:
         return None
-    sig = derive_signature(event_fm)
+    sig = derive_signature(event_fm, event_body=event_body)
     sig_value = (sig.get("value") or "").strip().lower()
-    if not sig_value:
-        return None
-    # Only sender-anchored signatures are matchable today. Once OBS-5
-    # writes instincts with subject_keywords / attachment patterns,
-    # extend the match here.
-    if sig.get("kind") not in ("gmail_sender", "gcal_organiser", "slack_user"):
-        return None
+    # Subject text for keyword matching — a CI/PR instinct anchors here.
+    subject_text = " ".join(
+        str(event_fm.get(k) or "")
+        for k in ("subject", "title", "name", "display_headline")
+    ).strip().lower()
+    # ``gcal_organiser_title`` is what derive_signature actually emits;
+    # the old allowlist listed ``gcal_organiser`` and was dead.
+    sender_kinds = ("gmail_sender", "gcal_organiser_title", "slack_user")
     for inst in noise_instincts:
-        for glob in inst["sender_domains"]:
-            if fnmatch.fnmatch(sig_value, glob.strip().lower()):
-                return {
-                    "kind": f"instinct_{sig['kind']}",
-                    "value": sig_value,
-                    "path": inst["path"],
-                    "matched_glob": glob,
-                }
+        # 1. sender-domain globs (tolerate a bare domain via *glob*)
+        if sig.get("kind") in sender_kinds and sig_value:
+            for glob in inst.get("sender_domains", []):
+                g = glob.strip().lower()
+                if not g:
+                    continue
+                if fnmatch.fnmatch(sig_value, g) or (
+                    "*" not in g and "?" not in g
+                    and fnmatch.fnmatch(sig_value, f"*{g}*")
+                ):
+                    return {
+                        "kind": f"instinct_{sig['kind']}",
+                        "value": sig_value,
+                        "path": inst["path"],
+                        "matched_glob": glob,
+                    }
+        # 2. subject-keyword substrings (the anchor CI instincts carry)
+        if subject_text:
+            for kw in inst.get("subject_keywords", []):
+                k = kw.strip().lower()
+                if k and k in subject_text:
+                    return {
+                        "kind": "instinct_subject_keyword",
+                        "value": subject_text[:120],
+                        "path": inst["path"],
+                        "matched_keyword": kw,
+                    }
     return None

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from datetime import datetime
 from typing import Any, Optional
@@ -766,14 +767,18 @@ async def fetch_unprocessed_observations() -> list[dict[str, Any]]:
         # list_observation_records doesn't expose it, so query directly.
         from src.utils.signal_state import StateClient, observation_row_to_record
 
-        # Batch capped at 75: clerk_reflect sends every fetched observation to
-        # the LLM in one prompt. At 200 the call blew past clerk_reflect's
-        # StartToClose timeout (the whole ReflectionWorkflow then failed and
-        # marked nothing processed — so a backlog could never drain). 75 keeps a
-        # single reflection comfortably inside the timeout; the backlog drains
-        # across successive runs instead of choking on one oversized batch.
+        # Batch size (env-tunable via REFLECTION_BATCH_SIZE, default 250).
+        # clerk_reflect sends EVERY fetched observation to the LLM in ONE
+        # prompt, so batch size == the number of clerk/Codex calls needed to
+        # drain the backlog. A bigger batch means far fewer LLM calls (gentler
+        # on Codex quota) at the cost of one longer call — paired with the 900s
+        # clerk_reflect StartToClose timeout in ReflectionWorkflow. History: 75
+        # paired with a 300s timeout; 200@300s once overflowed and drained
+        # nothing, so keep the batch and the timeout moving together. Set
+        # REFLECTION_BATCH_SIZE higher for a one-off catch-up drain.
+        batch = int(os.environ.get("REFLECTION_BATCH_SIZE", "250") or "250")
         async with StateClient(config) as sc:
-            rows = await sc.list_observations(status="unprocessed", limit=75)
+            rows = await sc.list_observations(status="unprocessed", limit=batch)
         return [observation_row_to_record(r) for r in rows]
     except Exception:  # noqa: BLE001
         return []
@@ -892,7 +897,18 @@ name: Intuition Index
             obs_count = inst.get("observation_count", 0)
             content += f"- [[{path}]] — {name} ({obs_count} observations)\n"
 
-        await client.write_record("index", "intuition-index", content)
+        # Best-effort: "index" is NOT a canonical vault type — ctrl-api's
+        # promotion contract 422s it — and NOTHING in the learning loop reads
+        # this file (it is a cosmetic convenience index). A failure here must
+        # NEVER wedge ReflectionWorkflow: an uncapped 422 on this write left the
+        # workflow retrying for a month, so the observation backlog never drained
+        # and no instinct was ever promoted. Log and move on.
+        try:
+            await client.write_record("index", "intuition-index", content)
+        except Exception as exc:  # noqa: BLE001 — cosmetic; must not fail the run
+            activity.logger.warning(
+                "rebuild_intuition_index: index write skipped (%s)", exc
+            )
     finally:
         await client.close()
 
@@ -941,8 +957,23 @@ Reviewed {len(observations)} observations. Applied {changes} instinct changes.
             detail = p.get("name", p.get("path", ""))
             content += f"- **{action}**: {detail}\n"
 
-        path = await client.write_record("reflection", f"reflection-{date_str}", content)
-        return path
+        # Best-effort: "reflection" is NOT a canonical vault type — ctrl-api's
+        # promotion contract 422s it since the storage cutover — and NOTHING in
+        # the learning loop READS this report (it is a human-facing nightly
+        # summary). A failure here must NEVER wedge ReflectionWorkflow: this is
+        # the SECOND wedge point after rebuild_intuition_index — once step 7 was
+        # made non-fatal, replayed runs stalled HERE instead (found on the home
+        # canary). Log and move on so observations still drain and instincts
+        # still promote.
+        try:
+            return await client.write_record(
+                "reflection", f"reflection-{date_str}", content
+            )
+        except Exception as exc:  # noqa: BLE001 — cosmetic; must not fail the run
+            activity.logger.warning(
+                "write_reflection_report: report write skipped (%s)", exc
+            )
+            return ""
     finally:
         await client.close()
 

@@ -108,17 +108,18 @@ async def _resolve_sender_for_needs_attention(
     stream_event and run the same sender extractor the signal-side
     observations use.
 
-    The signal record's frontmatter is LLM-extracted and does NOT
-    carry a structured ``raw.from`` — it stores the rendered email
-    headers inside ``raw_quote`` (a string) plus a
-    ``source_event_path`` pointing at the upstream stream_event. The
-    stream_event frontmatter is where the structured sender info
-    actually lives, and where we already have a battle-tested
-    extractor (signal_observations._extract_sender_from_event).
-    Reuse it here so OBS-1 + OBS-2 stay in lockstep.
+    Post-4-store-cutover (PLAN.md Part I): a needs_attention card's
+    ``source_signal_path`` is a **state.db** signal ULID (not a
+    ``signal/*.md`` vault path) and its ``source_event_path`` is an
+    ``ingest:<id>`` ref into **ingest.db** (Store 4). Reading either over
+    the vault route (``/api/v1/vault/records/…``) 404s — which is exactly
+    why this returned "" for ~80% of clicks and left ``instinct_ref``
+    NULL, severing the click→observation→instinct loop. Read the signal
+    from state.db (``read_signal_record``) and the event from ingest.db
+    (``_fetch_ingest_event_as_record``); fall back to the vault route
+    only for a genuine ``signal/…md`` path (pre-cutover history).
 
-    Cheap and cached by the in-process mtime cache. Returns "" if any
-    step fails — sender is optional on the observation.
+    Returns "" if any step fails — sender is optional on the observation.
     """
     if not source_record.startswith("needs_attention/"):
         return ""
@@ -129,19 +130,30 @@ async def _resolve_sender_for_needs_attention(
         na_fm = (resp.json().get("frontmatter") or {})
     except Exception:  # noqa: BLE001
         return ""
-    sig_path = str(na_fm.get("source_signal_path") or "").strip()
-    if not sig_path:
-        return ""
-    try:
-        sig_resp = await client.get(f"/api/v1/vault/records/{sig_path}")
-        if sig_resp.status_code >= 400:
-            return ""
-        sig_fm = (sig_resp.json().get("frontmatter") or {})
-    except Exception:  # noqa: BLE001
-        return ""
 
-    # First try the (rare) structured fields on the signal itself, in
-    # case a future signal writer emits them — cheap and harmless.
+    # Resolve the signal. Post-cutover the ref is a bare state.db ULID;
+    # a ``signal/…md`` path only appears in legacy pre-cutover history.
+    sig_ref = str(na_fm.get("source_signal_path") or "").strip()
+    sig_fm: dict = {}
+    if sig_ref and not sig_ref.startswith("signal/"):
+        try:
+            from src.utils.signal_state import read_signal_record
+            sig_rec = await read_signal_record(sig_ref)
+        except Exception:  # noqa: BLE001
+            sig_rec = None
+        if sig_rec:
+            sig_fm = sig_rec.get("frontmatter") or {}
+    elif sig_ref:
+        try:
+            sig_resp = await client.get(f"/api/v1/vault/records/{sig_ref}")
+            if sig_resp.status_code < 400:
+                sig_fm = (sig_resp.json().get("frontmatter") or {})
+        except Exception:  # noqa: BLE001
+            sig_fm = {}
+    if not isinstance(sig_fm, dict):
+        sig_fm = {}
+
+    # (rare) structured sender directly on the signal — cheap first try.
     raw = sig_fm.get("raw") or {}
     if isinstance(raw, dict):
         for k in ("from", "From", "sender", "from_email", "organizer", "organiser"):
@@ -153,31 +165,43 @@ async def _resolve_sender_for_needs_attention(
         if isinstance(v, str) and v.strip():
             return v.strip()
 
-    # Preferred source of truth: the upstream stream_event the signal
-    # was extracted from. Read its frontmatter and apply the canonical
-    # sender extractor.
-    event_path = str(sig_fm.get("source_event_path") or "").strip()
-    if event_path:
+    # Preferred source of truth: the stream_event the signal was
+    # extracted from. Post-cutover it is an ``ingest:<id>`` ref — read it
+    # via the ingest route, not the vault. The NA card also carries the
+    # ref directly, so fall back to it if the signal row was evicted
+    # (state.db retention) but the ingest event survives.
+    event_ref = (
+        str(sig_fm.get("source_event_path") or "").strip()
+        or str(na_fm.get("source_event_path") or "").strip()
+    )
+    from src.activities.signal_observations import _extract_sender_from_event
+    if event_ref.startswith("ingest:"):
         try:
-            evt_resp = await client.get(f"/api/v1/vault/records/{event_path}")
+            from src.activities.signals import _fetch_ingest_event_as_record
+            evt_rec = await _fetch_ingest_event_as_record(event_ref[len("ingest:"):])
+        except Exception:  # noqa: BLE001
+            evt_rec = None
+        if evt_rec:
+            evt_fm = evt_rec.get("frontmatter") or {}
+            if isinstance(evt_fm, dict):
+                sender = _extract_sender_from_event(evt_fm)
+                if sender:
+                    return sender
+    elif event_ref:
+        # Legacy vault stream_event path (pre-cutover history only).
+        try:
+            evt_resp = await client.get(f"/api/v1/vault/records/{event_ref}")
             if evt_resp.status_code < 400:
                 evt_fm = (evt_resp.json().get("frontmatter") or {})
                 if isinstance(evt_fm, dict):
-                    from src.activities.signal_observations import (
-                        _extract_sender_from_event,
-                    )
                     sender = _extract_sender_from_event(evt_fm)
                     if sender:
                         return sender
         except Exception:  # noqa: BLE001
-            pass  # fall through to raw_quote fallback
+            pass
 
-    # Fallback: parse the signal's own ``raw_quote`` string. The
-    # signal-extract activity stores the rendered email/event preview
-    # there (e.g. `**From**: "Acme" <a@example.com> **To**: ...`). Stream
-    # events get purged after extraction (StreamEventPurgeWorkflow), so
-    # for older decisions the stream_event lookup above 404s and this
-    # fallback is the only way to recover the sender.
+    # Last resort: parse the signal's own ``raw_quote`` (works only when
+    # it embeds ``**From**:`` headers — most post-cutover signals do NOT).
     return _sender_from_raw_quote(str(sig_fm.get("raw_quote") or ""))
 
 

@@ -39,12 +39,15 @@ def test_reflection_fetch_batch_is_bounded():
     from src.activities import vault
 
     src = inspect.getsource(vault.fetch_unprocessed_observations)
-    m = re.search(r"list_observations\([^)]*limit=(\d+)", src, re.DOTALL)
-    assert m, "fetch_unprocessed_observations must pass an explicit limit"
-    limit = int(m.group(1))
-    # 200 was the value that overflowed clerk_reflect's timeout. Keep the batch
-    # small enough that one reflection comfortably completes.
-    assert limit <= 100, f"reflection batch limit {limit} is too large (was 200)"
+    # Batch is env-tunable (REFLECTION_BATCH_SIZE) so a one-off backlog drain can
+    # use bigger batches — fewer clerk/Codex CALLS for the same work. The DEFAULT
+    # must stay bounded so a nightly run fits clerk_reflect's (900s) timeout; it
+    # must move together with that timeout, never unbounded.
+    assert "REFLECTION_BATCH_SIZE" in src, "reflection batch size should be env-tunable"
+    m = re.search(r'REFLECTION_BATCH_SIZE",\s*"(\d+)"', src)
+    assert m, "REFLECTION_BATCH_SIZE must carry a numeric default"
+    default = int(m.group(1))
+    assert 75 <= default <= 500, f"reflection default batch {default} out of range"
 
 
 def test_reflection_clerk_timeout_has_headroom():

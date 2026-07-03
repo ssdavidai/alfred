@@ -71,11 +71,14 @@ class ReflectionWorkflow:
         proposals = await workflow.execute_activity(
             clerk_reflect,
             args=[observations, instincts, distiller_learnings, janitor_flags],
-            # 300s (was 120s): one LLM pass over the observation batch + the full
-            # instinct set is slow; 120s timed out, failed the whole workflow, and
-            # left every observation unprocessed (a backlog could never drain).
-            # Paired with the batch cap of 75 in fetch_unprocessed_observations.
-            start_to_close_timeout=timedelta(seconds=300),
+            # 900s: one LLM pass over the whole observation batch + the full
+            # instinct set is slow, and the batch is now larger + env-tunable
+            # (REFLECTION_BATCH_SIZE, default 250) to keep Codex/clerk CALL COUNT
+            # low when draining a backlog. Timeout must move WITH the batch size:
+            # 120s@small and 300s@75 both timed out and marked nothing processed.
+            # retry cap 2 so a genuine overflow fails fast (doesn't burn quota
+            # retrying forever).
+            start_to_close_timeout=timedelta(seconds=900),
             retry_policy=RetryPolicy(maximum_attempts=2),
         )
 
@@ -103,17 +106,28 @@ class ReflectionWorkflow:
             start_to_close_timeout=timedelta(seconds=30),
         )
 
-        # 7. Rebuild intuition index
+        # 7. Rebuild intuition index (cosmetic — nothing in the loop reads it).
+        # Cap retries so a failure fails fast instead of wedging the whole
+        # workflow. An uncapped promotion-contract 422 here retried ~26k times
+        # over a month and blocked the schedule from ever draining the
+        # observation backlog. The activity now also swallows the 422
+        # (belt-and-suspenders); this cap bounds any other failure mode.
+        # (Adding retry_policy to an existing activity call is replay-safe.)
         await workflow.execute_activity(
             rebuild_intuition_index,
             start_to_close_timeout=timedelta(seconds=30),
+            retry_policy=RetryPolicy(maximum_attempts=1),
         )
 
-        # 8. Write reflection report
+        # 8. Write reflection report (human-facing summary; nothing in the loop
+        # reads it). Bounded retries so no failure mode can wedge the workflow —
+        # the "reflection" type is non-canonical and 422s (the activity now
+        # swallows that), and a transient error must not retry forever.
         report_path: str = await workflow.execute_activity(
             write_reflection_report,
             args=[observations, valid_proposals, changes],
             start_to_close_timeout=timedelta(seconds=30),
+            retry_policy=RetryPolicy(maximum_attempts=3),
         )
 
         return ReflectionResult(changes=changes, report=report_path)
