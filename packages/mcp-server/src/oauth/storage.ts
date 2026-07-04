@@ -59,6 +59,30 @@ export interface RefreshTokenRow {
   rotated_to: string | null;
 }
 
+/**
+ * A long-lived, per-app static bearer token — the headless alternative to
+ * the OAuth flow for non-interactive clients (ElevenLabs / LiveKit voice
+ * agents, scripts). Unlike the tenant-wide `MCP_APPROVAL_SECRET`, each row
+ * is scoped to exactly ONE app and can be listed / rotated / deleted
+ * independently, so a leaked or retired vendor credential is contained.
+ * Only the SHA-256 hash is persisted; the raw token is shown once at mint.
+ */
+export interface ScopedTokenRow {
+  /** Public id used for management (rotate/delete). Never secret. */
+  id: string;
+  /** The single app this token authorizes (`AppId`). */
+  app_id: string;
+  token_hash: string;
+  /** First chars of the raw token, for display in the UI. Not secret. */
+  prefix: string;
+  /** Human label, e.g. "ElevenLabs prod". */
+  label: string;
+  created_at: number;
+  last_used_at: number | null;
+  /** Soft-disable timestamp; a revoked token fails validation. */
+  revoked_at: number | null;
+}
+
 export class OAuthStorage {
   private db: DatabaseSync;
 
@@ -121,6 +145,18 @@ export class OAuthStorage {
       CREATE INDEX IF NOT EXISTS idx_access_expires ON access_tokens(expires_at);
       CREATE INDEX IF NOT EXISTS idx_refresh_expires ON refresh_tokens(expires_at);
       CREATE INDEX IF NOT EXISTS idx_authcodes_expires ON auth_codes(expires_at);
+      CREATE TABLE IF NOT EXISTS scoped_tokens (
+        id TEXT PRIMARY KEY,
+        app_id TEXT NOT NULL,
+        token_hash TEXT NOT NULL UNIQUE,
+        prefix TEXT NOT NULL,
+        label TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        last_used_at INTEGER,
+        revoked_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_scoped_app ON scoped_tokens(app_id);
+      CREATE INDEX IF NOT EXISTS idx_scoped_hash ON scoped_tokens(token_hash);
     `);
   }
 
@@ -224,6 +260,73 @@ export class OAuthStorage {
 
   markRefreshRotated(old_hash: string, new_hash: string): void {
     this.db.prepare("UPDATE refresh_tokens SET rotated_to = ? WHERE token_hash = ?").run(new_hash, old_hash);
+  }
+
+  // ── scoped (per-app static) tokens ─────────────────────────────────────────
+
+  private rowToScoped(row: {
+    id: string; app_id: string; token_hash: string; prefix: string; label: string;
+    created_at: number; last_used_at: number | null; revoked_at: number | null;
+  }): ScopedTokenRow {
+    return {
+      id: row.id,
+      app_id: row.app_id,
+      token_hash: row.token_hash,
+      prefix: row.prefix,
+      label: row.label,
+      created_at: row.created_at,
+      last_used_at: row.last_used_at,
+      revoked_at: row.revoked_at,
+    };
+  }
+
+  insertScopedToken(t: ScopedTokenRow): void {
+    this.db.prepare(
+      "INSERT INTO scoped_tokens(id, app_id, token_hash, prefix, label, created_at, last_used_at, revoked_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+    ).run(t.id, t.app_id, t.token_hash, t.prefix, t.label, t.created_at, t.last_used_at, t.revoked_at);
+  }
+
+  getScopedTokenByHash(token_hash: string): ScopedTokenRow | null {
+    const row = this.db.prepare("SELECT * FROM scoped_tokens WHERE token_hash = ?").get(token_hash) as
+      | Parameters<OAuthStorage["rowToScoped"]>[0] | undefined;
+    return row ? this.rowToScoped(row) : null;
+  }
+
+  getScopedTokenById(id: string): ScopedTokenRow | null {
+    const row = this.db.prepare("SELECT * FROM scoped_tokens WHERE id = ?").get(id) as
+      | Parameters<OAuthStorage["rowToScoped"]>[0] | undefined;
+    return row ? this.rowToScoped(row) : null;
+  }
+
+  /** List tokens (newest first), optionally filtered to one app. Never exposes the hash's preimage. */
+  listScopedTokens(app_id?: string): ScopedTokenRow[] {
+    const rows = (app_id
+      ? this.db.prepare("SELECT * FROM scoped_tokens WHERE app_id = ? ORDER BY created_at DESC").all(app_id)
+      : this.db.prepare("SELECT * FROM scoped_tokens ORDER BY created_at DESC").all()
+    ) as Array<Parameters<OAuthStorage["rowToScoped"]>[0]>;
+    return rows.map((r) => this.rowToScoped(r));
+  }
+
+  touchScopedToken(id: string, ts: number): void {
+    this.db.prepare("UPDATE scoped_tokens SET last_used_at = ? WHERE id = ?").run(ts, id);
+  }
+
+  /** Replace the secret on an existing token in-place (keeps id + label). */
+  rotateScopedToken(id: string, token_hash: string, prefix: string, ts: number): boolean {
+    const r = this.db.prepare(
+      "UPDATE scoped_tokens SET token_hash = ?, prefix = ?, created_at = ?, last_used_at = NULL, revoked_at = NULL WHERE id = ?",
+    ).run(token_hash, prefix, ts, id);
+    return Number(r.changes) > 0;
+  }
+
+  revokeScopedToken(id: string, ts: number): boolean {
+    const r = this.db.prepare("UPDATE scoped_tokens SET revoked_at = ? WHERE id = ?").run(ts, id);
+    return Number(r.changes) > 0;
+  }
+
+  deleteScopedToken(id: string): boolean {
+    const r = this.db.prepare("DELETE FROM scoped_tokens WHERE id = ?").run(id);
+    return Number(r.changes) > 0;
   }
 
   // ── janitor ──────────────────────────────────────────────────────────────

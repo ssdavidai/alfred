@@ -126,6 +126,54 @@ export const rotateApprovalSecret = async (_args: unknown, context: any) => {
   });
 };
 
+// ─── Per-app MCP scoped bearer tokens ──────────────────────────────────────
+// Thin proxies to ctrl-api /api/v1/mcp/tokens/* → mcp-server /manage/tokens.
+// Let Sir mint / list / rotate / delete multiple long-lived per-app bearer
+// tokens (one per voice vendor — ElevenLabs, LiveKit, …) without the browser
+// ever holding MCP_APPROVAL_SECRET. The raw token is returned by mint + rotate
+// EXACTLY ONCE; the list only ever carries metadata (prefix, label, usage).
+
+/** List token metadata + the supported apps + public connector base. */
+export const getMcpTokens = async (args: { app?: string } | undefined, context: any) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    path: "/api/v1/mcp/tokens",
+    query: args?.app ? { app: args.app } : undefined,
+  });
+};
+
+/** Mint a new per-app token. Returns { id, app, label, prefix, url, token } once. */
+export const mintMcpToken = async (args: { app: string; label: string }, context: any) => {
+  if (!args?.app) throw new HttpError(400, "app required");
+  if (!args?.label?.trim()) throw new HttpError(400, "label required");
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/mcp/tokens",
+    body: { app: args.app, label: args.label.trim() },
+  });
+};
+
+/** Rotate a token in place (same id + label, new secret). Returns the raw token once. */
+export const rotateMcpToken = async (args: { id: string }, context: any) => {
+  if (!args?.id) throw new HttpError(400, "id required");
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: `/api/v1/mcp/tokens/${encodeURIComponent(args.id)}/rotate`,
+  });
+};
+
+/** Delete a token (hard). The credential stops working immediately. */
+export const deleteMcpToken = async (args: { id: string }, context: any) => {
+  if (!args?.id) throw new HttpError(400, "id required");
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "DELETE",
+    path: `/api/v1/mcp/tokens/${encodeURIComponent(args.id)}`,
+  });
+};
+
 // Sir #8 — SSH info for the /channels Terminal card. Backed by ctrl-api
 // GET /api/v1/system/ssh-info (Lane I owns the endpoint). Returns
 // { hostname, port, user, pubkey, hermes_exec } — each may be null

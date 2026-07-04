@@ -18,8 +18,10 @@ import type { ZodObject, ZodRawShape } from "zod";
 
 import { loadEnv } from "./env.js";
 import { OAuthStorage } from "./oauth/storage.js";
+import type { ScopedTokenRow } from "./oauth/storage.js";
 import { SqliteOAuthProvider, issueAuthCode, timingSafeEqual } from "./oauth/provider.js";
 import type { MCPProps } from "./oauth/provider.js";
+import { mintScopedToken, verifyScopedToken } from "./scopedTokens.js";
 import { type AppId, getToolsForApp, isAppId, SUPPORTED_APPS } from "./tools/registry.js";
 import type { CtrlContext } from "./tools/types.js";
 import { runTool } from "./tools/types.js";
@@ -234,6 +236,21 @@ async function main() {
           };
           return next();
         }
+        // Per-app scoped bearer token (dashboard-minted, one per vendor).
+        // Bound to exactly this app, so a token for another app's URL
+        // falls through to the OAuth verifier and 401s.
+        if (token && verifyScopedToken(storage, appId, token, Date.now())) {
+          (req as Request & { auth?: unknown }).auth = {
+            token,
+            clientId: "scoped-token",
+            scopes: [],
+            extra: {
+              appId,
+              tenantLabel: env.TENANT_LABEL,
+            } satisfies MCPProps,
+          };
+          return next();
+        }
       }
       // Anything else (no header, malformed, mismatched secret) → defer to
       // the standard OAuth verifier.
@@ -332,6 +349,119 @@ async function main() {
       }
     });
   }
+
+  // ── Management API — per-app scoped bearer tokens ─────────────────────────
+  //
+  // Gated by the tenant-wide MCP_APPROVAL_SECRET. The dashboard calls these
+  // SERVER-SIDE (the web Wasp server holds the secret; the browser never
+  // does), letting Sir mint / list / rotate / delete multiple long-lived
+  // per-app bearer tokens — e.g. one per voice vendor — so third-party
+  // clients (ElevenLabs, LiveKit) authenticate with a scoped credential
+  // instead of the master secret. The raw token is returned ONLY on
+  // create/rotate; list never exposes it.
+  const requireMaster = (req: Request, res: Response, next: NextFunction) => {
+    const header = req.headers.authorization;
+    const token =
+      typeof header === "string" && header.startsWith("Bearer ")
+        ? header.slice("Bearer ".length).trim()
+        : "";
+    if (token && timingSafeEqual(token, env.MCP_APPROVAL_SECRET)) return next();
+    res.status(401).json({ error: "unauthorized" });
+  };
+
+  const publicBase = env.PUBLIC_URL.replace(/\/+$/, "");
+  const connectorUrl = (appId: string) => `${publicBase}/${appId}/mcp`;
+  const publicToken = (t: ScopedTokenRow) => ({
+    id: t.id,
+    app: t.app_id,
+    label: t.label,
+    prefix: t.prefix,
+    url: connectorUrl(t.app_id),
+    created_at: t.created_at,
+    last_used_at: t.last_used_at,
+    revoked: t.revoked_at != null,
+  });
+
+  // List tokens (metadata only), optionally ?app=<app>. Also returns the
+  // supported apps + public base so the UI can render the connector URLs.
+  app.get("/manage/tokens", requireMaster, (req, res) => {
+    const appQ = typeof req.query.app === "string" ? req.query.app : undefined;
+    const filter = appQ && isAppId(appQ) ? appQ : undefined;
+    res.json({
+      tenant: env.TENANT_LABEL,
+      public_url: publicBase,
+      apps: [...SUPPORTED_APPS],
+      transport: "streamable-http",
+      tokens: storage.listScopedTokens(filter).map(publicToken),
+    });
+  });
+
+  // Mint a new token for an app. Returns the raw token ONCE.
+  app.post("/manage/tokens", requireMaster, express.json(), (req, res) => {
+    const body = (req.body ?? {}) as { app?: string; label?: string };
+    const appId = body.app;
+    const label = (body.label ?? "").trim();
+    if (!appId || !isAppId(appId)) {
+      res.status(400).json({ error: `invalid app; must be one of ${[...SUPPORTED_APPS].join(", ")}` });
+      return;
+    }
+    if (!label) {
+      res.status(400).json({ error: "label required" });
+      return;
+    }
+    const minted = mintScopedToken(appId);
+    storage.insertScopedToken({
+      id: minted.id,
+      app_id: appId,
+      token_hash: minted.token_hash,
+      prefix: minted.prefix,
+      label,
+      created_at: Date.now(),
+      last_used_at: null,
+      revoked_at: null,
+    });
+    res.status(201).json({
+      id: minted.id,
+      app: appId,
+      label,
+      prefix: minted.prefix,
+      url: connectorUrl(appId),
+      token: minted.token, // shown once
+    });
+  });
+
+  // Rotate an existing token in place (same id + label, new secret).
+  app.post("/manage/tokens/:id/rotate", requireMaster, (req, res) => {
+    const existing = storage.getScopedTokenById(req.params.id);
+    if (!existing) {
+      res.status(404).json({ error: "not found" });
+      return;
+    }
+    const minted = mintScopedToken(existing.app_id);
+    const ok = storage.rotateScopedToken(existing.id, minted.token_hash, minted.prefix, Date.now());
+    if (!ok) {
+      res.status(404).json({ error: "not found" });
+      return;
+    }
+    res.json({
+      id: existing.id,
+      app: existing.app_id,
+      label: existing.label,
+      prefix: minted.prefix,
+      url: connectorUrl(existing.app_id),
+      token: minted.token, // shown once
+    });
+  });
+
+  // Delete (hard) a token.
+  app.delete("/manage/tokens/:id", requireMaster, (req, res) => {
+    const ok = storage.deleteScopedToken(req.params.id);
+    if (!ok) {
+      res.status(404).json({ error: "not found" });
+      return;
+    }
+    res.json({ ok: true });
+  });
 
   // Catch-all 404 for anything else (the cloudflared ingress should route
   // only `/<app>/mcp` + OAuth paths to us; ctrl-api handles everything else

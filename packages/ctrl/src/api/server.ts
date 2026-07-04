@@ -75,6 +75,7 @@ import { registerFilesRoutes } from "./routes/files.js";
 import { registerChannelsTailscaleRoutes } from "./routes/channels_tailscale.js";
 import { registerProfileRoutes } from "./routes/profiles.js";
 import { registerChannelIdentityRoutes } from "./routes/channel_identity.js";
+import { registerMcpTokensRoutes } from "./routes/mcpTokens.js";
 
 export interface RouteParams {
   [key: string]: string;
@@ -249,6 +250,10 @@ export function createApiServer(): http.Server {
   // Consumed by Lane IV adapters at send time via resolveChannelIdentity().
   // See packages/ctrl/src/db/migrations/0018_channel_identity.sql.
   registerChannelIdentityRoutes();
+  // /api/v1/mcp/tokens/* — thin proxy to mcp-server's /manage/tokens API so
+  // the dashboard can mint/list/rotate/delete per-app scoped bearer tokens
+  // without the browser holding MCP_APPROVAL_SECRET. web → ctrl-api → mcp-server.
+  registerMcpTokensRoutes();
 
   const server = http.createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const start = Date.now();

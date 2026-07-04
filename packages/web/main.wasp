@@ -557,6 +557,11 @@ query getClaudeSetup {
   entities: []
 }
 
+query getMcpTokens {
+  fn: import { getMcpTokens } from "@src/dashboard/operations",
+  entities: []
+}
+
 query getInboxItems {
   fn: import { getInboxItems } from "@src/dashboard/operations",
   entities: []
@@ -804,6 +809,21 @@ action provisionPhone {
 
 action rotateApprovalSecret {
   fn: import { rotateApprovalSecret } from "@src/dashboard/operations",
+  entities: []
+}
+
+action mintMcpToken {
+  fn: import { mintMcpToken } from "@src/dashboard/operations",
+  entities: []
+}
+
+action rotateMcpToken {
+  fn: import { rotateMcpToken } from "@src/dashboard/operations",
+  entities: []
+}
+
+action deleteMcpToken {
+  fn: import { deleteMcpToken } from "@src/dashboard/operations",
   entities: []
 }
 

@@ -17,11 +17,15 @@
 //                         tenants that were provisioned with BW
 //
 // F82 — "Developer / API keys" lives under Settings → API keys; not here.
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import {
   useQuery,
   getClaudeSetup,
   rotateApprovalSecret,
+  getMcpTokens,
+  mintMcpToken,
+  rotateMcpToken,
+  deleteMcpToken,
 } from "wasp/client/operations";
 
 // F77/C16 — the rotate action returns the fresh secret exactly once.
@@ -313,6 +317,265 @@ function ApprovalSecretSection({
   );
 }
 
+// ── MCP access tokens ──────────────────────────────────────────────────────
+// Per-app scoped bearer tokens for third-party clients that can't do the
+// browser OAuth flow (ElevenLabs / LiveKit voice agents, scripts). Each token
+// is bound to a single app; mint one per client so it can be rotated/revoked
+// in isolation. The raw token is shown exactly once (mint + rotate); the list
+// only carries metadata. Backed by getMcpTokens / mintMcpToken /
+// rotateMcpToken / deleteMcpToken → ctrl-api → mcp-server /manage/tokens.
+interface McpTokenRow {
+  id: string;
+  app: string;
+  label: string;
+  prefix: string;
+  url: string;
+  created_at: number;
+  last_used_at: number | null;
+  revoked: boolean;
+}
+interface McpTokensResp {
+  tenant?: string;
+  public_url?: string;
+  transport?: string;
+  apps: string[];
+  tokens: McpTokenRow[];
+}
+interface MintTokenResp {
+  id: string;
+  app: string;
+  label: string;
+  prefix: string;
+  url: string;
+  token: string;
+}
+
+function fmtTs(ms: number | null): string {
+  if (!ms) return "never";
+  return new Date(ms).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+}
+
+function McpTokensSection() {
+  const { data, isLoading, refetch } = useQuery(getMcpTokens);
+  const resp = data as McpTokensResp | undefined;
+  const apps = resp?.apps ?? [];
+  const tokens = resp?.tokens ?? [];
+
+  const [app, setApp] = useState<string>("");
+  const [label, setLabel] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [rowBusy, setRowBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState<string | null>(null);
+  const [revealed, setRevealed] = useState<MintTokenResp | null>(null);
+
+  // Default the app picker to the first app once the list loads.
+  useEffect(() => {
+    if (!app && apps.length > 0) setApp(apps[0]);
+  }, [apps, app]);
+
+  function copy(key: string, value: string) {
+    navigator.clipboard?.writeText(value);
+    setCopied(key);
+    setTimeout(() => setCopied((c) => (c === key ? null : c)), 1500);
+  }
+
+  async function mint() {
+    if (!app || !label.trim()) {
+      setError("Pick an app and give the token a label.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const r = (await mintMcpToken({ app, label: label.trim() })) as MintTokenResp;
+      setRevealed(r);
+      setLabel("");
+      await refetch();
+    } catch (e: any) {
+      setError(e?.message ?? "Could not mint the token.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function rotate(id: string) {
+    setRowBusy(id);
+    setError(null);
+    try {
+      const r = (await rotateMcpToken({ id })) as MintTokenResp;
+      setRevealed(r);
+      await refetch();
+    } catch (e: any) {
+      setError(e?.message ?? "Rotation failed.");
+    } finally {
+      setRowBusy(null);
+    }
+  }
+
+  async function remove(id: string) {
+    setRowBusy(id);
+    setError(null);
+    try {
+      await deleteMcpToken({ id });
+      await refetch();
+    } catch (e: any) {
+      setError(e?.message ?? "Delete failed.");
+    } finally {
+      setRowBusy(null);
+    }
+  }
+
+  return (
+    <div>
+      <h3 className="font-display text-3xl mb-2">MCP access tokens</h3>
+      <p className="font-body italic mb-8" style={{ color: "var(--marginalia)" }}>
+        Long-lived bearer tokens for connecting one app to a client that can't do the
+        browser OAuth flow — a voice agent (ElevenLabs, LiveKit), a script, anything else.
+        Each token is scoped to a single app; mint one per client so you can rotate or
+        delete it on its own.
+      </p>
+
+      {/* Reveal-once panel — the raw token is never shown again. */}
+      {revealed && (
+        <div className="border border-rule p-4 mb-8">
+          <div
+            className="font-mono text-[10px] uppercase tracking-[0.22em] mb-3"
+            style={{ color: "var(--brass)" }}
+          >
+            New token for {revealed.app} — “{revealed.label}” · copy it now, it won't be shown again
+          </div>
+          <div
+            className="font-mono text-[10px] uppercase tracking-[0.18em] mb-1"
+            style={{ color: "var(--marginalia)" }}
+          >
+            Token (send as Authorization: Bearer …)
+          </div>
+          <div className="flex items-center gap-2 mb-3">
+            <code className="flex-1 font-mono text-[12px] border border-rule p-2 break-all">
+              {revealed.token}
+            </code>
+            <button onClick={() => copy("tok", revealed.token)} className="btn-ghost">
+              {copied === "tok" ? "Copied" : "Copy"}
+            </button>
+          </div>
+          <div
+            className="font-mono text-[10px] uppercase tracking-[0.18em] mb-1"
+            style={{ color: "var(--marginalia)" }}
+          >
+            Server URL (transport: Streamable HTTP)
+          </div>
+          <div className="flex items-center gap-2 mb-4">
+            <code className="flex-1 font-mono text-[12px] border border-rule p-2 break-all">
+              {revealed.url}
+            </code>
+            <button onClick={() => copy("url", revealed.url)} className="btn-ghost">
+              {copied === "url" ? "Copied" : "Copy"}
+            </button>
+          </div>
+          <button onClick={() => setRevealed(null)} className="btn-ghost">
+            Done — I've saved it
+          </button>
+        </div>
+      )}
+
+      {/* Generate control */}
+      <div className="border border-rule p-4 mb-8">
+        <div
+          className="font-mono text-[10px] uppercase tracking-[0.22em] mb-3"
+          style={{ color: "var(--marginalia)" }}
+        >
+          Generate a token
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <select
+            value={app}
+            onChange={(e) => setApp(e.target.value)}
+            className="bg-transparent border border-rule px-2 py-1 font-mono text-[12px]"
+            aria-label="app"
+          >
+            {apps.length === 0 && <option value="">(loading apps…)</option>}
+            {apps.map((a) => (
+              <option key={a} value={a}>
+                {a}
+              </option>
+            ))}
+          </select>
+          <input
+            value={label}
+            onChange={(e) => setLabel(e.target.value)}
+            placeholder="Label (e.g. 'ElevenLabs prod')"
+            className="flex-1 min-w-[180px] bg-transparent border border-rule px-2 py-1 font-mono text-[12px]"
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void mint();
+            }}
+          />
+          <button onClick={() => void mint()} disabled={busy || !app} className="btn-brass">
+            {busy ? "Generating…" : "Generate"}
+          </button>
+        </div>
+      </div>
+
+      {/* Existing tokens */}
+      {isLoading ? (
+        <p className="font-body italic text-[15px]" style={{ color: "var(--marginalia)" }}>
+          Reading tokens…
+        </p>
+      ) : tokens.length === 0 ? (
+        <p className="font-body italic text-[15px]" style={{ color: "var(--marginalia)" }}>
+          No tokens yet. Generate one above to connect a voice agent or script.
+        </p>
+      ) : (
+        <ul className="border-t border-rule">
+          {tokens.map((t) => (
+            <li
+              key={t.id}
+              className="grid grid-cols-[100px_1fr_auto] gap-4 py-3 border-b border-rule items-center"
+            >
+              <span className="font-mono text-[11px] uppercase tracking-[0.14em]">{t.app}</span>
+              <div className="min-w-0">
+                <div className="font-display italic text-[16px] truncate">{t.label}</div>
+                <div
+                  className="font-mono text-[10px] uppercase tracking-[0.12em]"
+                  style={{ color: "var(--marginalia)" }}
+                >
+                  {t.prefix}… · added {fmtTs(t.created_at)} · last used {fmtTs(t.last_used_at)}
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <button onClick={() => copy(`url-${t.id}`, t.url)} className="btn-link">
+                  {copied === `url-${t.id}` ? "Copied URL" : "Copy URL"}
+                </button>
+                <button
+                  onClick={() => void rotate(t.id)}
+                  disabled={rowBusy === t.id}
+                  className="btn-link"
+                >
+                  {rowBusy === t.id ? "…" : "Rotate"}
+                </button>
+                <button
+                  onClick={() => void remove(t.id)}
+                  disabled={rowBusy === t.id}
+                  className="btn-link"
+                  style={{ color: "var(--brass)" }}
+                >
+                  Delete
+                </button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {error && (
+        <p className="font-body italic text-[13px] mt-3" style={{ color: "var(--brass)" }}>
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
 // F84 — the Claude Setup body, rendered inline within Settings → Agent
 // Configuration (StudyPage). No Frame, no sidebar nav: each section renders
 // only when its data is present, and the sections stack vertically.
@@ -398,6 +661,8 @@ export function ClaudeSetupSections() {
               </ul>
             </div>
           )}
+
+          <McpTokensSection />
 
           {hasApproval && (
             <ApprovalSecretSection
