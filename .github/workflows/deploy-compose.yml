@@ -39,9 +39,9 @@ on:
   workflow_dispatch:
     inputs:
       tenants:
-        description: "Comma-separated tenant hostnames (default: all 5)"
+        description: "Comma-separated tenant hostnames (default: all 6)"
         required: false
-        default: "home.alfred.black,rj.alfred.black,joe.alfred.black,zsolt.alfred.black,miguel.alfred.black"
+        default: "home.alfred.black,rj.alfred.black,joe.alfred.black,zsolt.alfred.black,miguel.alfred.black,rami.alfred.black"
 
 concurrency:
   # Serialise per-branch so two pushes don't race on the same tenant.
@@ -62,6 +62,7 @@ jobs:
           - joe.alfred.black
           - zsolt.alfred.black
           - miguel.alfred.black
+          - rami.alfred.black
     steps:
       - uses: actions/checkout@v4
 
