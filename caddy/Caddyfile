@@ -93,7 +93,7 @@ import /tailscale-snippets/*.caddy
 	# 405-ing at the SPA's nginx. Drop this entry when the stub goes (the
 	# PR that lands Recall.ai — #113 PR2).
 	@public_webhooks {
-		path /api/v1/streams/omi/* /api/v1/plane/webhook /api/v1/webhooks/plane/steward /api/v1/webhooks/vexa /api/v1/webhooks/recall /api/v1/webhooks/in/* /api/v1/channels/email/inbound /api/v1/channels/paperclip/* /api/v1/channels/ha/* /api/v1/composio/webhook
+		path /api/v1/streams/omi/* /api/v1/webhooks/vexa /api/v1/webhooks/recall /api/v1/webhooks/in/* /api/v1/channels/email/inbound /api/v1/channels/paperclip/* /api/v1/channels/ha/* /api/v1/composio/webhook
 	}
 	handle @public_webhooks {
 		reverse_proxy ctrl-api:3100
@@ -120,12 +120,6 @@ import /tailscale-snippets/*.caddy
 api.{$DOMAIN} {
 	encode zstd gzip
 	reverse_proxy web:3000
-}
-
-# Plane — self-hosted project management.
-plane.{$DOMAIN} {
-	encode zstd gzip
-	reverse_proxy plane-proxy:80
 }
 
 # Sure — self-hosted personal finance.

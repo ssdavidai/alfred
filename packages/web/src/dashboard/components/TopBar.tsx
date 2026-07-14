@@ -11,7 +11,6 @@ import {
   Loader2,
   Copy,
   Wallet,
-  Kanban,
   KeyRound,
   MessageSquare,
 } from "lucide-react";
@@ -93,10 +92,8 @@ export default function TopBar({
     containers?.some((c: any) => c.Service === service && c.State === "running") ?? false;
 
   const showSure = containerRunning("sure-web");
-  const showPlane = containerRunning("plane-proxy");
   const showVault = containerRunning("vaultwarden");
   const sureUrl = showSure ? sidecarUrl("sure") : null;
-  const planeUrl = showPlane ? sidecarUrl("plane") : null;
   const vaultUrl = showVault ? sidecarUrl("vault") : null;
 
   return (
@@ -267,21 +264,6 @@ export default function TopBar({
               <a href={sureUrl} target="_blank" rel="noopener noreferrer">
                 <Wallet className="h-3 w-3" />
                 Sure
-              </a>
-            </Button>
-          )}
-
-          {planeUrl && (
-            <Button
-              variant="ghost"
-              size="sm"
-              className="gap-1.5 font-mono text-[0.65rem] text-muted-foreground hover:text-[#F0EDE8]"
-              title="Plane — project management"
-              asChild
-            >
-              <a href={planeUrl} target="_blank" rel="noopener noreferrer">
-                <Kanban className="h-3 w-3" />
-                Plane
               </a>
             </Button>
           )}

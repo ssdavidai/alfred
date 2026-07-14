@@ -192,17 +192,6 @@ export function registerClaudeSetupRoutes(): void {
         enabled: true,
       },
       {
-        id: "plane",
-        name: "Plane",
-        description:
-          "Project management — issues, comments, cycles, projects. v2 catalogue with sophisticated search.",
-        mcp_url: tenantUrl ? `${tenantUrl}/plane/mcp` : null,
-        skill_url: `${skillBase}/alfred-plane.md`,
-        // Same as Sure: plane-api is a sibling container reached at
-        // http://plane-api:8000; no per-tenant PLANE_API_TOKEN on merged stack.
-        enabled: true,
-      },
-      {
         id: "vaultwarden",
         name: "Vaultwarden",
         description:

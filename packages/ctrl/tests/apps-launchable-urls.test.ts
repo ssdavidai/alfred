@@ -54,13 +54,12 @@ describe("GET /api/v1/apps — real launchable sidecar apps (B12)", () => {
     assert.ok(Array.isArray(apps), "apps must be an array");
   });
 
-  it("includes Plane / Sure / Vault with apex https://<app>.<domain> urls", () => {
+  it("includes Sure / Vault with apex https://<app>.<domain> urls", () => {
     const byId = new Map(apps.map((a) => [a.id, a]));
 
-    for (const id of ["plane", "sure", "vault"]) {
+    for (const id of ["sure", "vault"]) {
       assert.ok(byId.has(id), `apps must include ${id}`);
     }
-    assert.equal(byId.get("plane").url, "https://plane.test.alfred.black");
     assert.equal(byId.get("sure").url, "https://sure.test.alfred.black");
     assert.equal(byId.get("vault").url, "https://vault.test.alfred.black");
   });

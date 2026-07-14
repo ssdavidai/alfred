@@ -229,7 +229,6 @@ function toToolkitLabel(slug: string): string {
     notion: "Notion",
     linear: "Linear",
     github: "GitHub",
-    plane: "Plane",
     asana: "Asana",
     airtable: "Airtable",
     dropbox: "Dropbox",

@@ -562,15 +562,6 @@ mcp_servers:
         - identify_recurring_patterns
 {%- endif %}
 
-  plane:
-    command: "node"
-    args: ["{{ mcp_stdio_dir }}/dist/bin/stdio-app.js", "plane"]
-    env:
-      CTRL_API_URL: "{{ ctrl_api_url }}"
-      AAS_API_KEY: "${AAS_API_KEY}"
-    timeout: 120
-    connect_timeout: 60
-
   vaultwarden:
     command: "node"
     args: ["{{ mcp_stdio_dir }}/dist/bin/stdio-app.js", "vaultwarden"]

@@ -110,6 +110,30 @@ if [[ -z "$(env_get OWNER_EMAIL | tr -d '[:space:]')" ]]; then
 	red "  fails open. Set OWNER_EMAIL to the principal's address, then re-run."
 fi
 
+# ── 1.5 ensure swap ────────────────────────────────────────
+# Container mem_limits sum to tens of GB; a swapfile is a cheap cushion so a
+# transient spike past a cgroup cap (e.g. the hermes workers gateway on a
+# multi-minute LLM job) becomes a slowdown, not an instant OOM-kill.
+# Idempotent; needs root; skipped with a warning otherwise. Override size
+# with SWAP_SIZE_GB.
+SWAP_SIZE_GB="${SWAP_SIZE_GB:-8}"
+if swapon --show 2>/dev/null | grep -q .; then
+	green "Swap already active — skipping swapfile creation."
+elif [[ "$(id -u)" -ne 0 ]]; then
+	red "WARNING: not root — cannot create swap. Add ${SWAP_SIZE_GB}G manually or re-run as root."
+else
+	green "Creating ${SWAP_SIZE_GB}G swapfile at /swapfile…"
+	if dd if=/dev/zero of=/swapfile bs=1M count=$((SWAP_SIZE_GB*1024)) status=none 2>/dev/null; then
+		chmod 600 /swapfile
+		mkswap /swapfile >/dev/null
+		swapon /swapfile
+		grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+		green "Swap enabled (${SWAP_SIZE_GB}G) + persisted in /etc/fstab."
+	else
+		red "WARNING: swapfile creation failed — continuing without swap."
+	fi
+fi
+
 # ── 2. generate auto-secrets ────────────────────────────────────────
 # Each entry is generated with `openssl rand -hex 32` if absent or empty.
 AUTO_SECRETS=(
@@ -121,11 +145,6 @@ AUTO_SECRETS=(
 	VAULTWARDEN_ADMIN_TOKEN
 	VAULTWARDEN_BW_PASSWORD
 	MCP_APPROVAL_SECRET
-	DJANGO_SECRET_KEY
-	POSTGRES_PASSWORD
-	REDIS_PASSWORD
-	MINIO_ROOT_PASSWORD
-	LIVE_SERVER_SECRET_KEY
 	SURE_SECRET_KEY_BASE
 	SURE_POSTGRES_PASSWORD
 	SURE_REDIS_PASSWORD

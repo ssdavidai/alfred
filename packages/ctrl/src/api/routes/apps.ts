@@ -93,15 +93,6 @@ export function registerAppsRoutes(): void {
     // unconditionally. The runtime (Hermes, formerly OpenClaw) is reached via
     // the in-app /chat thin client the web adds separately; it is NOT a dock
     // app, so no openclaw/chat entry here.
-    checks.push(
-      (async (): Promise<InstalledApp> => ({
-        id: "plane",
-        name: "Plane",
-        url: `https://plane.${domain}`,
-        icon: "/app-icons/plane.svg",
-        status: await checkHealth("http://plane-proxy:80/"),
-      }))(),
-    );
 
     checks.push(
       (async (): Promise<InstalledApp> => ({
