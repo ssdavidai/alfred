@@ -1022,6 +1022,43 @@ export function registerHaChannelRoutes(): void {
     sendJson(res, 200, readRegistry());
   });
 
+  // #110 PR1 (backfilled 2026-07-15) — GET /state/:entity_id.
+  // The `ha__get_state` MCP tool (mcp-server/src/tools/hass.ts) has always
+  // pointed at this path, but the route was specced (#110 header) and never
+  // implemented, so every `ha__get_state` returned 404 "No route". Combined
+  // with the write loop-guard, that stranded every climate read and fed a
+  // re-dispatch notification loop on home (2026-07-15 office-AC incident).
+  // Reads live state straight from HA's REST `/api/states/<entity_id>` with
+  // the stored LLAT — same auth/fetch shape as callHaService.
+  addRoute(
+    "GET",
+    "/api/v1/channels/ha/state/:entity_id",
+    async ({ res, params }) => {
+      // The router already decodeURIComponent's path params (server.ts).
+      const entity_id = String(
+        (params as { entity_id?: string })?.entity_id ?? "",
+      ).trim();
+      if (!entity_id) throw new ValidationError("entity_id is required");
+      // Asserts ha_connection.state === 'connected' and returns the LLAT.
+      const llat = await readHaLlat();
+      const row = getHaConnectionRow()!;
+      const result = await callHaGetState({ ha_url: row.ha_url, llat, entity_id });
+      if (!result.ok) {
+        if (result.status === 404) {
+          throw new NotFoundError(
+            `entity_id ${entity_id} not found in Home Assistant`,
+          );
+        }
+        throw new ApiError(
+          result.status >= 400 && result.status < 600 ? result.status : 502,
+          "HA_UPSTREAM_ERROR",
+          result.detail,
+        );
+      }
+      sendJson(res, 200, result.response);
+    },
+  );
+
   // #110 PR5 — registry bootstrap surface (LLAT retrieval + bulk upsert +
   // on-demand refresh). All three routes are operator-only (master
   // AAS_API_KEY); the LLAT route is the most sensitive — it returns the
@@ -1506,6 +1543,57 @@ async function callHaService(args: {
   }
   if (!resp.ok) {
     let detail = `HA service call returned HTTP ${resp.status}`;
+    try {
+      const t = await resp.text();
+      if (t) detail = `${detail}: ${t.slice(0, 500)}`;
+    } catch {
+      // best-effort
+    }
+    return { ok: false, status: resp.status, detail };
+  }
+  let parsed: unknown = null;
+  try {
+    parsed = await resp.json();
+  } catch {
+    parsed = null;
+  }
+  return { ok: true, response: parsed };
+}
+
+// Read a single entity's live state from HA's REST API
+// (`GET /api/states/<entity_id>`). Mirrors callHaService's auth/fetch/error
+// shape. Backs GET /api/v1/channels/ha/state/:entity_id (the ha__get_state
+// MCP tool). A missing entity surfaces as a clean 404 (NotFoundError) rather
+// than the historic routing 404 that stranded reads.
+async function callHaGetState(args: {
+  ha_url: string;
+  llat: string;
+  entity_id: string;
+}): Promise<
+  { ok: true; response: unknown } | { ok: false; status: number; detail: string }
+> {
+  let resp: Response;
+  try {
+    resp = await fetch(
+      `${args.ha_url}/api/states/${encodeURIComponent(args.entity_id)}`,
+      {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${args.llat}`,
+          "Content-Type": "application/json",
+        },
+        signal: AbortSignal.timeout(HA_WRITE_TIMEOUT_MS),
+      },
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, status: 502, detail: `HA unreachable: ${msg}` };
+  }
+  if (resp.status === 404) {
+    return { ok: false, status: 404, detail: `entity not found in HA` };
+  }
+  if (!resp.ok) {
+    let detail = `HA state read returned HTTP ${resp.status}`;
     try {
       const t = await resp.text();
       if (t) detail = `${detail}: ${t.slice(0, 500)}`;
