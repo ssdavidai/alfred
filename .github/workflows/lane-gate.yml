@@ -1,0 +1,68 @@
+# Server-side replay of the lane commit gate (scripts/hooks/check_lane.py).
+#
+# WHY THIS EXISTS: the local pre-commit gate depends on client git config,
+# and the Claude Code worktree harness rewrites core.hooksPath at worktree
+# creation — which silently disarmed the local gate for ~6 weeks (2026-06 →
+# 2026-07 audit). This workflow is the authoritative, un-clobberable copy of
+# the same rules: it derives the lane from the PR's branch name and replays
+# boundary + forbidden-zone + scope checks against the full PR diff.
+#
+# Branch → lane mapping (docs/lane-protocol.md):
+#   lane-1/* → I (ctrl)          lane-5/* → V  (edges/infra)
+#   lane-2/* → II (learn)        lane-6/* → VI (voice-bridge)
+#   lane-3/* → III (web)         lane-7/* → VII (paperclip)
+#   lane-4/* → IV (alfred-vault)
+#   anything else → phase0 (operator branch; allow-all by design — the lane
+#   protocol constrains AGENT branches, and agents must use lane-N/ naming).
+#
+# VERIFY (builds/tests) is NOT run here — ci-check.yml owns that.
+name: lane-gate
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lane-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve lane from branch name
+        id: lane
+        env:
+          BRANCH: ${{ github.head_ref }}
+        run: |
+          case "$BRANCH" in
+            lane-1/*) LANE=I ;;
+            lane-2/*) LANE=II ;;
+            lane-3/*) LANE=III ;;
+            lane-4/*) LANE=IV ;;
+            lane-5/*) LANE=V ;;
+            lane-6/*) LANE=VI ;;
+            lane-7/*) LANE=VII ;;
+            lane-*)   LANE=INVALID ;;
+            *)        LANE=phase0 ;;
+          esac
+          echo "lane=$LANE" >> "$GITHUB_OUTPUT"
+          echo "branch '$BRANCH' → lane $LANE"
+
+      - name: Reject unmapped lane-* branch names
+        if: steps.lane.outputs.lane == 'INVALID'
+        run: |
+          echo "::error::branch '${{ github.head_ref }}' uses lane-* naming but maps to no lane (valid: lane-1 … lane-7). Rename the branch or use a non-lane branch for operator work."
+          exit 1
+
+      - name: Replay the lane gate on the PR diff
+        run: |
+          git fetch origin "${{ github.base_ref }}" --depth=200 || git fetch origin "${{ github.base_ref }}"
+          python3 scripts/hooks/check_lane.py --ci \
+            --lane "${{ steps.lane.outputs.lane }}" \
+            --base "origin/${{ github.base_ref }}"
+
+      - name: Gate unit tests
+        run: python3 scripts/hooks/test_check_lane.py

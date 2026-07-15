@@ -1,5 +1,5 @@
 {
-  "_comment": "Lane definitions for the Alfred fix fan-out. Enforced by check_lane.py at pre-commit. forbidden_zone is Phase-0-owned and off-limits to every lane (except phase0). A staged file must match >=1 of its lane's `allowed` globs and 0 forbidden_zone globs. Glob rules: `a/b/**` = prefix match; `**/x` = suffix match; otherwise fnmatch; exact path = equality. `verify` is the regression gate (overridable per-task via .lane). scope_limit is net changed LOC.",
+  "_comment": "Lane definitions for the Alfred fix fan-out. Enforced by check_lane.py at pre-commit AND replayed server-side by .github/workflows/lane-gate.yml on every PR from a lane-N/* branch. forbidden_zone is Phase-0-owned and off-limits to every lane (except phase0). A staged file must match >=1 of its lane's `allowed` globs and 0 forbidden_zone globs. Glob rules: `a/b/**` = prefix match; `**/x` = suffix match; otherwise fnmatch; exact path = equality. `verify` is the regression gate (overridable per-task via .lane). scope_limit is net changed LOC. Branch naming: lane-<arabic>/<issue>-<slug> maps to the roman lane id (lane-1=I .. lane-7=VII). v2 2026-07-15: added lanes VI (voice-bridge) + VII (paperclip), setup joined lane V — every package now has exactly one owning lane; .github/** and docs/lane-protocol.md joined the forbidden zone.",
   "forbidden_zone": [
     "packages/ctrl/src/db/schema.sql",
     "packages/ctrl/src/db/migrations/**",
@@ -9,7 +9,9 @@
     "docs/FIX-CONTRACTS.md",
     "docs/FIX-PLAN.md",
     "docs/FAILURE-MODES.md",
+    "docs/lane-protocol.md",
     "scripts/hooks/**",
+    ".github/**",
     "CLAUDE.md"
   ],
   "lanes": {
@@ -43,6 +45,7 @@
         "packages/hermes/**",
         "packages/mcp-server/**",
         "packages/vault-init/**",
+        "packages/setup/**",
         "scripts/**",
         "caddy/**",
         "docker-compose.yaml",
@@ -51,6 +54,18 @@
         "docs/**"
       ],
       "verify": "docker compose config -q",
+      "scope_limit": 200
+    },
+    "VI": {
+      "name": "voice-bridge",
+      "allowed": ["packages/voice-bridge/**"],
+      "verify": "cd packages/voice-bridge && npm test",
+      "scope_limit": 200
+    },
+    "VII": {
+      "name": "paperclip",
+      "allowed": ["packages/paperclip/**"],
+      "verify": "cd packages/paperclip/adapter && npm run typecheck && npm test",
       "scope_limit": 200
     },
     "phase0": {

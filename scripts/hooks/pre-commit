@@ -1,19 +1,30 @@
 #!/usr/bin/env bash
 # Alfred lane-enforcement gate (pre-commit).
 #
-# Installed by scripts/hooks/install.sh, which sets:
-#     git config core.hooksPath scripts/hooks
-# core.hooksPath is repo config shared by every linked worktree, so each lane
-# agent's worktree inherits this gate automatically.
+# Installed by scripts/hooks/install.sh two ways (belt and suspenders):
+#   1. git config core.hooksPath scripts/hooks       (the intended path)
+#   2. a symlink .git/hooks/pre-commit -> this file  (survives the Claude Code
+#      worktree harness, which rewrites core.hooksPath back to .git/hooks at
+#      every worktree creation — the 2026-06 gate-off regression)
+#
+# Because (2) means this script may run VIA A SYMLINK from .git/hooks, we do
+# NOT locate check_lane.py relative to $BASH_SOURCE (dirname of the symlink is
+# the wrong dir). The working tree's checkout is authoritative: git hooks run
+# with CWD at the top of the working tree, and every worktree has
+# scripts/hooks/check_lane.py checked out.
 #
 # It rejects a commit BEFORE the orchestrator ever sees the diff if it jumps
 # lanes, touches the Phase-0 forbidden zone, blows the ~200-LOC scope limit, or
 # fails the lane's VERIFY (regression) command. All logic lives in check_lane.py.
 set -euo pipefail
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TOP="$(git rev-parse --show-toplevel)"
 PY="$(command -v python3 || command -v python || true)"
 if [ -z "${PY}" ]; then
   echo "✗ lane gate: python3 not found on PATH" >&2
   exit 1
 fi
-exec "${PY}" "${DIR}/check_lane.py"
+if [ ! -f "${TOP}/scripts/hooks/check_lane.py" ]; then
+  echo "✗ lane gate: ${TOP}/scripts/hooks/check_lane.py missing from the working tree" >&2
+  exit 1
+fi
+exec "${PY}" "${TOP}/scripts/hooks/check_lane.py"

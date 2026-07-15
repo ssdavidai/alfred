@@ -33,8 +33,9 @@ Alfred at `https://<their-domain>` with TLS, the dashboard, all 5 sidecars
 (Plane, Sure, Vaultwarden, Hermes, the chat surface), and the full
 intelligence layer.
 
-The full design rationale is in `docs/PLAN.md` (Parts A–I). Read it before
-making structural changes.
+Design rationale lives under `docs/design/` + `docs/specs/`; the
+architecture contracts are §5–§10 here. Read them before making
+structural changes.
 
 ---
 
@@ -53,15 +54,21 @@ alfred-black/
 │   ├── web/                 Wasp dashboard (auth + UI; proxies to ctrl-api)
 │   ├── ctrl/                ctrl-api: tenant API server (:3100) + 4-store layer
 │   ├── learn/               alfred-learn: Temporal intelligence layer (Python)
-│   ├── mcp-server/          5-app MCP bundle (alfred/sure/plane/vaultwarden/execute)
+│   ├── alfred-vault/        the Python vault daemon (validator; separate package)
+│   ├── mcp-server/          MCP app bundle (alfred/sure/vaultwarden/execute/…)
 │   ├── vault-init/          Vaultwarden bootstrap
-│   └── hermes/              Hermes runtime image (Dockerfile + supervisor.sh + init/)
+│   ├── hermes/              Hermes runtime image (Dockerfile + supervisor.sh + init/)
+│   ├── voice-bridge/        Twilio/telephony bridge (own image + CI)
+│   ├── paperclip/           Paperclip adapter (own image + CI; see docs/PAPERCLIP-BOOTSTRAP-CONTRACT.md)
+│   └── setup/               first-run setup wizard (own image + CI)
 ├── docs/
-│   ├── PLAN.md              the complete plan
-│   ├── FAILURE-MODES.md     ranked bug catalogue
-│   ├── FIX-PLAN.md          lane fan-out plan
-│   └── FIX-CONTRACTS.md     frozen cross-lane interfaces (Cn…)
-├── deploy/                  CUTOVER.md and ops runbooks
+│   ├── lane-protocol.md     CANONICAL lane protocol (mirrored in the operator harness)
+│   ├── FAILURE-MODES.md     ranked bug catalogue (historical; stamped)
+│   ├── FIX-PLAN.md          lane fan-out plan (historical — protocol now lives here + §11)
+│   ├── FIX-CONTRACTS.md     frozen cross-lane interfaces (Cn…)
+│   ├── design/ specs/       design rationale + per-issue specs
+│   └── operators/           ops runbooks
+├── deploy/                  ops runbooks
 ├── debug/                   ignored — investigation outputs land here
 └── CLAUDE.md                this file
 ```
@@ -134,7 +141,7 @@ to `/desk`. `/triage` → `/desk`. `/back-office` → `/study`.
 
 ---
 
-## 5. The four-store architecture (PLAN.md Part I)
+## 5. The four-store architecture
 
 > **The vault is the principal's published output, not the system's database.**
 
@@ -506,8 +513,8 @@ npm test               # node:test suite (~440 tests)
 
 Numbered SQL files in `packages/ctrl/src/db/migrations/`, applied
 transactionally on ctrl-api boot. **Never edit a migration after it has
-merged — append a new one.** See `packages/ctrl/CLAUDE.md` §state.db
-migrations for the rules.
+merged — append a new one.** Migrations are forbidden-zone: only the
+orchestrator (phase0) lands them.
 
 ---
 
@@ -551,36 +558,50 @@ For mapping unknown breakage (e.g. a sweep over the live product):
    never improvises across the boundary.**
 
 4. **Package-scoped lanes**, non-overlapping glob territory (→ conflict-free
-   merges by construction):
+   merges by construction). Canonical source: `docs/lane-protocol.md` +
+   `scripts/hooks/lanes.json` (v2 2026-07-15 — every package has exactly
+   one owning lane):
 
-   | Lane | Glob | Owns |
-   |------|------|------|
-   | **I**·ctrl | `packages/ctrl/**` | ctrl-api routes, the 4-store layer, settings |
-   | **II**·learn | `packages/learn/**` | Temporal activities, the intelligence layer, scoring |
-   | **III**·web | `packages/web/**` | Wasp app, dashboard pages, operations.ts |
-   | **IV**·alfred-vault | `packages/alfred-vault/**` | The Python vault daemon (separate package `alfred-vault` 1.0+) |
-   | **V**·edges/infra | `packages/{hermes,mcp-server,vault-init}/**`, `scripts/**`, `caddy/**`, `docker-compose.yaml`, `.env.example`, `Makefile`, `docs/**` | All non-package config |
+   | Lane | Branch | Glob | Owns |
+   |------|--------|------|------|
+   | **I**·ctrl | `lane-1/` | `packages/ctrl/**` | ctrl-api routes (incl. channels), the 4-store layer, settings |
+   | **II**·learn | `lane-2/` | `packages/learn/**` | Temporal activities, the intelligence layer, scoring |
+   | **III**·web | `lane-3/` | `packages/web/**` | Wasp app, dashboard pages, operations.ts |
+   | **IV**·alfred-vault | `lane-4/` | `packages/alfred-vault/**` | The Python vault daemon (separate package `alfred-vault` 1.0+) |
+   | **V**·edges/infra | `lane-5/` | `packages/{hermes,mcp-server,vault-init,setup}/**`, `scripts/**`, `caddy/**`, `docker-compose.yaml`, `.env.example`, `Makefile`, `docs/**` | All non-package config |
+   | **VI**·voice-bridge | `lane-6/` | `packages/voice-bridge/**` | Twilio/telephony bridge |
+   | **VII**·paperclip | `lane-7/` | `packages/paperclip/**` | Paperclip adapter |
 
-   **At most one agent per lane at a time** — lanes parallel, tasks within
-   a lane serial.
+   These are the ONLY valid lane IDs — never invent one ("CTRL"/"HERMES"
+   inventions are how the 2026-06 ungated commits happened). `.github/**`
+   is phase0-only. **At most one agent per lane at a time** — lanes
+   parallel, tasks within a lane serial.
 
-5. **The commit gate makes violations impossible to land**
-   (`scripts/hooks/`, `bash scripts/hooks/install.sh` sets `core.hooksPath`,
-   inherited by every worktree). On `git commit`, `check_lane.py` rejects
-   the diff if it:
-   - (a) leaves the lane's `allowed` globs (lane-jumping)
-   - (b) touches the **forbidden zone** (`schema.sql`, `db/migrations/**`,
-     `migrate.ts`, `api/server.ts`, `**/CONTRACT.md`, the `FIX-*` /
-     `FAILURE-MODES` docs, `scripts/hooks/**`, `CLAUDE.md`)
-   - (c) exceeds **~200 net LOC**, or
-   - (d) fails the lane **VERIFY** (build / `tsc` / pytest / `compose
-     config` — the regression gate)
+5. **The gate makes violations impossible to land — twice.**
+   - **Local pre-commit** (`scripts/hooks/`, `bash scripts/hooks/install.sh`):
+     on `git commit`, `check_lane.py` rejects the diff if it
+     - (a) leaves the lane's `allowed` globs (lane-jumping) — deletions
+       and rename-sources count too,
+     - (b) touches the **forbidden zone** (`schema.sql`, `db/migrations/**`,
+       `migrate.ts`, `api/server.ts`, `**/CONTRACT.md`, the `FIX-*` /
+       `FAILURE-MODES` docs, `docs/lane-protocol.md`, `scripts/hooks/**`,
+       `.github/**`, `CLAUDE.md`),
+     - (c) exceeds **~200 net LOC**, or
+     - (d) fails the lane **VERIFY** (build / `tsc` / pytest / `compose
+       config` — the regression gate).
+   - **Server-side CI replay** (`.github/workflows/lane-gate.yml`): every
+     PR from a `lane-N/*` branch re-runs rules (a)–(c) against the full PR
+     diff. This copy is authoritative — local hook removal or the harness
+     clobbering `core.hooksPath` (see §11.3) does not bypass it.
 
    The lane is declared by a `.lane` manifest at the worktree root:
-   `{"lane":"II","verify":"…","scope_limit":300}`.
+   `{"lane":"II","verify":"…","scope_limit":300}`, and by the branch name
+   in CI (`lane-2/… → II`; non-lane branches are phase0/operator).
    The **main checkout (no `.lane`) is `phase0`** — orchestrator, allow-all.
-   A linked worktree with **no `.lane` is rejected** (fail-safe).
+   A linked worktree with **no `.lane` is rejected**, and **`phase0` is not
+   self-declarable from a linked worktree** (fail-safe).
    **Never use `ALFRED_SKIP_VERIFY`.**
+   Gate unit tests: `python3 scripts/hooks/test_check_lane.py`.
 
 6. **Agent brief** = LANE / GOAL (one sentence) / ALLOWED + FORBIDDEN globs
    / VERIFY / CONTRACT (the package `CONTRACT.md` + the relevant
@@ -604,6 +625,14 @@ For mapping unknown breakage (e.g. a sweep over the live product):
 
 ### 11.3 Hard-won rules (these bit me — do not relearn them)
 
+- **The Claude Code worktree harness disarms local hooks.** At every
+  worktree creation it rewrites `core.hooksPath` back to `.git/hooks`
+  (shared config AND per-worktree `config.worktree`) — this silently
+  killed the lane gate for ~6 weeks (2026-06 → 2026-07-15 audit).
+  `install.sh` now also symlinks `.git/hooks/pre-commit → scripts/hooks/
+  pre-commit` so the gate fires under either config value, and strips
+  stale per-worktree overrides — re-run it whenever in doubt. The CI
+  `lane-gate` workflow is the authoritative backstop either way.
 - **`isolation: worktree` does NOT guarantee isolation.** Agents have
   shared the working tree and overwritten each other's `.lane`. Either
   confirm each agent got a real separate worktree, **or** run coordinated
@@ -643,7 +672,12 @@ Path-filtered, push-to-main:
 | `build-hermes.yml` | `packages/hermes/**` (Dockerfile, supervisor.sh, configs) | `ssdavidai00/alfred-black-hermes:latest` |
 | `build-init.yml` | `packages/hermes/init/**`, `packages/ctrl/src/templates/**`, hermes-config templates | `ssdavidai00/alfred-init:latest` |
 | `build-mcp-server.yml` | `packages/mcp-server/**` | `ssdavidai00/alfred-mcp-server:latest` |
+| `build-voice-bridge.yml` | `packages/voice-bridge/**` | voice-bridge image |
+| `build-paperclip.yml` | `packages/paperclip/**` | paperclip image |
+| `build-setup.yml` | `packages/setup/**` | setup image |
 | `ci-check.yml` | * (all) | `tsc --noEmit` + `pytest` + `docker compose config` |
+| `lane-gate.yml` | PRs | server-side replay of the lane gate on the PR diff (see §11.2.5) |
+| `pr-review-gate.yml` | PRs | `smoke-evidence-check` — PR body must carry `## Smoke evidence` |
 | `gitleaks.yml` | * (all) | Secret scanning |
 
 `docker compose up` **never builds** — it pulls `:latest` for every
@@ -881,10 +915,11 @@ containers.
 
 ## 17. References — read these when you touch the relevant area
 
-- `docs/PLAN.md` — the complete plan (Parts A–I)
+- `docs/lane-protocol.md` — the canonical lane protocol (lanes, gate, contracts file)
 - `docs/FAILURE-MODES.md` — ranked bug catalogue
 - `docs/FIX-PLAN.md` — lane fan-out plan
 - `docs/FIX-CONTRACTS.md` — frozen cross-lane interfaces
+- `docs/PAPERCLIP-BOOTSTRAP-CONTRACT.md` — paperclip cross-lane contract
 - `packages/ctrl/docs/STORAGE-ARCHITECTURE.md` — the 4-store model
 - `packages/ctrl/CONTRACT.md` — what ctrl-api provides + requires
 - `packages/learn/CONTRACT.md` — what alfred-learn provides + requires
@@ -896,7 +931,8 @@ containers.
 - `packages/hermes/docker/supervisor.sh` — the 3-process supervisor
 - `packages/hermes/init/entrypoint.sh` — vault scaffold, Hermes profile rendering, password generation
 - `caddy/Caddyfile` — Caddy ingress with `{$DOMAIN}` substitution
-- `scripts/hooks/check_lane.py` — the commit gate (read this before opening a PR)
+- `scripts/hooks/check_lane.py` — the commit gate (read this before opening a PR); tests in `scripts/hooks/test_check_lane.py`
+- `.github/workflows/lane-gate.yml` — the server-side gate replay
 - `CHANGELOG.md` — bare-date release tags
 
 ---
