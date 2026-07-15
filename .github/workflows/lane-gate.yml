@@ -53,16 +53,21 @@ jobs:
 
       - name: Reject unmapped lane-* branch names
         if: steps.lane.outputs.lane == 'INVALID'
+        env:
+          BRANCH: ${{ github.head_ref }}
         run: |
-          echo "::error::branch '${{ github.head_ref }}' uses lane-* naming but maps to no lane (valid: lane-1 … lane-7). Rename the branch or use a non-lane branch for operator work."
+          echo "::error::branch '$BRANCH' uses lane-* naming but maps to no lane (valid: lane-1 … lane-7). Rename the branch or use a non-lane branch for operator work."
           exit 1
 
       - name: Replay the lane gate on the PR diff
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          LANE: ${{ steps.lane.outputs.lane }}
         run: |
-          git fetch origin "${{ github.base_ref }}" --depth=200 || git fetch origin "${{ github.base_ref }}"
+          git fetch origin "$BASE_REF" --depth=200 || git fetch origin "$BASE_REF"
           python3 scripts/hooks/check_lane.py --ci \
-            --lane "${{ steps.lane.outputs.lane }}" \
-            --base "origin/${{ github.base_ref }}"
+            --lane "$LANE" \
+            --base "origin/$BASE_REF"
 
       - name: Gate unit tests
         run: python3 scripts/hooks/test_check_lane.py
