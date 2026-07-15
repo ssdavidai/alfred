@@ -184,10 +184,10 @@ right endpoint.
 
 | Demoted type | Goes to |
 |---|---|
-| `signal-action` / `steward-action` / `desk-action` / `state-change` / `needs_attention_action` / `auto-task-created` / `event` | `alfred-state.db` **`audit`** table (via `POST /api/v1/audit`) |
-| `signal` | `alfred-state.db` **`signal`** (via `POST /api/v1/signals`) |
-| `observation` / `pattern_proposal` / `synthesis` / `contradiction` / `assumption` / `constraint` | `alfred-state.db` **`observation`** (via `POST /api/v1/observations`) |
-| `stream_event` | `ingest.db` **`stream_event`** (via `POST /api/v1/streams/events`) |
+| `signal-action` / `steward-action` / `desk-action` / `state-change` / `needs_attention_action` / `auto-task-created` / `event` | `alfred-state.db` **`audit`** table (via `POST /api/v1/state/audit`) |
+| `signal` | `alfred-state.db` **`signal`** (via `POST /api/v1/state/signals`) |
+| `observation` / `pattern_proposal` / `synthesis` / `contradiction` / `assumption` / `constraint` | `alfred-state.db` **`observation`** (via `POST /api/v1/state/observations`) |
+| `stream_event` | `ingest.db` **`stream_event`** (via `POST /api/v1/ingest/events`) |
 
 Vault operator paths that **bypass** the canonical-12 check:
 `_templates/`, `_archive/`, `_migrated*/`, `_rescue/`, `_raw/`,
@@ -341,7 +341,7 @@ for chores with 20+ live runs ≥95% success.
 Canonical type. `vault/instinct/<slug>.md`.
 
 **Tiers**: `Asking → Confirming → Acting`. Tier promotion is **clerk-driven** —
-`ReflectionWorkflow` (daily 02:00 UTC) feeds accumulated observations to Opus,
+`ReflectionWorkflow` (daily 02:00 tenant-local) feeds accumulated observations to Opus,
 which proposes `apply_instinct_change` calls. `apply_instinct_change` is the
 SOLE writer of `observation_count`, `confidence_score`, and `tier`.
 
@@ -360,9 +360,9 @@ enrichment) takes precedence over the snapshotted `observation_count`.
 
 ```
 inbound webhook / composio poll / agent action
-       ↓ POST /api/v1/streams/events
+       ↓ POST /api/v1/ingest/events
 ingest.db.stream_event (7d TTL)
-       ↓ EventProcessorWorkflow (every 2 min)
+       ↓ EventProcessorWorkflow (every 15 min)
    marks processed_at; signals routed directly from ingest.db (#78 Design-B)
        ↓ SignalExtractWorkflow (every 5 min, gated on STEWARD_SIGNAL_EXTRACT_ENABLED)
    chunked extraction via clerk → alfred-state.db.signal (status=unrouted)
@@ -384,7 +384,7 @@ ingest.db.stream_event (7d TTL)
                   → extract_observation_from_decision (ALWAYS — no guard)
                   → state.db.observation (kind=decision, instinct_ref stamped)
                   → state=completed (or =executing for delegate, then =completed on outcome)
-       ↓ ReflectionWorkflow (daily 02:00 UTC)
+       ↓ ReflectionWorkflow (daily 02:00 tenant-local)
    accumulated observations → Opus proposes instinct changes
    → apply_instinct_change → observation_count/confidence_score/tier updated
    → next signal scoring uses the new bar
@@ -425,7 +425,9 @@ OpenClaw is replaced by **Hermes**. In ctrl-api code:
 
 - Runtime container is `hermes` (compose service)
 - In-container CLI: `hermes` (`HERMES_CMD` / `HERMES_CONTAINER` in `helpers.ts`)
-- **Three supervised profiles** (per `packages/hermes/docker/supervisor.sh`):
+- **Supervised profiles** (per `packages/hermes/docker/supervisor.sh`) — three
+  static plus dynamic per-slug profiles provisioned from
+  `$HERMES_HOME/profiles/_registry.json` (optional codex-builder among them):
   - `main` profile, API port **18789** — user-facing chat, memory enabled
   - `workers` profile, API port **18790** — background agents (clerk, curator, janitor, distiller, ephemeral runs), concurrency capped
   - `heavy` profile, API port **18791** — heavy reasoning (Opus / GPT-5.5-class) for onboarding + Reflection
@@ -444,7 +446,8 @@ OpenClaw is replaced by **Hermes**. In ctrl-api code:
 
 Hermes speaks the **OpenAI Responses API natively** — no shim:
 - `POST http://hermes:18789/v1/responses` (main)
-- `POST http://hermes:18790/v1/runs` (workers — ephemeral runs)
+- `POST http://hermes:18790/v1/responses` (workers — the `/v1/runs` poll loop
+  was removed in #46; learn dispatches responses with `X-Hermes-Session-Key`)
 - `POST http://hermes:18791/v1/responses` (heavy)
 
 All calls carry `Authorization: Bearer ${HERMES_API_SERVER_KEY}` (the
@@ -469,11 +472,12 @@ HTTP proxy to ctrl-api.
 
 ### 9.3 NOT used
 
-- **Hermes web dashboard** (`hermes dashboard`): the upstream v0.14.0 wheel
-  ships neither the React source nor a pre-built `web_dist/`. We deployed
-  it briefly on 2026-05-24, hit "Frontend not built", reverted (commit
-  `ce6c177`). Use `hermes config` / `hermes profile` / `hermes auth` CLI
-  inside the container instead.
+- ~~Hermes web dashboard unusable~~ **stale since the 0.17 wheel**: the
+  dashboard now ships `web_dist/` and runs as a supervised process on
+  `:9119` (main profile; internal compose network only — see the
+  `# hermes-relay … + main dashboard (:9119)` block in `supervisor.sh`).
+  The 2026-05-24 "Frontend not built" revert (`ce6c177`) predates this.
+  CLI (`hermes config` / `hermes profile` / `hermes auth`) still works.
 
 ---
 
@@ -497,7 +501,7 @@ npm test               # node:test suite (~440 tests)
 
 ### 10.2 Route layout
 
-`src/api/routes/` — ~40 files, one per surface. Notable:
+`src/api/routes/` — ~70 files (incl. `webhooks/`), one per surface. Notable:
 
 | Route file | Surface |
 |------------|---------|

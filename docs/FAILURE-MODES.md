@@ -1,5 +1,29 @@
 # Alfred Black — Lanes, Failure Modes & Resilience Stories
 
+> ---
+> **CATALOGUE STATUS (stamped 2026-07-15).** This document is a FROZEN audit
+> artifact: Part 1 is the 2026-05-20 lane map; Parts 2–4 are the 2026-05-20/21
+> code-audit waves. The body text below is preserved as written and is NOT
+> updated as bugs get fixed. Per-section resolution stamps (the
+> `[STAMP 2026-07-15]` blockquotes under each heading) record what has since
+> been RESOLVED, what is SUPERSEDED-STACK (the subsystem was removed from the
+> deployed compose stack), and what is STILL-OPEN. File-and-line references in
+> the original text are as-of the audit date and may no longer match `main`.
+> **Do not add new bugs here — new bugs go to GitHub issues.** Stamps are
+> forbidden-zone edits (orchestrator/phase0 only), same as the rest of this file.
+>
+> Stamp vocabulary:
+> * **RESOLVED** — the named defect is fixed on `main` (fixing commit or current
+>   code line cited). "RESOLVED (residuals: …)" = the headline item is fixed,
+>   listed leftovers are not.
+> * **SUPERSEDED-STACK** — the subsystem no longer ships (Plane and Vexa were
+>   removed from `docker-compose.yaml`; dormant code remains in-tree). Bugs in
+>   these sections are moot in production; revisit only if the code is revived.
+> * **STILL-OPEN** — re-verified 2026-07-15 as genuinely unfixed on `main`.
+> * Items marked *unverified* inside a stamp were not re-checked in the
+>   2026-07-15 pass; treat them as historical claims, not current facts.
+> ---
+
 A working map of where this system can fail, organized by the **lanes** a user's
 intent flows through. Each lane lists user stories ("I want to… / I expect…"),
 the **under-the-hood** path, and the **failure modes** with a marker:
@@ -18,6 +42,19 @@ identical to the user. That is the central resilience problem.
 ---
 
 ## 0. The spine — cross-cutting dependencies
+
+> **[STAMP 2026-07-15] STILL-OPEN (structural), table partially stale.** The
+> no-HA single-VM posture is unchanged and remains the honest risk. Stale rows:
+> Plane was removed from the deployed stack (PR #279, `4a83de87`) and Vexa has
+> no compose services on `main` (verify: `docker-compose.yaml` service list —
+> caddy/web-db/web/web-client/init/temporal/ollama/hermes/alfred/ctrl-api/
+> alfred-learn/voice-bridge/mcp-server/vaultwarden/vault-signup/vault-cli/
+> sure-*/paperclip*/tailscale — no plane, no vexa). Hermes now runs
+> THREE profiles (main :18789 / workers :18790 / heavy :18791, per
+> `packages/hermes/docker/supervisor.sh`). Minimum RAM guidance is now 48 GB
+> (CLAUDE.md §3), with hermes capped at 12g + swap (PR #279). ctrl-api still
+> mounts the Docker socket RW (`docker-compose.yaml:579`) — acknowledged as the
+> VM trust-root at `:596`; the S1 stands.
 
 Every story below rides on some subset of these. A failure here is a failure
 everywhere downstream.
@@ -40,6 +77,16 @@ butler goes dark — quietly.
 ---
 
 ## Lane 1 — Deploy & first boot
+
+> **[STAMP 2026-07-15] RESOLVED (residuals: docker-socket S1).** The
+> missing-identity class is closed: `OWNER_EMAIL` is defined in `.env.example:95`
+> and compose sets BOTH `OWNER_EMAIL` and `ALFRED_OWNER_EMAIL` from it (C9,
+> `docker-compose.yaml:730–736`); `COMPOSIO_USER_ID` was cleared by the Part-3
+> audit itself. RAM exhaustion addressed: Plane removed + hermes 12g + swap
+> (PR #279 `4a83de87`), 48 GB min documented. Vexa profile gone
+> (SUPERSEDED-STACK). STILL-OPEN: ctrl-api holds the Docker socket RW
+> (`docker-compose.yaml:579`) — by design, but still root-equivalent. ACME/DNS
+> ordering and init partial-failure remain inherent deploy risks (unverified).
 
 > *"I clone the repo, fill `.env`, run `docker compose up`, and in a few minutes
 > my butler is live on my domain over HTTPS."*
@@ -76,6 +123,14 @@ endpoint.
 
 ## Lane 2 — Become the owner / auth
 
+> **[STAMP 2026-07-15] RESOLVED (top items).** Open registration is closed:
+> `onBeforeSignup` rejects any signup once a user exists, override via
+> `ALLOW_SIGNUP_AFTER_OWNER=true` (`packages/web/src/auth/hooks.ts`, comment
+> cites "FAILURE-MODES web bug #1"). The Google refresh-token drop is fixed:
+> re-auth preserves the stored token when Google omits it
+> (`packages/web/src/server/oauth2.ts:385–390`, conditional spread). Member
+> email-verification still requires a mail provider (structural, unverified).
+
 > *"The first account I create is the owner. My family can join as members."*
 
 **Under the hood:** Wasp email/Google auth → `userSignupFields` (`User.count()===0
@@ -98,6 +153,15 @@ endpoint.
 ---
 
 ## Lane 3 — Connect Gmail / integrations
+
+> **[STAMP 2026-07-15] RESOLVED (residuals: silent execute path).** Connection
+> scoping was hardened: readiness and account enumeration now scope by
+> `user_id` server-side AND re-filter client-side
+> (`packages/ctrl/src/api/routes/integrations.ts:3288–3320`). Note Part 2 §E
+> corrected this lane's "under the hood" (no allowlist/restart model exists).
+> STILL-OPEN: `execute_action` still returns `{"error": …}` envelopes instead
+> of raising (`packages/learn/src/integrations/composio_client.py:207ff`) —
+> "connected + ACTIVE" can still coexist with "every call fails", silently.
 
 > *"I click 'Connect Gmail' once and Alfred can read my mail."*
 
@@ -125,6 +189,18 @@ connection lands ACTIVE → scoped by `COMPOSIO_USER_ID` → `GMAIL_FETCH_EMAILS
 ---
 
 ## Lane 4 — Onboarding (the first impression)
+
+> **[STAMP 2026-07-15] RESOLVED (top items), pipeline substantially rewritten.**
+> LLM-truncation class: fact extraction is chunked (#193), stream pull is
+> chunked/paginated (#180); the brief writer was replaced
+> (`write_brief_and_opportunities_opus`, PR S2-2,
+> `packages/learn/src/activities/onboarding_v3.py:2312`). Ritual routing was
+> reworked; the /soul preset chooser now sits between /verify and /composing
+> (#853, `packages/web/src/onboarding/SoulPresetPage.tsx`). Tasks are born with
+> the rich shape + 4-tier matter resolution (`dbaca816`, `935692f`, CLAUDE.md
+> §15.5). Generated-chore risk is MITIGATED, not closed: first 3 runs are
+> quarantine dry-runs (CLAUDE.md §6.5), but there is still no sandbox/review
+> gate on what generated code does — see the Part-3 Chores stamp.
 
 > *"I watch Alfred read my last 100 days, I confirm what he learned, and I get a
 > first brief that makes me feel known."*
@@ -168,6 +244,18 @@ top.
 
 ## Lane 5 — The signal pipeline (the core promise)
 
+> **[STAMP 2026-07-15] RESOLVED (plumbing), STILL-OPEN (model risk).** The
+> silent-zero seams are closed: extract/router schedules default ON
+> (`packages/learn/scripts/register_schedules.py:810,826`, comments cite
+> "#6"); absent signal status defaults to `unrouted` not `open`
+> (`packages/ctrl/src/api/routes/state.ts:191–193`, cites C2); the ingest TTL no longer
+> deletes unprocessed rows (`packages/ctrl/src/db/ingest.ts:20,72`, cites #17);
+> OWNER_EMAIL guard is armed (see Lane 1 stamp). Under-extraction by the cheap
+> model remains inherent — source-type handling was rewritten with trust tiers
+> + an unknown-source retry valve (`packages/learn/src/activities/signals.py:193,268ff`),
+> but "the model misses the one email that mattered" is unfixable by plumbing;
+> STILL-OPEN as a standing risk.
+
 > *"200 emails land on Tuesday; Alfred surfaces the 1 that actually needs me as a
 > card on my Desk — and never invents one."*
 
@@ -198,6 +286,15 @@ top.
 
 ## Lane 6 — Matters, Decisions & progressive autonomy
 
+> **[STAMP 2026-07-15] RESOLVED.** The wrong-store writer class is gated in
+> code: POST, PATCH and move on `/vault/records` all call
+> `assertCanonicalVaultPath` (`packages/ctrl/src/api/routes/vault.ts:759,899,1178`).
+> Progressive autonomy's frozen counter is fixed (Part 2 bugs #1/#2, see that
+> stamp) and the whole learning loop was re-repaired 2026-07-03 (#276,
+> `ef33909e`: reflection wedge + click→instinct link + noise suppression),
+> deployed to home. Mis-calibrated autonomous fire remains a designed risk
+> managed by the discretion gate + the 3 mode flags (CLAUDE.md §8).
+
 > *"Alfred files everything under the right Matter, learns how I decide, and
 > slowly starts acting for me — earning trust, not assuming it."*
 
@@ -224,6 +321,15 @@ sweeps matters/tasks and evaluates state changes.
 ---
 
 ## Lane 7 — Chat & the Hermes runtime
+
+> **[STAMP 2026-07-15] RESOLVED (the realized S1).** The 2026-06-19 workers
+> disk-bloat incident (described in the body) has its fixes on `main`: nightly
+> session-prune/vacuum rendering (`packages/hermes/init/render_workers_pruning.py`
+> + `packages/hermes/tests/test_init_workers_pruning_mutator.py`) and the
+> compose logging cap. The workers gateway :18790 is now health-checked
+> alongside :18789 (`docker-compose.yaml:456`, `packages/hermes/Dockerfile:496–500`).
+> Memory-parity, transport-seam and provider-outage entries are structural and
+> unverified.
 
 > *"I message Alfred on the web, or Telegram, or by email, and he answers like
 > he knows my whole life."*
@@ -266,6 +372,16 @@ gateway; `notify_principal` bridges ephemeral agents → main message tool.
 
 ## Lane 8 — Chores (the standing automations)
 
+> **[STAMP 2026-07-15] RESOLVED (top items).** The worst blast-radius item —
+> one workflow-name collision crash-looping the whole learn worker — is fixed:
+> the dynamic loader dedups against reserved + already-seen names and skips
+> collisions with a log line
+> (`packages/learn/src/workflows/chores/_dynamic_loader.py:601–706`).
+> Generated-code review: quarantine dry-runs (first 3 runs) now exist
+> (CLAUDE.md §6.5); a hard sandbox/enforced review gate still does not —
+> STILL-OPEN as a designed-risk residual. Zombie-workflow / timezone / missing-
+> dependency entries unverified.
+
 > *"Alfred runs my recurring work — the Friday wind-down, the zombie-subscription
 > audit — and only pings me when there's something to see."*
 
@@ -289,6 +405,19 @@ registers them → cron schedule fires → run → `notify_principal`.
 
 ## Lane 9 — Channels & notifications
 
+> **[STAMP 2026-07-15] RESOLVED (delivery), STILL-OPEN (noise).**
+> `notify_principal`'s hard-broken default channel is fixed: "auto" resolves
+> the most-recently-active delivery-capable Hermes session, never fabricating
+> "webchat" (C8, `packages/ctrl/src/api/routes/notifications.ts:128–139`).
+> Over-notification: noise suppression now enforces adopted noise instincts
+> (#276 `ef33909e`), BUT a verified latent bug keeps part of it inert —
+> `derive_signature` normalizes `composio-gmail*`/`gmail` but NOT
+> `source_type="email"` (`packages/learn/src/activities/noise_patterns.py:109–113`),
+> so sender-domain noise matching never fires for events stamped `email`.
+> Workaround in production: anchor noise instincts on `subject_keywords`
+> (2026-07 home fix). STILL-OPEN — file/keep a GitHub issue for the
+> derive_signature gap.
+
 > *"Alfred reaches me where I am, and only when it matters."*
 
 **Under the hood:** `notify_principal` → ctrl-api → Hermes main message tool →
@@ -305,6 +434,14 @@ channel (Telegram/Slack/email).
 ---
 
 ## Lane 10 — Sidecars (Sure / Plane / Vaultwarden / Vexa)
+
+> **[STAMP 2026-07-15] SUPERSEDED-STACK (Plane, Vexa) / RESOLVED (Sure).**
+> Plane was removed fleet-wide (PR #279, `4a83de87`); Vexa has no compose
+> services on `main`. Their sync/migration failure modes are moot in
+> production; `plane_*`/`vexa`/`transcript` code remains in-tree DORMANT
+> (deletion is an open follow-up). Sure is still deployed and its Part-4 S1s
+> are fixed — see the Part 4 "New S1s" stamp. Vaultwarden entries: no known
+> issues, unverified.
 
 > *"Alfred manages my money in Sure and my projects in Plane."*
 
@@ -324,6 +461,17 @@ apps drive them via init-rendered mutate scripts.
 ---
 
 ## Lane 11 — Vault & memory integrity (the four stores)
+
+> **[STAMP 2026-07-15] RESOLVED (top items).** Promotion-contract 422 class:
+> enforcement now covers POST + PATCH + move (`vault.ts:759,899,1178`); the
+> demoted-type writers were repointed at state.db (see Part 2 stamp). Worker
+> misbehavior class: distiller can no longer create principal-facing
+> `decision/` records (`packages/alfred-vault/src/alfred/vault/scope.py:41–43,126`,
+> cites bug #12). The cold compactor is RUNNING (Part 4 corrected the
+> "deferred" doc-rot) and cross-tier reads are now generic, not audit-only
+> (`packages/ctrl/src/db/coldRead.ts:288,405` `queryCrossTier`/`getCrossTier`).
+> `vault_index` drift is structurally prevented by single-writer discipline
+> (CLAUDE.md §5.2). Janitor/curator specifics unverified.
 
 > *"My vault is my second brain — and I can trust it."*
 
@@ -347,6 +495,15 @@ curator/janitor/distiller/surveyor workers; `vault_index` in `state.db`.
 
 ## Lane 12 — MCP / the Claude connector
 
+> **[STAMP 2026-07-15] RESOLVED.** Hermes registers the full MCP bundle per
+> profile — the ctrl-api proxy (`alfred-ctrl`) plus stdio apps
+> alfred/sure/vaultwarden/execute/hass/paperclip, with `files` added on
+> main+workers (`packages/hermes/hermes-config.yaml.njk:460ff`; `plane` was
+> dropped with PR #279, and CLAUDE.md §9.2's "6 servers" undercounts) — the
+> "can Hermes spawn stdio children" risk did not materialize. Auth got a real
+> model: per-app scoped bearer tokens + management UI shipped in PR #278
+> (`12d02d21`). Connector-drift entries unverified.
+
 > *"I use Alfred's tools from Claude (claude.ai connector)."*
 
 **Failure modes**
@@ -359,6 +516,14 @@ curator/janitor/distiller/surveyor workers; `vault_index` in `state.db`.
 ---
 
 ## Lane 13 — Day-2 operations
+
+> **[STAMP 2026-07-15] STILL-OPEN (ops posture).** No backup wiring exists in
+> the repo (no restic/backup hits under `scripts/` or `Makefile`;
+> CLAUDE.md §15.10 is guidance only). `:latest`-drift and Temporal
+> replay-discipline remain the standing update risks (structural). Disk fill
+> is mitigated for the known offenders (workers session pruning + compose log
+> caps — Lane 7 stamp) but has no general guard. At-rest encryption and
+> secret-rotation flow: still absent (documented trade-offs).
 
 > *"I restart, update, and back up, and nothing breaks."*
 
@@ -380,6 +545,16 @@ curator/janitor/distiller/surveyor workers; `vault_index` in `state.db`.
 ---
 
 ## The systemic class — "looks fine but isn't"
+
+> **[STAMP 2026-07-15] MIXED.** Items 3 (promotion-contract gaps) and much of
+> 4 (the specific wedges audited) are RESOLVED per the Part 2/3 stamps; item 5
+> shrank with Plane's removal + memory re-sizing (PR #279). Items 1 (silent
+> under-extraction), 2 (autonomous wrong action — see the 2026-07-15 office-AC
+> runaway, stamped under Part 2 §A), and 6 (cost) are inherent and STILL-OPEN.
+> The meta-finding — no unified "Alfred is degraded" surface / work-liveness
+> heartbeat — remains the highest-leverage gap: compose healthchecks improved
+> (Lane 7 stamp) but nothing yet proves the pipeline *worked*, only that
+> processes are up.
 
 Ranked by how badly they violate the user's trust:
 
@@ -408,11 +583,61 @@ looking the same.
 
 # Part 2 — Mechanism-level deep dives (2026-05-20 code audit)
 
+> **[STAMP 2026-07-15]** Frozen audit wave. Per-bug resolution for the ranked
+> table is stamped under the next heading; §A–§E each carry their own stamp.
+> The "half-finished storage cutover" root cause (R1) is closed — see bugs
+> #1/#2/#6/#7 below. R4 (no work-liveness heartbeat) is still the honest gap.
+
 Part 1 above is the lane map. Part 2 is the result of a five-agent read-only
 audit of the actual code, grounded in `file:line`. It promotes many Part-1
 ☣ LATENT entries to **⚠ CONFIRMED** — found in the source, not hypothesized.
 
 ## Confirmed bugs found in the audit (ranked)
+
+> **[STAMP 2026-07-15] Per-bug resolution** (verified on `main` unless noted):
+> * **#1 RESOLVED** — counts come from state.db, not the vault FS:
+>   `packages/ctrl/src/api/instinctCounts.ts:1–37` (`SELECT instinct_ref,
+>   COUNT(*) FROM observation`), comment cites "FAILURE-MODES bug #1".
+> * **#2 RESOLVED** — `mark_observations_processed` PATCHes state.db via
+>   `update_observation(obs_id, status="processed")`
+>   (`packages/learn/src/activities/vault.py:851,868`). See also #232 `ce6773d2`.
+> * **#3 PARTIALLY RESOLVED** — the dual-write race is gone (Desk runs ONE
+>   decision POST, reconcile-on-success), but intent=done on an approval-source
+>   card still flips its status to `approved`
+>   (`packages/ctrl/src/api/routes/decisions.ts:462`). Whether anything
+>   executes on that flip was not re-verified — if "Done ≠ approve" still
+>   matters, file an issue.
+> * **#4 RESOLVED** — DeskPage clears a card only after server confirmation
+>   ("reconcile-on-success", `packages/web/src/dashboard/DeskPage.tsx:655–680`).
+> * **#5 RESOLVED** — defer now carries a resurface contract in its 201 (C-B4,
+>   `decisions.ts:538–546`) and the UI names the resurface time.
+> * **#6 RESOLVED** — both flags default ON
+>   (`packages/learn/scripts/register_schedules.py:810,826`, cites "#6").
+> * **#7 RESOLVED** — absent status defaults `unrouted`
+>   (`packages/ctrl/src/api/routes/state.ts:191–193`, cites C2).
+> * **#8 unverified** (`mirrorEventToIngestDb` swallow) — not re-checked.
+> * **#9 RESOLVED-BY-REWRITE** — source-type inference was replaced with
+>   gmail trust tiers + an unknown-source retry valve
+>   (`packages/learn/src/activities/signals.py:193,264–327`).
+> * **#10 ANCHOR GONE** — `stream_puller.py` no longer exists on `main`; the
+>   pull path was restructured (`activities/pull.py`, `streams.py`).
+>   `resolve_active_connected_account_id` lives in `pull.py`/`composio_client.py`;
+>   re-verify pinning only if reviving the concern.
+> * **#11 unverified** (enable-tool no-op UI copy).
+> * **#12 RESOLVED** — distiller may NOT create `decision`
+>   (`packages/alfred-vault/src/alfred/vault/scope.py:41–43,126`, cites bug #12).
+> * **#13 RESOLVED** — `matter` removed from the surveyor entity-type list
+>   (`packages/alfred-vault/src/alfred/surveyor/labeler.py:120`, cites bug #13).
+> * **#14 STILL-OPEN (likely)** — no health-gating/liveness strings found in
+>   `surveyor/embedder.py`; Ollama-down still degrades recall silently.
+> * **#15 STILL-OPEN** — `execute_action` still returns `{"error": …}`
+>   envelopes, never raises (`packages/learn/src/integrations/composio_client.py:207ff`).
+> * **#16 RESOLVED** — Undo is wired: F51 connects `reverseDecision` /
+>   `undoStewardAction` to the ledger (`DeskPage.tsx:215–218,500`).
+> * **#17 RESOLVED** — TTL retains unprocessed rows, reports `stale_dropped`
+>   (`packages/ctrl/src/db/ingest.ts:20,50–105`, cites #17).
+> * **#18 RESOLVED (docs)** — CLAUDE.md was rewritten (`f32aafa7`) with current
+>   cadences (§7).
 
 These are real defects in the merged tree, not "could happen." Severity: **S1**
 silent/dangerous · **S2** breaks-flow · **S3** ugly. Most are S1 because they
@@ -455,6 +680,17 @@ fail with a 200 OK.
 
 ## A — Streams → ingest → signals (the core pipeline)
 
+> **[STAMP 2026-07-15] LARGELY SUPERSEDED-BY-REWRITE; one new STILL-OPEN.**
+> `stream_puller.py` is gone (pull restructured into `pull.py`/`streams.py`);
+> `signals.py` source-typing was rewritten (trust tiers + retry valve); TTL and
+> status-default seams are fixed (bugs #7/#17 above). The "signal stuck in
+> `dispatching`, nothing auto-sweeps it" entry inverted into a NEW bug: a
+> recovery sweep now exists (`recover_stuck_dispatching`,
+> `packages/learn/src/activities/decision_router.py:148`) but has NO attempt
+> cap — it drove the 2026-07-15 office-AC channel-spam runaway (stuck delegate
+> decision re-dispatched in a loop). **STILL-OPEN: recovery cap.** Remaining
+> line items unverified.
+
 ```
 Stream config (JSON on disk)  → StreamSweepWorkflow (2m) → /streams/ingest
   → ingest.db (Store 4, 7d TTL) → SignalExtractWorkflow (5m) → state.db signal (unrouted)
@@ -481,6 +717,13 @@ on those seams.
 
 ## B — The four vault workers (curator / janitor / distiller / surveyor)
 
+> **[STAMP 2026-07-15] MIXED.** Distiller decision-write and surveyor
+> matter-type bugs are RESOLVED (see #12/#13 in the table stamp). Surveyor
+> embedder liveness (#14) appears STILL-OPEN. The `openclaw-wrapper` is still
+> referenced on `main` (janitor pipeline, hermes templates) — its
+> timeout/premature-completion entries were not re-verified; treat as
+> historical until someone re-audits the wrapper path.
+
 All four run in one `alfred-worker` container; LLM workers shell to the
 `openclaw-wrapper` (which speaks Hermes `/v1/runs` over HTTP); surveyor calls
 Ollama + OpenRouter directly. Orchestrator restarts a dead child ≤5× then drops
@@ -500,6 +743,17 @@ it permanently (`orchestrator.py:255`).
 **Surveyor** (vectors/recall): **bugs #13, #14** + an embedding-dim mismatch **drops the whole collection and wipes file state** to force a re-embed (`embedder.py:136`); wrong clusters write permanent, never-retracted `related_*` links (S4f); the OpenRouter labeler retries only on 429 and gives up on any other error (`labeler.py:261`); runs only if a `surveyor:` config block exists — omit it and there's *no semantic layer at all*, zero error (S9f).
 
 ## C — Desk decision cards + the action buttons
+
+> **[STAMP 2026-07-15] RESOLVED (residual: #3 semantics).** Every button now
+> runs one decision POST with reconcile-on-success (#4), defer has a resurface
+> contract (#5/C-B4), Undo is wired (#16/F51), and every decision mints
+> `state: open` so observation extraction always fires (`31fa11f7`, `e8905e4`;
+> see `decisions.ts:563` comment). Delegate's loop/recursion class was killed
+> by `4466c68b` (mirror suppression) + `c551c00e` (terminal re-routed signal)
+> + `6a8052f` (direct dispatch). Noise now feeds enforced noise instincts
+> (#276 `ef33909e`) — subject to the derive_signature gap (Lane 9 stamp).
+> Residual: intent=done still maps an approval card to `approved`
+> (`decisions.ts:462`) — see bug #3 stamp.
 
 **Construction:** a signal (`effect=action`) → `route_signal_action` → HUMAN path
 → `needs_attention/*.md` (`status:pending`). Cards are assembled *client-side* in
@@ -524,6 +778,17 @@ Per-button specifics:
 
 ## D — Learning, observations & progressive autonomy
 
+> **[STAMP 2026-07-15] RESOLVED (the severed feedback arc).** The dead segment
+> is reconnected: live counts from state.db (`instinctCounts.ts`, bug #1),
+> processed-marking lands (bug #2), decisions always route (`31fa11f7`), and
+> the loop was re-repaired end-to-end 2026-07-03 (#276 `ef33909e`: reflection
+> index-422 wedge, click→instinct linkage, noise enforcement). CLAUDE.md §6.6
+> documents the current contract (`live_observation_count` precedence,
+> non-deprecated instinct matching, discretion gate as the safety belt).
+> Pack-seeded threshold bypass, dual-scorer scale mismatch, and the gameable
+> ≥3-observations gate were NOT re-verified — treat as open questions for a
+> future issue, not confirmed-current facts.
+
 The full chain and its dead segment:
 ```
 Desk click → decision/*.md → route_decision → extract_observation_from_decision
@@ -544,6 +809,13 @@ never earn autonomy (confirmed bugs #1, #2; A-1, A-7, I-1).
 **Observation hygiene:** clerk extraction failures drop the whole batch but still truncate the queue by count (`learning.py:131`) → silent loss (O-5); two observation schemas with disjoint required fields and no reconciliation (O-4); cross-store dedup absent → the same gesture double-counts (O-8); `fetch_unprocessed_observations` swallows all errors → Reflection concludes "nothing to learn" on a state.db blip (L-9).
 
 ## E — Composio (all apps, not just Gmail)
+
+> **[STAMP 2026-07-15] MIXED.** Scoping hardened: check-readiness now filters
+> `user_id` server-side AND client-side (`integrations.ts:3288–3320`, comment
+> cites PR #469 defense-in-depth). STILL-OPEN: the meta-finding — execute-path
+> silence (`execute_action` error envelopes, bug #15) and the absence of a
+> per-toolkit last-success/last-error health surface. Remaining line items
+> (orphan SKILL.md, reconnect mis-doc, retry-storm backoff) unverified.
 
 **Corrects Part 1 Lane 3.** The connect flow: catalogue (v3 `/toolkits`, 1h cache,
 ~60-slug `CATEGORY_MAP`) → `POST /connect` (find/create auth_config + connected_account
@@ -579,12 +851,34 @@ health surface (last-success / last-error) + pin the resolved account on every p
 
 # Part 3 — Second-wave audit (the un-covered lanes)
 
+> **[STAMP 2026-07-15]** Frozen audit wave; per-section stamps follow. Note the
+> headline itself is now stale in 2 of its 3 points — see the next stamp.
+
 Part 2 audited 5 subsystems. Part 3 covers the **8 lanes never audited**: brief,
 chores, the onboarding pipeline, the Hermes runtime, ctrl-api core, the web app
 (owner/ritual/other pages), the MCP connector, and first-boot. All grounded in
 `file:line`; `[CONFIRMED]` = provable from code, `[SUSPECTED]` = needs runtime.
 
 ## Headline: three CLAUDE.md claims are FALSE (the architecture isn't what the docs say)
+
+> **[STAMP 2026-07-15] 2 of 3 RESOLVED; 1 STILL TRUE. Re-verified individually:**
+> 1. **Promotion contract — RESOLVED (residual side doors).** Enforcement now
+>    covers the dominant write paths: POST (`vault.ts:759`), the workhorse
+>    **PATCH** (`vault.ts:899`, with an explicit promotion-contract comment
+>    block), and move (`vault.ts:1178`). The audit-era gap ("PATCH bypasses")
+>    is closed. Residual: at least one direct `fs.writeFileSync` of a demoted
+>    type survives (`packages/ctrl/src/api/routes/learning.ts:365` writes
+>    `observation/<name>.md`) — a small side-door class, not the dominant path.
+> 2. **Migration mechanism — RESOLVED.** `packages/ctrl/src/db/migrate.ts`
+>    exists and `packages/ctrl/src/db/migrations/` holds 18 numbered migrations
+>    (0001_fix_pack … 0018_channel_identity). CLAUDE.md §10.3's description is
+>    now accurate. The FIX-PLAN Phase-0 warning in the body text is historical.
+> 3. **ctrl-api credentials plaintext — STILL TRUE.** `credentials.ts` still
+>    reads/writes secrets as plaintext `.env` (`readEnv`/`patchEnv`, no crypto
+>    calls); `columnCrypto` exists only in the web package
+>    (`packages/web/src/server/columnCrypto.ts`). The stale part is only the
+>    framing: current CLAUDE.md no longer claims ctrl-side column encryption,
+>    so it is a documented design, not a docs-vs-code falsehood.
 
 The ctrl-api audit proved the documented foundation partly doesn't exist:
 
@@ -616,6 +910,19 @@ The ctrl-api audit proved the documented foundation partly doesn't exist:
 
 ## Cross-cutting confirmed bugs that appear in multiple lanes (deduped)
 
+> **[STAMP 2026-07-15] ALL THREE RESOLVED.**
+> * openclaw-alias 404s: `/api/v1/openclaw/*` is dual-registered as a thin
+>   forward to the same handlers as `/api/v1/hermes/*`
+>   (`packages/ctrl/src/api/routes/hermes.ts:157–168`, cites the ~7 callers).
+> * Scheduled briefing crash: the schedule passes a **positional string** slot
+>   with a morning/evening discriminator
+>   (`packages/ctrl/src/api/routes/chores.ts:352–359`,
+>   `BRIEFING_SLOT_BY_TEMPLATE`), and `BriefingWorkflow.run` normalizes it
+>   (`packages/learn/src/workflows/briefing.py:76–84`).
+> * `notify_principal` default channel: C8 replaced `pickPrimaryChannel` with
+>   Hermes-session-index resolution that can never yield "webchat"
+>   (`packages/ctrl/src/api/routes/notifications.ts:128–139`).
+
 - **The `/api/v1/openclaw/*` alias was retired but ~7 callers still hit it → 404.**
   4 MCP `alfred` tools (`alfred.ts:306,313,320,490` incl. `list_in_flight_agents`,
   the documented anti-double-spawn guard), and the **brief composer**
@@ -635,6 +942,21 @@ The ctrl-api audit proved the documented foundation partly doesn't exist:
   only path to reach Sir on autonomous completion. **[CONFIRMED, S1]**
 
 ## Brief / briefing
+
+> **[STAMP 2026-07-15] MIXED.** The composer was rewritten
+> (`write_brief_and_opportunities_opus`, PR S2-2 — `onboarding_v3.py:2312`;
+> the audited vault-write `except: pass` swallow is fixed — #B2 comment at
+> `onboarding_v3.py:2082` — though a handful of typed `except …: pass`
+> swallows remain elsewhere in the file), and the First Brief
+> has a dedicated dashboard surface
+> (`packages/web/src/dashboard/components/FirstBrief.tsx`). STILL-OPEN:
+> `/brief` still renders a backend failure identically to a quiet day —
+> `BriefPage.tsx:273` keeps `retry: false` and the page has no error branch.
+> The `(morning|evening)` slug filter persists (`briefings.ts:49`) — moot for
+> the First Brief given the dedicated component, relevant if any other
+> non-slot briefing is ever written. UTC/timezone and lexical-compare items
+> unverified.
+
 - **[CONFIRMED, S1]** Onboarding first-brief vault write swallows ALL errors (`except: pass`, `onboarding_v3.py:871,1175`) → brief never persists, workflow still reports `done`.
 - **[CONFIRMED, S2]** First-brief email failures swallowed by both activity (`first_brief_email.py:75-141` returns `{sent:False}`) and workflow (`onboarding_pipeline.py:516`).
 - **[CONFIRMED, S2]** `/brief` + Desk render a backend 502/504 identically to "quiet day" (`BriefPage.tsx:270`, `DeskPage.tsx:261`, `retry:false`, no error branch).
@@ -644,6 +966,16 @@ The ctrl-api audit proved the documented foundation partly doesn't exist:
 - **[CONFIRMED, S3]** `since`/`until` and state.db `ts>=` filters do lexical string compare across mixed `Z`/`+00:00` forms → boundary-second drops (`briefings.ts:274`, `state.ts:174`). Empty-brief copy hardcoded "this morning" regardless of slot (`BriefPage.tsx:154`).
 
 ## Chores
+
+> **[STAMP 2026-07-15] RESOLVED (the S1), MIXED elsewhere.** The
+> highest-blast-radius bug — workflow-name collision crash-looping the entire
+> learn worker — is fixed: the loader dedups vs reserved + seen names and
+> skips with a log (`packages/learn/src/workflows/chores/_dynamic_loader.py:601–706`).
+> Quarantine (3 dry-runs) now exists per CLAUDE.md §6.5, but an ENFORCED
+> sandbox/review gate on generated code still does not — STILL-OPEN residual.
+> Schedule-vs-registration ordering, restart-readiness, timezone, and cursor
+> items unverified.
+
 - **[CONFIRMED, S1]** No cross-file workflow-name dedup in the dynamic loader (`_dynamic_loader.py:660`); one generated `@workflow.defn` name collision (with another chore or a static workflow) makes `Worker(...)` reject duplicate names → **the entire learn worker crash-loops, every chore + workflow dead.** Highest blast radius in the system.
 - **[CONFIRMED, S1]** No sandbox/dry-run/review gate on what generated code DOES; `call_composio` can `GMAIL_SEND_EMAIL`/`CREATE_EVENT`/`NOTION_CREATE_PAGE` unattended; the "quarantine" is unenforced convention (`chore_generation_prompts.py:219` "validator does not yet enforce it"); smoke test only imports, never executes.
 - **[CONFIRMED, S2]** Schedule created before the worker registers the workflow (`assign_chores.py:1365` then restart at `onboarding_pipeline.py:558`); if restart is skipped/fails (downgraded to a warning), every fire is a permanent `NotFoundError`.
@@ -653,6 +985,17 @@ The ctrl-api audit proved the documented foundation partly doesn't exist:
 - **[CONFIRMED, S3]** No dedup on generated `module_name`/slug within one onboarding → silent overwrite + a `failed[]` schedule never surfaced (`assign_chores.py:1300`). Profile-key mismatch: prompt reads `detected_subscriptions`/`detected_merchants`, logic reads `detected_services` (`chore_generation.py:131` vs `assign_chores.py:294`). No chore re-registration at boot — lost Temporal schedules never recreated (`register_schedules.py` has no chore scan).
 
 ## Onboarding pipeline
+
+> **[STAMP 2026-07-15] LARGELY RESOLVED-BY-REWRITE.** The pipeline was
+> substantially rebuilt post-audit: chunked extraction (#193), rich task shape
+> + 4-tier matter resolution (`dbaca816`/`935692f`), the /soul preset chooser
+> relocated into the ritual between /verify and /composing (#853,
+> `SoulPresetPage.tsx`), sentence-boundary truncation for personalize
+> (2026-05-23 incident), day-one desk seeding (#196). Individual line items
+> here (onboard.json torn read, brace-counting parser in personalize,
+> re-onboard reset) were NOT each re-verified — treat as historical claims;
+> re-audit before citing any of them as current.
+
 - **[CONFIRMED, S1]** The `/soul` preset write is dead AND destructive: the brief reads `soul_md` from `onboard.json` (`onboarding_v3.py:1027`), but `/soul` writes the vault `SOUL.md` (`SoulPresetPage.tsx:99`) — so the chosen bearing never reaches the brief, and it overwrites the personalized `SOUL.md` with a canned template.
 - **[CONFIRMED, S1]** `personalize_opus` hard-raises on the first of 5 vault writes failing (`onboarding_v3.py:741`) → aborts before `awaiting_verification`, leaving partial vault state and the user stuck on `/reading-the-room`.
 - **[CONFIRMED, S1]** Re-onboard has no reset; pack dedup uses grep-substring `search_records` not exact-slug (`packs_opus.py:473,894,1393`; `vault_client.py:184`) → drifted-name duplicates (the 9→16 class).
@@ -663,6 +1006,15 @@ The ctrl-api audit proved the documented foundation partly doesn't exist:
 - **[CONFIRMED, S3]** Gate maps phantom stages (`automations`, `backfill`) not in STAGE_ORDER (`DeskOnboardingGate.tsx:104`); `AwakenPage` ignores real progress (canned timer). `messages_read`/`total_days` overwritten with email count → wrong % bar (`onboarding_v3.py:418`).
 
 ## Hermes runtime
+
+> **[STAMP 2026-07-15] MIXED.** Workers gateway :18790 IS now health-checked
+> (compose `docker-compose.yaml:435–456` probes both gateways + fd-limit;
+> `packages/hermes/Dockerfile:496–500`) — that entry is RESOLVED. The runtime
+> has since moved on (three profiles incl. heavy :18791; session pruning; see
+> Lane 7 stamp). Wrapper/clerk timeout, dispatch-lock starvation, and
+> `_extract_json` items unverified — the clerk/wrapper path still exists on
+> `main`, so re-audit before relying on those lines either way.
+
 - **[CONFIRMED, S2]** `openclaw-wrapper` treats any assistant text as run-complete (`if status in terminal or text:`, line 439) → premature truncation of multi-step curator/clerk runs; file marked processed.
 - **[CONFIRMED, S2]** Workers gateway `:18790` is never health-checked (compose + Dockerfile probe only `:18789`); dependents start against a dead clerk gateway.
 - **[CONFIRMED, S2]** `clerk` activities get `start_to_close=60s` with a 900s HTTP budget and no heartbeat (`media_ingestion.py:110` vs `clerk.py:530`) → Temporal kills + retries while the billable run continues server-side.
@@ -672,6 +1024,17 @@ The ctrl-api audit proved the documented foundation partly doesn't exist:
 - **[CONFIRMED/SUSPECTED, S3]** `learn-clerk` session reuses one key with idle-only reset → unbounded transcript growth, no prune job wired (the OpenClaw `.trajectory` leak re-manifested). All 4 workers + ephemeral executors pinned to `gpt-4.1-nano` (the #79 under-extraction model); `main` spends grok-4.x on a deterministic echo cron. Model PATCH restart bounces both profiles + can exceed the 30s exec timeout; init re-render clobbers a UI-set model.
 
 ## ctrl-api core (beyond the 3 headline structural findings)
+
+> **[STAMP 2026-07-15] MIXED.** RESOLVED: the false-201 audit write — the
+> primary `POST /audit` route uses strict mode and rethrows so the request
+> 5xx's; only best-effort mirrors still swallow, by design
+> (`packages/ctrl/src/api/routes/state.ts:411–412,808–855`). The
+> `AAS_API_KEY`-unset fail-open is still mitigated the same way (hard exit,
+> `standalone.ts:27–29`) and auth has since been hardened well beyond the
+> audit (scoped voice-bridge allowlists in `auth.ts`; per-app MCP tokens
+> PR #278). Boot-guard, per-file lock, KNOWN_TYPES divergence, CORS, and
+> rowid-reuse items unverified.
+
 - **[CONFIRMED, S2]** `authenticate()` is fail-open when `AAS_API_KEY` is unset (`auth.ts:11` "open access"); mitigated only by `standalone.ts:27` hard-exit, so the security primitive itself defaults to allow (other entrypoints unprotected).
 - **[CONFIRMED, S2]** `POST /api/v1/state/audit` returns `201 {ok,id}` even when the INSERT failed (`appendAudit` swallows, `state.ts:740`) → the audit ledger silently loses entries.
 - **[CONFIRMED, S2]** `schema.exec` at boot is unguarded (`standalone.ts:51`) → a corrupt `state.db` is a hard boot-loop with no degraded mode (the vault reconcile IS guarded; the 3 DB opens aren't).
@@ -680,6 +1043,16 @@ The ctrl-api audit proved the documented foundation partly doesn't exist:
 - **[SUSPECTED, S2]** Re-embed reuses freed `embedding_meta` rowids (non-AUTOINCREMENT PK) with deletes+inserts not in a transaction (`state.ts:543`) → vec0 vector / meta desync → wrong k-NN neighbors.
 
 ## Web app (owner / ritual / other pages)
+
+> **[STAMP 2026-07-15] RESOLVED (the headline S1).** Registration lockdown
+> exists: `onBeforeSignup` throws 403 once the box is claimed;
+> `ALLOW_SIGNUP_AFTER_OWNER=true` reopens it deliberately
+> (`packages/web/src/auth/hooks.ts`, cites "FAILURE-MODES web bug #1") — which
+> also collapses the "second registrant gets everything" exposure. The Google
+> refresh-token nulling is fixed (`oauth2.ts:385–390` preserves the stored
+> token on re-auth). Error-swallowing list queries: at least `/brief` still
+> renders failure as empty (see Brief stamp); the other ~11 unverified.
+
 - **[CONFIRMED, S1]** **No registration lockdown + zero server-side ownership enforcement.** Signup is open (`main.wasp:35`); only the *first* user is owner, but `isOwner`/`isAdmin` are used **only cosmetically** (nav visibility) — no operation checks role (grep: no `isOwner`/`403`/`requireOwner` in any `operations.ts`). **Any second registrant gets full read/write to the owner's vault, RULES.md, decisions, and Gmail-backed data.** The headline tenant-isolation gap for an internet-exposed single-principal box.
 - **[CONFIRMED, S2]** Google OAuth `handleCallback` nulls a good `refresh_token` on re-auth (`oauth2.ts:382` sets `null` when Google omits it) — and it's the exact path onboarding routes through; Gmail dies ~1h later. (`auth/hooks.ts:107` does it correctly — inconsistent.)
 - **[CONFIRMED, S2]** `getOnboardingProgress` returns `stage:"not_started"` on ANY proxy error (`operations.ts:1020`) → a fully-onboarded principal is bounced to the "Start onboarding" CTA on a transient hiccup (5s poll).
@@ -688,11 +1061,30 @@ The ctrl-api audit proved the documented foundation partly doesn't exist:
 - *Verified OK:* the ritual-loop fixes (ComposingPage, `ritualPathForStage`) are real; `tenantProxy` preserves status codes (the swallowing is in callers).
 
 ## MCP connector (beyond the openclaw-404 dedup)
+
+> **[STAMP 2026-07-15] unverified line items; surface substantially evolved.**
+> The MCP server gained per-app scoped bearer tokens + a management API/UI
+> (PR #278 `12d02d21`) and the tool catalogue has been reworked since the
+> audit. The specific type-list mismatches cited here (creatable-types vs 422,
+> KNOWN_TYPES missing daybook/place, list_decisions filter) were not
+> re-verified — re-check against current `packages/mcp-server/src/alfred.ts`
+> before citing.
+
 - **[CONFIRMED, S2]** `create_vault_record` advertises `observation`/`reflection`/`project` etc. as creatable, but `assertCanonicalVaultPath` 422s them (`alfred.ts:106` vs `vault.ts:740`) — the tool invites guaranteed-fail calls.
 - **[CONFIRMED, S2]** `list_vault_by_type` `KNOWN_TYPES` missing `daybook`/`place` → 400 on canonical types.
 - **[CONFIRMED, S3]** `list_decisions` filters `status` while the comment says filter `state` too (`decisions.ts:616,634`) → records with only `state` silently omitted. `start_workflow` advertises deleted workflow types. `notify_principal` MCP timeout (120s) races the ctrl poll (120s) with no margin; channel enum narrower than the route supports.
 
 ## Deploy / first-boot
+
+> **[STAMP 2026-07-15] RESOLVED (top items).** `OWNER_EMAIL` is defined
+> (`.env.example:95`) and compose sets both spellings from one source (C9,
+> `docker-compose.yaml:730–736`) — first-brief email, cross-tenant guard, and
+> sender-allowlist seeding all get the address. Memory posture fixed at the
+> stack level (Plane removed, hermes 12g + swap, 48 GB min — PR #279).
+> bootstrap whitespace-validation, AgentMail vars, `:latest` pinning, and
+> Temporal `start-dev` items unverified (the `:latest` model is by-design per
+> CLAUDE.md §12).
+
 - **[CONFIRMED, S1]** `OWNER_EMAIL` is read by code (`first_brief_email.py:77`, `pull.py:324`, init step 9) but **never set** — compose passes the *wrong name* `ALFRED_OWNER_EMAIL` (`docker-compose.yaml:415`), bootstrap/`.env.example` never define `OWNER_EMAIL`. → first-brief email never sends, cross-tenant guard fail-open, sender-allowlist not seeded.
 - **[CONFIRMED, S2]** `bootstrap.sh` treats whitespace-only required fields as present (`-z` test, no trim, `:67`) → a stray-space secret passes validation and is never regenerated.
 - **[CONFIRMED, S2]** First-brief email needs AgentMail vars (`AGENTMAIL_*`) absent from `.env.example`/bootstrap/compose (`email.ts:17`) → outbound email non-functional even if `OWNER_EMAIL` were fixed.
@@ -701,6 +1093,12 @@ The ctrl-api audit proved the documented foundation partly doesn't exist:
 - *Cleared:* `COMPOSIO_USER_ID` is actually handled correctly here (bootstrap generates it, init mirrors the file, ctrl reads env→file) — corrects an earlier worry. `VAULT_PATH` is consistent across containers. Init is fail-closed + idempotent.
 
 ## Count + the proof discipline going forward
+
+> **[STAMP 2026-07-15]** Historical tally — do not update. The remediation
+> campaigns that consumed this catalogue ran 2026-05-22 → 2026-05-24 (CLAUDE.md
+> §16 incident table) and continued through #276 (2026-07-03). Residual open
+> items are stamped in place; NEW bugs go to GitHub issues.
+
 This wave adds **~45 unique confirmed bugs** (after deduping the briefing-dict and
 openclaw-404 findings) to the 18 from Part 2 → **~60+ confirmed**, plus the 3
 structural CLAUDE.md falsehoods. Coverage is now ~comprehensive across the planes;
@@ -718,10 +1116,28 @@ above is the case in point: a fix written blind would have silently no-op'd.
 
 # Part 4 — Sidecar & edge sweep (Sure/Plane, Vexa, cold-archive)
 
+> **[STAMP 2026-07-15]** Frozen audit wave. Two of the swept subsystems (Plane,
+> Vexa) have since been REMOVED from the deployed stack — their findings are
+> SUPERSEDED-STACK. Sure and cold-archive remain live; stamps follow.
+
 Closes coverage. **4 new S1s** + a merged-compose↔code path divergence. Two whole
 subsystems are dead out-of-the-box.
 
 ## New S1s
+
+> **[STAMP 2026-07-15]**
+> * Sure-dead-OOTB: **RESOLVED** — `SURE_API_KEY` is bridged end-to-end:
+>   `.env.example:215–217`, `scripts/bootstrap.sh:151`, compose injects it into
+>   ctrl-api (`docker-compose.yaml:646`).
+> * Merged-compose path divergence: **RESOLVED** —
+>   `sure.ts` writes mutate payloads to `/alfred-data` (`MUTATE_HOST_DIR`,
+>   with an explicit path-note comment), and `webhooks/plane.ts` reads
+>   `VAULT_PATH` defaulting `/vault` (both files carry comments describing the
+>   old bug). The plane webhook is additionally moot (Plane removed).
+> * Both Vexa S1s: **SUPERSEDED-STACK** — no vexa services in
+>   `docker-compose.yaml` on `main`; `routes/vexa.ts` / `transcript.py` remain
+>   in-tree dormant.
+
 - **Sure is dead OOTB.** `.sure-api-key` is minted to a *file* by sure-init but
   **never injected into ctrl-api's `SURE_API_KEY` env** (`sure-bootstrap.rb:113`
   writes the file; `sure.ts:14` reads only `process.env`; bootstrap/.env.example/
@@ -747,6 +1163,11 @@ subsystems are dead out-of-the-box.
   extracted actions vanish. [CONFIRMED, S1, silent].
 
 ## OWNER_EMAIL split — corroborated from a second angle
+
+> **[STAMP 2026-07-15] RESOLVED.** Compose sets BOTH `OWNER_EMAIL` (canonical,
+> C9) and `ALFRED_OWNER_EMAIL` from the same `.env` value
+> (`docker-compose.yaml:730–736`); every reader sees the principal's address.
+
 `transcript.py:1113` reads `ALFRED_OWNER_EMAIL` (which compose sets) while
 `pull.py:324`, `first_brief_email.py:36`, `fleet_audit.py:73` read `OWNER_EMAIL`
 (unset) → the cross-tenant ingest guard disables itself AND `is_sir_attendee` is
@@ -754,6 +1175,14 @@ fail-open (empty owner → `True` for every meeting, `transcript.py:223`). Confi
 the deploy-lane `OWNER_EMAIL` bug is tenant-wide, not Vexa-local. [CONFIRMED, S2]
 
 ## Plane / Sure sync (Lane I ctrl `sure.ts`/`webhooks/plane.ts` · Lane II learn `plane_*.py`)
+
+> **[STAMP 2026-07-15] SUPERSEDED-STACK (Plane rows) / unverified (Sure rows).**
+> Plane was removed fleet-wide (PR #279, `4a83de87`); `plane_sync`/
+> `plane_reconciliation`/`plane_alfred_triggers` code is dormant in-tree —
+> deletion is an open follow-up. The Sure `_cluster/apply` envelope-shape and
+> null-name items target still-live `sure.ts` code and were NOT re-verified —
+> re-audit before citing as current.
+
 - **[S2]** Reconciliation clobbers the 15s forward-sync cursor (lost-update; whole-file read-modify-write over a minutes-long scan — `plane_reconciliation.py:386` vs `plane_sync.py:91`).
 - **[S2]** Staleness filter returns `{}` for the whole body when Plane is the newer author (`filtered` never repopulated, `plane_sync.py:230`) → one externally-touched field suppresses all legitimate field pushes.
 - **[S2]** `plane_alfred_triggers` reads the cursor at the wrong path (missing `/state/`, `plane_alfred_triggers.py:62`) → Plane-triggered sessions never get matter context.
@@ -761,15 +1190,43 @@ the deploy-lane `OWNER_EMAIL` bug is tenant-wide, not Vexa-local. [CONFIRMED, S2
 - **[S3]** null-name deref 500 (`sure.ts:1078`); loop-guard description-hash oscillation; `:stable` pin drift vs hardcoded Plane-1.3.0 quirks; `set_transaction_tags` single-id-vs-array. *Cleared:* #555 migrator handling, Ruby error envelopes (don't swallow), state-group mapping.
 
 ## Cold-archive / state.db tail (Lane I — packages/ctrl)
+
+> **[STAMP 2026-07-15] RESOLVED (the reader gap).** `coldRead.ts` now exports
+> generic cross-tier readers — `queryCrossTier(table, …)` / `getCrossTier`
+> (`packages/ctrl/src/db/coldRead.ts:288,405`) — not just the audit pair, so
+> compacted signal/observation/routing_decision/link rows are reachable. FK
+> null-ordering, transactionless re-embed, and `synchronous=NORMAL` items
+> unverified.
+
 - **[S2]** After TTL, **signal/observation/routing_decision/link are deleted from hot but only `audit` has a cross-tier reader** (`coldRead.ts` exports only `queryAuditCrossTier`) → those four tables' long tail silently unreachable from every API.
 - **[S2]** FK `ON DELETE SET NULL` nulls `routing_decision.signal_id` when the signal is compacted before the (newer) decision (`schema.sql:94`, order `compactor.ts:35`) → cross-tier join broken.
 - **[S2]** Embedding re-embed runs 4 statements with no transaction + non-AUTOINCREMENT rowid reuse (`state.ts:543`, `schema.sql:211`) → orphaned meta / vec mis-pair on crash.
 - **[S2-susp]** `synchronous=NORMAL` on two independent DBs → power-loss can lose a compacting row to neither tier. **[S3]** cross-tier `total` double-counts straddling rows; deep-pagination per-tier cap; ingest 7d TTL deletes unprocessed (by-design). *Corrects the plan:* the compactor **is** running — the "deferred" text in `schema.sql:13` is stale doc-rot.
 
 ## Vexa runtime (Lane II learn `transcript.py` · Lane V compose)
+
+> **[STAMP 2026-07-15] SUPERSEDED-STACK.** No Vexa services in
+> `docker-compose.yaml` on `main`. Findings apply only if the dormant code
+> (`packages/ctrl/src/api/routes/vexa.ts`, `packages/learn/src/activities/transcript.py`,
+> `workflows/transcript_intake.py`) is ever revived.
+
 - **[S2]** auto-join toggle controls only 1 of 2 schedules (`vexa.ts:191` vs `register_schedules.py:98,102`); **[S2]** empty-transcript-on-early-webhook marked processed → permanent loss (`transcript_intake.py:319`); **[S2]** `vexa-runtime-api` mounts docker.sock RW with no `no-new-privileges`/`cap_drop` on a 3rd-party image (`docker-compose.yaml:1117`). **[S3]** `vexa-transcripts.jsonl` never rotated; bot containers unbounded. *Cleared:* webhook HMAC is timing-safe + replay-windowed; the Omi path is independent and ingests correctly.
 
 ## Tally
+
+> **[STAMP 2026-07-15]** Historical tally — frozen. Aggregate position as of
+> this stamp pass: the structural root causes (R1 storage cutover, the
+> migration runner, the promotion-contract gate, the openclaw alias, the
+> registration lockdown, Sure/OWNER_EMAIL wiring) are closed; Plane + Vexa
+> findings are moot (subsystems removed); the verified STILL-OPEN set is:
+> `execute_action` error-envelope silence (bug #15), surveyor embedder
+> liveness (bug #14, likely), `recover_stuck_dispatching` missing attempt cap
+> (2026-07-15 incident), `derive_signature` `source_type="email"` gap (noise
+> matching inert), ctrl plaintext credential store (by-design, headline #3),
+> `/brief` error-vs-empty rendering, no backup wiring, no work-liveness
+> heartbeat (R4), ctrl-api Docker-socket root-equivalence. New bugs → GitHub
+> issues, not this file.
+
 The sweep adds ~25 findings (4 new S1s) → **~85 confirmed/suspected total** across
 every plane + sidecar. Coverage is now comprehensive. **The Vexa pipeline and the
 Sure integration are each dead out-of-the-box** (independent S1s).
