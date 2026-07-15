@@ -21,6 +21,13 @@
 //                 the outcome arrived and was stamped
 //   reversed    → principal undid this decision; router has already (or
 //                 will) run inverse side-effects
+//   failed      → terminal dead-letter state (#282). The DecisionRouter's
+//                 recover_stuck_dispatching pass moves a decision here once
+//                 its dispatch has been resurrected MAX_DISPATCH_ATTEMPTS
+//                 times without ever succeeding, instead of resetting it to
+//                 `open` forever (the office-ac-quiet-mode runaway loop).
+//                 Terminal like `completed`/`reversed`: it drops out of the
+//                 in-flight sweep so it is never re-processed.
 //
 // Endpoints:
 //
@@ -76,7 +83,11 @@ type DecisionState =
   | "dispatching"
   | "executing"
   | "completed"
-  | "reversed";
+  | "reversed"
+  // #282: terminal dead-letter state — a dispatch that exceeded the
+  // DecisionRouter retry cap (MAX_DISPATCH_ATTEMPTS) lands here instead of
+  // being resurrected to `open` indefinitely.
+  | "failed";
 
 const VALID_INTENTS: readonly DecisionIntent[] = [
   "delegate", "defer", "done", "take_mine", "noise",
@@ -98,7 +109,9 @@ const VALID_SOURCES: readonly DecisionSource[] = [
 type DecisionPrincipal = "principal" | "alfred";
 const VALID_PRINCIPALS: readonly DecisionPrincipal[] = ["principal", "alfred"];
 const VALID_STATES: readonly DecisionState[] = [
-  "open", "scheduled", "dispatching", "executing", "completed", "reversed",
+  // `failed` is the terminal dead-letter state (#282) for dispatches that
+  // exceeded the DecisionRouter retry cap; PATCH must accept it (not 422).
+  "open", "scheduled", "dispatching", "executing", "completed", "reversed", "failed",
 ];
 
 interface DecisionRecord {
