@@ -129,6 +129,37 @@ async def list_decisions_by_state(state: str) -> list[dict[str, Any]]:
 DISPATCHING_STALE_MINUTES = 10
 
 
+# A dispatch that can never succeed loops forever under the recovery
+# pass: ``open → route_decision (dispatch fails) → dispatching →
+# recover → open → …`` every ~60s, re-firing the action and
+# re-notifying the principal each cycle (live incident 2026-07-15,
+# ``office-ac-quiet-mode``). Cap the resurrections: after
+# ``MAX_DISPATCH_ATTEMPTS`` reset-to-open cycles, move the decision to
+# the terminal ``failed`` dead-letter state (surfaced exactly once,
+# because a ``failed`` decision no longer appears in the
+# ``?state=dispatching`` sweep) instead of resurrecting it again.
+def _resolve_max_dispatch_attempts() -> int:
+    """Resolve ``MAX_DISPATCH_ATTEMPTS`` defensively from the env
+    override ``DECISION_MAX_DISPATCH_ATTEMPTS`` — falls back to 3 on
+    unset/garbage, floored at a minimum of 1 (so the cap can never
+    disable itself)."""
+    raw = os.environ.get("DECISION_MAX_DISPATCH_ATTEMPTS", "")
+    try:
+        val = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return 3
+    return max(1, val)
+
+
+MAX_DISPATCH_ATTEMPTS = _resolve_max_dispatch_attempts()
+
+
+def _now_iso() -> str:
+    """Current UTC instant as an ISO8601 string with a trailing ``Z``
+    (parity with the ``created`` timestamp ctrl-api writes)."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
 def _parse_iso(ts: str) -> datetime | None:
     """Parse the ISO timestamp ctrl-api writes for ``created`` (always
     UTC, trailing ``Z``). Returns None on any parse failure so the
@@ -154,24 +185,32 @@ async def recover_stuck_dispatching() -> dict[str, Any]:
       * ``True`` → the Hermes call landed but the final ``executing``
         PATCH was dropped (route_decision's activity timed out
         between the dispatch and the state-write). PATCH to
-        ``executing`` so check_decision_outcomes picks it up.
-      * ``False`` / missing → presume the dispatch crashed. PATCH back
-        to ``open`` so the next tick's route_decision pass re-routes
-        cleanly (the #55 idempotency guard relies on ``dispatching``
-        being a recent thing; an old ``dispatching`` is treated as
-        crashed).
+        ``executing`` so check_decision_outcomes picks it up. This is
+        a legitimate promotion and is **not** capped.
+      * ``False`` / missing → presume the dispatch crashed. This branch
+        is **capped** (issue #282): each reset increments
+        ``side_effects.dispatch_attempts``. While ``attempts <
+        MAX_DISPATCH_ATTEMPTS`` we PATCH back to ``open`` (as before) so
+        the next tick's route_decision pass re-routes cleanly. Once
+        ``attempts >= MAX_DISPATCH_ATTEMPTS`` the dispatch is presumed
+        never able to succeed, so instead of resurrecting again we move
+        the decision to the terminal ``failed`` dead-letter state and
+        surface it exactly once — never re-firing the action forever.
 
     Every PATCH is audit-logged via ``POST /api/v1/state/audit`` with
-    ``action_type=state-change`` and ``source=decision_router.recovery``
-    so production can count occurrences.
+    ``action_type=state-change``. The reset/promote path uses
+    ``source=decision_router.recovery``; the dead-letter crossover uses
+    ``source=decision_router.dead_letter`` so production can count
+    dead-letters separately.
 
     Returns ``{scanned, recovered, reset_to_open,
-    promoted_to_executing}`` for observability.
+    promoted_to_executing, dead_lettered}`` for observability.
     """
     scanned = 0
     recovered = 0
     reset_to_open = 0
     promoted_to_executing = 0
+    dead_lettered = 0
     cutoff = datetime.now(timezone.utc) - timedelta(
         minutes=DISPATCHING_STALE_MINUTES,
     )
@@ -204,19 +243,130 @@ async def recover_stuck_dispatching() -> dict[str, Any]:
                 side_effects = {}
             agent_dispatched = bool(side_effects.get("agent_dispatched"))
 
-            new_state = "executing" if agent_dispatched else "open"
-            reason = (
-                "agent_dispatched=true; final state-write dropped — "
-                "promoting to executing"
-                if agent_dispatched
-                else "agent_dispatched=false/missing; presumed crash — "
-                "resetting to open for re-routing"
-            )
+            # ---- Branch A: legitimate promotion (NOT capped) ----
+            # agent_dispatched=true means the Hermes call landed but the
+            # final executing PATCH was dropped. Promote to executing so
+            # check_decision_outcomes picks it up. Uncapped by design.
+            if agent_dispatched:
+                new_state = "executing"
+                reason = (
+                    "agent_dispatched=true; final state-write dropped — "
+                    "promoting to executing"
+                )
+                try:
+                    patch_resp = await client.patch(
+                        f"/api/v1/decisions/{decision_id}",
+                        json={"state": new_state},
+                    )
+                    patch_resp.raise_for_status()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "decision_router.recover_stuck_dispatching: PATCH "
+                        "failed decision=%s new_state=%s err=%s",
+                        decision_id, new_state, exc,
+                    )
+                    continue
 
+                recovered += 1
+                promoted_to_executing += 1
+                await _emit_recovery_audit(
+                    client,
+                    decision_id=decision_id,
+                    source="decision_router.recovery",
+                    new_state=new_state,
+                    reason=reason,
+                    created=created,
+                    agent_dispatched=True,
+                    extra_changes=None,
+                )
+                logger.warning(
+                    "decision_router.recover_stuck_dispatching: "
+                    "unstuck decision=%s dispatching → %s (%s)",
+                    decision_id, new_state, reason,
+                )
+                continue
+
+            # ---- Branch B: presumed crash — CAPPED (issue #282) ----
+            # Each reset increments dispatch_attempts. PATCH replaces the
+            # whole side_effects object, so we merge client-side: read the
+            # current object, add our bookkeeping keys, PATCH it back.
+            prior = side_effects.get("dispatch_attempts", 0)
+            try:
+                prior = int(prior)
+            except (TypeError, ValueError):
+                prior = 0
+            attempts = prior + 1
+            now_iso = _now_iso()
+
+            merged = dict(side_effects)
+            merged["dispatch_attempts"] = attempts
+
+            if attempts >= MAX_DISPATCH_ATTEMPTS:
+                # Dead-letter: dispatch never succeeded across the cap.
+                # Move to the terminal ``failed`` state (NOT open) so the
+                # decision drops out of the ?state=dispatching sweep and
+                # the surfacing audit below fires exactly once.
+                new_state = "failed"
+                dead_letter_reason = (
+                    f"exceeded MAX_DISPATCH_ATTEMPTS ({MAX_DISPATCH_ATTEMPTS}) "
+                    f"resurrections; dispatch never succeeded"
+                )
+                merged["dead_lettered_at"] = now_iso
+                merged["dead_letter_reason"] = dead_letter_reason
+                try:
+                    patch_resp = await client.patch(
+                        f"/api/v1/decisions/{decision_id}",
+                        json={"state": new_state, "side_effects": merged},
+                    )
+                    patch_resp.raise_for_status()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "decision_router.recover_stuck_dispatching: PATCH "
+                        "failed decision=%s new_state=%s err=%s",
+                        decision_id, new_state, exc,
+                    )
+                    continue
+
+                recovered += 1
+                dead_lettered += 1
+                # Best-effort: an audit failure must NOT roll back the
+                # ``failed`` PATCH (which already landed above). Fires
+                # exactly once — a ``failed`` decision is no longer in
+                # the ?state=dispatching sweep.
+                await _emit_recovery_audit(
+                    client,
+                    decision_id=decision_id,
+                    source="decision_router.dead_letter",
+                    new_state=new_state,
+                    reason=dead_letter_reason,
+                    created=created,
+                    agent_dispatched=False,
+                    extra_changes={
+                        "dispatch_attempts": attempts,
+                        "dead_letter_reason": dead_letter_reason,
+                    },
+                )
+                logger.error(
+                    "decision_router.recover_stuck_dispatching: "
+                    "DEAD-LETTER decision=%s dispatching → failed "
+                    "after %d attempts (%s)",
+                    decision_id, attempts, dead_letter_reason,
+                )
+                continue
+
+            # Under the cap — reset to open as before, but stamp the
+            # attempt counter + last_dispatch_at into side_effects.
+            new_state = "open"
+            reason = (
+                "agent_dispatched=false/missing; presumed crash — "
+                f"resetting to open for re-routing (attempt {attempts}/"
+                f"{MAX_DISPATCH_ATTEMPTS})"
+            )
+            merged["last_dispatch_at"] = now_iso
             try:
                 patch_resp = await client.patch(
                     f"/api/v1/decisions/{decision_id}",
-                    json={"state": new_state},
+                    json={"state": new_state, "side_effects": merged},
                 )
                 patch_resp.raise_for_status()
             except Exception as exc:  # noqa: BLE001
@@ -228,62 +378,17 @@ async def recover_stuck_dispatching() -> dict[str, Any]:
                 continue
 
             recovered += 1
-            if new_state == "executing":
-                promoted_to_executing += 1
-            else:
-                reset_to_open += 1
-
-            # Audit-emit so production can count. We post directly to
-            # /api/v1/state/audit (the StateClient envelope) rather
-            # than going through StateClient here — the existing _http
-            # client already holds the same bearer token and base URL,
-            # so this keeps the activity dependency-light and parity
-            # with the rest of decision_router's HTTP calls.
-            try:
-                audit_resp = await client.post(
-                    "/api/v1/state/audit",
-                    json={
-                        "action_type": "state-change",
-                        "actor": "decision_router",
-                        "source": "decision_router.recovery",
-                        "target_path": f"decision/{decision_id}.md",
-                        "target_kind": "decision",
-                        "summary": (
-                            f"recovery: decision/{decision_id} "
-                            f"dispatching → {new_state} "
-                            f"({reason})"
-                        ),
-                        "changes": {
-                            "state": {
-                                "from": "dispatching",
-                                "to": new_state,
-                            },
-                            "age_minutes": (
-                                (
-                                    datetime.now(timezone.utc) - created
-                                ).total_seconds()
-                                / 60.0
-                            ),
-                            "agent_dispatched": agent_dispatched,
-                        },
-                        "mode": "live",
-                    },
-                )
-                # Best-effort: an audit-write failure doesn't roll
-                # back the recovery PATCH that already landed.
-                if audit_resp.status_code >= 400:
-                    logger.warning(
-                        "decision_router.recover_stuck_dispatching: "
-                        "audit POST returned %s for decision=%s",
-                        audit_resp.status_code, decision_id,
-                    )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "decision_router.recover_stuck_dispatching: "
-                    "audit POST failed decision=%s err=%s",
-                    decision_id, exc,
-                )
-
+            reset_to_open += 1
+            await _emit_recovery_audit(
+                client,
+                decision_id=decision_id,
+                source="decision_router.recovery",
+                new_state=new_state,
+                reason=reason,
+                created=created,
+                agent_dispatched=False,
+                extra_changes={"dispatch_attempts": attempts},
+            )
             logger.warning(
                 "decision_router.recover_stuck_dispatching: "
                 "unstuck decision=%s dispatching → %s (%s)",
@@ -295,7 +400,69 @@ async def recover_stuck_dispatching() -> dict[str, Any]:
         "recovered": recovered,
         "reset_to_open": reset_to_open,
         "promoted_to_executing": promoted_to_executing,
+        "dead_lettered": dead_lettered,
     }
+
+
+async def _emit_recovery_audit(
+    client: Any,
+    *,
+    decision_id: str,
+    source: str,
+    new_state: str,
+    reason: str,
+    created: datetime,
+    agent_dispatched: bool,
+    extra_changes: dict[str, Any] | None,
+) -> None:
+    """Best-effort audit emit for the recovery pass. We post directly to
+    ``/api/v1/state/audit`` (the StateClient envelope) rather than going
+    through StateClient here — the existing ``_http`` client already
+    holds the same bearer token and base URL, so this keeps the activity
+    dependency-light and parity with decision_router's other HTTP calls.
+
+    An audit-write failure MUST NOT roll back the state PATCH that
+    already landed — all failure modes here are swallowed with a warning.
+    """
+    changes: dict[str, Any] = {
+        "state": {"from": "dispatching", "to": new_state},
+        "age_minutes": (
+            (datetime.now(timezone.utc) - created).total_seconds() / 60.0
+        ),
+        "agent_dispatched": agent_dispatched,
+    }
+    if extra_changes:
+        changes.update(extra_changes)
+    verb = "dead-letter" if new_state == "failed" else "recovery"
+    try:
+        audit_resp = await client.post(
+            "/api/v1/state/audit",
+            json={
+                "action_type": "state-change",
+                "actor": "decision_router",
+                "source": source,
+                "target_path": f"decision/{decision_id}.md",
+                "target_kind": "decision",
+                "summary": (
+                    f"{verb}: decision/{decision_id} "
+                    f"dispatching → {new_state} ({reason})"
+                ),
+                "changes": changes,
+                "mode": "live",
+            },
+        )
+        if audit_resp.status_code >= 400:
+            logger.warning(
+                "decision_router.recover_stuck_dispatching: "
+                "audit POST returned %s for decision=%s",
+                audit_resp.status_code, decision_id,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "decision_router.recover_stuck_dispatching: "
+            "audit POST failed decision=%s err=%s",
+            decision_id, exc,
+        )
 
 
 # ---------------------------------------------------------------------
