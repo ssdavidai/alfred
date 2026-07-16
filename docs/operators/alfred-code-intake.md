@@ -8,8 +8,9 @@ in the loop.
 In label-gated mode, an issue enters the controller when it is labeled
 `alfred-code`. When automatic intake is enabled, every open issue enters
 without requiring that label. Label removal is not a cancellation mechanism
-after a plan or job exists; reject the current plan in GitHub or use the
-documented incident procedure instead.
+after a plan or job exists. Before approval, reject the exact current plan in
+GitHub. Once a job has launched, the current controller has no cancellation
+command; do not treat label removal or a late plan rejection as a stop signal.
 
 ## Planning before building
 
@@ -46,17 +47,19 @@ hash.
 
 ## Where to look: Projects vs Superset
 
-GitHub Projects is the control center and Superset is the execution
-viewer.
+GitHub Projects is the control center and Superset is the execution runtime.
 
 - **GitHub Projects** is where operators act: issue status, published
   plans, approval comments, and PR linkage all live on the board and the
-  issues themselves. Decisions happen here.
-- **Superset** is where operators watch: it renders the running lane
-  agents, their worktrees, and live job output. It is read-only from a
-  control standpoint — nothing you do in Superset approves, dispatches,
-  or halts work.
+  issues themselves. Supported approval and rejection decisions happen here.
+- **Superset** renders running lane agents, their worktrees, and live job
+  output. It also exposes manual agent and workspace controls, but those are
+  outside the controller protocol: they do not count as plan approval,
+  rejection, or cancellation, and using them can leave the job blocked or
+  out of sync with GitHub.
 
-If a run looks wrong in Superset, act on it from GitHub (comment on the
-issue or PR); the controller only responds to signals in the control
-center.
+For normal controller-managed work, record decisions and feedback on the
+GitHub issue or PR. The controller also observes Superset execution state and
+can block a job when an agent fails or terminates. If manual intervention is
+required after launch, first compare the GitHub state, controller state, and
+Superset logs; after intervening, reconcile all three before resuming work.
