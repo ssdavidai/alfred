@@ -3,12 +3,13 @@
 How a GitHub issue becomes controller-managed work, and where a human sits
 in the loop.
 
-## Intake: the `alfred-code` label
+## Intake
 
-An issue enters the controller when it is labeled `alfred-code`. Nothing
-else triggers intake — an unlabeled issue is invisible to the controller,
-and removing the label withdraws it. Apply the label only when the issue
-is ready to be planned.
+In label-gated mode, an issue enters the controller when it is labeled
+`alfred-code`. When automatic intake is enabled, every open issue enters
+without requiring that label. Label removal is not a cancellation mechanism
+after a plan or job exists; reject the current plan in GitHub or use the
+documented incident procedure instead.
 
 ## Planning before building
 
@@ -30,6 +31,11 @@ the complete hex string, copied verbatim:
 ```
 /approve-plan <full-plan-hash>
 ```
+
+To reject the plan without starting a build, use the corresponding exact
+full-hash command shown by the controller. Any other operator comment made
+while the plan awaits approval is specification feedback and produces a new
+plan with a new hash.
 
 Truncated, paraphrased, or retyped-from-memory hashes are not accepted.
 The hash binds the approval to the full plan content and the pinned base
