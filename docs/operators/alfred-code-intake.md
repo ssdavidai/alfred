@@ -34,9 +34,10 @@ the complete hex string, copied verbatim:
 ```
 
 To reject the plan without starting a build, use the corresponding exact
-full-hash command shown by the controller. Any other operator comment made
-while the plan awaits approval is specification feedback and produces a new
-plan with a new hash.
+full-hash command shown by the controller. Any other non-command operator
+comment made while the plan awaits approval is specification feedback and
+produces a new plan with a new hash. Malformed approval or rejection commands
+are ignored rather than interpreted as feedback.
 
 Truncated, paraphrased, or retyped-from-memory hashes are not accepted.
 The hash binds the approval to the full plan content and the pinned base
