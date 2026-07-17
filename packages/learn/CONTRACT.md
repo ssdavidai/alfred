@@ -50,7 +50,7 @@ Registration-time gates only take effect on the next container restart
 
 | Workflow | Schedule | Purpose |
 |---|---|---|
-| `SignalExtractWorkflow` | `al-signal-extract` every 5 min (25 min cap) — gate `STEWARD_SIGNAL_EXTRACT_ENABLED` (**default ON**; disable with `false`/`0`/`no`/`off`) | Chunked clerk extraction over unprocessed ingest events (`GET /api/v1/ingest/events/pending`, #78 Design-B) → `POST /api/v1/state/signals` (status `unrouted`) + `extract_observation_from_signal` (OBS-2) + auto-task-create hook (`create_task_from_signal`, mode-gated §Invariants). |
+| `SignalExtractWorkflow` | `al-signal-extract` every 5 min (25 min cap) — gate `STEWARD_SIGNAL_EXTRACT_ENABLED` (**default ON**; disable with `false`/`0`/`no`/`off`) | Chunked clerk extraction over unprocessed ingest events (`GET /api/v1/ingest/events/pending`, #78 Design-B) → `POST /api/v1/state/signals` (status `unrouted`) + `extract_observation_from_signal` (OBS-2) + auto-task-create hook (`create_task_from_signal`, mode-gated §Invariants). Poison handling: every per-event extraction failure is reported to `POST /api/v1/ingest/events/:id/failure`; unknown `source_type` is `retryable` (bounded by ctrl's fixed retry budget), while a schema-invalid payload is `non_retryable`; the workflow never marks a dead-lettered event processed. |
 
 #### Route (signals → dispatch / Desk cards)
 
