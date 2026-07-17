@@ -3,15 +3,8 @@ import { addRoute } from "../server.js";
 import { sendJson, ValidationError } from "../errors.js";
 import { dockerComposeCmd, dockerExec, execAsync, sudoExec, parseJsonLines, validateServiceName, COMPOSE_DIR, HERMES_CMD, HERMES_CONTAINER } from "../helpers.js";
 import { getVaultContextData, getInboxFiles, VAULT_PATH } from "./vault.js";
-import { parseActivityFeed } from "../activity.js";
-import { ttlCache } from "../cache.js";
+import { readDurableActivity } from "../activity.js";
 import { queryAuditCrossTier } from "../../db/coldRead.js";
-
-// Activity feed is the most expensive read on the Desk page — it spawns
-// `docker compose logs --tail=N alfred` which forks a process per call.
-// Coalesce repeat reads (every Desk page-load fires this once, and
-// every click invalidates+refetches) onto a single subprocess invocation.
-const activityFeedCache = ttlCache<{ items: any[] }>({ ttlMs: 3_000 });
 
 // alfred-black mounts the alfred daemon's data dir as a named Docker volume
 // (PLAN.md Part E), bind-mounted into ctrl-api at /alfred-data by default.
@@ -658,15 +651,9 @@ export function registerAdminRoutes(): void {
   // --- Activity Feed ---
 
   addRoute("GET", "/api/v1/admin/activity", async ({ res, query }) => {
-    const limit = parseInt(query.get("limit") ?? "50", 10);
+    const limit = Math.min(parseInt(query.get("limit") ?? "50", 10), 200);
     if (isNaN(limit) || limit < 1) throw new ValidationError("limit must be a positive number");
-    const payload = await activityFeedCache.get(`activity:${limit}`, async () => {
-      // Fetch 3x more raw lines to account for noise filtering
-      const rawTail = Math.min(limit * 3, 1000).toString();
-      const stdout = await dockerComposeCmd(["logs", "--no-color", "--tail", rawTail, "alfred"]);
-      return { items: parseActivityFeed(stdout, limit) };
-    });
-    sendJson(res, 200, payload);
+    sendJson(res, 200, readDurableActivity(limit));
   });
 
   // GET /api/v1/admin/audit?limit&include_automated=0&cursor=<ts> — the durable
@@ -837,6 +824,13 @@ export function registerAdminRoutes(): void {
     // Fast synchronous reads
     const vaultRaw = getVaultContextData();
     const inboxFiles = getInboxFiles();
+    const activityHealth = readDurableActivity(1);
+    const rawHealth = healthResult.status === "fulfilled" && healthResult.value &&
+      typeof healthResult.value === "object" ? healthResult.value : {};
+    const health = {
+      ...rawHealth,
+      status: healthResult.status === "fulfilled" && !activityHealth.partial ? "ok" : "degraded",
+    };
 
     // NOTE (issue #59): the legacy `openclawCfg` field is gone. It read
     // `/hermes-data/main/config.yaml` — a nonexistent path — so it was
@@ -847,7 +841,7 @@ export function registerAdminRoutes(): void {
     // match.
 
     sendJson(res, 200, {
-      health: healthResult.status === "fulfilled" ? healthResult.value : null,
+      health,
       containers: containersResult.status === "fulfilled" ? containersResult.value : null,
       pairing: pairingResult.status === "fulfilled" ? pairingResult.value : null,
       vault: vaultRaw,
