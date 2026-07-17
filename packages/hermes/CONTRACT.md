@@ -197,11 +197,20 @@ auto-namespaces tools as `mcp_<server>_<tool>`.
 | `hass` | stdio (bundle) | ✓ (trimmed) | — | — | — | main-only (#110); proxies ctrl-api `/api/v1/channels/ha/*`; the HA token never reaches the MCP server |
 | `paperclip` | stdio (upstream npm) | ✓ (trimmed) | ✓ | ✓ | — | needs `PAPERCLIP_API_KEY` = **board key** (`pcp_board_…`, minted by `init/bootstrap-paperclip.sh` step 12 into the profile `.env`) + `PAPERCLIP_COMPANY_ID`/`PAPERCLIP_AGENT_ID` |
 | `files` | stdio (bundle) | ✓ | ✓ | — | — | Store-5 blob surface onto ctrl-api `/api/v1/files/*` (#114) |
-| `plane` | — | — | — | — | — | **DORMANT, not deployed**: the stdio app still ships in the bundle but no profile registers it on `main`; a stale in-template comment (line ~440) still lists it in the "base 7" |
 
 Counts on `main` branch: main 8, workers 7, heavy 6, codex-builder 0
 (`mcp_servers: {}` — the hard fence). User-facing dynamic profiles render
 main-like and get the main set.
+
+On every init boot, `render_mcp_servers.py` runs against every profile's
+operator-owned `config.yaml`. Its reconciliation is idempotent: the ADD pass
+backfills missing required registrations, then the REMOVE pass deletes retired
+server keys (currently `plane`) from `mcp_servers`; unrelated operator-owned
+blocks are preserved.
+
+A deployment-conformance test pins the resulting graph: configured MCP server
+keys must not include any retired key, and every HTTP-based server URL's host
+must map to a service declared in the root `docker-compose.yaml`.
 
 ### 7. Init container responsibilities (`init/entrypoint.sh`)
 

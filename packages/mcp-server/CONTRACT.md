@@ -177,7 +177,7 @@ other than its own `oauth.sqlite`; everything else is HTTP to ctrl-api.
 | Hermes `heavy` profile | stdio | `alfred`, `sure`, `vaultwarden`, `execute` | same (no `hass`/`files`/`paperclip-admin`) |
 | Hermes `codex-builder` profile | — | none | `mcp_servers: {}` by design (sealed runtime) |
 | claude.ai Custom Connectors | HTTP + OAuth | any app, one connector per app | `https://mcp.<DOMAIN>/<app>/mcp` |
-| voice-bridge | HTTP + master secret | `alfred`, `sure`, `vaultwarden`, `execute`, `hermes` (its `APPS` list at `packages/voice-bridge/src/mcp-clients.ts:36` still names `plane` — stale; that URL now 404s) | `MCP_SERVER_URL=http://mcp-server:8787` in compose |
+| voice-bridge | HTTP + master secret | `alfred`, `sure`, `vaultwarden`, `execute`, `hermes` | `MCP_SERVER_URL=http://mcp-server:8787` in compose |
 | Third-party voice vendors (ElevenLabs, LiveKit) | HTTP + scoped token | one app per token | connector URL from `/manage/tokens` responses |
 | ctrl-api + web dashboard | HTTP `/manage/*` | token management only | see P5 chain |
 
