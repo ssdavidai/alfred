@@ -57,7 +57,7 @@ describe("GET /api/v1/admin/activity — durable audit ledger", () => {
     getStateDb();
     appendAudit({
       ts: "2026-07-17T08:00:00.000Z", action_type: "decision",
-      actor: "principal", source: "desk", subject_ref: "decision:d-1",
+      actor: "principal", source: "curator", subject_ref: "decision:d-1",
       summary: "Approved durable activity",
     });
     appendAudit({
@@ -80,6 +80,10 @@ describe("GET /api/v1/admin/activity — durable audit ledger", () => {
       assert.ok(key in workflow, `missing ${key}`);
     assert.equal(workflow.subject_ref, "workflow:wf-317");
     assert.deepEqual(JSON.parse(workflow.payload_json), workflowPayload);
+    assert.deepEqual(
+      data.items.map(({ timestamp, tool, level, event, message }: any) => ({ timestamp, tool, level, event, message })),
+      [{ timestamp: workflowTs, tool: "system", level: "info", event: "workflow_run", message: "Workflow run completed" }, { timestamp: "2026-07-17T08:00:00.000Z", tool: "curator", level: "info", event: "decision", message: "Approved durable activity" }],
+    );
     assert.equal((await getActivity(1)).data.items.length, 1, "limit must be honored");
   });
 

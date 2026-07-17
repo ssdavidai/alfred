@@ -20,9 +20,22 @@ export interface DurableActivityFeed {
 export function readDurableActivity(limit: number): DurableActivityFeed {
   const generated_at = new Date().toISOString();
   try {
-    const items = getStateDb()
+    const rows = getStateDb()
       .prepare("SELECT * FROM audit ORDER BY ts DESC LIMIT ?")
       .all(limit) as Array<Record<string, unknown>>;
+    const items = rows.map((row) => {
+      const event = String(row.action_type ?? "activity");
+      const sourceTool = inferTool(String(row.source ?? ""));
+      const actorTool = inferTool(String(row.actor ?? ""));
+      return {
+        ...row,
+        timestamp: String(row.ts ?? ""),
+        tool: sourceTool !== "system" ? sourceTool : actorTool !== "system" ? actorTool : inferTool(event),
+        level: "info" as const,
+        event,
+        message: String(row.summary ?? humanizeEventName(event)),
+      };
+    });
     return {
       items,
       generated_at,
