@@ -160,9 +160,10 @@ Jinja2-compatible subset) into `<profile_dir>/config.yaml` + `.env`.
 Ownership split — **the load-bearing rule**:
 
 - `config.yaml` is **operator-owned**: seeded once, never overwritten by a
-  re-render. New template features reach existing tenants only via the
-  idempotent ADD-only mutators run by init on every boot:
-  `render_mcp_servers.py` (backfill missing required MCP servers),
+  re-render. New template features and retired-key cleanup reach existing
+  tenants only via the idempotent mutators run by init on every boot:
+  `render_mcp_servers.py` (backfill missing required MCP servers and remove
+  retired server keys),
   `migrate_main_profile_tool_trim.py` (issue #175 `tools.include`
   whitelists + `kanban.dispatch_in_gateway: false` add-if-unset — an
   explicit operator setting is preserved),
@@ -225,7 +226,7 @@ One-shot, idempotent; every other service gates on
 | 3 | Seed `/alfred-data/config.yaml` for the alfred vault daemon (from `config.yaml.tpl`; preserved once present) |
 | 4 | Gateway token: honour `OPENCLAW_GATEWAY_TOKEN` if set, else generate `token_urlsafe(32)` → `/alfred-data/.gateway-token`, chmod **644** |
 | 5 | Seed `/vault/intuition/index.md` + `matter/inbox.md` (the orphan-task fallback target) |
-| 6 | Render each profile's `config.yaml` + `.env` (`render_hermes.py`) and run the ADD-only mutators (§5). Writes via `/hermes-state`, bakes runtime paths from `HERMES_RUNTIME_HOME` |
+| 6 | Render each profile's `config.yaml` + `.env` (`render_hermes.py`) and run the idempotent mutators (§5). Writes via `/hermes-state`, bakes runtime paths from `HERMES_RUNTIME_HOME` |
 | 7 | `chown -R 10000:10000` on the hermes volume + `/vault`; codex-builder subtree re-owned 10001 mode 0711 + deploy-key write + negative-assert spot-checks (uid 10001 must NOT read `/vault`, `/alfred-data/.gateway-token`, other profiles' `.env` — NOT the rest of `/alfred-data`, which is deliberately 777) |
 | 8–9 | Mirror `COMPOSIO_USER_ID` → `/alfred-data/.composio-user-id`; seed `/vault/.auth/authorized_senders.json` from `OWNER_EMAIL` |
 | 10 | Stage Sure bootstrap inputs (email/password files + `bootstrap.rb` + the 16 `sure-*-mutate.rb` scripts) for the separate `sure-init` service |
@@ -316,11 +317,13 @@ deliberately blanked in this container — Hermes is the sole key holder.
 3. **Boot ordering**: init completes before hermes starts (compose gate);
    the supervisor additionally waits for `_registry.json` then each
    profile's `config.yaml` + `.env` (FATAL after 300 s/profile).
-4. **`config.yaml` is operator-owned** — never overwrite; extend only via
-   ADD-only mutators. **`.env` is deployment-owned** — re-rendered every
-   init with `_RUNTIME_KEY_PREFIXES` merge-preservation. The mcp-stdio
-   bundle is **image-owned** — rsync `--delete` on every init; never
-   hand-edit it on the volume.
+4. **`config.yaml` is operator-owned** — never overwrite; reconcile only via
+   idempotent mutators. `render_mcp_servers.py` performs required-key ADD and
+   retired-key REMOVE passes; the remaining config mutators are ADD-only.
+   **`.env` is deployment-owned** — re-rendered every init with
+   `_RUNTIME_KEY_PREFIXES` merge-preservation. The mcp-stdio bundle is
+   **image-owned** — rsync `--delete` on every init; never hand-edit it on the
+   volume.
 5. **codex-builder is sealed**: uid 10001, `mcp_servers: {}`,
    positive-allowlist `.env` (no `AAS_API_KEY`, no provider keys, no
    `PAPERCLIP_API_KEY`), iptables egress allowlist installed before launch,
