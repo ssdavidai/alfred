@@ -2,14 +2,12 @@ import { useEffect, useRef } from "react";
 import { useQuery, getActivityFeed } from "wasp/client/operations";
 import { Card, CardContent, CardTitle } from "../../client/components/ui/card";
 import { Activity, AlertTriangle, CheckCircle2 } from "lucide-react";
-
-interface ActivityItem {
-  timestamp: string;
-  tool: "curator" | "janitor" | "distiller" | "surveyor" | "system";
-  level: "info" | "warning" | "error";
-  event: string;
-  message: string;
-}
+import {
+  formatActivityFreshness,
+  parseActivityEnvelope,
+  selectActivityFeedState,
+  type ActivityItem,
+} from "../activityFeedCore";
 
 const TOOL_COLORS: Record<string, string> = {
   curator: "text-blue-400",
@@ -54,7 +52,9 @@ export default function ActivityFeed() {
 
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  const items: ActivityItem[] = Array.isArray(data?.items) ? data.items : [];
+  const envelope = parseActivityEnvelope(data);
+  const { items } = envelope;
+  const feedState = selectActivityFeedState(envelope);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -72,6 +72,24 @@ export default function ActivityFeed() {
           </CardTitle>
         </div>
 
+        {data && (
+          <p className="mb-3 font-mono text-[0.6rem] text-muted-foreground/60">
+            {formatActivityFreshness(envelope.generatedAt)}
+          </p>
+        )}
+
+        {feedState === "degraded" && (
+          <div
+            role="alert"
+            className="mb-3 flex items-start gap-2 rounded-sm border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-amber-400"
+          >
+            <AlertTriangle className="mt-0.5 h-3 w-3 flex-shrink-0" />
+            <p className="font-mono text-[0.65rem]">
+              Partial data — failed sources: {envelope.failedSources.join(", ")}
+            </p>
+          </div>
+        )}
+
         {isLoading && items.length === 0 && (
           <p className="font-mono text-xs text-muted-foreground">Loading...</p>
         )}
@@ -82,7 +100,7 @@ export default function ActivityFeed() {
           </p>
         )}
 
-        {items.length === 0 && !isLoading && !error && (
+        {feedState === "empty" && !isLoading && !error && (
           <p className="font-mono text-xs text-muted-foreground/60">
             No recent activity
           </p>
@@ -104,9 +122,15 @@ export default function ActivityFeed() {
                 >
                   {item.tool}
                 </span>
-                <span className="min-w-0 flex-1 font-mono text-[0.65rem] leading-relaxed text-foreground/80">
-                  {item.message}
-                </span>
+                <div className="min-w-0 flex-1 font-mono leading-relaxed">
+                  <p className="text-[0.65rem] text-foreground/80">
+                    {item.message}
+                  </p>
+                  <p className="text-[0.55rem] text-muted-foreground/50">
+                    {item.actionType}
+                    {item.correlationRef && ` · correlation ${item.correlationRef}`}
+                  </p>
+                </div>
                 <span className="flex-shrink-0 font-mono text-[0.6rem] text-muted-foreground/50">
                   {formatTime(item.timestamp)}
                 </span>

@@ -1534,7 +1534,7 @@ export const getActivityFeed: GetActivityFeed<void, any> = async (
 // GET /api/v1/admin/audit (one row per user action, not the legacy
 // needs_attention_action + desk-action event-file twin). `includeAutomated`
 // maps to ?include_automated=1 so the UI can surface steward/auto noise.
-// Distinct from getActivityFeed, which scrapes the alfred container's logs.
+// Distinct from getActivityFeed, which returns ctrl's freshness envelope.
 export const getAuditFeed: GetAuditFeed<
   { includeAutomated?: boolean } | void,
   any
