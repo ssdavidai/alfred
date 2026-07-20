@@ -733,6 +733,12 @@ class _WorkflowAuditInboundInterceptor(WorkflowInboundInterceptor):
         super().__init__(next)
         self._emit = workflow.extern_functions()[_WORKFLOW_AUDIT_EXTERN]
 
+    def _emit_best_effort(self, event: dict[str, str]) -> None:
+        try:
+            self._emit(event)
+        except Exception as exc:  # noqa: BLE001 — audit must never affect a run
+            logger.warning("workflow audit scheduling failed: %s", str(exc)[:200])
+
     async def execute_workflow(self, input: object) -> object:
         info = workflow.info()
         event = {
@@ -741,15 +747,15 @@ class _WorkflowAuditInboundInterceptor(WorkflowInboundInterceptor):
             "workflow_type": info.workflow_type,
         }
         if not workflow.unsafe.is_replaying():
-            self._emit({**event, "outcome": "started"})
+            self._emit_best_effort({**event, "outcome": "started"})
         try:
             result = await self.next.execute_workflow(input)
         except Exception as exc:
             if not workflow.unsafe.is_replaying():
-                self._emit({**event, "outcome": "failed", "error": str(exc)})
+                self._emit_best_effort({**event, "outcome": "failed", "error": str(exc)})
             raise
         if not workflow.unsafe.is_replaying():
-            self._emit({**event, "outcome": "completed"})
+            self._emit_best_effort({**event, "outcome": "completed"})
         return result
 
 
