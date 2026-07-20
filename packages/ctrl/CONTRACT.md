@@ -89,7 +89,7 @@ One row per module in `src/api/routes/` (complete index = the `register*` import
 | `mcpTokens.ts` | `/api/v1/mcp/tokens*` | Per-app MCP scoped-token proxy (PR #278). See call-out §MCP tokens. |
 | `claudeSetup.ts` | `/api/v1/claude-setup*` | /claude page payload + `MCP_APPROVAL_SECRET` rotation |
 | `vaultwarden.ts` | `/api/v1/vaultwarden/*` | Vaultwarden proxy via the vault-cli sidecar (`VAULT_CLI_URL`, default `http://vault-cli:8087`) |
-| `sure.ts` | `/api/v1/sure/*` | Sure personal-finance REST proxy (96 endpoints; auth via `SURE_API_KEY`, missing key → `NOT_CONFIGURED`) |
+| `sure.ts` | `/api/v1/sure/*` | Sure personal-finance REST proxy (97 endpoints). Account-bearing responses add per-account `balance_provenance` (`source`: `provider`/`cached_fallback`; `observed_at`: ISO8601; `freshness`: `fresh`/`stale`/`unknown`; `fallback_reason`: string/null). Aggregate balance-sheet/net-worth responses also add `data_quality` (`fresh_accounts`, `stale_accounts`, `unknown_accounts`, `partial`: boolean). `GET /api/v1/sure/sync-health` returns each account's anchor/staleness status plus a remediation hint. All routes authenticate via `SURE_API_KEY`; a missing key returns `NOT_CONFIGURED`, including for sync-health. |
 | `sureAssistant.ts` | `/api/v1/sure/assistant` | Sure AI-assistant endpoint |
 | `plane.ts` | `/api/v1/plane/*` | **DORMANT, not deployed** — Plane proxy + webhook. Plane was removed from the compose stack fleet-wide (PR #279); no `plane` service exists in `docker-compose.yaml`. Routes remain registered but have no upstream. Do not build against; deletion is an open follow-up. |
 | `webhooks/plane.ts` | `/api/v1/webhooks/plane/steward` | **DORMANT** — same status as `plane.ts` |

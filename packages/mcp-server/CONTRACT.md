@@ -22,7 +22,7 @@ lookup surface; a token or stdio arg outside this set is rejected.
 | AppId | Source file | Tools | Naming | Backing |
 |---|---|---|---|---|
 | `alfred` | `src/tools/alfred.ts` | 29 | `list_vault_by_type`, `search_vault`, `spawn_alfred_task`, `start_workflow`, `act_on_decision`, `delegate_to_focused_agent`, `notify_principal`, … | ctrl-api vault/workflow/decision routes |
-| `sure` | `src/tools/sure.ts` | 95 | `list_transactions`, `get_balance_sheet`, `bulk_update_transactions`, … | ctrl-api Sure REST proxy |
+| `sure` | `src/tools/sure.ts` | 96 | `list_transactions`, `get_balance_sheet`, `get_sync_health`, `bulk_update_transactions`, …; `get_balance_sheet` passes through each account's additive `balance_provenance` and the aggregate `data_quality` unchanged | ctrl-api Sure REST proxy (`get_sync_health` → `GET /api/v1/sure/sync-health`) |
 | `vaultwarden` | `src/tools/vaultwarden.ts` | 14 | `list_vault_items`, `create_vault_item`, `generate_password`, `vault_refresh`, … | ctrl-api Vaultwarden proxy |
 | `execute` | `src/tools/execute.ts` | 6 | `list_composio_tools`, `composio_execute`, `list_connections`, `create_connection`, `reconnect_connection`, `delete_connection` | ctrl-api `/api/v1/integrations/*` (Composio; execute = `/api/v1/integrations/execute`) |
 | `hermes` | `src/tools/hermes.ts` | 7 | `run`, `stop_run`, `health`, `list_models`, `schedule_prompt`, `list_scheduled`, `cancel_scheduled` (all take optional `profile: main\|workers`) | ctrl-api `/api/v1/hermes/*` (schedule tools hit `/api/v1/hermes/cron`; ctrl-api bridges those to the in-container `hermes cron` CLI) |
