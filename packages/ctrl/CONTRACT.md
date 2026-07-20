@@ -1,6 +1,6 @@
 # CONTRACT.md — alfred-ctrl-api (`packages/ctrl`)
 
-**Frozen cross-lane interface.** Lane agents code against this document, not against ctrl's source. Regenerated 2026-07-15 from `main`; every claim below is verified in code at the cited path.
+**Frozen cross-lane interface.** Lane agents code against this document, not against ctrl's source. Regenerated 2026-07-15 from `main`; every current-runtime claim below is verified in code at the cited path. Clauses explicitly labelled `#261 target` instead freeze Lane I's required future behavior and are not code-verified claims about this phase-0 head.
 
 ctrl-api is the tenant API server: a zero-dependency-at-runtime Node 22 HTTP service on **:3100** that is the **sole writer** of all four stores (vault markdown, `alfred-state.db`, `ingest.db`, cold archive) plus Store 5 (files). It is HTTP-only — the pre-cutover CLI/TUI was deleted; `build.mjs` produces exactly one artefact, `dist/api.mjs`, from entry `src/api/standalone.ts`. Every other service (web, alfred-learn, the alfred vault daemon, Hermes profiles via the `alfred-ctrl` MCP server, voice-bridge) persists state by calling ctrl-api over HTTP. ctrl-api in turn reaches siblings via `docker exec` (helpers `dockerExec`, `src/api/helpers.ts:100`) and HTTP (Hermes gateway, vault-cli, mcp-server, Sure, Paperclip).
 
@@ -160,7 +160,11 @@ Resolution precedence: env var > `${ALFRED_DATA_DIR}/settings.json` > default. R
 
 ### Call-out: disk-usage watcher and system-info
 
-ctrl-api owns the tenant disk-usage watcher. Its frozen thresholds are
+**#261 target (Lane I; not implemented at this phase-0 head).** ctrl-api
+currently has neither a disk-usage watcher nor the hyphenated system-info
+route below; it exposes only the legacy raw-diagnostics
+`GET /api/v1/admin/system/info`. Lane I must add the tenant disk-usage watcher.
+Its frozen thresholds are
 `DISK_ALERT_WARN_PCT=80` and `DISK_ALERT_PAGE_PCT=90` (percentage of the
 Alfred data filesystem used):
 
@@ -169,7 +173,7 @@ Alfred data filesystem used):
 | warn (`used_pct >= 80` and `< 90`) | Append a state.db audit row and create a `needs_attention` card. The warning incident is deduplicated across watcher polls/restarts to at most one audit/card pair per 24 hours. |
 | page (`used_pct >= 90`) | Preserve the warn audit/card behavior and escalate with an outbound notification through the existing Hermes **main** notify path used by `POST /api/v1/notifications`; never send through workers/heavy. |
 
-The machine-readable read surface is
+The required machine-readable read surface is
 `GET /api/v1/admin/system-info`. Its new disk fields are `disk_used_pct`
 (number or `null` when sampling fails), `disk_alert_level`
 (`ok | warn | page | unknown`),
@@ -207,7 +211,7 @@ compatibility surface; new consumers use the hyphenated route.
 | `STATE_DB_PATH` / `INGEST_DB_PATH` / `COLD_DB_PATH` | no | default `<cwd>/data/{alfred-state.db,ingest.db,cold.db}`; volumes mount at `/state`, `/ingest`, `/cold` |
 | `SQLITE_VEC_PATH`, `EMBEDDING_DIM` (768), `EMBED_MODEL`, `OLLAMA_BASE_URL` | no | vector search + embedding |
 | `INGEST_TTL_DAYS` (7), `INGEST_SWEEP_INTERVAL_MS`, `COLD_TTL_*`, `COLD_COMPACT_*` | no | store TTL/compaction knobs |
-| `DISK_ALERT_WARN_PCT` / `DISK_ALERT_PAGE_PCT` | no | `80` / `90`; ctrl-api watcher warning and outbound-page thresholds |
+| `DISK_ALERT_WARN_PCT` / `DISK_ALERT_PAGE_PCT` | no | **#261 target (not read at this head):** `80` / `90`; ctrl-api watcher warning and outbound-page thresholds |
 | `HERMES_GATEWAY_URL`, `HERMES_WORKERS_GATEWAY_URL`, `HERMES_API_KEY`, `OPENCLAW_GATEWAY_TOKEN`, `OPENCLAW_GATEWAY_TOKEN_FILE` | no | see sibling table (OPENCLAW_* names are legacy fallbacks still read by code) |
 | `HERMES_CONFIG_DIR` | compose-pinned | `/hermes-state/profiles` — ctrl-api reads/writes per-profile `config.yaml` |
 | `MCP_SERVER_URL`, `MCP_APPROVAL_SECRET` | for /mcp/tokens | see call-out |
@@ -233,7 +237,7 @@ compatibility surface; new consumers use the hyphenated route.
 7. **No route module registers itself** — registration is centralized in `createApiServer()` (`server.ts`, forbidden-zone). Adding a module = orchestrator edit of `server.ts`.
 8. **Deploys pull, never build.** The image is `ssdavidai00/alfred-ctrl-api:latest`, built only by CI (`.github/workflows/build-ctrl-api.yml`); `docker compose up` never builds.
 9. **Plane surfaces are dormant.** No Plane container exists in the stack (PR #279). `plane.ts` / `webhooks/plane.ts` / `PLANE_*` env are dead config awaiting deletion; do not wire new consumers.
-10. **Disk pressure is surfaced before outage.** At the effective warn
+10. **#261 target — disk pressure is surfaced before outage.** At the effective warn
     threshold ctrl-api records an audit row plus a 24 h-deduped
     needs-attention card; at the page threshold it additionally delivers via
     the Hermes main notification path. `/api/v1/admin/system-info` reports the
@@ -259,6 +263,6 @@ npm test        # node:test over tests/*.test.ts (148 test files)
 
 ## Change protocol
 
-This file is **forbidden-zone**: the commit gate (`scripts/hooks/check_lane.py`) rejects any lane diff touching `**/CONTRACT.md`. Changes land only via an orchestrator (phase0) commit in the main checkout, after the interface change itself has merged.
+This file is **forbidden-zone**: the commit gate (`scripts/hooks/check_lane.py`) rejects any lane diff touching `**/CONTRACT.md`. Changes land only via an orchestrator (phase0) commit in the main checkout, normally after the interface change itself has merged. A phase-0 target freeze may precede provider implementation only when it is explicitly labelled, states the current gap and owning lane, and is not presented as deployed behavior.
 
 A lane that finds this contract wrong — a route missing, a shape mismatched, an invariant contradicted by code — **STOPs and reports to the orchestrator. It never improvises across the boundary**, never codes to "what the provider probably meant", and never edits this file to match its patch. The orchestrator reconciles (fix the provider, or fix the contract) and re-freezes before the lane resumes.

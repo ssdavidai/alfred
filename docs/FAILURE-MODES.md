@@ -365,7 +365,10 @@ gateway; `notify_principal` bridges ephemeral agents → main message tool.
   boot-only, main-as-source `auth.json` copy lets workers/heavy retain an OAuth
   refresh token invalidated when another profile refreshes, turning an auth
   divergence into a retry storm that accelerates the same disk growth.
-  **Layered guards added by #261:** Lane V (Hermes/infra) adds the
+  **Current status at this phase-0 contract head:** the existing runtime has
+  the nightly background-profile cron, but none of the following three #261
+  guard families is implemented yet. **Layered guards frozen by #261 for the
+  implementation lanes:** Lane V (Hermes/infra) adds the
   supervised `session-janitor`, separate session/request-dump TTLs + dump
   count cap, workers/heavy state.db TTL+VACUUM, and 900 s newest-
   `openai-codex.last_refresh` auth convergence; Lane II (learn) adds the
@@ -373,8 +376,8 @@ gateway; `notify_principal` bridges ephemeral agents → main message tool.
   `max_retries_exhausted` and emits one
   needs-attention card per incident; Lane I (ctrl) adds 80% warn audit/card
   and 90% Hermes-main outbound page thresholds plus structured disk fields on
-  `GET /api/v1/admin/system-info`. Any one layer can fail without returning to
-  silent disk exhaustion.
+  `GET /api/v1/admin/system-info`. Once those lanes merge, any one layer can
+  fail without returning to silent disk exhaustion.
 - **☣ [S2] Memory parity gap.** Recall depends on the surveyor embedding the
   vault into sqlite-vec; if the embedder lags or the vector store drifts, Alfred
   "forgets" recent context and answers thinly.

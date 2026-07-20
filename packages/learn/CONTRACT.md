@@ -2,9 +2,11 @@
 
 > Frozen cross-lane interface for `packages/learn/**` (Lane II). Read this
 > before coding against or inside alfred-learn. Regenerated 2026-07-15 from
-> `main`; every claim below was verified against code, with
+> `main`; every current-runtime claim below was verified against code, with
 > `src/worker.py` (workflow/activity registration) and
-> `scripts/register_schedules.py` (schedules) as the authorities.
+> `scripts/register_schedules.py` (schedules) as the authorities. Clauses
+> explicitly labelled `#261 target` instead freeze Lane II's required future
+> behavior and are not code-verified claims about this phase-0 head.
 
 alfred-learn is the Temporal intelligence layer: a single Python 3.12
 worker container (`ssdavidai00/alfred-learn:latest`) that runs every
@@ -163,22 +165,26 @@ steady-state surface.
 
 ### 4. Clerk gateway circuit breaker
 
-Every call through the shared clerk gateway path is protected by a persistent,
-per-tenant circuit breaker. `CLERK_BREAKER_ENABLED` defaults **ON** (the normal
-`false`/`0`/`no`/`off` spellings disable it). Its rolling outcome window opens
-only when all three conditions hold: samples span at least one hour, a
-non-zero fixed/test-pinned minimum call floor has been reached, and at least
-**95%** of outcomes are `max_retries_exhausted`. This is a sustained
-gateway-failure guard, not a trigger on a single failed workflow.
+**#261 target (Lane II; not implemented at this phase-0 head).** The current
+shared clerk path dispatches directly and has no breaker gate, persisted
+breaker state, or incident card. Lane II must protect every call through that
+path with a persistent, per-tenant circuit breaker. `CLERK_BREAKER_ENABLED`
+defaults **ON** (the normal `false`/`0`/`no`/`off` spellings disable it). Its
+rolling outcome window must open only when all three conditions hold: samples
+span at least one hour, a non-zero fixed/test-pinned minimum call floor has
+been reached, and at least **95%** of outcomes are `max_retries_exhausted`.
+This is a sustained gateway-failure guard, not a trigger on a single failed
+workflow.
 
-Opening the breaker short-circuits ordinary clerk dispatch and creates exactly
-one `needs_attention` card for that incident through ctrl-api (never a direct
-vault write). Retries/restarts use the persisted incident identity and must not
-create duplicate cards. The breaker is **close-on-first-success**: an admitted
-recovery probe's first successful clerk completion closes it immediately; a
-later open state is a new incident and may create one new card.
+Opening the breaker must short-circuit ordinary clerk dispatch and create
+exactly one `needs_attention` card for that incident through ctrl-api (never a
+direct vault write). Retries/restarts must use the persisted incident identity
+and must not create duplicate cards. The breaker is
+**close-on-first-success**: an admitted recovery probe's first successful clerk
+completion must close it immediately; a later open state is a new incident and
+may create one new card.
 
-Breaker state is internal bookkeeping under
+Breaker state must be internal bookkeeping under
 `/alfred-data/state/steward/clerk-breaker.json`, alongside
 `reversal-calibration.json`, and is written with the same atomic replacement
 pattern. It is not vault knowledge and must not be stored in SQLite or a new
@@ -242,7 +248,7 @@ deployed tenant actually sees.
 | `GROQ_API_KEY` | (from `.env`) | Whisper transcription; without it OMI audio is silently dead. |
 | `COMPOSIO_API_KEY` | (from `.env`) | Composio SDK (sidecar + composio_tools). |
 | `DISPATCH_USE_EPHEMERAL_EXECUTOR` | compose: `1` | Delegate dispatch uses per-task `exec-<hash>` Hermes sessions. |
-| `CLERK_BREAKER_ENABLED` | **ON** | Invocation-time gate for the persistent clerk gateway circuit breaker; `false`/`0`/`no`/`off` disables it. |
+| `CLERK_BREAKER_ENABLED` | **ON** | **#261 target (not read at this head):** invocation-time gate for the persistent clerk gateway circuit breaker; `false`/`0`/`no`/`off` disables it. |
 | `OPENROUTER_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` | **blanked in compose** | Hermes is the sole provider-key holder; learn makes no direct provider calls. |
 
 **Feature gates (registration-time — changing them requires a container
@@ -269,7 +275,7 @@ precedence)**: `STEWARD_SIGNAL_ACTION_LIVE_MODE`, `STEWARD_LIVE_MODE`,
 | Path | Access | Purpose |
 |---|---|---|
 | `/vault` (`vault_data`) | read | Vault markdown (writes go through ctrl-api). |
-| `/alfred-data` (`alfred_data`) | read/write | `.gateway-token` (read), `settings.json` (read — ctrl-api is the writer), `user-chores/` (dynamic templates), `chore-run-history.jsonl`, `state/steward/*` caches including `reversal-calibration.json` and `clerk-breaker.json`. |
+| `/alfred-data` (`alfred_data`) | read/write | `.gateway-token` (read), `settings.json` (read — ctrl-api is the writer), `user-chores/` (dynamic templates), `chore-run-history.jsonl`, `state/steward/*` caches including current `reversal-calibration.json`; **#261 target** adds `clerk-breaker.json`. |
 | `/hermes-state` (`hermes_data`) | read/write | Hermes profile configs; onboarding writes `memories/MEMORY.md` etc. |
 
 ### Runtime
@@ -362,7 +368,7 @@ limit in compose. No local Whisper model — Groq-hosted.
     confidence gate), clerk (not subken). Source:
     `packages/learn/CLAUDE.md` §Key Constraints.
 
-11. **Clerk outages are incident-deduped.** With
+11. **#261 target — clerk outages are incident-deduped.** With
     `CLERK_BREAKER_ENABLED` on, only a >=95% `max_retries_exhausted` rate over
     a sample spanning >=1 h and clearing the fixed minimum-call floor opens the
     breaker. One open incident produces at most one ctrl-api needs-attention
@@ -391,3 +397,6 @@ changes — never as part of a lane's feature commit. If a lane discovers
 this contract is wrong (an endpoint moved, a schedule changed, a default
 flipped), the lane **STOPs and reports** to the orchestrator; it never
 improvises across the boundary or edits this file to match its code.
+A phase-0 target freeze may precede its provider implementation only when it
+is explicitly labelled, states the current gap and owning lane, and is not
+presented as deployed behavior.
