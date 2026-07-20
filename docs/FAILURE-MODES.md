@@ -356,6 +356,25 @@ gateway; `notify_principal` bridges ephemeral agents → main message tool.
   background profiles (template + idempotent `render_workers_pruning.py`
   backfill) and an `x-default-logging` cap in compose; cleanup runbook +
   upstream loop follow-up at `debug/2026-06-19/workers-disk-bloat-runbook.md`.
+- **☣ [S1] Retention guard failure + cross-profile auth divergence. ⟵ ISSUE
+  #261, zsolt incident 2026-06-10.** The dated fleet capture/cleanup runbook
+  was written on 2026-06-19, but issue #261 records the triggering zsolt
+  incident on 2026-06-10. Unbounded `session_*.json`,
+  `request_dump_*.json`, and workers/heavy `state.db` growth can fill the
+  tenant disk before a nightly profile cron succeeds. Independently, the old
+  boot-only, main-as-source `auth.json` copy lets workers/heavy retain an OAuth
+  refresh token invalidated when another profile refreshes, turning an auth
+  divergence into a retry storm that accelerates the same disk growth.
+  **Layered guards added by #261:** Lane V (Hermes/infra) adds the
+  supervised `session-janitor`, separate session/request-dump TTLs + dump
+  count cap, workers/heavy state.db TTL+VACUUM, and 900 s newest-
+  `openai-codex.last_refresh` auth convergence; Lane II (learn) adds the
+  default-on clerk breaker that opens only after sustained >=95%
+  `max_retries_exhausted` and emits one
+  needs-attention card per incident; Lane I (ctrl) adds 80% warn audit/card
+  and 90% Hermes-main outbound page thresholds plus structured disk fields on
+  `GET /api/v1/admin/system-info`. Any one layer can fail without returning to
+  silent disk exhaustion.
 - **☣ [S2] Memory parity gap.** Recall depends on the surveyor embedding the
   vault into sqlite-vec; if the embedder lags or the vector store drifts, Alfred
   "forgets" recent context and answers thinly.

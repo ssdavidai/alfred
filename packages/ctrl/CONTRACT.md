@@ -158,6 +158,26 @@ Resolution precedence: env var > `${ALFRED_DATA_DIR}/settings.json` > default. R
 
 `/api/v1/mcp/tokens` (GET list, POST mint), `/:id/rotate`, DELETE `/:id` (`routes/mcpTokens.ts`) — a **thin proxy** to mcp-server's `/manage/tokens` API. mcp-server owns the tokens (its own SQLite; local validation on every `POST /<app>/mcp`). Chain: browser → web (Wasp op) → ctrl-api → mcp-server, so the browser never holds `MCP_APPROVAL_SECRET`; ctrl-api presents it as the onward Bearer. The raw token appears exactly once (mint + rotate responses); list never carries it; ctrl-api relays verbatim. Missing secret → 500 `MCP_NOT_CONFIGURED`; mcp-server down → 502 `MCP_UNREACHABLE`.
 
+### Call-out: disk-usage watcher and system-info
+
+ctrl-api owns the tenant disk-usage watcher. Its frozen thresholds are
+`DISK_ALERT_WARN_PCT=80` and `DISK_ALERT_PAGE_PCT=90` (percentage of the
+Alfred data filesystem used):
+
+| Level | Required side effects |
+|---|---|
+| warn (`used_pct >= 80` and `< 90`) | Append a state.db audit row and create a `needs_attention` card. The warning incident is deduplicated across watcher polls/restarts to at most one audit/card pair per 24 hours. |
+| page (`used_pct >= 90`) | Preserve the warn audit/card behavior and escalate with an outbound notification through the existing Hermes **main** notify path used by `POST /api/v1/notifications`; never send through workers/heavy. |
+
+The machine-readable read surface is
+`GET /api/v1/admin/system-info`. Its new disk fields are `disk_used_pct`
+(number or `null` when sampling fails), `disk_alert_level`
+(`ok | warn | page | unknown`),
+`disk_alert_warn_pct`, and `disk_alert_page_pct`. The last two fields report
+the effective configured thresholds, not hard-coded display values. The
+legacy `GET /api/v1/admin/system/info` raw diagnostics route remains a
+compatibility surface; new consumers use the hyphenated route.
+
 ---
 
 ## Requires
@@ -187,6 +207,7 @@ Resolution precedence: env var > `${ALFRED_DATA_DIR}/settings.json` > default. R
 | `STATE_DB_PATH` / `INGEST_DB_PATH` / `COLD_DB_PATH` | no | default `<cwd>/data/{alfred-state.db,ingest.db,cold.db}`; volumes mount at `/state`, `/ingest`, `/cold` |
 | `SQLITE_VEC_PATH`, `EMBEDDING_DIM` (768), `EMBED_MODEL`, `OLLAMA_BASE_URL` | no | vector search + embedding |
 | `INGEST_TTL_DAYS` (7), `INGEST_SWEEP_INTERVAL_MS`, `COLD_TTL_*`, `COLD_COMPACT_*` | no | store TTL/compaction knobs |
+| `DISK_ALERT_WARN_PCT` / `DISK_ALERT_PAGE_PCT` | no | `80` / `90`; ctrl-api watcher warning and outbound-page thresholds |
 | `HERMES_GATEWAY_URL`, `HERMES_WORKERS_GATEWAY_URL`, `HERMES_API_KEY`, `OPENCLAW_GATEWAY_TOKEN`, `OPENCLAW_GATEWAY_TOKEN_FILE` | no | see sibling table (OPENCLAW_* names are legacy fallbacks still read by code) |
 | `HERMES_CONFIG_DIR` | compose-pinned | `/hermes-state/profiles` — ctrl-api reads/writes per-profile `config.yaml` |
 | `MCP_SERVER_URL`, `MCP_APPROVAL_SECRET` | for /mcp/tokens | see call-out |
@@ -212,6 +233,11 @@ Resolution precedence: env var > `${ALFRED_DATA_DIR}/settings.json` > default. R
 7. **No route module registers itself** — registration is centralized in `createApiServer()` (`server.ts`, forbidden-zone). Adding a module = orchestrator edit of `server.ts`.
 8. **Deploys pull, never build.** The image is `ssdavidai00/alfred-ctrl-api:latest`, built only by CI (`.github/workflows/build-ctrl-api.yml`); `docker compose up` never builds.
 9. **Plane surfaces are dormant.** No Plane container exists in the stack (PR #279). `plane.ts` / `webhooks/plane.ts` / `PLANE_*` env are dead config awaiting deletion; do not wire new consumers.
+10. **Disk pressure is surfaced before outage.** At the effective warn
+    threshold ctrl-api records an audit row plus a 24 h-deduped
+    needs-attention card; at the page threshold it additionally delivers via
+    the Hermes main notification path. `/api/v1/admin/system-info` reports the
+    sampled percentage, level, and both effective thresholds.
 
 ---
 

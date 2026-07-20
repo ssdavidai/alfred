@@ -63,6 +63,25 @@ is PID 1; the supervisor is its single child.
 | `codex-builder` | **18793** | Sealed builder runtime, uid 10001, iptables egress jail, `mcp_servers: {}` | only when `ENABLE_CODEX_BUILDER=true` (boot-only — never spawned by reconcile) |
 | user-facing profiles | **18794–18799** | Created via ctrl-api `POST /api/v1/agent-profiles`; rendered main-like (`is_main_like` in `init/render_hermes.py`) | registry-driven |
 
+The supervisor also owns a mandatory, portless **`session-janitor`** process.
+It is restarted with the same supervision/backoff discipline as the gateways
+and periodically bounds profile runtime state that Hermes itself leaves
+unbounded:
+
+| Frozen knob | Default | Contract |
+|---|---:|---|
+| `HERMES_SESSION_RETENTION_DAYS` | `7` | Remove expired `sessions/session_*.json` artifacts from the supervised profiles. |
+| `HERMES_REQUEST_DUMP_RETENTION_DAYS` | `3` | Remove expired `sessions/request_dump_*.json` debug artifacts. |
+| `HERMES_REQUEST_DUMP_KEEP` | `50` | Independently cap request dumps to the newest 50 per profile; the age and count bounds both apply. |
+| `HERMES_STATE_DB_RETENTION_DAYS` | `7` | Apply row TTL to the high-volume `workers` and `heavy` profile `state.db` files, then `VACUUM` them so deleted pages return disk space. Main/user-facing state DBs are outside this destructive TTL. |
+| `HERMES_AUTH_RESYNC_SECONDS` | `900` | Reconcile shared OAuth state every 900 seconds in addition to the initial boot convergence. |
+
+The janitor must tolerate a missing profile/session directory or state DB, and
+one profile's cleanup failure must not stop the other profiles or any gateway.
+This supervised guard supersedes the background-profile-only rendered cron as
+the durable retention owner; the old cron is migration compatibility, not the
+cross-lane guarantee.
+
 Profile enumeration is **registry-driven**: the supervisor reads
 `$HERMES_HOME/profiles/_registry.json` (written by init's
 `render_registry.py` from ctrl-api's `agent_profile` table, and re-written by
@@ -79,12 +98,13 @@ After each gateway's `/health` goes 200, the supervisor POSTs
 `http://ctrl-api:3100/api/v1/agent-profiles/<slug>/status` with
 `Authorization: Bearer <AAS_API_KEY>` read from `profiles/main/.env`.
 
-Supervisor boot-time side effects (all idempotent):
+Supervisor convergence side effects (all idempotent; auth convergence also
+runs periodically):
 
 | Step | Behaviour |
 |---|---|
 | Sticky default | `hermes profile use main` — bare `hermes` in a `docker exec` opens the Alfred main profile |
-| auth.json propagation | If `profiles/main/auth.json` exists, mirror to `workers` + `heavy` whenever theirs is missing or smaller (one OAuth identity for all profiles). With `ENABLE_CODEX_BUILDER=1` also mirrored to `codex-builder/auth.json` AND `codex-builder/.codex/auth.json` (codex-CLI auth), chowned 10001 mode 0600 |
+| auth.json convergence | On boot, and then every `HERMES_AUTH_RESYNC_SECONDS` (default 900), inspect `main`, `workers`, and `heavy`; the valid file with the newest `providers.openai-codex.last_refresh` wins and is atomically mirrored to the other two. When `ENABLE_CODEX_BUILDER=1`, the same winner is also mirrored to `codex-builder/auth.json` AND `codex-builder/.codex/auth.json` (codex-CLI auth), chowned 10001 mode 0600. Missing/malformed files never displace a valid newer file. |
 | SOUL.md consolidation | Copies `profiles/main/SOUL.md` → `$HERMES_HOME/SOUL.md` (the file Hermes actually loads as persona) only if the source is >200 bytes AND the destination is missing, smaller, or contains the stock marker `You are Hermes Agent`. A hand-edited global SOUL is preserved |
 | hermes-lcm install | Copies `/opt/hermes-lcm` → `profiles/main/plugins/hermes-lcm` once (guard: `! -e`). Main only |
 | one-alfred install | Copies `/opt/one-alfred` → `profiles/main/plugins/one-alfred`, refreshed whenever the baked source mtime is newer. Main only |
@@ -97,6 +117,14 @@ Each gateway is launched as
 — the process cwd is the profile dir (so Hermes auto-discovers the profile's
 `AGENTS.md`) and the profile `.env` is source-and-exported into the process
 env (auth key visible in `/proc/<pid>/environ`; the 2026-05-28 hardening).
+
+Auth propagation is therefore **not boot-only**. Any one of the three normal
+gateways may be the process that refreshes `openai-codex`; timestamp election
+converges that newest refresh token before another profile continues using an
+invalidated predecessor. Operationally this preserves one effective OAuth
+refresher/identity across main/workers/heavy, per the 2026-06-11 operator
+decision, without treating `main` as an authority when another profile has the
+newer refresh.
 
 ### 3. hermes-relay (:8767) + main dashboard (:9119)
 
@@ -269,6 +297,9 @@ deliberately blanked in this container — Hermes is the sole key holder.
 | `HERMES_CODEX_BUILDER_MODEL` | default `gpt-5-codex` | |
 | `HERMES_RELAY_ENABLED` | not set by compose → **on** | relay :8767 + dashboard :9119 |
 | `HERMES_CRON_TIMEOUT` | `1800` | per-cron-job wall clock; must stay ≥ the largest Temporal execution_timeout being migrated (#56) |
+| `HERMES_SESSION_RETENTION_DAYS` / `HERMES_REQUEST_DUMP_RETENTION_DAYS` / `HERMES_REQUEST_DUMP_KEEP` | `7` / `3` / `50` | supervised `session-janitor` bounds session transcripts and request dumps |
+| `HERMES_STATE_DB_RETENTION_DAYS` | `7` | workers/heavy `state.db` row TTL + `VACUUM` |
+| `HERMES_AUTH_RESYNC_SECONDS` | `900` | periodic newest-refresh auth convergence |
 | depends_on | `init` completed, `temporal` healthy | |
 | caps | `cap_drop: ALL` + `DAC_OVERRIDE`, `NET_ADMIN`, `SETUID`, `SETGID` | last three exist for the codex-builder jail/uid-drop |
 | ulimits / mem / pids | nofile 65536, `mem_limit: 12g`, `pids_limit: 2048 ` | #222 fd headroom; 12 g per PR #279 |
@@ -325,8 +356,12 @@ deliberately blanked in this container — Hermes is the sole key holder.
 7. **Kanban dispatcher is disabled fleet-wide** (`kanban.
    dispatch_in_gateway: false` on every profile) — do not re-enable; work
    coordination flows through Paperclip.
-8. **One OAuth identity**: `hermes auth login` on main is sufficient; the
-   supervisor mirrors `auth.json` to the other profiles at every boot.
+8. **One effective OAuth refresher/identity**: `hermes auth login` on any of
+   main/workers/heavy is sufficient. At boot and every
+   `HERMES_AUTH_RESYNC_SECONDS`, the supervisor elects the valid `auth.json`
+   with the newest `providers.openai-codex.last_refresh` and mirrors it to the
+   other normal profiles (plus both codex-builder auth locations when enabled).
+   File size and a hard-coded `main` source are not freshness signals.
 9. **Plugins are main-only** (hermes-lcm, one-alfred, hermes-relay) and
    installed by the supervisor from image-baked sources — never `pip
    install`ed, never installed on workers/heavy.
@@ -341,6 +376,11 @@ deliberately blanked in this container — Hermes is the sole key holder.
     staging, the `plane` stdio app, learn/ctrl plane_sync) must be treated
     as dead surface; deleting it is an open follow-up — do not wire new
     features to it.
+13. **Runtime state is bounded by supervision**: `session-janitor` is the
+   durable owner of session/request-dump retention for supervised profiles and
+   workers/heavy `state.db` TTL + compaction. A rendered Hermes cron may remain
+   as rollout compatibility, but callers and operators must not rely on it as
+   the only guard.
 
 ---
 

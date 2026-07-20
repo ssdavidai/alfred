@@ -161,6 +161,29 @@ One-shot operator scripts under `packages/learn/scripts/` (e.g.
 `python -m scripts.<name>` inside the container; not part of the
 steady-state surface.
 
+### 4. Clerk gateway circuit breaker
+
+Every call through the shared clerk gateway path is protected by a persistent,
+per-tenant circuit breaker. `CLERK_BREAKER_ENABLED` defaults **ON** (the normal
+`false`/`0`/`no`/`off` spellings disable it). Its rolling outcome window opens
+only when all three conditions hold: samples span at least one hour, a
+non-zero fixed/test-pinned minimum call floor has been reached, and at least
+**95%** of outcomes are `max_retries_exhausted`. This is a sustained
+gateway-failure guard, not a trigger on a single failed workflow.
+
+Opening the breaker short-circuits ordinary clerk dispatch and creates exactly
+one `needs_attention` card for that incident through ctrl-api (never a direct
+vault write). Retries/restarts use the persisted incident identity and must not
+create duplicate cards. The breaker is **close-on-first-success**: an admitted
+recovery probe's first successful clerk completion closes it immediately; a
+later open state is a new incident and may create one new card.
+
+Breaker state is internal bookkeeping under
+`/alfred-data/state/steward/clerk-breaker.json`, alongside
+`reversal-calibration.json`, and is written with the same atomic replacement
+pattern. It is not vault knowledge and must not be stored in SQLite or a new
+vault record type.
+
 ---
 
 ## Requires
@@ -219,6 +242,7 @@ deployed tenant actually sees.
 | `GROQ_API_KEY` | (from `.env`) | Whisper transcription; without it OMI audio is silently dead. |
 | `COMPOSIO_API_KEY` | (from `.env`) | Composio SDK (sidecar + composio_tools). |
 | `DISPATCH_USE_EPHEMERAL_EXECUTOR` | compose: `1` | Delegate dispatch uses per-task `exec-<hash>` Hermes sessions. |
+| `CLERK_BREAKER_ENABLED` | **ON** | Invocation-time gate for the persistent clerk gateway circuit breaker; `false`/`0`/`no`/`off` disables it. |
 | `OPENROUTER_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` | **blanked in compose** | Hermes is the sole provider-key holder; learn makes no direct provider calls. |
 
 **Feature gates (registration-time — changing them requires a container
@@ -245,7 +269,7 @@ precedence)**: `STEWARD_SIGNAL_ACTION_LIVE_MODE`, `STEWARD_LIVE_MODE`,
 | Path | Access | Purpose |
 |---|---|---|
 | `/vault` (`vault_data`) | read | Vault markdown (writes go through ctrl-api). |
-| `/alfred-data` (`alfred_data`) | read/write | `.gateway-token` (read), `settings.json` (read — ctrl-api is the writer), `user-chores/` (dynamic templates), `chore-run-history.jsonl`, `state/steward/*` caches. |
+| `/alfred-data` (`alfred_data`) | read/write | `.gateway-token` (read), `settings.json` (read — ctrl-api is the writer), `user-chores/` (dynamic templates), `chore-run-history.jsonl`, `state/steward/*` caches including `reversal-calibration.json` and `clerk-breaker.json`. |
 | `/hermes-state` (`hermes_data`) | read/write | Hermes profile configs; onboarding writes `memories/MEMORY.md` etc. |
 
 ### Runtime
@@ -337,6 +361,13 @@ limit in compose. No local Whisper model — Groq-hosted.
     reflection (not synthesis), judgment (not router), discretion (not
     confidence gate), clerk (not subken). Source:
     `packages/learn/CLAUDE.md` §Key Constraints.
+
+11. **Clerk outages are incident-deduped.** With
+    `CLERK_BREAKER_ENABLED` on, only a >=95% `max_retries_exhausted` rate over
+    a sample spanning >=1 h and clearing the fixed minimum-call floor opens the
+    breaker. One open incident produces at most one ctrl-api needs-attention
+    card, persisted state survives worker restarts, and the first successful
+    recovery completion closes it.
 
 ---
 
