@@ -19,6 +19,11 @@ Provider → consumer notation: *(Lane X provides → Lane Y consumes)*.
 > goal was met another way), **INCOMPLETE** (partially enforced; gaps cited).
 > Statuses annotate, they do not amend. A lane that finds a status wrong
 > STOPs and reports — this file is orchestrator/phase0-only.
+>
+> **C20 (frozen 2026-07-20 for issue #316)** is a new forward contract. Its
+> provider and consumer implementations intentionally follow this phase-0
+> contract change; the current synchronous worker routes are not evidence of
+> the new interface.
 
 ---
 
@@ -181,6 +186,87 @@ clears the card **only on 2xx** (F50).
 `LINK_FIELDS` extended with `key_people, related_persons, related_orgs, org` (F10) so person/matter
 edges resolve; `MatterDetailPage` consumes `backlinks` (F55).
 
+### C20 · Durable worker-run ledger + asynchronous control API *(I ↔ IV; II consumes)*
+
+Janitor fixes and distiller extractions are durable asynchronous runs. Their
+canonical ledger is the `alfred_data` volume-relative directory
+`state/worker-runs/`, with one atomically replaced JSON file per run at
+`state/worker-runs/<run_id>.json`. The same directory is visible to ctrl-api as
+`/alfred-data/state/worker-runs/` and to the vault worker as
+`/app/data/state/worker-runs/`; these are two container paths for one ledger,
+not separate stores.
+
+Every worker run record has this closed JSON top-level shape (timestamps are
+RFC 3339 UTC strings or `null`):
+
+```json
+{
+  "run_id": "01K0ABCDEF23456789GHJKMNPQ",
+  "worker": "janitor",
+  "trigger": "manual",
+  "status": "queued",
+  "started_at": null,
+  "finished_at": null,
+  "progress": {
+    "files_scanned": 0,
+    "issues_found": 0,
+    "files_fixed": 0,
+    "files_deleted": 0
+  },
+  "error": null,
+  "last_success_at": null,
+  "failure_streak": 0
+}
+```
+
+- `run_id` is a ULID; its embedded timestamp is the canonical enqueue time.
+  `worker` is `janitor | distiller`, `trigger` is `manual | scheduled`, and
+  `status` is `queued | running | complete | failed | timed_out`.
+- `progress` is selected by `worker`. Janitor counters are
+  `{files_scanned, issues_found, files_fixed, files_deleted}`. Distiller
+  counters are `{candidates_found, candidates_processed, batches,
+  records_created}`. Every counter is a non-negative integer and starts at 0.
+- `started_at` is `null` until execution begins; `finished_at` is `null` until
+  a terminal state. `error` is `null` for queued/running/complete and a
+  non-empty string for failed/timed_out.
+- `last_success_at` is the most recent `finished_at` of a complete run for the
+  same worker, including the current run after it completes, or `null` if that
+  worker has never completed successfully. `failure_streak` is the number of
+  consecutive failed/timed_out runs since that success; complete resets it to
+  0. Queued/running records carry the current snapshot of both fields.
+
+Writer ownership is frozen: **ctrl-api** mints `run_id`, chooses `worker` and
+`trigger`, initializes the worker-specific zero counters and reliability
+snapshot, and durably creates the record in `queued`. Those identity fields
+are immutable. The **vault worker** is the only writer after handoff: it stamps
+`started_at` with `running`, updates `progress`, and writes exactly one terminal
+status together with `finished_at`, `error`, `last_success_at`, and
+`failure_streak`. All updates use temp-file + atomic rename so readers never
+observe partial JSON.
+
+The ctrl surface is:
+
+- `POST /api/v1/workers/janitor/fix` and
+  `POST /api/v1/workers/distiller/run` durably enqueue and return
+  **`202 {run_id,status}`** without waiting for worker completion. While that
+  worker has a queued/running record, another POST is idempotent: it returns
+  the same active `run_id` and current status and does not enqueue a second
+  run. Scheduled callers identify `trigger: "scheduled"`; otherwise it
+  defaults to `manual`. Existing distiller filters such as `project` remain
+  request inputs, not run-record fields.
+- `GET /api/v1/workers/runs/:run_id` returns the complete ledger record, or
+  404 for an unknown ULID.
+- `GET /api/v1/workers/status` includes a `workers` map with `janitor` and
+  `distiller`. Each entry carries `active_run_id`, `active_status`, freshness
+  classification `idle | stalled | failed | complete`, `last_success_at`,
+  `failure_streak`, `queue_age_ms` (ULID enqueue age while queued, otherwise
+  `null`), and `last_queue_latency_ms` (latest started run's
+  `started_at - ULID timestamp`, otherwise `null`). `stalled` takes precedence
+  when an active queued/running run exceeds its configured bound; otherwise
+  the latest terminal run yields `failed` or `complete`, and no terminal
+  history yields `idle`. Legacy daemon detail may remain additive, but these
+  per-worker fields and meanings are stable.
+
 ---
 
 ## Per-clause status table (2026-07-15 audit)
@@ -206,6 +292,7 @@ edges resolve; `MatterDetailPage` consumes `backlinks` (F55).
 | **C17** · Model-config matrix API | **LIVE** | `GET /api/v1/admin/models[?refresh=true]` (`packages/ctrl/src/api/routes/models.ts:385-386`; cache bust wired via `credentials.ts:245`); `GET /api/v1/admin/profiles` including `heavy` :18791 (`agents.ts:326-329`, profile table `agents.ts:59`, comment cites C17); `PATCH /api/v1/admin/agents/:agentId/model` (`agents.ts:371-372`). |
 | **C18** · Decision record = single source of truth | **LIVE** (amended by C-B4/C-B5 + the 2026-05-24 `state=open` fix) | `POST /api/v1/decisions`: writes `decision/<ts>.md` + `indexVaultWrite()` same-request (`decisions.ts:626, 636` — F1); mirrors to state.db audit (`decisions.ts:651` area); synchronous source flip per intent with `side_effects.synchronous_flip` (`decisions.ts:290-534`); delegate flips NA→dispatched only after dispatch succeeds (`decisions.ts:361-363`, F2/C18 comment). Amendment beyond the frozen text: **every** intent now mints `state: "open"` (`decisions.ts:568` `initialState = "open"`, rationale block :550-567) so DecisionRouter always runs `extract_observation_from_decision`; the router flips to `completed` itself. Root `CLAUDE.md` §6.3 documents the amended shape. |
 | **C19** · Vault graph focus/backlinks | **LIVE** | `GET /api/v1/vault/graph?focus=` (`packages/ctrl/src/api/routes/vault.ts:1310`); `LINK_FIELDS` includes `key_people, related_persons, related_orgs, org` (F10) plus later `related_places, place` (B9) (`vault.ts:1316-1327`); `backlinks:[{path,name,rel}]` computed for the focused record (`vault.ts:1452-1462`). |
+| **C20** · Durable worker-run ledger + asynchronous control API | **FROZEN — implementation pending (#316)** | Current `packages/ctrl/src/api/routes/workers.ts` still blocks on `dockerExec` and returns 200; current `packages/learn/src/activities/maintenance.py` consumes the synchronous body. Provider/consumer lanes must replace those paths with the C20 ledger and 202/poll contract rather than preserving observed legacy behaviour. |
 
 ---
 

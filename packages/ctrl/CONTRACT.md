@@ -1,6 +1,6 @@
 # CONTRACT.md — alfred-ctrl-api (`packages/ctrl`)
 
-**Frozen cross-lane interface.** Lane agents code against this document, not against ctrl's source. Regenerated 2026-07-15 from `main`; every claim below is verified in code at the cited path.
+**Frozen cross-lane interface.** Lane agents code against this document, not against ctrl's source. Regenerated 2026-07-15 from `main`; current-state claims below are verified in code at the cited path. Clauses explicitly marked as forward contracts freeze an approved interface before its provider and consumers are implemented.
 
 ctrl-api is the tenant API server: a zero-dependency-at-runtime Node 22 HTTP service on **:3100** that is the **sole writer** of all four stores (vault markdown, `alfred-state.db`, `ingest.db`, cold archive) plus Store 5 (files). It is HTTP-only — the pre-cutover CLI/TUI was deleted; `build.mjs` produces exactly one artefact, `dist/api.mjs`, from entry `src/api/standalone.ts`. Every other service (web, alfred-learn, the alfred vault daemon, Hermes profiles via the `alfred-ctrl` MCP server, voice-bridge) persists state by calling ctrl-api over HTTP. ctrl-api in turn reaches siblings via `docker exec` (helpers `dockerExec`, `src/api/helpers.ts:100`) and HTTP (Hermes gateway, vault-cli, mcp-server, Sure, Paperclip).
 
@@ -45,7 +45,7 @@ One row per module in `src/api/routes/` (complete index = the `register*` import
 | `settings.ts` | `/api/v1/settings*` | The 3 live↔shadow mode flags. See call-out §Settings. |
 | `chores.ts` | `/api/v1/chores*`, `/api/v1/chore-actions`, `/api/v1/cron/preview`, `/api/v1/admin/chores/{refresh-tier,install-standard}` | Chore CRUD/pause/resume/trigger/runs/source |
 | `workflows.ts` | `/api/v1/workflows*`, `/api/v1/schedules*`, `/api/v1/onboarding/*` | Temporal workflow/schedule ops — via `docker exec temporal temporal …` CLI (`workflows.ts:28`) |
-| `workers.ts` | `/api/v1/workers/*` | Worker lifecycle + distiller/janitor scan/run/history |
+| `workers.ts` | `/api/v1/workers/*` | **Frozen #316 forward contract:** `POST /api/v1/workers/janitor/fix` and `POST /api/v1/workers/distiller/run` quickly return `202 {run_id,status}` and return the same run while that worker is queued/running; `GET /api/v1/workers/runs/:run_id` returns the durable run record; `GET /api/v1/workers/status` carries per-worker freshness (`idle \| stalled \| failed \| complete`), `last_success_at`, `failure_streak`, and queue-age metrics (`queue_age_ms`, `last_queue_latency_ms`). See C20 in `docs/FIX-CONTRACTS.md`. |
 | `hermes.ts` | `/api/v1/hermes/*` | Hermes gateway proxy: cron jobs, ephemeral runs, model list |
 | `agents.ts` | `/api/v1/agents/*`, `/api/v1/admin/agents*`, `/api/v1/admin/profiles` | Agent registry, focused-subagent dispatch (workers gateway `/v1/responses`), tool disposition |
 | `profiles.ts` | `/api/v1/agent-profiles*`, `/api/v1/admin/profiles/:slug/*` | Multi-profile Hermes registry (#120): bindings, skills, MCP registrations, restore/status |
