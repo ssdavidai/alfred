@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from temporalio import workflow
 from temporalio.client import Client
-from temporalio.worker import Worker
+from temporalio.worker import Interceptor, WorkflowInboundInterceptor, Worker
 
 from src.config import load_config
 
@@ -276,7 +277,7 @@ from src.activities.omi_audio import (
 )
 
 # Activities — stream log
-from src.activities.stream_log import append_to_stream_log
+from src.activities.stream_log import append_to_stream_log, emit_workflow_audit_event
 from src.activities.maintenance import (
     purge_old_stream_events,
     run_distiller_batch,
@@ -720,6 +721,51 @@ from src.validators.frontmatter import validate_classification
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("alfred-learn")
+
+_WORKFLOW_AUDIT_EXTERN = "__alfred_workflow_audit"
+_AUDIT_TASKS: set[asyncio.Task[None]] = set()
+
+
+class _WorkflowAuditInboundInterceptor(WorkflowInboundInterceptor):
+    """Observe run transitions without adding commands to workflow history."""
+
+    def __init__(self, next: WorkflowInboundInterceptor) -> None:
+        super().__init__(next)
+        self._emit = workflow.extern_functions()[_WORKFLOW_AUDIT_EXTERN]
+
+    async def execute_workflow(self, input: object) -> object:
+        info = workflow.info()
+        event = {
+            "workflow_id": info.workflow_id,
+            "run_id": info.run_id,
+            "workflow_type": info.workflow_type,
+        }
+        if not workflow.unsafe.is_replaying():
+            self._emit({**event, "outcome": "started"})
+        try:
+            result = await self.next.execute_workflow(input)
+        except Exception as exc:
+            if not workflow.unsafe.is_replaying():
+                self._emit({**event, "outcome": "failed", "error": str(exc)})
+            raise
+        if not workflow.unsafe.is_replaying():
+            self._emit({**event, "outcome": "completed"})
+        return result
+
+
+class WorkflowAuditInterceptor(Interceptor):
+    def __init__(self, emit: object) -> None:
+        self._emit = emit
+
+    def workflow_interceptor_class(self, input: object) -> type[WorkflowInboundInterceptor]:
+        input.unsafe_extern_functions[_WORKFLOW_AUDIT_EXTERN] = self._emit
+        return _WorkflowAuditInboundInterceptor
+
+
+def _spawn_workflow_audit(event: dict[str, str]) -> None:
+    task = asyncio.create_task(emit_workflow_audit_event(**event))
+    _AUDIT_TASKS.add(task)
+    task.add_done_callback(_AUDIT_TASKS.discard)
 
 
 _STATIC_WORKFLOWS = [
@@ -1253,11 +1299,16 @@ async def run_worker() -> None:
     client = await Client.connect(config.temporal_host)
 
     logger.info("Starting worker on task queue: %s", config.task_queue)
+    loop = asyncio.get_running_loop()
+    audit_interceptor = WorkflowAuditInterceptor(
+        lambda event: loop.call_soon_threadsafe(_spawn_workflow_audit, event)
+    )
     worker = Worker(
         client,
         task_queue=config.task_queue,
         workflows=ALL_WORKFLOWS,
         activities=ALL_ACTIVITIES,
+        interceptors=[audit_interceptor],
     )
 
     logger.info("Alfred Learn worker running.")

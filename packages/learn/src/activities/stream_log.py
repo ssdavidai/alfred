@@ -9,6 +9,7 @@ import httpx
 from temporalio import activity
 
 from src.config import load_config
+from src.utils.state_client import StateClient
 from src.utils.vault_client import VaultClient
 
 logger = logging.getLogger("alfred-learn")
@@ -25,6 +26,53 @@ tags: [stream-log, daily]
 # Stream Log — {date}
 
 """
+
+
+async def emit_workflow_audit_event(
+    *,
+    workflow_id: str,
+    run_id: str,
+    workflow_type: str,
+    outcome: str,
+    error: str | None = None,
+    client: StateClient | None = None,
+) -> None:
+    """Best-effort ctrl-api audit emission for a Temporal workflow run."""
+    summary = f"{workflow_type} {outcome}"
+    if outcome == "failed" and error:
+        summary = f"{summary}: {error}"
+    state_client = client
+    try:
+        if state_client is None:
+            state_client = StateClient(load_config())
+        await state_client.append_audit(
+            action_type="workflow_run",
+            actor="alfred-learn",
+            source="temporal",
+            target_kind="workflow",
+            subject_ref=workflow_id,
+            summary=summary,
+            payload={
+                "workflow_id": workflow_id,
+                "run_id": run_id,
+                "workflow_type": workflow_type,
+                "outcome": outcome,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 — audit must never affect a run
+        logger.warning(
+            "workflow audit POST failed for %s/%s (%s): %s",
+            workflow_id,
+            run_id,
+            outcome,
+            str(exc)[:200],
+        )
+    finally:
+        if client is None and state_client is not None:
+            try:
+                await state_client.close()
+            except Exception as exc:  # noqa: BLE001 — best-effort cleanup
+                logger.warning("workflow audit client close failed: %s", str(exc)[:200])
 
 
 @activity.defn

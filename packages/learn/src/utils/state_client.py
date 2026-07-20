@@ -46,12 +46,14 @@ class StateClient:
     surprises.
     """
 
-    def __init__(self, config: Config) -> None:
+    def __init__(
+        self, config: Config, *, transport: httpx.AsyncBaseTransport | None = None
+    ) -> None:
         self._base = config.alfred_ctrl_url
         api_key = os.environ.get("AAS_API_KEY", "")
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         self._client = httpx.AsyncClient(
-            base_url=self._base, timeout=30.0, headers=headers
+            base_url=self._base, timeout=30.0, headers=headers, transport=transport
         )
 
     async def close(self) -> None:
