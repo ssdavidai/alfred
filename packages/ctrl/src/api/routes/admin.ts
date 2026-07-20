@@ -5,6 +5,7 @@ import { dockerComposeCmd, dockerExec, execAsync, sudoExec, parseJsonLines, vali
 import { getVaultContextData, getInboxFiles, VAULT_PATH } from "./vault.js";
 import { readDurableActivity } from "../activity.js";
 import { queryAuditCrossTier } from "../../db/coldRead.js";
+import { getDiskInfo } from "../diskWatch.js";
 
 // alfred-black mounts the alfred daemon's data dir as a named Docker volume
 // (PLAN.md Part E), bind-mounted into ctrl-api at /alfred-data by default.
@@ -875,6 +876,10 @@ export function registerAdminRoutes(): void {
   });
 
   // --- System info ---
+
+  addRoute("GET", "/api/v1/admin/system-info", async ({ res }) => {
+    sendJson(res, 200, await getDiskInfo());
+  });
 
   addRoute("GET", "/api/v1/admin/system/info", async ({ res }) => {
     const [uptimeResult, diskResult, memResult] = await Promise.all([

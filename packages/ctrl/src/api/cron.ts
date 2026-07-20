@@ -22,6 +22,13 @@
 // higher up — Temporal handles it; this computer only mirrors the
 // raw cron semantics.
 
+import { runDiskWatch } from "./diskWatch.js";
+
+const diskWatchTimer = setInterval(() => {
+  void runDiskWatch().catch((err) => console.error(`[disk-watch] ${err}`));
+}, 15 * 60_000);
+diskWatchTimer.unref();
+
 type FieldRange = { min: number; max: number };
 
 const RANGES: Record<"min" | "hour" | "dom" | "month" | "dow", FieldRange> = {
