@@ -5,6 +5,7 @@ import { dockerComposeCmd, dockerExec, execAsync, sudoExec, parseJsonLines, vali
 import { getVaultContextData, getInboxFiles, VAULT_PATH } from "./vault.js";
 import { readDurableActivity } from "../activity.js";
 import { queryAuditCrossTier } from "../../db/coldRead.js";
+import { getStateDb } from "../../db/state.js";
 import { getDiskInfo } from "../diskWatch.js";
 
 // alfred-black mounts the alfred daemon's data dir as a named Docker volume
@@ -676,8 +677,25 @@ export function registerAdminRoutes(): void {
         until: cursor || null, limit: includeAutomated ? limit : limit * 4, offset: 0,
       } as any);
     } catch {
-      sendJson(res, 200, { items: [], total: 0, next_cursor: null });
-      return;
+      // The cold archive is optional for serving current data. If it is
+      // temporarily unavailable, preserve the hot audit ledger instead of
+      // turning a healthy state.db into an empty activity feed.
+      try {
+        const where = cursor ? "WHERE ts <= ?" : "";
+        const args = cursor ? [cursor] : [];
+        const fetchLimit = includeAutomated ? limit : limit * 4;
+        const db = getStateDb();
+        const entries = db.prepare(
+          `SELECT * FROM audit ${where} ORDER BY ts DESC LIMIT ?`,
+        ).all(...args, fetchLimit) as Array<Record<string, unknown>>;
+        const total = (db.prepare(
+          `SELECT COUNT(*) AS n FROM audit ${where}`,
+        ).get(...args) as { n: number }).n;
+        result = { entries, total };
+      } catch {
+        sendJson(res, 200, { items: [], total: 0, next_cursor: null });
+        return;
+      }
     }
     const visible = (result.entries as Array<Record<string, any>>).filter(
       (row) => includeAutomated || !isAutomatedAuditType(String(row.action_type ?? "")),

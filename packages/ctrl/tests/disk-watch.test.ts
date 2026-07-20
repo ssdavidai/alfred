@@ -54,24 +54,31 @@ describe("disk watcher", () => {
     const { getStateDb } = await import("../src/db/state.js");
     const row = getStateDb().prepare("SELECT count(*) AS n FROM audit WHERE action_type = 'disk_pressure_warning'").get() as { n: number };
     assert.equal(row.n, 1);
+    const indexed = getStateDb().prepare("SELECT status FROM vault_index WHERE path = ?").get(`needs_attention/${file}`) as { status: string } | undefined;
+    assert.equal(indexed?.status, "pending");
   });
 
-  it("notifies once per page crossing", async () => {
+  it("persists page crossings so a restart does not notify again", async () => {
     let current = info("page", 92), calls = 0;
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async (url) => { calls++; assert.match(String(url), /\/api\/v1\/notifications$/); return new Response("{}", { status: 200 }); }) as typeof fetch;
     try {
       const deps = { sample: async () => current, recentWarn: () => true };
-      await runDiskWatch(deps); await runDiskWatch(deps);
+      await runDiskWatch(deps);
+      _resetDiskWatchForTests();
+      await runDiskWatch(deps);
       current = info("warn", 85); await runDiskWatch(deps);
       current = info("page", 93); await runDiskWatch(deps);
       assert.equal(calls, 2);
+      const { getStateDb } = await import("../src/db/state.js");
+      const row = getStateDb().prepare("SELECT count(*) AS n FROM audit WHERE action_type = 'disk_pressure_page'").get() as { n: number };
+      assert.equal(row.n, 2);
     } finally { globalThis.fetch = originalFetch; }
   });
 
   it("does nothing below threshold", async () => {
     let effects = 0;
-    await runDiskWatch({ sample: async () => info("ok", 40), recentWarn: () => { effects++; return false; }, card: () => { effects++; return "x"; }, audit: () => { effects++; }, notify: async () => { effects++; } });
+    await runDiskWatch({ sample: async () => info("ok", 40), recentWarn: () => { effects++; return false; }, card: () => { effects++; return "x"; }, audit: () => { effects++; }, pageActive: () => false, auditPage: () => { effects++; }, notify: async () => { effects++; } });
     assert.equal(effects, 0);
   });
 });
