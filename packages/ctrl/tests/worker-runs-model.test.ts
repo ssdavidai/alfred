@@ -46,6 +46,7 @@ describe("worker-run strict model", () => {
     for (const key of ["attempt", "heartbeat_sequence", "write_sequence"]) { const reliability = queued(); reliability.reliability[key] = -1; rejects(reliability); }
     const outcomes = claimed("running"); Object.assign(outcomes.progress, { total: 1, succeeded: 1, failed: 1 }); rejects(outcomes);
     const janitor = claimed("running", "janitor"); Object.assign(janitor.progress, { total: 1, started: 0, succeeded: 1 }); rejects(janitor);
+    const doubleCounted = claimed("running", "janitor"); Object.assign(doubleCounted.progress, { total: 1, started: 1, skipped: 1 }); rejects(doubleCounted);
   });
   it("requires terminal errors exactly for failed and timed-out states", () => {
     const activeError = queued(); activeError.terminal_error = { code: "bad", message: "safe", retryable: false, at: now }; rejects(activeError);
