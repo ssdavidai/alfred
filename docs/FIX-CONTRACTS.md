@@ -19,6 +19,10 @@ Provider → consumer notation: *(Lane X provides → Lane Y consumes)*.
 > goal was met another way), **INCOMPLETE** (partially enforced; gaps cited).
 > Statuses annotate, they do not amend. A lane that finds a status wrong
 > STOPs and reports — this file is orchestrator/phase0-only.
+>
+> **Issue #316 target (added 2026-07-21).** C20 is a new target freeze on top
+> of that audited state. It is not a claim that the pinned head implements the
+> interface; its current gaps and owning lanes are recorded below.
 
 ---
 
@@ -181,6 +185,171 @@ clears the card **only on 2xx** (F50).
 `LINK_FIELDS` extended with `key_people, related_persons, related_orgs, org` (F10) so person/matter
 edges resolve; `MatterDetailPage` consumes `backlinks` (F55).
 
+### C20 · Durable asynchronous worker runs *(I ↔ IV; II consumes distiller)*
+
+**Target for issue #316 — not implemented at this phase-0 head.** The two
+agent-backed manual trigger routes become durable enqueue operations:
+
+- `POST /api/v1/workers/process` → worker `curator`;
+- `POST /api/v1/workers/distiller/run` → worker `distiller`.
+
+Their run ledger is internal bookkeeping on the existing `alfred_data` named
+volume, not vault knowledge and not a sixth principal store. The same directory
+is visible as **`/alfred-data/state/worker-runs`** in ctrl-api and
+**`/app/data/state/worker-runs`** in the vault-worker container. One file named
+`<run_id>.json` holds one run. Both sides write by same-directory temporary
+file, file `fsync`, atomic rename, then directory `fsync`; readers ignore temp
+files and therefore see either the previous complete JSON document or the new
+one, never a partial write.
+
+The canonical record has this shape (nullable timestamps are present as
+`null`, not omitted):
+
+```json
+{
+  "schema_version": 1,
+  "run_id": "01K...",
+  "worker": "curator",
+  "state": "queued",
+  "trigger": {
+    "kind": "manual_api",
+    "route": "/api/v1/workers/process",
+    "requested_at": "2026-07-21T12:00:00.000Z"
+  },
+  "input": {"limit": null, "dry_run": false, "jobs": 4},
+  "timeout_policy": {
+    "claim_timeout_seconds": 60,
+    "heartbeat_timeout_seconds": 120,
+    "no_progress_timeout_seconds": 900,
+    "run_timeout_seconds": 21600
+  },
+  "timestamps": {
+    "created_at": "2026-07-21T12:00:00.000Z",
+    "queued_at": "2026-07-21T12:00:00.000Z",
+    "claimed_at": null,
+    "started_at": null,
+    "heartbeat_at": null,
+    "last_progress_at": null,
+    "last_successful_output_at": null,
+    "finished_at": null,
+    "updated_at": "2026-07-21T12:00:00.000Z"
+  },
+  "progress": {
+    "total": null,
+    "started": 0,
+    "succeeded": 0,
+    "failed": 0,
+    "skipped": 0,
+    "outputs_created": 0,
+    "outputs_modified": 0
+  },
+  "terminal_error": null,
+  "reliability": {
+    "attempt": 0,
+    "claim_id": null,
+    "worker_instance_id": null,
+    "pid": null,
+    "effective_jobs": null,
+    "heartbeat_sequence": 0,
+    "write_sequence": 0,
+    "exit_code": null,
+    "termination_signal": null,
+    "recovered_at": null,
+    "recovery_reason": null
+  }
+}
+```
+
+`schema_version`, `run_id` (ULID), `worker`, `trigger`, validated canonical
+`input`, `timeout_policy`, `timestamps.created_at`, and
+`timestamps.queued_at` are immutable. `state` is exactly
+`queued | running | succeeded | failed | timed_out`. Progress values are
+non-negative integers; `total` is `null` until discovery and thereafter never
+decreases. `last_progress_at` advances only when a counter advances, while the
+worker refreshes `heartbeat_at` at least every 30 seconds during a run.
+`last_successful_output_at` advances only when `outputs_created` or
+`outputs_modified` advances. `terminal_error` is non-null only for `failed` or
+`timed_out` and is the sanitized shape
+`{code, message, retryable, at}` — no stack, bearer, provider output, or secret.
+For these two producers `trigger.kind` is exactly `manual_api`, and
+`trigger.route` must match the route-to-worker table above; arbitrary caller
+provenance is not copied into the record. The worker serializes updates per run,
+verifies the current `claim_id` before every replacement, and increments
+`write_sequence` monotonically; heartbeat-only writes also increment
+`heartbeat_sequence`.
+
+Input validation happens before enqueue and unknown keys are rejected:
+
+- curator: `limit` is `null` or an integer `1..10000`; `dry_run` is boolean;
+  `jobs` is an integer `1..32` (defaults: `null`, `false`, `4`). The Hermes
+  backend may force serial execution; the actual value is reported as
+  `reliability.effective_jobs` without mutating the requested input.
+- distiller: `project` is `null` or a trimmed, control-character-free string
+  of 1–200 characters (default `null`).
+
+**Writer ownership is phase-separated.** ctrl-api owns validation, same-worker
+deduplication, ULID generation, and the one initial durable `queued` write. It
+does no inbox bridge, vault scan, agent call, or blocking `docker exec` before
+responding. The vault worker claims a queued run by atomically changing it to
+`running`, assigning a boot-unique `worker_instance_id`, `claim_id`, PID, and
+`attempt=1`; after that claim it is the only writer of heartbeats, progress,
+output timestamps, recovery metadata, and the terminal transition. GET/status
+handlers are read-only.
+
+At worker boot and on every queue poll, the vault worker performs stranded-run
+recovery before claiming new work. A `running` record owned by another boot
+instance, or whose recorded process is absent, becomes `failed` with a
+`stranded_running` terminal error. A same-instance run past its heartbeat,
+no-progress, or hard-run deadline has its owned process group terminated and
+becomes `timed_out` with the corresponding reason. Recovery never replays a
+run automatically because curator/distiller side effects are not generally
+idempotent; a later trigger creates a new run id. Old queued work is claimed
+oldest-first. Active records are never pruned; terminal records are retained
+for at least 30 days and at least the newest 100 records per worker.
+
+Both POST routes return promptly with HTTP **202** after the durable enqueue:
+`{run_id, worker, state, reused, input, status_url}` plus
+`Location: /api/v1/workers/runs/<run_id>`. Under one ctrl-api worker-scoped
+enqueue lock, a request finding any `queued` or `running` record for the same
+worker returns that record with `reused:true` — even when the new request body
+differs — rather than starting duplicate side effects. A derived `stalled`
+record remains active and is reused until vault-worker recovery terminalizes
+it. `GET /api/v1/workers/runs/:run_id` returns `{run, derived}` or 404
+`WORKER_RUN_NOT_FOUND`; `derived` includes status, health reasons, queue age,
+and deadline ages without mutating the file.
+
+`GET /api/v1/workers/status` keeps its existing `raw` compatibility field and
+adds structured `workers.curator` / `workers.distiller` summaries. Per-worker
+run status is derived as follows:
+
+- `idle`: no run record exists;
+- `queued`: the active queued run is still inside its claim timeout;
+- `running`: the active running run has fresh heartbeat/progress and is inside
+  its hard timeout;
+- `stalled`: active queued age exceeds the claim timeout, or an active running
+  run has `queue_age_exceeded`, `heartbeat_stale`, `no_progress`, or
+  `hard_timeout_exceeded` in `health_reasons`;
+- `failed`: there is no active run and the latest terminal run is `failed` or
+  `timed_out`;
+- `complete`: there is no active run and the latest terminal run succeeded.
+
+Each summary exposes `active_run_id`, `latest_run_id`, `health_reasons`, and
+`metrics` with `queue_age_seconds`, `last_successful_output_at`,
+`failure_streak`, `throughput_window_seconds: 86400`, and
+`trailing_effective_throughput_per_minute`. Queue age is live while queued and
+frozen to `claimed_at - queued_at` afterward. Failure streak counts consecutive
+failed/timed-out terminal runs since the newest success (active runs ignored).
+Trailing effective throughput is successful units divided by active running
+minutes across portions of runs overlapping the trailing 24-hour window; it is
+`null` when that window contains zero running seconds. Queue and idle time are
+excluded, but failed/no-progress running time remains in the denominator.
+
+Lane II's `run_distiller_batch` is an existing non-interactive consumer of the
+distiller POST. It must treat 202 as acceptance, retain the returned `run_id`,
+and poll the inspection route to a terminal state with Temporal heartbeats; it
+must not report zero learnings as a completed run merely because enqueue
+succeeded.
+
 ---
 
 ## Per-clause status table (2026-07-15 audit)
@@ -206,6 +375,7 @@ edges resolve; `MatterDetailPage` consumes `backlinks` (F55).
 | **C17** · Model-config matrix API | **LIVE** | `GET /api/v1/admin/models[?refresh=true]` (`packages/ctrl/src/api/routes/models.ts:385-386`; cache bust wired via `credentials.ts:245`); `GET /api/v1/admin/profiles` including `heavy` :18791 (`agents.ts:326-329`, profile table `agents.ts:59`, comment cites C17); `PATCH /api/v1/admin/agents/:agentId/model` (`agents.ts:371-372`). |
 | **C18** · Decision record = single source of truth | **LIVE** (amended by C-B4/C-B5 + the 2026-05-24 `state=open` fix) | `POST /api/v1/decisions`: writes `decision/<ts>.md` + `indexVaultWrite()` same-request (`decisions.ts:626, 636` — F1); mirrors to state.db audit (`decisions.ts:651` area); synchronous source flip per intent with `side_effects.synchronous_flip` (`decisions.ts:290-534`); delegate flips NA→dispatched only after dispatch succeeds (`decisions.ts:361-363`, F2/C18 comment). Amendment beyond the frozen text: **every** intent now mints `state: "open"` (`decisions.ts:568` `initialState = "open"`, rationale block :550-567) so DecisionRouter always runs `extract_observation_from_decision`; the router flips to `completed` itself. Root `CLAUDE.md` §6.3 documents the amended shape. |
 | **C19** · Vault graph focus/backlinks | **LIVE** | `GET /api/v1/vault/graph?focus=` (`packages/ctrl/src/api/routes/vault.ts:1310`); `LINK_FIELDS` includes `key_people, related_persons, related_orgs, org` (F10) plus later `related_places, place` (B9) (`vault.ts:1316-1327`); `backlinks:[{path,name,rel}]` computed for the focused record (`vault.ts:1452-1462`). |
+| **C20** · Durable asynchronous worker runs | **TARGET — NOT IMPLEMENTED** | At the pinned head, `workers.ts:82-97,180-190` awaits the full `dockerExec`; `helpers.ts:32-53,100-115` imposes a 30 s exec timeout; `GET /workers/status` wraps human CLI output as `{raw}`; curator progress is in-memory only (`curator/process.py:49-58,88-99`); and no `worker-runs` path exists. The prerequisite shared mount is live: `alfred_data:/alfred-data` on ctrl-api and `alfred_data:/app/data` on alfred (`docker-compose.yaml:554,504`). Lane I owns enqueue/read/status; Lane IV owns claim/progress/terminal/recovery; Lane II updates the scheduled distiller consumer. |
 
 ---
 

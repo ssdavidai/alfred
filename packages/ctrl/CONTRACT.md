@@ -2,6 +2,9 @@
 
 **Frozen cross-lane interface.** Lane agents code against this document, not against ctrl's source. Regenerated 2026-07-15 from `main`; every current-runtime claim below is verified in code at the cited path. Clauses explicitly labelled `#261 target` instead freeze Lane I's required future behavior and are not code-verified claims about this phase-0 head.
 
+**Issue #316 phase-0 target (added 2026-07-21).** The C20 call-out below is
+also a required future interface, not a claim about this pinned head.
+
 ctrl-api is the tenant API server: a zero-dependency-at-runtime Node 22 HTTP service on **:3100** that is the **sole writer** of all four stores (vault markdown, `alfred-state.db`, `ingest.db`, cold archive) plus Store 5 (files). It is HTTP-only — the pre-cutover CLI/TUI was deleted; `build.mjs` produces exactly one artefact, `dist/api.mjs`, from entry `src/api/standalone.ts`. Every other service (web, alfred-learn, the alfred vault daemon, Hermes profiles via the `alfred-ctrl` MCP server, voice-bridge) persists state by calling ctrl-api over HTTP. ctrl-api in turn reaches siblings via `docker exec` (helpers `dockerExec`, `src/api/helpers.ts:100`) and HTTP (Hermes gateway, vault-cli, mcp-server, Sure, Paperclip).
 
 ---
@@ -158,6 +161,131 @@ Resolution precedence: env var > `${ALFRED_DATA_DIR}/settings.json` > default. R
 
 `/api/v1/mcp/tokens` (GET list, POST mint), `/:id/rotate`, DELETE `/:id` (`routes/mcpTokens.ts`) — a **thin proxy** to mcp-server's `/manage/tokens` API. mcp-server owns the tokens (its own SQLite; local validation on every `POST /<app>/mcp`). Chain: browser → web (Wasp op) → ctrl-api → mcp-server, so the browser never holds `MCP_APPROVAL_SECRET`; ctrl-api presents it as the onward Bearer. The raw token appears exactly once (mint + rotate responses); list never carries it; ctrl-api relays verbatim. Missing secret → 500 `MCP_NOT_CONFIGURED`; mcp-server down → 502 `MCP_UNREACHABLE`.
 
+### Call-out: C20 durable asynchronous worker runs
+
+**#316 target (Lanes I + IV; not implemented at this phase-0 head).** Current
+`routes/workers.ts` still blocks on the full curator/distiller CLI invocation,
+and `dockerExec()` has a 30-second helper timeout. Lane I must replace only the
+two agent-backed manual trigger routes with durable enqueue semantics:
+
+| Route | Canonical worker | Validated input |
+|---|---|---|
+| `POST /api/v1/workers/process` | `curator` | `{limit: null|integer 1..10000, dry_run: boolean, jobs: integer 1..32}`; defaults `null,false,4`; unknown keys rejected |
+| `POST /api/v1/workers/distiller/run` | `distiller` | `{project: null|string}`; string is trimmed, control-character-free, 1–200 chars; default `null`; unknown keys rejected |
+
+The ledger is internal execution bookkeeping on the already-shared
+`alfred_data` volume: ctrl-api uses
+**`/alfred-data/state/worker-runs`**, while the alfred vault-worker uses
+**`/app/data/state/worker-runs`**. It is not vault knowledge, SQLite state, or a
+new principal store. A run is one `<run_id>.json` file. Every replacement is a
+same-directory temp write followed by file `fsync`, atomic rename, and directory
+`fsync`; readers ignore temp files and never accept malformed JSON as `idle`.
+
+The required record fields are:
+
+```text
+schema_version: 1
+run_id: ULID                         # immutable
+worker: curator | distiller          # immutable
+state: queued | running | succeeded | failed | timed_out
+trigger: {kind, route, requested_at} # immutable, allowlisted provenance
+input: <canonical validated object>  # immutable
+timeout_policy: {                    # immutable snapshot; defaults below
+  claim_timeout_seconds: 60,
+  heartbeat_timeout_seconds: 120,
+  no_progress_timeout_seconds: 900,
+  run_timeout_seconds: 21600
+}
+timestamps: {
+  created_at, queued_at, claimed_at, started_at, heartbeat_at,
+  last_progress_at, last_successful_output_at, finished_at, updated_at
+}
+progress: {
+  total, started, succeeded, failed, skipped,
+  outputs_created, outputs_modified
+}
+terminal_error: null | {code, message, retryable, at}
+reliability: {
+  attempt, claim_id, worker_instance_id, pid, effective_jobs,
+  heartbeat_sequence, write_sequence, exit_code, termination_signal,
+  recovered_at, recovery_reason
+}
+```
+
+All nullable timestamp/reliability keys are present as `null`. Progress counters
+are non-negative integers; `total` is `null` until discovery and never decreases
+afterward. `last_progress_at` changes only with a counter. The worker updates
+`heartbeat_at` at least every 30 seconds, and updates
+`last_successful_output_at` only when `outputs_created` or `outputs_modified`
+increases. A terminal error exists only for `failed`/`timed_out`, is sanitized,
+and never includes a stack, bearer, provider output, or secret. When Hermes
+forces serial curator execution, the request's immutable `input.jobs` remains
+unchanged and `reliability.effective_jobs` reports `1`.
+For these routes `trigger.kind` is exactly `manual_api`, and `trigger.route`
+must match the route-to-worker table; arbitrary caller provenance is not copied
+into the record. The worker serializes replacements per run, verifies the
+current `claim_id`, and monotonically increments `write_sequence` on every
+write plus `heartbeat_sequence` on heartbeat-only writes.
+
+**Writer boundary:** ctrl-api owns validation, same-worker enqueue locking,
+ULID generation, and exactly the initial atomic `queued` record. It must return
+without running the inbox bridge, scan, agent, or a blocking `docker exec`.
+The vault worker atomically claims the record (`state=running`, boot-unique
+`worker_instance_id`, `claim_id`, PID, `attempt=1`) and is then the sole writer
+of progress, heartbeats, output timestamps, recovery fields, and terminal
+state. Inspection and status routes never mutate records.
+
+Both POSTs return HTTP **202** after durable enqueue with
+`{run_id, worker, state, reused, input, status_url}` and a `Location` header.
+While any record for that worker remains `queued` or `running`, another trigger
+returns the same record and `reused:true`, even if the second request supplied
+different valid input. It never returns 409 and never starts duplicate side
+effects. A read-derived `stalled` run is still active until worker recovery
+terminalizes it, so it is also reused.
+
+`GET /api/v1/workers/runs/:run_id` validates the ULID and returns
+`200 {run, derived}`; unknown records return 404
+`WORKER_RUN_NOT_FOUND`. `derived` contains the status, health reasons, live or
+frozen queue age, and timeout ages. No response may expose an ignored temp file
+or a partially decoded record.
+
+The vault worker recovers stranded runs before new claims at boot and every
+queue poll. A running record from another boot instance or a missing recorded
+process becomes `failed` / `stranded_running`. A same-instance process beyond
+its heartbeat, no-progress, or hard deadline is terminated as an owned process
+group and becomes `timed_out` with the matching reason. There is no automatic
+replay: curator/distiller effects are not generally idempotent, so a later
+trigger receives a new run id. Queued records are claimed oldest-first. Active
+records are never pruned; keep terminal records for at least 30 days and at
+least the latest 100 per worker.
+
+`GET /api/v1/workers/status` retains the current `raw` field for compatibility
+and adds `workers.curator` and `workers.distiller`. Each structured entry has
+`status`, `active_run_id`, `latest_run_id`, `health_reasons`, and `metrics`:
+
+- `idle`: no record; `queued`: inside claim timeout; `running`: active and
+  healthy; `stalled`: queue age, heartbeat age, no-progress age, or hard runtime
+  exceeded; `failed`: no active record and latest terminal failed/timed out;
+  `complete`: no active record and latest terminal succeeded.
+- Stalled reason codes are exactly `queue_age_exceeded`, `heartbeat_stale`,
+  `no_progress`, and `hard_timeout_exceeded`; more than one may apply.
+- Metrics are `queue_age_seconds`, `last_successful_output_at`,
+  `failure_streak`, `throughput_window_seconds` (86400), and
+  `trailing_effective_throughput_per_minute`. Failure streak ignores active
+  runs and counts consecutive failed/timed-out terminals since the newest
+  success. Throughput is successful units divided by active running minutes in
+  portions of runs overlapping the trailing 24 hours; failed/no-progress
+  running time remains in the denominator, while queued/idle time does not.
+  With zero running seconds it is `null`.
+
+Implementation tests are mandatory in the owning lanes: they must prove
+validation/defaults, 202-before-work, same-worker reuse under concurrent
+requests, atomic-reader behavior, GET/404, phase-separated writer ownership,
+boot/PID/timeout recovery, terminal error redaction, every derived status and
+stalled reason, and the four metric calculations. Lane II must also update the
+scheduled `run_distiller_batch` consumer to poll the returned inspection URL to
+a terminal state with Temporal heartbeats; enqueue acceptance is not completion.
+
 ### Call-out: disk-usage watcher and system-info
 
 **#261 target (Lane I; not implemented at this phase-0 head).** ctrl-api
@@ -224,6 +352,10 @@ compatibility surface; new consumers use the hyphenated route.
 
 `vault_data:/vault` · `alfred_data:/alfred-data` · `hermes_data:/hermes-state` · `state_data:/state` · `ingest_data:/ingest` · `cold_data:/cold` · `files_data:/files` (**sole `:rw`** — hermes + alfred mount `:ro`) · `files_cold_data:/cold-files` (ZSTD-19 archive, only ctrl-api mounts) · `/var/run/docker.sock` · `${COMPOSE_DIR_HOST:-/opt/alfred}:/srv/alfred-black` (RW) · `/root/.ssh/authorized_keys` (RW, for the Terminal card).
 
+**#316 target:** the existing `alfred_data` mount makes ctrl-api's
+`/alfred-data/state/worker-runs` the same directory as the alfred service's
+`/app/data/state/worker-runs`; no new volume is needed.
+
 ---
 
 ## Invariants (other lanes rely on these)
@@ -242,6 +374,11 @@ compatibility surface; new consumers use the hyphenated route.
     needs-attention card; at the page threshold it additionally delivers via
     the Hermes main notification path. `/api/v1/admin/system-info` reports the
     sampled percentage, level, and both effective thresholds.
+11. **#316 target — worker run ownership is phase-separated.** ctrl-api creates
+    only the initial queued C20 record; after vault-worker claim, only that
+    worker writes progress or terminal state. A same-worker active record is
+    reused, trigger requests return 202 without waiting for agent work, and
+    stalled state is observable and recoverable rather than silently stranded.
 
 ---
 
