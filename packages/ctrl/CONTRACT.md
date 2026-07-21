@@ -164,14 +164,16 @@ Resolution precedence: env var > `${ALFRED_DATA_DIR}/settings.json` > default. R
 ### Call-out: C20 durable asynchronous worker runs
 
 **#316 target (Lanes I + IV; not implemented at this phase-0 head).** Current
-`routes/workers.ts` still blocks on the full curator/distiller CLI invocation,
-and `dockerExec()` has a 30-second helper timeout. Lane I must replace only the
-two agent-backed manual trigger routes with durable enqueue semantics:
+`routes/workers.ts` still blocks on the full curator/distiller/janitor CLI
+invocation, and `dockerExec()` has a 30-second helper timeout. Lane I must
+replace only the three agent-backed manual trigger routes with durable enqueue
+semantics:
 
 | Route | Canonical worker | Validated input |
 |---|---|---|
 | `POST /api/v1/workers/process` | `curator` | `{limit: null|integer 1..10000, dry_run: boolean, jobs: integer 1..32}`; defaults `null,false,4`; unknown keys rejected |
 | `POST /api/v1/workers/distiller/run` | `distiller` | `{project: null|string}`; string is trimmed, control-character-free, 1–200 chars; default `null`; unknown keys rejected |
+| `POST /api/v1/workers/janitor/fix` | `janitor` | Body omitted or `{}`; canonical input is `{}`; non-object bodies and unknown keys are rejected |
 
 The ledger is internal execution bookkeeping on the already-shared
 `alfred_data` volume: ctrl-api uses
@@ -186,7 +188,7 @@ The required record fields are:
 ```text
 schema_version: 1
 run_id: ULID                         # immutable
-worker: curator | distiller          # immutable
+worker: curator | distiller | janitor # immutable
 state: queued | running | succeeded | failed | timed_out
 trigger: {kind, route, requested_at} # immutable, allowlisted provenance
 input: <canonical validated object>  # immutable
@@ -202,7 +204,7 @@ timestamps: {
 }
 progress: {
   total, started, succeeded, failed, skipped,
-  outputs_created, outputs_modified
+  outputs_created, outputs_modified, outputs_deleted
 }
 terminal_error: null | {code, message, retryable, at}
 reliability: {
@@ -216,11 +218,12 @@ All nullable timestamp/reliability keys are present as `null`. Progress counters
 are non-negative integers; `total` is `null` until discovery and never decreases
 afterward. `last_progress_at` changes only with a counter. The worker updates
 `heartbeat_at` at least every 30 seconds, and updates
-`last_successful_output_at` only when `outputs_created` or `outputs_modified`
-increases. A terminal error exists only for `failed`/`timed_out`, is sanitized,
-and never includes a stack, bearer, provider output, or secret. When Hermes
-forces serial curator execution, the request's immutable `input.jobs` remains
-unchanged and `reliability.effective_jobs` reports `1`.
+`last_successful_output_at` only when `outputs_created`, `outputs_modified`, or
+`outputs_deleted` increases. A terminal error exists only for
+`failed`/`timed_out`, is sanitized, and never includes a stack, bearer,
+provider output, or secret. When Hermes forces serial curator execution, the
+request's immutable `input.jobs` remains unchanged and
+`reliability.effective_jobs` reports `1`; it is `null` for janitor.
 For these routes `trigger.kind` is exactly `manual_api`, and `trigger.route`
 must match the route-to-worker table; arbitrary caller provenance is not copied
 into the record. The worker serializes replacements per run, verifies the
@@ -235,8 +238,9 @@ The vault worker atomically claims the record (`state=running`, boot-unique
 of progress, heartbeats, output timestamps, recovery fields, and terminal
 state. Inspection and status routes never mutate records.
 
-Both POSTs return HTTP **202** after durable enqueue with
-`{run_id, worker, state, reused, input, status_url}` and a `Location` header.
+All three POSTs return HTTP **202** after durable enqueue with
+`{run_id, worker, state, reused, input, status_url}`. Both `status_url` and the
+`Location` header are exactly `/api/v1/workers/runs/<run_id>`.
 While any record for that worker remains `queued` or `running`, another trigger
 returns the same record and `reused:true`, even if the second request supplied
 different valid input. It never returns 409 and never starts duplicate side
@@ -254,14 +258,15 @@ queue poll. A running record from another boot instance or a missing recorded
 process becomes `failed` / `stranded_running`. A same-instance process beyond
 its heartbeat, no-progress, or hard deadline is terminated as an owned process
 group and becomes `timed_out` with the matching reason. There is no automatic
-replay: curator/distiller effects are not generally idempotent, so a later
-trigger receives a new run id. Queued records are claimed oldest-first. Active
-records are never pruned; keep terminal records for at least 30 days and at
-least the latest 100 per worker.
+replay: curator/distiller/janitor effects are not generally idempotent, so a
+later trigger receives a new run id. Queued records are claimed oldest-first.
+Active records are never pruned; keep terminal records for at least 30 days and
+at least the latest 100 per worker.
 
 `GET /api/v1/workers/status` retains the current `raw` field for compatibility
-and adds `workers.curator` and `workers.distiller`. Each structured entry has
-`status`, `active_run_id`, `latest_run_id`, `health_reasons`, and `metrics`:
+and adds `workers.curator`, `workers.distiller`, and `workers.janitor`. Each
+structured entry has `status`, `active_run_id`, `latest_run_id`,
+`health_reasons`, and `metrics`:
 
 - `idle`: no record; `queued`: inside claim timeout; `running`: active and
   healthy; `stalled`: queue age, heartbeat age, no-progress age, or hard runtime
@@ -273,18 +278,60 @@ and adds `workers.curator` and `workers.distiller`. Each structured entry has
   `failure_streak`, `throughput_window_seconds` (86400), and
   `trailing_effective_throughput_per_minute`. Failure streak ignores active
   runs and counts consecutive failed/timed-out terminals since the newest
-  success. Throughput is successful units divided by active running minutes in
-  portions of runs overlapping the trailing 24 hours; failed/no-progress
-  running time remains in the denominator, while queued/idle time does not.
-  With zero running seconds it is `null`.
+  success. Throughput is the sum of `progress.succeeded` divided by active
+  running minutes in portions of runs overlapping the trailing 24 hours;
+  failed/no-progress running time remains in the denominator, while
+  queued/idle time does not. With zero running seconds it is `null`.
+
+For `worker=janitor`, the run is the complete scan-and-fix operation; it never
+depends on a preceding `/janitor/scan` call. Its progress/output mapping is
+frozen as follows:
+
+- one work unit is one issue discovered by the run's initial structural scan;
+  discovery sets `progress.total` to `issues_found` (including zero);
+- `started` counts discovered issues admitted to a deterministic or agent fix
+  stage, `succeeded` counts discovered issues absent from the final structural
+  verification scan, `failed` counts attempted issues still present or whose
+  fix failed, and `skipped` counts discovered issues deliberately not
+  attempted; when the run ends in `state=succeeded`,
+  `succeeded + failed + skipped == total` and `started == succeeded + failed`;
+- `outputs_created`, `outputs_modified`, and `outputs_deleted` count successful
+  vault mutation-log entries in their respective categories. They remain
+  monotonic even when later verification finds an issue unresolved. A clean
+  scan therefore succeeds with `total=0`, all counters zero, and
+  `last_successful_output_at=null`. Issues first observed by the final scan are
+  left for a later run rather than added to this run's discovery total;
+- terminal `succeeded` means scan, fix stages, and final verification completed;
+  individual unresolved/skipped issues remain visible in progress. A process,
+  run-level provider, state-write, or verification failure makes the run
+  `failed` while preserving counters and any already-recorded outputs. The
+  common heartbeat, no-progress, hard-timeout, redaction, recovery, retention,
+  reuse, inspection, status, and metric rules above apply without
+  janitor-specific exceptions.
+
+`POST /api/v1/workers/janitor/fix` always stamps
+`trigger={kind:"manual_api", route:"/api/v1/workers/janitor/fix", ...}` and
+`worker="janitor"`, including when the HTTP caller is the nightly Temporal
+activity. It shares reuse only with another active janitor run; active curator
+or distiller runs do not change its reuse result. The synchronous structural
+`POST /api/v1/workers/janitor/scan` remains an operator diagnostic outside C20,
+not a prerequisite or scheduled-consumer interface. Likewise, the legacy
+`GET /api/v1/workers/janitor/status` is not the durable inspection surface;
+C20 consumers use the returned `status_url`.
 
 Implementation tests are mandatory in the owning lanes: they must prove
 validation/defaults, 202-before-work, same-worker reuse under concurrent
 requests, atomic-reader behavior, GET/404, phase-separated writer ownership,
 boot/PID/timeout recovery, terminal error redaction, every derived status and
-stalled reason, and the four metric calculations. Lane II must also update the
-scheduled `run_distiller_batch` consumer to poll the returned inspection URL to
-a terminal state with Temporal heartbeats; enqueue acceptance is not completion.
+stalled reason, the four metric calculations, and the janitor progress/output
+mapping including deletion and a clean scan. Lane I owns all three enqueue
+providers plus read-only inspection/status derivation. Lane IV owns the shared
+execution-ledger consumer, claim/progress/terminal writes, process control,
+recovery, and pruning for all three workers. Lane II owns scheduled polling for
+both `run_janitor_scan_and_fix` and `run_distiller_batch`; each must poll the
+returned inspection URL to a terminal state with Temporal heartbeats. Enqueue
+acceptance is not completion, and consumers must not invent another run or
+status interface.
 
 ### Call-out: disk-usage watcher and system-info
 

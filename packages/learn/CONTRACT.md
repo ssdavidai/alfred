@@ -5,8 +5,9 @@
 > `main`; every current-runtime claim below was verified against code, with
 > `src/worker.py` (workflow/activity registration) and
 > `scripts/register_schedules.py` (schedules) as the authorities. Clauses
-> explicitly labelled `#261 target` instead freeze Lane II's required future
-> behavior and are not code-verified claims about this phase-0 head.
+> explicitly labelled `#261 target` or `#316 target` instead freeze Lane II's
+> required future behavior and are not code-verified claims about this phase-0
+> head.
 
 alfred-learn is the Temporal intelligence layer: a single Python 3.12
 worker container (`ssdavidai00/alfred-learn:latest`) that runs every
@@ -127,6 +128,51 @@ succeeded), `recreate_missing_chore_schedules` (F34b).
 | `FilesColdArchiveWorkflow` | `al-files-cold-archive` daily 03:00 local | Promote ≥90 d-unaccessed file blobs via ctrl-api `POST /api/v1/files/cold-promote/:file_id`. |
 | `ComposioReconnectCleanupWorkflow` | `al-composio-reconnect-cleanup` every 15 min | Safety-net reaper for ctrl-api's persistent reconnect ledger (#645). |
 | `FleetAuditWorkflow` | `al-fleet-audit` daily 02:00 **UTC** — gate `FLEET_AUDIT_ENABLED` (**default ON**) | Wrong-tenant stream contamination check. |
+
+**#316 target (Lane II; not implemented at this phase-0 head).** Current
+`src/activities/maintenance.py` awaits a synchronous janitor scan, then awaits a
+separate synchronous janitor fix, and treats the distiller POST response as
+completion. After the C20 providers land, the existing activity names and
+nightly workflow order remain for Temporal replay compatibility, but
+`run_janitor_scan_and_fix` and `run_distiller_batch` become enqueue-and-poll
+consumers of the ctrl-api C20 interface:
+
+- janitor's only enqueue call is `POST /api/v1/workers/janitor/fix` with `{}`;
+  on retry it resumes a heartbeat-recorded run when one exists. It must never
+  call `POST /api/v1/workers/janitor/scan` before or after the fix; the fix run
+  owns its initial scan, fix stages, and final verification as one durable unit;
+- distiller sends `POST /api/v1/workers/distiller/run` with its canonical input.
+  Each enqueue requires HTTP 202 and records the returned `worker`, `run_id`,
+  and `status_url`; `reused:true` is accepted and polled identically to a new
+  run. The route-owned trigger remains `manual_api`—the consumer must not
+  invent a `scheduled` trigger kind or write the ledger itself;
+- after enqueue and after every inspection poll, the activity calls
+  `activity.heartbeat` with
+  `{worker, run_id, status_url}`. On a Temporal retry, valid heartbeat details
+  are polled first instead of issuing another POST. With no resumable heartbeat
+  details, the activity POSTs normally and relies on C20 active-run reuse;
+- polls use the returned `status_url` against ctrl-api with the normal Bearer
+  auth. Only `run.state in {succeeded, failed, timed_out}` is terminal;
+  `derived.status=stalled` is observable but nonterminal because Lane IV
+  recovery must first write the durable terminal state. A 404, malformed
+  record, or worker/run mismatch is a contract error, never a reason to fall
+  back to synchronous CLI or the janitor scan endpoint;
+- poll at five-second intervals with a per-request timeout no greater than ten
+  seconds. Both workflow activity calls set a 60-second heartbeat timeout and
+  a start-to-close timeout of seven hours, which bounds the consumer while
+  exceeding C20's six-hour hard run timeout plus claim/recovery latency;
+- on `succeeded`, janitor returns `run_id`,
+  `issues_found=run.progress.total`, `issues_fixed=run.progress.succeeded`, and
+  all three output counters; distiller derives `learnings_created` only from
+  the terminal record. On `failed` or `timed_out`, each raises an activity error
+  carrying only the run id and sanitized terminal code/message. A 202 response
+  alone must never be reported as a completed maintenance result.
+
+Lane I owns the janitor enqueue provider and ctrl-api inspection/status
+derivation. Lane IV owns the shared ledger consumer and all claim, progress,
+output, terminal, timeout, and recovery writes. Lane II owns only this scheduled
+polling behavior; it reads no `worker-runs` file directly and defines no
+parallel run/status interface.
 
 #### DORMANT — Plane (not deployed since PR #279)
 
@@ -374,6 +420,13 @@ limit in compose. No local Whisper model — Groq-hosted.
     breaker. One open incident produces at most one ctrl-api needs-attention
     card, persisted state survives worker restarts, and the first successful
     recovery completion closes it.
+
+12. **#316 target — scheduled maintenance observes durable completion.** The
+    nightly janitor activity performs one C20 fix enqueue and polls its returned
+    inspection URL; it never sequences `/janitor/scan` plus `/janitor/fix`.
+    Janitor and distiller activities heartbeat their run identity, resume it on
+    retry, and treat only a durable terminal record as completion. Lane II never
+    reads or writes the execution ledger directly.
 
 ---
 
