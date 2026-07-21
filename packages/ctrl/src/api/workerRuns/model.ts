@@ -41,7 +41,7 @@ const TS = ["created_at", "queued_at", "claimed_at", "started_at", "heartbeat_at
 const PROGRESS = ["total", "started", "succeeded", "failed", "skipped", "outputs_created", "outputs_modified", "outputs_deleted"];
 const RELIABILITY = ["attempt", "claim_id", "worker_instance_id", "pid", "effective_jobs", "heartbeat_sequence", "write_sequence", "exit_code", "termination_signal", "recovered_at", "recovery_reason"];
 const ACTIVE_TS = ["claimed_at", "started_at", "heartbeat_at"];
-const ULID = /^[0-9A-HJKMNP-TV-Z]{26}$/;
+const ULID = /^[0-7][0-9A-HJKMNP-TV-Z]{25}$/;
 const RFC3339 = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-](\d{2}):(\d{2}))$/;
 const fail = (path: string, why: string): never => { throw new WorkerRunDecodeError(`${path}: ${why}`); };
 function exact(value: unknown, path: string, keys: readonly string[]): Obj {
@@ -90,6 +90,7 @@ export function decodeWorkerRun(value: unknown): WorkerRunRecord {
   const total = progress.total;
   if (typeof total === "number" && ["started", "succeeded", "failed", "skipped"].some((key) => (progress[key] as number) > total)) fail("run.progress", "counter exceeds total");
   if (typeof total === "number" && (progress.succeeded as number) + (progress.failed as number) + (progress.skipped as number) > total) fail("run.progress", "outcomes exceed total");
+  if (worker === "janitor" && (progress.succeeded as number) + (progress.failed as number) > (progress.started as number)) fail("run.progress", "janitor outcomes exceed started fixes");
   const outputs = (progress.outputs_created as number) + (progress.outputs_modified as number) + (progress.outputs_deleted as number);
   const progressed = progress.total !== null || PROGRESS.slice(1).some((key) => progress[key] !== 0);
   if (progressed !== (times.last_progress_at !== null)) fail("run.timestamps.last_progress_at", "must track counter progress");

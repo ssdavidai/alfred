@@ -38,12 +38,14 @@ describe("worker-run strict model", () => {
     assert.throws(() => parseWorkerRunJson("{"), WorkerRunDecodeError);
   });
   it("rejects invalid canonical inputs, timestamps, and counters", () => {
+    const overflowUlid = queued(); overflowUlid.run_id = `Z${overflowUlid.run_id.slice(1)}`; rejects(overflowUlid);
     const input = queued(); input.input.jobs = 1.5; rejects(input);
     const project = queued("distiller"); project.input.project = " untrimmed "; rejects(project);
     const timestamp = queued(); timestamp.timestamps.updated_at = "yesterday"; rejects(timestamp);
     const counter = queued(); counter.progress.outputs_deleted = -1; rejects(counter);
     for (const key of ["attempt", "heartbeat_sequence", "write_sequence"]) { const reliability = queued(); reliability.reliability[key] = -1; rejects(reliability); }
     const outcomes = claimed("running"); Object.assign(outcomes.progress, { total: 1, succeeded: 1, failed: 1 }); rejects(outcomes);
+    const janitor = claimed("running", "janitor"); Object.assign(janitor.progress, { total: 1, started: 0, succeeded: 1 }); rejects(janitor);
   });
   it("requires terminal errors exactly for failed and timed-out states", () => {
     const activeError = queued(); activeError.terminal_error = { code: "bad", message: "safe", retryable: false, at: now }; rejects(activeError);
