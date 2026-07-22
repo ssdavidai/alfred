@@ -2,38 +2,40 @@ import http from "node:http";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError } from "../errors.js";
 import { dockerExec, dockerComposeCmd, ALFRED_CMD } from "../helpers.js";
+import { enqueueWorkerRun } from "../workerRuns/enqueue.js";
+import type { WorkerName } from "../workerRuns/model.js";
 
-/**
- * Trigger inbox → stream scan before Curator processing.
- * This ensures inbox files are ingested as stream events so alfred-learn
- * can classify, route, and learn from them.
- */
+/** Legacy inbox bridge retained for non-trigger callers; durable triggers never invoke it. */
 async function bridgeInboxToStreams(): Promise<void> {
   const hostname = process.env.AAS_HOST ?? "localhost";
   const portEnv = process.env.AAS_PORT;
   const port = portEnv !== undefined ? Number.parseInt(portEnv, 10) : 3100;
   const effectivePort = Number.isNaN(port) ? 3100 : port;
-
   const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (process.env.AAS_API_KEY) {
-    headers.Authorization = `Bearer ${process.env.AAS_API_KEY}`;
-  }
-
+  if (process.env.AAS_API_KEY) headers.Authorization = `Bearer ${process.env.AAS_API_KEY}`;
   return new Promise((resolve) => {
-    const req = http.request(
-      {
-        hostname,
-        port: effectivePort,
-        path: "/api/v1/streams/inbox/scan",
-        method: "POST",
-        headers,
-        timeout: 10000,
-      },
-      () => resolve(),
-    );
-    req.on("error", () => resolve()); // best-effort, don't block processing
+    const req = http.request({ hostname, port: effectivePort, path: "/api/v1/streams/inbox/scan", method: "POST", headers, timeout: 10000 }, () => resolve());
+    req.on("error", () => resolve());
     req.on("timeout", () => { req.destroy(); resolve(); });
     req.end();
+  });
+}
+
+async function enqueueManualRun(
+  worker: WorkerName,
+  body: unknown,
+  res: Parameters<typeof sendJson>[0],
+): Promise<void> {
+  const { run, reused } = await enqueueWorkerRun(worker, body);
+  const statusUrl = `/api/v1/workers/runs/${run.run_id}`;
+  res.setHeader("Location", statusUrl);
+  sendJson(res, 202, {
+    run_id: run.run_id,
+    worker: run.worker,
+    state: run.state,
+    reused,
+    input: run.input,
+    status_url: statusUrl,
   });
 }
 
@@ -78,22 +80,9 @@ export function registerWorkerRoutes(): void {
     }
   });
 
-  // Process inbox — bridge to streams first so alfred-learn sees the files
+  // Durably queue Curator processing; the vault worker owns execution.
   addRoute("POST", "/api/v1/workers/process", async ({ res, body }) => {
-    // Bridge inbox files to the system-inbox stream (best-effort)
-    await bridgeInboxToStreams();
-
-    const b = body as Record<string, unknown> | undefined;
-    const args = [...ALFRED_CMD, "process"];
-    if (b?.limit) args.push("--limit", String(b.limit));
-    if (b?.dry_run) args.push("--dry-run");
-    if (b?.jobs) args.push("--jobs", String(b.jobs));
-    const stdout = await dockerExec("alfred", args);
-    try {
-      sendJson(res, 200, JSON.parse(stdout));
-    } catch {
-      sendJson(res, 200, { raw: stdout.trim() });
-    }
+    await enqueueManualRun("curator", body, res);
   });
 
   // --- Janitor ---
@@ -118,14 +107,9 @@ export function registerWorkerRoutes(): void {
     }
   });
 
-  // Janitor fix (scan + agent fix)
-  addRoute("POST", "/api/v1/workers/janitor/fix", async ({ res }) => {
-    const stdout = await dockerExec("alfred", [...ALFRED_CMD, "janitor", "fix"]);
-    try {
-      sendJson(res, 200, JSON.parse(stdout));
-    } catch {
-      sendJson(res, 200, { raw: stdout.trim() });
-    }
+  // Durably queue Janitor repair; the vault worker owns scan and agent work.
+  addRoute("POST", "/api/v1/workers/janitor/fix", async ({ res, body }) => {
+    await enqueueManualRun("janitor", body, res);
   });
 
   // Janitor history
@@ -176,17 +160,9 @@ export function registerWorkerRoutes(): void {
     }
   });
 
-  // Distiller run (scan + extract)
+  // Durably queue Distiller extraction; the vault worker owns execution.
   addRoute("POST", "/api/v1/workers/distiller/run", async ({ res, body }) => {
-    const b = body as Record<string, unknown> | undefined;
-    const args = [...ALFRED_CMD, "distiller", "run"];
-    if (b?.project) args.push("--project", b.project as string);
-    const stdout = await dockerExec("alfred", args);
-    try {
-      sendJson(res, 200, JSON.parse(stdout));
-    } catch {
-      sendJson(res, 200, { raw: stdout.trim() });
-    }
+    await enqueueManualRun("distiller", body, res);
   });
 
   // Distiller history
