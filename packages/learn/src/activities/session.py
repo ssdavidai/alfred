@@ -8,7 +8,10 @@ from typing import Any
 
 from temporalio import activity
 
+import httpx
+
 from src.config import load_config
+from src.utils.retry_policy import raise_if_permanent
 from src.utils.vault_client import VaultClient
 
 
@@ -102,7 +105,16 @@ idle_minutes: 0
         for p in record_paths:
             content += f"- [[{p}]]\n"
 
-        path = await client.write_record("session", name, content)
+        try:
+            path = await client.write_record("session", name, content)
+        except httpx.HTTPStatusError as exc:
+            # A 4xx here means the session payload itself is rejected — most
+            # often 422 from the promotion contract. Retrying an invalid
+            # payload cannot make it valid: on home this activity reached
+            # attempt 7208 against the same 422, burning worker capacity and
+            # burying every other failure in the log (#296).
+            raise_if_permanent(exc, context="create_session write_record")
+            raise
         session["id"] = path
 
         # Assign records to session

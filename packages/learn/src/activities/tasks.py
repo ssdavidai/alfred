@@ -16,6 +16,7 @@ import httpx
 from temporalio import activity
 
 from src.config import load_config
+from src.utils.retry_policy import raise_if_permanent
 from src.utils.vault_client import VaultClient
 
 
@@ -136,7 +137,21 @@ async def check_task_prerequisites(task: dict[str, Any]) -> bool:
         client = VaultClient(config)
         try:
             for dep_path in depends_on:
-                dep = await client.read_record(dep_path)
+                try:
+                    dep = await client.read_record(dep_path)
+                except httpx.HTTPStatusError as exc:
+                    # A 404 here means the depends_on reference itself is
+                    # wrong — on home this was a raw "[[task/...]]" wikilink
+                    # that was never normalised into a path, and the activity
+                    # reached attempt 2387 against the same 404. The reference
+                    # can never resolve, so surface it as terminal instead of
+                    # retrying forever; a silent `return False` would hide the
+                    # data bug indefinitely (#296).
+                    raise_if_permanent(
+                        exc,
+                        context=f"check_task_prerequisites depends_on={dep_path!r}",
+                    )
+                    raise
                 if dep.get("status") != "done":
                     return False
         finally:
