@@ -151,6 +151,23 @@ _SEALED_PROFILES: frozenset[str] = frozenset({"codex-builder"})
 # session (#314).
 _RETIRED_MCP_SERVERS: tuple[str, ...] = ("plane",)
 
+# Channel-authority tools that BACKGROUND profiles must never hold (#288).
+#
+# workers/heavy run unattended agents. `spawn_alfred_task` schedules a one-shot
+# cron whose reply is delivered to the principal's most-recent channel, and
+# `notify_principal` messages them directly. The vault-janitor reached for the
+# former and put 13 raw failure dumps in Sir's Slack in a day.
+#
+# The template carries this exclusion for new tenants — but `config.yaml` is
+# operator-owned and never re-rendered, so a template-only change reaches
+# exactly zero deployed tenants. Same trap as the retired-server registration
+# in #314. This pass applies it to the operator-owned file on every init boot.
+_CHANNEL_TOOLS: tuple[str, ...] = ("spawn_alfred_task", "notify_principal")
+
+# Profiles that run unattended agents. `main` and user-facing profiles are the
+# principal's own chat surfaces and legitimately deliver to channels.
+_NO_CHANNEL_AUTHORITY_PROFILES: frozenset[str] = frozenset({"workers", "heavy"})
+
 
 # -----------------------------------------------------------------------------
 # Phase B: runtime-flippable DIRECT vs DELEGATED disposition per MCP server.
@@ -296,8 +313,8 @@ def ensure_mcp_servers(
     ctrl_api_url: str,
     state_db_path: Path | None = None,
 ) -> Literal[
-    "added", "removed", "present", "no-config", "sealed", "unknown-profile",
-    "empty-mcp",
+    "added", "removed", "excluded", "present", "no-config", "sealed",
+    "unknown-profile", "empty-mcp",
 ]:
     """Idempotently add required `mcp_servers` entries to ``config_path``.
 
@@ -314,6 +331,8 @@ def ensure_mcp_servers(
                           server's tools.include block
       "removed"         — the only mutation was deleting a retired server
                           (see _RETIRED_MCP_SERVERS)
+      "excluded"        — the only mutation was stripping channel-authority
+                          tools from a background profile (#288)
 
     ADD-only for the server set: an existing entry under any of the required
     names is preserved verbatim (operator-owned, may be a hand-customised
@@ -367,6 +386,28 @@ def ensure_mcp_servers(
             del mcp_servers[retired]
             removed_any = True
 
+    # EXCLUDE pass (#288) — also BEFORE the required-server resolution, for
+    # the same reason: `heavy` returns early and is one of the two profiles
+    # that must lose channel authority. Additive to any operator-authored
+    # exclude list, so a hand-tuned config is extended, never replaced.
+    excluded_any = False
+    if profile in _NO_CHANNEL_AUTHORITY_PROFILES:
+        alfred = mcp_servers.get("alfred")
+        if isinstance(alfred, dict):
+            tools = alfred.get("tools")
+            if not isinstance(tools, dict):
+                tools = {}
+            existing = tools.get("exclude")
+            if not isinstance(existing, list):
+                existing = []
+            for tool in _CHANNEL_TOOLS:
+                if tool not in existing:
+                    existing.append(tool)
+                    excluded_any = True
+            if excluded_any:
+                tools["exclude"] = existing
+                alfred["tools"] = tools
+
     def _flush() -> None:
         with config_path.open("w", encoding="utf-8") as f:
             yaml.dump(data, f)
@@ -376,11 +417,12 @@ def ensure_mcp_servers(
         # Heavy (a reserved profile with no allowlist entries) keeps the
         # historical "unknown-profile" return — the test pins this exact
         # outcome so heavy never picks up the principal-facing surfaces. It
-        # still gets the retired-key removal above.
+        # still gets the retired-key removal and the channel-tool exclusion
+        # above.
         if profile in _RESERVED_PROFILES:
-            if removed_any:
+            if removed_any or excluded_any:
                 _flush()
-                return "removed"
+                return "removed" if removed_any else "excluded"
             return "unknown-profile"
         # #120 Lane II — user-facing profiles (created via ctrl-api's
         # /api/v1/agent-profiles POST) fall here. Treat them like `main`:
@@ -417,11 +459,13 @@ def ensure_mcp_servers(
         if dispositions:
             disposition_mutated = _apply_dispositions_to_main(mcp_servers, dispositions)
 
-    if not added_any and not disposition_mutated and not removed_any:
+    if not added_any and not disposition_mutated and not removed_any and not excluded_any:
         return "present"
 
     _flush()
-    return "added" if (added_any or disposition_mutated) else "removed"
+    if added_any or disposition_mutated:
+        return "added"
+    return "removed" if removed_any else "excluded"
 
 
 if __name__ == "__main__":

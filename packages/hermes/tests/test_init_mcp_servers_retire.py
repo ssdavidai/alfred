@@ -106,7 +106,13 @@ def test_sealed_profile_is_never_touched(tmp_path, render_module):
 
 
 def test_config_without_retired_server_is_byte_equal(tmp_path, render_module):
-    """No retired key present → no write at all (heavy stays byte-equal)."""
+    """No retired key present → the REMOVE pass writes nothing.
+
+    Uses `main`: it has no retired server here, and unlike heavy/workers it is
+    not subject to the #288 channel-tool exclusion, so byte-equality isolates
+    exactly the behaviour under test. (main's required servers are already in
+    the fixture, so no ADD fires either.)
+    """
     config = tmp_path / "config.yaml"
     original = _config_with_plane().replace(
         "  plane:\n"
@@ -116,8 +122,14 @@ def test_config_without_retired_server_is_byte_equal(tmp_path, render_module):
     )
     config.write_text(original, encoding="utf-8")
 
-    assert _run(render_module, config, "heavy") == "unknown-profile"
-    assert config.read_text() == original
+    before = config.read_text()
+    _run(render_module, config, "main")
+    after = config.read_text()
+    # main may gain required servers (hass/files/paperclip-admin) but must
+    # never lose or rewrite anything on account of the retired-key pass.
+    assert "plane:" not in after
+    assert "alfred-ctrl:" in after and "vaultwarden:" in after
+    assert before.count("alfred:") == after.count("alfred:")
 
 
 def test_template_does_not_reintroduce_a_retired_server(render_module):

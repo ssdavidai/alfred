@@ -95,3 +95,118 @@ def test_user_facing_profiles_are_main_like(tmp_path: Path):
     excluded = ((alfred.get("tools") or {}).get("exclude")) or []
     for tool in CHANNEL_TOOLS:
         assert tool not in excluded, f"user-facing profile must retain {tool}"
+
+
+# ---------------------------------------------------------------------------
+# The template alone is NOT enough.
+#
+# `config.yaml` is operator-owned: render_hermes.py seeds it once and never
+# overwrites. So the template exclusion above reaches new tenants only — every
+# already-provisioned tenant keeps its channel tools. Verified on home: after
+# the template shipped, all three profiles still reported `exclude: (none)`.
+#
+# render_mcp_servers.py therefore applies the exclusion to the operator-owned
+# file on every init boot, the same way it backfills required servers and
+# removes retired ones.
+# ---------------------------------------------------------------------------
+
+import importlib.util  # noqa: E402
+
+RENDER_MCP = HERMES / "init" / "render_mcp_servers.py"
+
+
+@pytest.fixture
+def mutator():
+    pytest.importorskip("ruamel.yaml")
+    spec = importlib.util.spec_from_file_location("render_mcp_servers", RENDER_MCP)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _deployed_config() -> str:
+    """A config as it exists on a tenant provisioned before #288."""
+    return (
+        "model:\n"
+        "  provider: openrouter\n"
+        "mcp_servers:\n"
+        "  alfred-ctrl:\n"
+        "    type: http\n"
+        "    url: http://ctrl-api:3100/mcp\n"
+        "  alfred:\n"
+        "    command: node\n"
+        "    args: ['/opt/data/profiles/workers/mcp-stdio/dist/bin/stdio-app.js', 'alfred']\n"
+        "  files:\n"
+        "    command: node\n"
+        "    args: ['/opt/data/profiles/workers/mcp-stdio/dist/bin/stdio-app.js', 'files']\n"
+        "  paperclip-admin:\n"
+        "    command: node\n"
+        "    args: ['/opt/data/profiles/workers/mcp-stdio/dist/bin/stdio-app.js', 'paperclip-admin']\n"
+    )
+
+
+def _mutate(mod, cfg, profile: str) -> str:
+    return mod.ensure_mcp_servers(
+        cfg,
+        profile=profile,
+        mcp_stdio_dir=f"/opt/data/profiles/{profile}/mcp-stdio",
+        ctrl_api_url="http://ctrl-api:3100",
+    )
+
+
+def _exclude_list(cfg) -> list:
+    data = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+    alfred = (data.get("mcp_servers") or {}).get("alfred") or {}
+    return ((alfred.get("tools") or {}).get("exclude")) or []
+
+
+@pytest.mark.parametrize("profile", BACKGROUND_PROFILES)
+def test_mutator_strips_channel_tools_from_a_deployed_config(mutator, tmp_path, profile):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(_deployed_config(), encoding="utf-8")
+
+    _mutate(mutator, cfg, profile)
+
+    got = _exclude_list(cfg)
+    for tool in CHANNEL_TOOLS:
+        assert tool in got, f"{profile}: template-only fix would have missed this tenant"
+
+
+def test_mutator_is_idempotent(mutator, tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(_deployed_config(), encoding="utf-8")
+
+    _mutate(mutator, cfg, "workers")
+    once = cfg.read_text()
+    _mutate(mutator, cfg, "workers")
+    assert cfg.read_text() == once, "second init boot must not rewrite the file"
+    assert len(_exclude_list(cfg)) == len(CHANNEL_TOOLS), "no duplicate entries"
+
+
+def test_mutator_extends_an_operator_authored_exclude(mutator, tmp_path):
+    """An operator who already excluded something keeps their entry."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        _deployed_config().replace(
+            "  files:\n",
+            "    tools:\n      exclude:\n        - some_operator_choice\n  files:\n",
+        ),
+        encoding="utf-8",
+    )
+
+    _mutate(mutator, cfg, "workers")
+
+    got = _exclude_list(cfg)
+    assert "some_operator_choice" in got, "operator's own exclusion was clobbered"
+    for tool in CHANNEL_TOOLS:
+        assert tool in got
+
+
+def test_mutator_leaves_main_alone(mutator, tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(_deployed_config(), encoding="utf-8")
+
+    _mutate(mutator, cfg, "main")
+
+    assert _exclude_list(cfg) == [], "main is the principal's chat — it keeps channel tools"

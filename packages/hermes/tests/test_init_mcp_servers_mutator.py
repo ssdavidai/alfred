@@ -196,12 +196,19 @@ def test_workers_profile_backfills_files_only_not_hass(tmp_path: Path, render_mo
 def test_heavy_profile_is_unknown_no_additions(tmp_path: Path, render_module):
     """Heavy profile has no required-server allowlist. The template stops at
     the 7-baseline catalogue for heavy (no hass, no files). The mutator must
-    leave the config byte-equal so the operator's heavy profile never picks
-    up the principal-facing surfaces accidentally.
+    never GRANT heavy a principal-facing surface.
+
+    #288 update: heavy IS mutated now — but only to REMOVE channel authority
+    (`spawn_alfred_task` / `notify_principal`), never to add a server. The
+    assertion therefore moved from byte-equality to "the server set is
+    unchanged", which is what this test was actually protecting.
     """
+    from ruamel.yaml import YAML
+
     config = tmp_path / "config.yaml"
     original = _PRE_HASS_PRE_FILES_CONFIG
     config.write_text(original, encoding="utf-8")
+    before = set((YAML().load(original)["mcp_servers"] or {}).keys())
 
     outcome = render_module.ensure_mcp_servers(
         config,
@@ -209,9 +216,12 @@ def test_heavy_profile_is_unknown_no_additions(tmp_path: Path, render_module):
         mcp_stdio_dir="/opt/data/profiles/heavy/mcp-stdio",
         ctrl_api_url="http://ctrl-api:3100",
     )
-    assert outcome == "unknown-profile"
-    # No file write happened — byte-equal.
-    assert config.read_text() == original
+    assert outcome in {"unknown-profile", "excluded"}
+
+    after_data = YAML().load(config.read_text())
+    assert set((after_data["mcp_servers"] or {}).keys()) == before, (
+        "heavy must never gain an MCP server from the mutator"
+    )
 
 
 def test_codex_builder_is_sealed_never_mutated(tmp_path: Path, render_module):

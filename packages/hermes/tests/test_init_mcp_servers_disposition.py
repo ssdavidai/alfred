@@ -210,9 +210,11 @@ def test_workers_profile_ignores_dispositions(tmp_path: Path, render_module):
         ctrl_api_url="http://ctrl-api:3100",
         state_db_path=state_db,
     )
-    # `files` is required for workers; it's already in this config so
-    # outcome is "present" — no disposition mutation should have happened.
-    assert outcome == "present"
+    # `files` is required for workers and already present, so no ADD happens
+    # and no disposition mutation should either. "excluded" is also valid:
+    # #288 strips channel-authority tools from workers, which is a different
+    # block (alfred.tools.exclude) from the one under test here.
+    assert outcome in {"present", "excluded"}
 
     from ruamel.yaml import YAML
     data = YAML().load(config.read_text())
