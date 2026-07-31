@@ -56,11 +56,18 @@ jobs:
             echo "::warning::ALFRED_CODE_BOT_TOKEN or ALFRED_CODE_CHAT_ID missing; skipping notify."
             exit 0
           fi
+          # Telegram's legacy Markdown parse mode treats _ * ` [ as formatting.
+          # A PR title like "serve the worker-run status_url ..." opens an
+          # italic run that never closes and the whole send 400s:
+          #   can't parse entities: Can't find end of the entity at byte 73
+          # The notification then fails on a perfectly good PR. Escape any
+          # user-authored text before it reaches the message body.
+          md_escape() { printf '%s' "$1" | sed 's/[][_*`]/\\&/g'; }
           case "$EVENT_NAME" in
             pull_request)
               action=$(echo "$EVENT" | jq -r '.action')
               num=$(echo "$EVENT" | jq -r '.pull_request.number')
-              title=$(echo "$EVENT" | jq -r '.pull_request.title')
+              title=$(md_escape "$(echo "$EVENT" | jq -r '.pull_request.title')")
               url=$(echo "$EVENT" | jq -r '.pull_request.html_url')
               merged=$(echo "$EVENT" | jq -r '.pull_request.merged // false')
               actor=$(echo "$EVENT" | jq -r '.sender.login')
@@ -78,7 +85,7 @@ jobs:
             issues)
               action=$(echo "$EVENT" | jq -r '.action')
               num=$(echo "$EVENT" | jq -r '.issue.number')
-              title=$(echo "$EVENT" | jq -r '.issue.title')
+              title=$(md_escape "$(echo "$EVENT" | jq -r '.issue.title')")
               url=$(echo "$EVENT" | jq -r '.issue.html_url')
               actor=$(echo "$EVENT" | jq -r '.sender.login')
               icon="📋"
