@@ -47,6 +47,7 @@ async def fire_due_scheduled_dispatches() -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     fired = 0
     examined = 0
+    retired = 0
     async with _http() as client:
         resp = await client.get(
             "/api/v1/decisions?state=scheduled&limit=500",
@@ -93,6 +94,35 @@ async def fire_due_scheduled_dispatches() -> dict[str, Any]:
                 dispatch_resp.raise_for_status()
                 dispatch_json = dispatch_resp.json()
             except Exception as exc:  # noqa: BLE001
+                status_code = getattr(
+                    getattr(exc, "response", None), "status_code", None
+                )
+                if status_code == 404:
+                    # The source needs_attention card is gone, so this
+                    # decision can NEVER fire. Retire it instead of retrying
+                    # every cycle forever (#313) — an eternally-eligible
+                    # decision buries genuinely new dispatch failures.
+                    prior = d.get("side_effects")
+                    prior = dict(prior) if isinstance(prior, dict) else {}
+                    prior["scheduled_dispatch"] = "source_card_missing"
+                    prior["retired_at"] = now.isoformat()
+                    try:
+                        await client.patch(
+                            f"/api/v1/decisions/{decision_id}",
+                            json={"state": "completed", "side_effects": prior},
+                        )
+                        retired += 1
+                        logger.info(
+                            "scheduled_dispatch: retired decision=%s — "
+                            "needs_attention/%s no longer exists (404)",
+                            decision_id, na_id,
+                        )
+                    except Exception as patch_exc:  # noqa: BLE001
+                        logger.warning(
+                            "scheduled_dispatch: could not retire %s: %s",
+                            decision_id, patch_exc,
+                        )
+                    continue
                 logger.warning(
                     "scheduled_dispatch: dispatch failed for %s: %s",
                     decision_id, exc,
@@ -126,8 +156,9 @@ async def fire_due_scheduled_dispatches() -> dict[str, Any]:
                 decision_id, na_id, execute_at,
             )
 
-    if examined or fired:
+    if examined or fired or retired:
         logger.info(
-            "scheduled_dispatch: examined=%d fired=%d", examined, fired,
+            "scheduled_dispatch: examined=%d fired=%d retired=%d",
+            examined, fired, retired,
         )
-    return {"examined": examined, "fired": fired}
+    return {"examined": examined, "fired": fired, "retired": retired}

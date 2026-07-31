@@ -91,6 +91,7 @@ from src.activities.chore_promotion import (
     create_github_promotion_pr,
     draft_promotion_proposal,
     identify_promotion_candidates,
+    promotion_auto_pr_enabled,
     save_promotion_draft,
     scan_user_chores_directory,
 )
@@ -1025,6 +1026,7 @@ ALL_ACTIVITIES = [
     identify_promotion_candidates,
     draft_promotion_proposal,
     save_promotion_draft,
+    promotion_auto_pr_enabled,
     create_github_promotion_pr,
     # Composio tool belt (#376) — third-party tool execution
     list_composio_tools,

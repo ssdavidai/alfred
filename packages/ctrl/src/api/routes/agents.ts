@@ -256,6 +256,18 @@ export function _hermesRestartPendingForTests(): boolean {
 const HERMES_WORKERS_GATEWAY_URL =
   process.env.HERMES_WORKERS_GATEWAY_URL ?? "http://hermes:18790";
 
+/** Wall-clock budget for one focused-agent delegation.
+ *
+ *  Focused runs are multi-step by design and routinely need more than a
+ *  minute. The previous hard 60s cap aborted legitimate work — and reported
+ *  the client-side abort as an unreachable gateway, which sent #325 chasing a
+ *  gateway that was answering /health in 3ms. Tunable per deployment.
+ */
+const DELEGATE_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.HERMES_DELEGATE_TIMEOUT_MS ?? 300_000);
+  return Number.isFinite(raw) && raw >= 10_000 ? raw : 300_000;
+})();
+
 /** Read API_SERVER_KEY for the workers profile out of its rendered .env.
  *
  *  Same key-resolution pattern as channels_paperclip.ts /
@@ -738,19 +750,22 @@ export function registerAgentRoutes(): void {
           { role: "user", content: userMessage },
         ],
       }),
-      // 60s timeout — the subagent should complete within that for most
-      // tool-heavy fanouts.
-      signal: AbortSignal.timeout(60_000),
+      signal: AbortSignal.timeout(DELEGATE_TIMEOUT_MS),
     };
 
     let resp: Response;
     try {
       resp = await fetch(url, init);
     } catch (err: any) {
+      // A client-side abort means we ran out of budget, NOT that the gateway
+      // is down. Reporting both as UNREACHABLE is what made #325 undiagnosable.
+      const timedOut = err?.name === "TimeoutError" || err?.name === "AbortError";
       sendJson(res, 504, {
         ok: false,
-        error: "HERMES_WORKERS_UNREACHABLE",
-        detail: String(err?.message ?? err).slice(0, 300),
+        error: timedOut ? "HERMES_WORKERS_TIMEOUT" : "HERMES_WORKERS_UNREACHABLE",
+        detail: timedOut
+          ? `Delegation exceeded its ${DELEGATE_TIMEOUT_MS}ms budget (raise HERMES_DELEGATE_TIMEOUT_MS); the run may still be executing on the workers gateway`
+          : String(err?.message ?? err).slice(0, 300),
         session_key: sessionKey,
       });
       return;

@@ -40,7 +40,12 @@ async function main() {
   const provider = new SqliteOAuthProvider({ storage, publicUrl: env.PUBLIC_URL });
 
   const app = express();
-  app.set("trust proxy", true); // behind cloudflared
+  // Trust exactly the reverse-proxy hops in front of us (Caddy, plus
+  // cloudflared where present). `true` trusts the entire X-Forwarded-For
+  // chain, so a client can spoof its own IP and bypass express-rate-limit
+  // (#315 — ERR_ERL_PERMISSIVE_TRUST_PROXY).
+  const hopsRaw = Number(process.env.TRUST_PROXY_HOPS ?? 1);
+  app.set("trust proxy", Number.isFinite(hopsRaw) && hopsRaw >= 0 ? hopsRaw : 1);
 
   // CORS — claude.ai's browser-side connector wiring sends a preflight
   // OPTIONS before the real POST /<app>/mcp. Our bearer middleware runs

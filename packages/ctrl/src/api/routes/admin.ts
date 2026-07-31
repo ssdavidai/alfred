@@ -871,7 +871,25 @@ export function registerAdminRoutes(): void {
   // --- Health ---
 
   addRoute("GET", "/api/v1/admin/health", async ({ res }) => {
-    const stdout = await execAsync("/opt/alfred/healthcheck.sh", []).then(r => r.stdout);
+    // The packaged healthcheck script is provisioned by cloud-init and is
+    // simply absent on stacks deployed another way. Its absence must degrade
+    // the payload, not 500 the one aggregate-health surface operators have
+    // (#310) — fall back to live container state.
+    let stdout: string;
+    try {
+      stdout = await execAsync("/opt/alfred/healthcheck.sh", []).then(r => r.stdout);
+    } catch (err: any) {
+      const containers = await dockerComposeCmd(["ps", "--format", "json"])
+        .then(s => parseJsonLines(s))
+        .catch(() => null);
+      sendJson(res, 200, {
+        status: "degraded",
+        script: "unavailable",
+        detail: String(err?.message ?? err).slice(0, 200),
+        containers,
+      });
+      return;
+    }
     try {
       sendJson(res, 200, JSON.parse(stdout.trim()));
     } catch {

@@ -27,12 +27,11 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
-    import os as _os
-
     from src.activities.chore_promotion import (
         create_github_promotion_pr,
         draft_promotion_proposal,
         identify_promotion_candidates,
+        promotion_auto_pr_enabled,
         save_promotion_draft,
         scan_user_chores_directory,
     )
@@ -201,11 +200,16 @@ class ChorePromotionReflectionWorkflow:
                 )
                 continue
 
-            # Phase 4: auto-create the GitHub PR if the env flag is set.
-            # Default is OFF so ops can inspect drafts on disk and decide
-            # per-tenant when to start auto-creating PRs.
-            auto_pr_enabled = (
-                _os.environ.get("ALFRED_PROMOTION_AUTO_PR", "false").lower() == "true"
+            # Phase 4: auto-create the GitHub PR if the tenant opted in.
+            # The ALFRED_PROMOTION_AUTO_PR flag is read by a tiny activity,
+            # never here: env access from inside workflow code trips
+            # Temporal's deterministic sandbox and failed every activation of
+            # this workflow (#312). Default stays OFF so ops can inspect
+            # drafts on disk and opt in per-tenant.
+            auto_pr_enabled = await workflow.execute_activity(
+                promotion_auto_pr_enabled,
+                start_to_close_timeout=timedelta(seconds=10),
+                retry_policy=RetryPolicy(maximum_attempts=2),
             )
             if not auto_pr_enabled:
                 continue

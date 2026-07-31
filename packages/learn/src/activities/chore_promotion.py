@@ -689,3 +689,19 @@ async def create_github_promotion_pr(draft: dict[str, Any]) -> dict[str, Any]:
             "pr_number": pr_number,
             "branch": branch,
         }
+
+
+@activity.defn
+async def promotion_auto_pr_enabled() -> bool:
+    """Return whether auto-PR creation is enabled for this tenant.
+
+    Exists purely so the workflow never touches ``os.environ`` itself:
+    Temporal's deterministic sandbox rejects env access from inside workflow
+    code, which failed every activation of ChorePromotionReflectionWorkflow
+    (#312). Activities run outside the sandbox, so this is the legal place to
+    read the flag. Default OFF — ops inspect drafts on disk and opt in
+    per-tenant.
+    """
+    return (
+        os.environ.get("ALFRED_PROMOTION_AUTO_PR", "false").strip().lower() == "true"
+    )
