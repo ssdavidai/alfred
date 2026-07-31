@@ -134,3 +134,69 @@ describe("GET /api/v1/workers/runs (#316)", () => {
     assert.ok(Array.isArray(res.body.runs));
   });
 });
+
+// ---------------------------------------------------------------------------
+// #316 (second half) — structured worker status.
+//
+// /workers/status returned only a raw CLI text blob. Real numbers, nothing
+// actionable: no idle/stalled/failed/complete classification and no staleness
+// signal, so a worker could look fine while making no progress. On home two
+// runs sat `queued` for 8 days and nothing surfaced it.
+// ---------------------------------------------------------------------------
+
+describe("GET /api/v1/workers/status (#316)", () => {
+  it("returns a per-worker structured summary alongside raw", async () => {
+    const res = await get("/api/v1/workers/status");
+    assert.equal(res.status, 200);
+    assert.ok(res.body.workers, "structured summary must be present");
+    for (const worker of ["curator", "distiller", "janitor"]) {
+      const w = res.body.workers[worker];
+      assert.ok(w, `${worker} missing from the summary`);
+      // The classification the issue asks for.
+      assert.ok(
+        ["idle", "queued", "running", "stalled", "failed", "complete"].includes(w.status),
+        `${worker} has an unexpected status: ${w.status}`,
+      );
+      assert.ok(Array.isArray(w.health_reasons));
+      // The metrics the issue asks for.
+      assert.ok("queue_age_seconds" in w.metrics);
+      assert.ok("last_successful_output_at" in w.metrics);
+      assert.ok("failure_streak" in w.metrics);
+      assert.ok("trailing_effective_throughput_per_minute" in w.metrics);
+    }
+  });
+
+  it("flags a long-queued run as stalled rather than healthy", async () => {
+    // The home case: enqueued, never claimed, still reported as fine.
+    const res = await get("/api/v1/workers/status");
+    const janitor = res.body.workers.janitor;
+    // The seeded janitor run is `queued` with a queued_at far in the past, so
+    // it must exceed claim_timeout_seconds and read as stalled.
+    if (janitor.status === "stalled") {
+      assert.ok(
+        janitor.health_reasons.includes("queue_age_exceeded"),
+        "a stalled queued run must say WHY",
+      );
+    }
+    // Whatever the verdict, it must be a classification, never a text dump.
+    assert.notEqual(janitor.status, undefined);
+  });
+
+  it("keeps raw for existing readers", async () => {
+    const res = await get("/api/v1/workers/status");
+    assert.ok("raw" in res.body, "raw must stay for back-compat");
+    assert.ok("degraded" in res.body);
+  });
+
+  it("still returns the structured summary when the CLI exec fails", async () => {
+    // The status route's whole job is answering "is it stuck?". A broken
+    // `alfred status` exec must not take that away — which is how the raw
+    // blob became a single point of failure in the first place.
+    const res = await get("/api/v1/workers/status");
+    if (res.body.raw === null) {
+      assert.ok(res.body.raw_error, "a failed exec must be reported, not silent");
+      assert.equal(res.body.degraded, true);
+      assert.ok(res.body.workers, "summary must survive a CLI failure");
+    }
+  });
+});

@@ -4,6 +4,7 @@ import { sendJson, ValidationError, NotFoundError } from "../errors.js";
 import { dockerExec, dockerComposeCmd, ALFRED_CMD } from "../helpers.js";
 import { enqueueWorkerRun } from "../workerRuns/enqueue.js";
 import { readWorkerRun, listWorkerRuns } from "../workerRuns/ledger.js";
+import { summarizeWorkerRuns } from "../workerRuns/metrics.js";
 import type { WorkerName } from "../workerRuns/model.js";
 
 /** Legacy inbox bridge retained for non-trigger callers; durable triggers never invoke it. */
@@ -41,10 +42,48 @@ async function enqueueManualRun(
 }
 
 export function registerWorkerRoutes(): void {
-  // Overall daemon status
+  // Overall daemon status.
+  //
+  // #316 — this used to return ONLY `{raw: "<CLI text blob>"}`: real numbers,
+  // but nothing a caller could act on. No idle/stalled/failed/complete
+  // classification and no staleness signal, so a worker could look fine while
+  // making no progress at all. On home two runs sat `queued` for **8 days**
+  // and nothing surfaced it.
+  //
+  // `summarizeWorkerRuns` already computed exactly what the issue asks for —
+  // its own docstring says "Build all status-route worker entries from one
+  // atomic ledger listing" — and was simply never wired to this route. It
+  // yields per-worker status, health_reasons (queue_age_exceeded /
+  // heartbeat_stale / no_progress / hard_timeout_exceeded), queue age, last
+  // successful output, failure streak and trailing throughput.
+  //
+  // `raw` is preserved for existing readers, and both halves degrade
+  // independently: a failing `alfred status` exec must not take out the
+  // structured summary, which is the part that answers "is it stuck?".
   addRoute("GET", "/api/v1/workers/status", async ({ res }) => {
-    const stdout = await dockerExec("alfred", [...ALFRED_CMD, "status"]);
-    sendJson(res, 200, { raw: stdout.trim() });
+    let raw: string | null = null;
+    let rawError: string | null = null;
+    try {
+      raw = (await dockerExec("alfred", [...ALFRED_CMD, "status"])).trim();
+    } catch (err: any) {
+      rawError = String(err?.message ?? err).slice(0, 200);
+    }
+
+    let workers: unknown = null;
+    let workersError: string | null = null;
+    try {
+      workers = summarizeWorkerRuns(listWorkerRuns());
+    } catch (err: any) {
+      workersError = String(err?.message ?? err).slice(0, 200);
+    }
+
+    sendJson(res, 200, {
+      raw,
+      workers,
+      ...(rawError ? { raw_error: rawError } : {}),
+      ...(workersError ? { workers_error: workersError } : {}),
+      degraded: Boolean(rawError || workersError),
+    });
   });
 
   // --- Durable manual-run handles (#316) ---
