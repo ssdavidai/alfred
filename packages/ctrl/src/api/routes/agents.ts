@@ -486,9 +486,21 @@ export function registerAgentRoutes(): void {
   //                         etc. to force a specific one.
   //   at_seconds?: number   default 1 — seconds from now before fire.
   //   name?:       string   default "agent-task-<ts>-<rand>".
-  //   announce?:   boolean  default true. false = run silently (no
-  //                         delivery; used when the agent's job is
-  //                         background work that shouldn't DM Sir).
+  //   announce?:   boolean  default FALSE — channel delivery is opt-in
+  //                         (#288). It used to default true, which is the
+  //                         right default for a principal-facing caller
+  //                         ("tell Alfred to post X") and the wrong one for
+  //                         every background worker — and nothing here can
+  //                         tell the two apart. The vault-janitor's repair
+  //                         pipeline spawned one-shots through this route
+  //                         and dumped raw failure text into the
+  //                         principal's Slack (13 deliveries, 0 silent),
+  //                         re-spawning each sweep because the repairs
+  //                         could never succeed. Silence-by-convention
+  //                         ([SILENT] in the prompt) cannot hold: a failure
+  //                         always looks report-worthy, so failures always
+  //                         delivered. Callers that genuinely want the
+  //                         principal notified now say so explicitly.
   addRoute("POST", "/api/v1/agents/main/task", async ({ res, body }) => {
     const b = body as Record<string, unknown> | undefined;
     if (!b || typeof b.task !== "string" || !(b.task as string).trim()) {
@@ -501,7 +513,10 @@ export function registerAgentRoutes(): void {
     const atSeconds = typeof b.at_seconds === "number" && (b.at_seconds as number) > 0
       ? Math.floor(b.at_seconds as number)
       : 1;
-    const announce = b.announce !== false;
+    // Opt-in, not opt-out (#288). Every shipped caller that wants delivery
+    // already passes this explicitly (weekly_money_day.py, the
+    // alfred-chore-authoring template); background callers never did.
+    const announce = b.announce === true;
     const jobName = typeof b.name === "string" && (b.name as string).length > 0
       ? (b.name as string)
       : `agent-task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;

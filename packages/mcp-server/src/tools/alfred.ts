@@ -184,7 +184,7 @@ const agentTools: ToolDef[] = [
   {
     name: "spawn_alfred_task",
     description:
-      "Hand a one-shot task to Sir's main Alfred agent and (by default) deliver his reply to his most-recent active channel (Slack/Telegram/etc). Use this when Sir asks claude.ai to 'tell Alfred to …' or when you want Alfred to DO something (run a skill, post a briefing, perform a workflow) rather than just compute it here. Under the hood: creates an openclaw cron job with `--at 1s --delete-after-run`, the job fires immediately, runs in an isolated main-agent session with Sir's full skill set + memory, then self-destroys. Returns 202 `{status: 'scheduled', name, channel, at_seconds, job}`. Set `announce: false` for silent background work that should NOT DM Sir. Set `channel` to a specific channel name to override 'last'. NOT idempotent — calling twice schedules two runs. Backing: docker exec openclaw cron add (the same path the in-CLI scheduler uses).",
+      "Hand a one-shot task to Sir's main Alfred agent. Use this when Sir asks claude.ai to 'tell Alfred to …' or when you want Alfred to DO something (run a skill, post a briefing, perform a workflow) rather than just compute it here. Under the hood: creates an openclaw cron job with `--at 1s --delete-after-run`, the job fires immediately, runs in an isolated main-agent session with Sir's full skill set + memory, then self-destroys. Returns 202 `{status: 'scheduled', name, channel, at_seconds, job}`. DELIVERY IS OPT-IN: by default the run is silent and Sir is NOT messaged — pass `announce: true` only when Sir asked for the result on a channel (#288: background callers relying on the old announce-by-default filled his Slack with worker failure dumps). Set `channel` to override 'last'. NOT idempotent — calling twice schedules two runs. Backing: docker exec openclaw cron add (the same path the in-CLI scheduler uses).",
     inputSchema: z.object({
       task: z.string().min(1).describe(
         "The prompt Alfred sees. Be explicit — Alfred won't see context from claude.ai. Include any skill names, vault paths, or recipients he needs.",
@@ -202,7 +202,7 @@ const agentTools: ToolDef[] = [
         "Cron job name; default `agent-task-<ts>-<rand>`. Override only when Sir wants the run identifiable in `openclaw cron list` output.",
       ),
       announce: z.boolean().optional().describe(
-        "Default true (Alfred posts his reply to `channel`). Set false for background work where Sir shouldn't be DMed.",
+        "Channel delivery. Default FALSE — the run happens but Sir is NOT messaged. Pass true ONLY when Sir has asked for the result to reach him on a channel (e.g. 'tell Alfred to post the briefing to Slack'). Never pass true from background/maintenance work: that is how vault-worker failure dumps ended up in Sir's Slack (#288).",
       ),
     }),
     buildRequest: (args) => ({

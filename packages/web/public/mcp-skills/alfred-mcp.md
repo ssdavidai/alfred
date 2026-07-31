@@ -27,7 +27,7 @@ The catalogue is intentionally narrow. Container restarts, credential rotation, 
 
 ### Agents (2) — delegate to Alfred
 
-- `spawn_alfred_task` — hand a one-shot prompt to Alfred main; he runs it and posts the reply to Sir's last channel
+- `spawn_alfred_task` — hand a one-shot prompt to Alfred main; he runs it silently unless you pass `announce: true`, which posts the reply to Sir's last channel
 - `list_agents` — show which OpenClaw agents are configured (main, learn-clerk, vault-curator, vault-janitor, vault-distiller)
 
 ### Workflows (4) — Temporal orchestration
@@ -160,9 +160,11 @@ Do NOT paste the raw search JSON to Sir. Summarise: "Three matters mention Acme 
 
 ### "Tell Alfred to deliver the briefing / run a skill / DM me the result"
 
-`spawn_alfred_task({task: "<explicit prompt for Alfred — name the skill, vault path, recipient>"})`.
+`spawn_alfred_task({task: "<explicit prompt for Alfred — name the skill, vault path, recipient>", announce: true})`.
 
-Alfred sees ONLY the prompt — claude.ai conversation context does NOT carry over. If you want Alfred to use a particular skill, name it explicitly: "deliver the morning briefing per the alfred-daily-briefing skill". If Sir wants a silent run (no DM back), pass `announce: false`.
+Alfred sees ONLY the prompt — claude.ai conversation context does NOT carry over. If you want Alfred to use a particular skill, name it explicitly: "deliver the morning briefing per the alfred-daily-briefing skill".
+
+**Delivery is opt-in.** Without `announce: true` the task runs silently and Sir is never messaged. Pass it only when Sir actually asked for the result to reach him on a channel — which is exactly the case in this section's heading. Leave it off for anything investigative or background: that default is what kept vault-worker failure dumps out of Sir's Slack (#288).
 
 ### "Kick off / check on a workflow"
 

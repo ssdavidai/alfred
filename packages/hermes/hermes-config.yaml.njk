@@ -491,6 +491,35 @@ mcp_servers:
       AAS_API_KEY: "${AAS_API_KEY}"
     timeout: 120
     connect_timeout: 60
+{%- if not is_main %}
+    # BACKGROUND PROFILES HAVE NO CHANNEL AUTHORITY — issue #288.
+    #
+    # workers/heavy run autonomous, unattended agents (clerk, curator,
+    # janitor, distiller, Reflection). They need the vault read/write
+    # surface; they have no business messaging the principal directly.
+    #
+    # The vault-janitor's repair pipeline reached for `spawn_alfred_task`
+    # to delegate a fix to main. That tool schedules a one-shot cron whose
+    # reply is delivered to the principal's most-recent channel, so 13 raw
+    # failure dumps landed in Sir's Slack in a single day — and because the
+    # repairs could never succeed, the next sweep re-detected the same
+    # issue and spawned again. Prompt-level "[SILENT] if nothing to report"
+    # cannot prevent this: a failure always looks report-worthy.
+    #
+    # Delivery being opt-in (#288 L1, ctrl-api /agents/main/task) already
+    # makes the storm silent. Removing the capability outright makes it
+    # impossible — a background agent cannot reach a channel even if it
+    # decides to. Defence in depth, because the L1 default is one edit away
+    # from being flipped back.
+    #
+    # Anything a background agent genuinely needs surfaced goes through the
+    # audit ledger / needs-attention records, which the principal reads on
+    # /desk — a pull surface, not a push one.
+    tools:
+      exclude:
+        - spawn_alfred_task
+        - notify_principal
+{%- endif %}
 
   sure:
     command: "node"
