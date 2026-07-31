@@ -140,6 +140,17 @@ _RESERVED_PROFILES: frozenset[str] = frozenset({"main", "workers", "heavy", "cod
 # profile name.
 _SEALED_PROFILES: frozenset[str] = frozenset({"codex-builder"})
 
+# Retired capabilities. Every name here is DELETED from each non-sealed
+# profile's `mcp_servers` on every init boot.
+#
+# `config.yaml` is operator-owned, so removing a capability from the template
+# does NOT remove it from tenants that were provisioned earlier. Plane was
+# retired fleet-wide in #279, but its stdio registration survived in every
+# deployed config.yaml — so Hermes kept spawning and retrying a server whose
+# backend no longer exists, paying startup latency and log noise on every
+# session (#314).
+_RETIRED_MCP_SERVERS: tuple[str, ...] = ("plane",)
+
 
 # -----------------------------------------------------------------------------
 # Phase B: runtime-flippable DIRECT vs DELEGATED disposition per MCP server.
@@ -284,7 +295,10 @@ def ensure_mcp_servers(
     mcp_stdio_dir: str,
     ctrl_api_url: str,
     state_db_path: Path | None = None,
-) -> Literal["added", "present", "no-config", "sealed", "unknown-profile", "empty-mcp"]:
+) -> Literal[
+    "added", "removed", "present", "no-config", "sealed", "unknown-profile",
+    "empty-mcp",
+]:
     """Idempotently add required `mcp_servers` entries to ``config_path``.
 
     Returns:
@@ -298,6 +312,8 @@ def ensure_mcp_servers(
       "added"           — at least one missing entry was inserted OR a
                           disposition flip required mutating an existing
                           server's tools.include block
+      "removed"         — the only mutation was deleting a retired server
+                          (see _RETIRED_MCP_SERVERS)
 
     ADD-only for the server set: an existing entry under any of the required
     names is preserved verbatim (operator-owned, may be a hand-customised
@@ -315,19 +331,6 @@ def ensure_mcp_servers(
 
     if profile in _SEALED_PROFILES:
         return "sealed"
-
-    required = _REQUIRED_MCP_SERVERS.get(profile)
-    if required is None:
-        # Heavy (a reserved profile with no allowlist entries) keeps the
-        # historical "unknown-profile" return — the test pins this exact
-        # outcome so heavy never picks up the principal-facing surfaces.
-        if profile in _RESERVED_PROFILES:
-            return "unknown-profile"
-        # #120 Lane II — user-facing profiles (created via ctrl-api's
-        # /api/v1/agent-profiles POST) fall here. Treat them like `main`:
-        # they're conversational Alfred variants and need the same baseline
-        # MCP catalogue.
-        required = _REQUIRED_MCP_SERVERS["main"]
 
     from ruamel.yaml import YAML
 
@@ -354,6 +357,36 @@ def ensure_mcp_servers(
     if not isinstance(mcp_servers, dict):
         # Anything else is operator surgery we shouldn't second-guess.
         return "present"
+
+    # REMOVE pass (#314) — runs BEFORE the required-server resolution below,
+    # because `heavy` has no allowlist and returns early, yet still carries a
+    # retired `plane` registration on every deployed tenant.
+    removed_any = False
+    for retired in _RETIRED_MCP_SERVERS:
+        if retired in mcp_servers:
+            del mcp_servers[retired]
+            removed_any = True
+
+    def _flush() -> None:
+        with config_path.open("w", encoding="utf-8") as f:
+            yaml.dump(data, f)
+
+    required = _REQUIRED_MCP_SERVERS.get(profile)
+    if required is None:
+        # Heavy (a reserved profile with no allowlist entries) keeps the
+        # historical "unknown-profile" return — the test pins this exact
+        # outcome so heavy never picks up the principal-facing surfaces. It
+        # still gets the retired-key removal above.
+        if profile in _RESERVED_PROFILES:
+            if removed_any:
+                _flush()
+                return "removed"
+            return "unknown-profile"
+        # #120 Lane II — user-facing profiles (created via ctrl-api's
+        # /api/v1/agent-profiles POST) fall here. Treat them like `main`:
+        # they're conversational Alfred variants and need the same baseline
+        # MCP catalogue.
+        required = _REQUIRED_MCP_SERVERS["main"]
 
     added_any = False
     for name, block_template in required:
@@ -384,12 +417,11 @@ def ensure_mcp_servers(
         if dispositions:
             disposition_mutated = _apply_dispositions_to_main(mcp_servers, dispositions)
 
-    if not added_any and not disposition_mutated:
+    if not added_any and not disposition_mutated and not removed_any:
         return "present"
 
-    with config_path.open("w", encoding="utf-8") as f:
-        yaml.dump(data, f)
-    return "added"
+    _flush()
+    return "added" if (added_any or disposition_mutated) else "removed"
 
 
 if __name__ == "__main__":
