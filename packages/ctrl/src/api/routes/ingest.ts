@@ -9,7 +9,10 @@
 //   POST  /events            append a raw stream event
 //   GET   /events            list (filter: stream, pending, since, limit)
 //   GET   /events/pending    oldest-first pending events (EventProcessor feed)
+//   GET   /events/dead-letter    the poison queue (#311)
 //   POST  /events/:id/processed   mark an event consumed
+//   POST  /events/:id/failure     record a consumer failure (may dead-letter)
+//   POST  /events/:id/requeue     put a dead-lettered event back on the feed
 //   GET   /events/:id        one event
 //   POST  /sweep             run the 7d TTL sweep now
 //   GET   /sweep             last sweep results
@@ -17,7 +20,7 @@
 
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError, NotFoundError } from "../errors.js";
-import { getIngestDb, sweepIngestTTL } from "../../db/ingest.js";
+import { getIngestDb, sweepIngestTTL, INGEST_FAILURE_BUDGET } from "../../db/ingest.js";
 import { ulid } from "../../db/ulid.js";
 
 function asObj(body: unknown): Record<string, unknown> {
@@ -96,14 +99,126 @@ export function registerIngestRoutes(): void {
   });
 
   // GET /api/v1/ingest/events/pending — oldest-first feed for the consumer.
+  // Dead-lettered rows are excluded: leaving them in is what let three poison
+  // events cycle ~20 times each and starve the queue (#311). Counts are
+  // reported separately so queue health can converge while poison is parked.
   addRoute("GET", "/api/v1/ingest/events/pending", async ({ res, query }) => {
     const limit = Math.max(1, Math.min(500, parseInt(query.get("limit") ?? "100", 10) || 100));
     const rows = db()
       .prepare(
-        "SELECT * FROM stream_event WHERE processed_at IS NULL ORDER BY ts ASC LIMIT ?",
+        "SELECT * FROM stream_event WHERE processed_at IS NULL " +
+          "AND dead_lettered_at IS NULL ORDER BY ts ASC LIMIT ?",
+      )
+      .all(limit);
+    const counts = db()
+      .prepare(
+        `SELECT
+           SUM(CASE WHEN processed_at IS NULL AND dead_lettered_at IS NULL
+                    THEN 1 ELSE 0 END) AS pending,
+           SUM(CASE WHEN dead_lettered_at IS NOT NULL THEN 1 ELSE 0 END) AS dead_lettered
+         FROM stream_event`,
+      )
+      .get() as { pending: number | null; dead_lettered: number | null } | undefined;
+    sendJson(res, 200, {
+      events: rows,
+      count: rows.length,
+      pending: Number(counts?.pending ?? 0),
+      dead_lettered: Number(counts?.dead_lettered ?? 0),
+    });
+  });
+
+  // GET /api/v1/ingest/events/dead-letter — the operator-visible poison queue.
+  // MUST be registered before /events/:id or "dead-letter" is read as an id.
+  addRoute("GET", "/api/v1/ingest/events/dead-letter", async ({ res, query }) => {
+    const limit = Math.max(1, Math.min(500, parseInt(query.get("limit") ?? "100", 10) || 100));
+    const rows = db()
+      .prepare(
+        `SELECT id, ts, stream, channel, external_id, kind,
+                failure_count, last_error,
+                dead_lettered_at, dead_letter_reason AS reason
+           FROM stream_event
+          WHERE dead_lettered_at IS NOT NULL
+          ORDER BY dead_lettered_at DESC LIMIT ?`,
       )
       .all(limit);
     sendJson(res, 200, { events: rows, count: rows.length });
+  });
+
+  // POST /api/v1/ingest/events/:id/failure — a consumer reports one failure.
+  // `non_retryable` (e.g. schema-invalid payload) dead-letters immediately;
+  // `retryable` (e.g. an unknown source_type that a later deploy may learn to
+  // handle) dead-letters once the fixed budget is exhausted.
+  addRoute("POST", "/api/v1/ingest/events/:id/failure", async ({ res, params, body }) => {
+    const b = asObj(body);
+    const errorText = typeof b.error === "string" ? b.error.slice(0, 1000) : "";
+    const nonRetryable = b.error_class === "non_retryable";
+    const source = typeof b.source === "string" && b.source ? b.source.slice(0, 120) : "unknown";
+
+    const row = db()
+      .prepare("SELECT failure_count, dead_lettered_at FROM stream_event WHERE id = ?")
+      .get(params.id) as
+      | { failure_count: number | null; dead_lettered_at: string | null }
+      | undefined;
+    if (!row) throw new NotFoundError(`stream_event ${params.id} not found`);
+
+    // Already terminal — reporting again is idempotent, not an escalation.
+    if (row.dead_lettered_at) {
+      sendJson(res, 200, {
+        ok: true,
+        id: params.id,
+        failure_count: Number(row.failure_count ?? 0),
+        dead_lettered: true,
+      });
+      return;
+    }
+
+    const failureCount = Number(row.failure_count ?? 0) + 1;
+    const deadLetter = nonRetryable || failureCount >= INGEST_FAILURE_BUDGET;
+    const reason = nonRetryable
+      ? `non_retryable (${source}): ${errorText}`.slice(0, 500)
+      : `retry_budget_exhausted after ${failureCount} attempts (${source}): ${errorText}`.slice(0, 500);
+
+    db()
+      .prepare(
+        `UPDATE stream_event
+            SET failure_count = ?, last_error = ?,
+                dead_lettered_at = ?, dead_letter_reason = ?
+          WHERE id = ?`,
+      )
+      .run(
+        failureCount,
+        `[${source}] ${errorText}`.slice(0, 1200),
+        deadLetter ? new Date().toISOString() : null,
+        deadLetter ? reason : null,
+        params.id,
+      );
+
+    sendJson(res, 200, {
+      ok: true,
+      id: params.id,
+      failure_count: failureCount,
+      dead_lettered: deadLetter,
+      budget: INGEST_FAILURE_BUDGET,
+    });
+  });
+
+  // POST /api/v1/ingest/events/:id/requeue — operator puts a parked event back
+  // on the feed (e.g. after the deploy that teaches the consumer its shape).
+  // Idempotent: requeueing a live or already-requeued event is a 200 no-op.
+  addRoute("POST", "/api/v1/ingest/events/:id/requeue", async ({ res, params }) => {
+    const row = db()
+      .prepare("SELECT dead_lettered_at FROM stream_event WHERE id = ?")
+      .get(params.id) as { dead_lettered_at: string | null } | undefined;
+    if (!row) throw new NotFoundError(`stream_event ${params.id} not found`);
+    const wasDeadLettered = Boolean(row.dead_lettered_at);
+    db()
+      .prepare(
+        `UPDATE stream_event
+            SET dead_lettered_at = NULL, dead_letter_reason = NULL, failure_count = 0
+          WHERE id = ?`,
+      )
+      .run(params.id);
+    sendJson(res, 200, { ok: true, id: params.id, was_dead_lettered: wasDeadLettered });
   });
 
   // POST /api/v1/ingest/events/:id/processed — mark an event consumed.

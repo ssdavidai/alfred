@@ -31,8 +31,20 @@ CREATE TABLE IF NOT EXISTS stream_event (
   payload_json  TEXT NOT NULL,               -- the raw inbound payload
   processed_at  TEXT,                        -- set when EventProcessor consumes it; NULL = pending
   processed_by  TEXT,                        -- worker / workflow that consumed it
-  created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+  created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  -- Poison-event handling (#311). A malformed or unsupported event used to
+  -- fail forever, burning workflow capacity and hiding genuinely new
+  -- failures. Consumers report each failure; the row dead-letters when the
+  -- error is non-retryable or the retry budget is exhausted.
+  failure_count      INTEGER NOT NULL DEFAULT 0,
+  last_error         TEXT,
+  dead_lettered_at   TEXT,                   -- non-NULL = terminal, off the pending feed
+  dead_letter_reason TEXT
 );
+
+-- Operator surface: list the poison queue newest-first.
+CREATE INDEX IF NOT EXISTS idx_stream_event_dead_letter
+  ON stream_event(dead_lettered_at) WHERE dead_lettered_at IS NOT NULL;
 
 -- Sequential consume: EventProcessor walks pending events oldest-first.
 CREATE INDEX IF NOT EXISTS idx_stream_event_pending

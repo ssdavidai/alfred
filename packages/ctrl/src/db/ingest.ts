@@ -25,6 +25,33 @@ const SWEEP_INTERVAL_MS = Number(
   process.env.INGEST_SWEEP_INTERVAL_MS ?? String(6 * 60 * 60 * 1000),
 );
 
+/** Retryable failures per event before it dead-letters (#311). */
+export const INGEST_FAILURE_BUDGET = 5;
+
+/**
+ * Add any missing columns to an existing table.
+ *
+ * `ingest-schema.sql` is CREATE-only-idempotent: `CREATE TABLE IF NOT EXISTS`
+ * is a no-op once the table exists, so new columns never reach a tenant that
+ * was provisioned earlier. There is no migration runner on ingest.db (unlike
+ * state.db), so the retrofit happens here, at open time, guarded by
+ * PRAGMA table_info so it is safe to run on every boot.
+ */
+function ensureColumns(
+  db: DatabaseSync,
+  table: string,
+  columns: Record<string, string>,
+): void {
+  const present = new Set(
+    (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: unknown }>)
+      .map((r) => String(r.name)),
+  );
+  for (const [name, decl] of Object.entries(columns)) {
+    if (present.has(name)) continue;
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${decl}`);
+  }
+}
+
 let _db: DatabaseSync | null = null;
 let _sweepTimer: NodeJS.Timeout | null = null;
 
@@ -38,6 +65,17 @@ export function getIngestDb(): DatabaseSync {
   db.exec("PRAGMA busy_timeout = 5000");
   db.exec("PRAGMA synchronous = NORMAL");
   db.exec(ingestSchema);
+  // Retrofit the dead-letter columns onto tenants provisioned before #311.
+  ensureColumns(db, "stream_event", {
+    failure_count: "INTEGER NOT NULL DEFAULT 0",
+    last_error: "TEXT",
+    dead_lettered_at: "TEXT",
+    dead_letter_reason: "TEXT",
+  });
+  db.exec(
+    "CREATE INDEX IF NOT EXISTS idx_stream_event_dead_letter " +
+      "ON stream_event(dead_lettered_at) WHERE dead_lettered_at IS NOT NULL",
+  );
 
   _db = db;
   return db;
