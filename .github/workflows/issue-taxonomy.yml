@@ -1,0 +1,67 @@
+# Issue prioritization-taxonomy gate (#309).
+#
+# Keeps the backlog filterable as a portfolio: every open issue must carry
+# exactly one `kind/impact/effort/priority/horizon/customer/theme` label and at
+# least one `area:*`. Without this, "P1" stops meaning anything and a CEO
+# review degenerates into reading every issue's prose.
+#
+# Two modes:
+#   * issue events  — advisory. Comments once on a newly opened/reopened issue
+#                     that is missing dimensions, so the gap is visible while
+#                     the author still has context. Never fails the run.
+#   * weekly sweep  — enforcing. Fails if ANY open issue is unclassified, so
+#                     drift surfaces on a schedule instead of never.
+#
+# The allowed values are discovered from the repo's own label set (see
+# scripts/check_issue_taxonomy.py) — adding a `kind:` value is a label change,
+# not a code change.
+
+name: issue-taxonomy
+
+on:
+  issues:
+    types: [opened, reopened]
+  schedule:
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC — before the week's planning
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  taxonomy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate one issue (advisory)
+        if: github.event_name == 'issues'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -uo pipefail
+          python3 scripts/check_issue_taxonomy.py --issue "$NUMBER" | tee /tmp/report.txt
+          # Only comment when something is actually missing.
+          if grep -q "^    missing:\|^    conflicting:" /tmp/report.txt; then
+            {
+              echo "This issue is missing prioritization dimensions, so it will not"
+              echo "appear correctly in Now/Next/Later portfolio views."
+              echo
+              echo '```'
+              cat /tmp/report.txt
+              echo '```'
+              echo
+              echo "Rubric: [docs/ISSUE-TAXONOMY.md](../blob/main/docs/ISSUE-TAXONOMY.md)"
+            } > /tmp/comment.md
+            gh issue comment "$NUMBER" --body-file /tmp/comment.md
+          fi
+
+      - name: Sweep all open issues (enforcing)
+        if: github.event_name != 'issues'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: python3 scripts/check_issue_taxonomy.py --strict
