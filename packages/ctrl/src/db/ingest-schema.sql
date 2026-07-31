@@ -42,9 +42,13 @@ CREATE TABLE IF NOT EXISTS stream_event (
   dead_letter_reason TEXT
 );
 
--- Operator surface: list the poison queue newest-first.
-CREATE INDEX IF NOT EXISTS idx_stream_event_dead_letter
-  ON stream_event(dead_lettered_at) WHERE dead_lettered_at IS NOT NULL;
+-- NOTE: the poison-queue index (idx_stream_event_dead_letter) is deliberately
+-- NOT declared here. On a tenant provisioned before #311 the CREATE TABLE
+-- above is a no-op, so an index over `dead_lettered_at` in this same file
+-- would run BEFORE the retrofit adds that column and abort the whole schema
+-- exec with "no such column: dead_lettered_at" — crash-looping ctrl-api on
+-- every existing tenant. It is created in src/db/ingest.ts instead, straight
+-- after ensureColumns(), which is correct for both fresh and legacy tenants.
 
 -- Sequential consume: EventProcessor walks pending events oldest-first.
 CREATE INDEX IF NOT EXISTS idx_stream_event_pending
