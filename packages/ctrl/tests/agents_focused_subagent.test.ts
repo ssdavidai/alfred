@@ -48,8 +48,21 @@ let nextFetchResponse: { status: number; body: string } = {
   }),
 };
 
+// #297 added a readiness probe (GET <gateway>/health) before dispatch. Stub
+// it separately, so `nextFetchResponse` keeps meaning "what the DISPATCH
+// returns" — otherwise a test simulating a failed dispatch is intercepted by
+// the probe and never reaches the code under test. `lastFetchCall` also stays
+// the dispatch, so every existing assertion below is unaffected.
+let nextProbeStatus = 200;
 globalThis.fetch = (async (url: any, init?: any) => {
-  lastFetchCall = { url: String(url), init };
+  const target = String(url);
+  if (target.endsWith("/health")) {
+    return new Response("{}", {
+      status: nextProbeStatus,
+      headers: { "content-type": "application/json" },
+    });
+  }
+  lastFetchCall = { url: target, init };
   return new Response(nextFetchResponse.body, {
     status: nextFetchResponse.status,
     headers: { "content-type": "application/json" },
@@ -233,6 +246,67 @@ describe("POST /api/v1/agents/focused-subagent — happy path", () => {
     assert.equal(r.payload.ok, false);
     assert.equal(r.payload.error, "HERMES_WORKERS_ERROR");
     // Reset for the next test (mutable shared state).
+    nextFetchResponse = {
+      status: 200,
+      body: JSON.stringify({ output: [{ content: [{ text: "ok" }] }] }),
+    };
+  });
+  // ── #297 — health-aware fail-fast ────────────────────────────────────────
+  //
+  // An unhealthy gateway used to consume the ENTIRE delegation budget per
+  // attempt (300s after #325, 60s before it), and callers that fell back to a
+  // second delegation compounded that minute by minute. A sub-second probe
+  // turns that into an immediate, honest refusal.
+
+  it("refuses fast when the workers gateway is unhealthy, without dispatching", async () => {
+    nextProbeStatus = 503;
+    lastFetchCall = null;
+
+    const r = await invokeRoute("POST", "/api/v1/agents/focused-subagent", {
+      body: { task: "task", domain: "sure" },
+    });
+
+    assert.equal(r.status, 503);
+    assert.equal(r.payload.ok, false);
+    assert.equal(r.payload.error, "HERMES_WORKERS_UNAVAILABLE");
+    assert.equal(r.payload.retryable, true);
+    // The whole point: no budget spent, nothing started on the gateway.
+    assert.equal(lastFetchCall, null, "must not dispatch when the probe fails");
+    assert.match(String(r.payload.detail), /Refused before dispatch/);
+
+    nextProbeStatus = 200;
+  });
+
+  it("dispatches normally when the probe is healthy", async () => {
+    nextProbeStatus = 200;
+    lastFetchCall = null;
+
+    const r = await invokeRoute("POST", "/api/v1/agents/focused-subagent", {
+      body: { task: "task", domain: "sure" },
+    });
+
+    assert.equal(r.status, 200);
+    assert.ok(lastFetchCall, "a healthy probe must not block the dispatch");
+    assert.match(lastFetchCall!.url, /\/v1\/responses$/);
+  });
+
+  it("distinguishes an unhealthy gateway from a failed dispatch", async () => {
+    // Both are 5xx to the caller, but they mean different things and need
+    // different error codes — conflating them is what made #325 undiagnosable.
+    nextProbeStatus = 200;
+    nextFetchResponse = { status: 500, body: "internal explosion" };
+    const failed = await invokeRoute("POST", "/api/v1/agents/focused-subagent", {
+      body: { task: "task", domain: "sure" },
+    });
+    assert.equal(failed.payload.error, "HERMES_WORKERS_ERROR");
+
+    nextProbeStatus = 500;
+    const unavailable = await invokeRoute("POST", "/api/v1/agents/focused-subagent", {
+      body: { task: "task", domain: "sure" },
+    });
+    assert.equal(unavailable.payload.error, "HERMES_WORKERS_UNAVAILABLE");
+
+    nextProbeStatus = 200;
     nextFetchResponse = {
       status: 200,
       body: JSON.stringify({ output: [{ content: [{ text: "ok" }] }] }),

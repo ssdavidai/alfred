@@ -268,6 +268,43 @@ const DELEGATE_TIMEOUT_MS = (() => {
   return Number.isFinite(raw) && raw >= 10_000 ? raw : 300_000;
 })();
 
+/** Readiness-probe budget before a delegation commits the full timeout (#297).
+ *
+ *  Set to 0 to disable probing entirely — an escape hatch, so a flaky probe
+ *  can never become a new way to refuse work that would have succeeded.
+ */
+const DELEGATE_PROBE_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.HERMES_DELEGATE_PROBE_TIMEOUT_MS ?? 3_000);
+  if (!Number.isFinite(raw) || raw < 0) return 3_000;
+  return raw === 0 ? 0 : Math.max(250, raw);
+})();
+
+/** Probe the workers gateway before spending a delegation budget on it.
+ *
+ *  An unhealthy gateway used to consume the ENTIRE request timeout per
+ *  attempt, and callers that fall back to a second delegation compounded
+ *  that minute by minute (#297). A sub-second probe converts "hang for the
+ *  full budget, then report a misleading error" into "refuse immediately and
+ *  say why".
+ *
+ *  Returns null when the gateway is ready, else a short human reason.
+ */
+async function probeWorkersGateway(): Promise<string | null> {
+  if (DELEGATE_PROBE_TIMEOUT_MS === 0) return null; // probing disabled
+  try {
+    const resp = await fetch(`${HERMES_WORKERS_GATEWAY_URL}/health`, {
+      signal: AbortSignal.timeout(DELEGATE_PROBE_TIMEOUT_MS),
+    });
+    if (!resp.ok) return `workers gateway /health returned ${resp.status}`;
+    return null;
+  } catch (err: any) {
+    const timedOut = err?.name === "TimeoutError" || err?.name === "AbortError";
+    return timedOut
+      ? `workers gateway /health did not answer within ${DELEGATE_PROBE_TIMEOUT_MS}ms`
+      : `workers gateway unreachable: ${String(err?.message ?? err).slice(0, 160)}`;
+  }
+}
+
 /** Read API_SERVER_KEY for the workers profile out of its rendered .env.
  *
  *  Same key-resolution pattern as channels_paperclip.ts /
@@ -747,6 +784,23 @@ export function registerAgentRoutes(): void {
         ok: false,
         error: "HERMES_WORKERS_KEY_MISSING",
         detail: `Hermes workers API key not found at ${HERMES_CONFIG_DIR}/workers/.env — has hermes-init run?`,
+      });
+      return;
+    }
+
+    // #297 — fail fast instead of burning the whole budget on a gateway that
+    // is not answering. Costs ~3ms on the happy path (measured on home);
+    // saves up to DELEGATE_TIMEOUT_MS per attempt when workers are down, and
+    // stops chained fallbacks compounding a minute each.
+    const unready = await probeWorkersGateway();
+    if (unready) {
+      sendJson(res, 503, {
+        ok: false,
+        error: "HERMES_WORKERS_UNAVAILABLE",
+        detail: `${unready}. Refused before dispatch — no delegation budget was spent and nothing was started on the gateway.`,
+        session_key: sessionKey,
+        probe_timeout_ms: DELEGATE_PROBE_TIMEOUT_MS,
+        retryable: true,
       });
       return;
     }
