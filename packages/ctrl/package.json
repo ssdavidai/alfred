@@ -8,9 +8,10 @@
     "build": "node build.mjs",
     "dev": "node build.mjs --watch",
     "start": "node --experimental-sqlite dist/api.mjs",
-    "test": "node --experimental-sqlite --experimental-test-module-mocks --import tsx/esm --experimental-loader ./tests/text-loader.mjs --test tests/*.test.ts",
+    "test": "node --experimental-sqlite --experimental-test-module-mocks --import tsx/esm --experimental-loader ./tests/text-loader.mjs --test-timeout=120000 --test tests/*.test.ts",
     "paperclip:secret-sync": "tsx scripts/paperclip-secret-sync.ts",
-    "evidence:paperclip-github": "tsx scripts/paperclip-github-evidence.ts"
+    "evidence:paperclip-github": "tsx scripts/paperclip-github-evidence.ts",
+    "test:ci": "node --experimental-sqlite --experimental-test-module-mocks --import tsx/esm --experimental-loader ./tests/text-loader.mjs --test-timeout=120000 --test $(ls tests/*.test.ts | grep -vE \"$(cat tests/.ci-quarantine | grep -v '^#' | grep -v '^$' | paste -sd'|' -)\" | tr '\\n' ' ')"
   },
   "dependencies": {
     "commander": "^13.1.0",

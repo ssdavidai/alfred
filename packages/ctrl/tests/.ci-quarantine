@@ -1,0 +1,18 @@
+# Quarantined ctrl test files — issue #290.
+#
+# These fail or HANG on origin/main today. They are excluded from the CI
+# `test-ctrl` job so the other ~1200 tests can gate merges instead of running
+# nowhere at all. The job prints this list as a warning on every run, so the
+# quarantine stays visible rather than becoming permanent by silence.
+#
+# Delete a line here the moment its suite is fixed.
+#
+# ha_ws_client            — un-timed WebSocket wait; observed 4h39m wall-clock
+#                           (this is what killed the #282 build orchestrator)
+# channels_ha_hacs        — whole HACS route suite fails on main
+# agent-profiles-channel-context — Lane IV profile-cascade failures
+# voice-routes-lane-vb    — fails on main
+ha_ws_client
+channels_ha_hacs
+agent-profiles-channel-context
+voice-routes-lane-vb

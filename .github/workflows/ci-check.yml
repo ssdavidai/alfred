@@ -79,6 +79,39 @@ jobs:
         working-directory: packages/mcp-server
         run: npm test
 
+  test-ctrl:
+    # node:test for packages/ctrl — added by #290.
+    #
+    # Until now `build-ctrl` only ran esbuild, so packages/ctrl/tests/* executed
+    # NOWHERE: not in CI, and not locally either (tsx is a devDependency most
+    # contributors never install). The suite rotted silently, and on 2026-07-31
+    # a PR went green across all 13 checks while carrying a fleet-wide
+    # ctrl-api crash-loop that its own committed test would have caught.
+    #
+    # Two guards, both from #290:
+    #   * --test-timeout=120000 — tests/ha_ws_client.test.ts has an un-timed
+    #     WebSocket wait that ran 4h39m and killed a build orchestrator.
+    #   * tests/.ci-quarantine — the four suites that fail on main today are
+    #     excluded so the other ~1200 tests can gate merges. The list is
+    #     printed as a warning on every run so it cannot quietly become
+    #     permanent.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install deps
+        working-directory: packages/ctrl
+        run: npm ci
+      - name: Announce quarantine (#290)
+        working-directory: packages/ctrl
+        run: |
+          echo "::warning title=ctrl tests quarantined (#290)::$(grep -vE '^#|^$' tests/.ci-quarantine | paste -sd', ' -)"
+      - name: node --test
+        working-directory: packages/ctrl
+        run: npm run test:ci
+
   test-voice-bridge:
     # tsc compile + node --test for the OpenAI Realtime session-update race fix.
     # Mock WS server is in-process; no network or OpenAI key needed (a dummy
