@@ -3438,3 +3438,81 @@ async def mark_stream_event_processed(
         "signals.mark_stream_event_processed: marked path=%s signal_path=%s",
         stream_event_path, signal_path or "(none)",
     )
+
+
+@activity.defn
+async def report_ingest_event_failure(
+    stream_event_path: str,
+    error: str,
+    error_class: str = "retryable",
+) -> dict[str, Any]:
+    """Report one consumer-side extraction failure to ctrl-api (#311).
+
+    Without this, a malformed or unsupported event is simply never marked
+    processed, so it comes back on the pending feed every tick — forever.
+    Three event IDs were cycling ~20 times each, burning capacity and
+    burying genuinely new failures.
+
+    ctrl-api owns the policy: ``non_retryable`` dead-letters immediately,
+    ``retryable`` dead-letters once the fixed budget is exhausted. Once
+    dead-lettered the event drops off ``/events/pending``, so the workflow
+    stops seeing it without ever marking it processed (it was never
+    consumed — marking it would be a lie).
+
+    Only ``ingest:<id>`` refs are reportable; legacy vault-path events have
+    no ingest row. Never raises: a failed report must not convert a handled
+    extraction failure into a workflow error.
+
+    Returns ``{"reported": bool, "dead_lettered": bool, "failure_count": int}``.
+    """
+    out: dict[str, Any] = {"reported": False, "dead_lettered": False, "failure_count": 0}
+    if not stream_event_path or not isinstance(stream_event_path, str):
+        return out
+    if not stream_event_path.startswith(_INGEST_REF_PREFIX):
+        return out
+
+    event_id = stream_event_path[len(_INGEST_REF_PREFIX):]
+    cfg = load_config()
+    api_key = __import__("os").environ.get("AAS_API_KEY", "")
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    cls = "non_retryable" if error_class == "non_retryable" else "retryable"
+    try:
+        async with httpx.AsyncClient(
+            base_url=cfg.alfred_ctrl_url, timeout=30.0, headers=headers
+        ) as client:
+            resp = await client.post(
+                f"/api/v1/ingest/events/{event_id}/failure",
+                json={
+                    "error": str(error)[:1000],
+                    "error_class": cls,
+                    "source": "signal_extract",
+                },
+            )
+            resp.raise_for_status()
+            body = resp.json() if resp.content else {}
+    except Exception as exc:  # noqa: BLE001
+        # An older ctrl-api has no /failure route (404). That is the
+        # pre-#311 behaviour — retry-forever — not a new failure mode, so
+        # log once and move on rather than escalating.
+        logger.warning(
+            "signals.report_ingest_event_failure: report failed id=%s err=%s",
+            event_id, exc,
+        )
+        return out
+
+    out["reported"] = True
+    out["dead_lettered"] = bool(body.get("dead_lettered"))
+    out["failure_count"] = int(body.get("failure_count") or 0)
+    if out["dead_lettered"]:
+        logger.warning(
+            "signals.report_ingest_event_failure: DEAD-LETTERED id=%s after "
+            "%s failures (%s) — off the pending feed, requeue via "
+            "POST /api/v1/ingest/events/%s/requeue",
+            event_id, out["failure_count"], cls, event_id,
+        )
+    else:
+        logger.info(
+            "signals.report_ingest_event_failure: id=%s failure %s (%s)",
+            event_id, out["failure_count"], cls,
+        )
+    return out

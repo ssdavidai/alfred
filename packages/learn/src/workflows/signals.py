@@ -70,6 +70,7 @@ with workflow.unsafe.imports_passed_through():
         # single-signal extractor (one signal or None) while new runs
         # use the multi-signal extractor (list[dict]).
         extract_signals_from_event,
+        report_ingest_event_failure,
         list_unprocessed_stream_events,
         mark_stream_event_processed,
         write_signal_record,
@@ -120,6 +121,17 @@ class SignalExtractResult:
     multi_signal_branch: bool = False
     multi_signal_max: int = 0
     multi_signal_events_with_multiple: int = 0
+
+
+# #311 — extraction failures that can never succeed on a retry, no matter how
+# many parser fixes land. Everything NOT listed here is treated as retryable
+# and bounded by ctrl-api's fixed failure budget, so an unknown source_type
+# still gets a fair number of chances before it is parked.
+_NON_RETRYABLE_EXTRACT_ERRORS: frozenset[str] = frozenset({
+    "SchemaInvalid",
+    "ValidationError",
+    "MalformedPayload",
+})
 
 
 @workflow.defn(name="SignalExtractWorkflow")
@@ -265,7 +277,49 @@ class SignalExtractWorkflow:
                         "signal_extract.extract_failed path=%s err=%s",
                         path, extracted,
                     )
-                    # Don't mark on extractor failure — next tick retries.
+                    # #311 — report the failure so ctrl-api can BOUND the
+                    # retries. Without this the event is simply never marked
+                    # processed and returns on the pending feed every tick,
+                    # forever (three IDs cycled ~20× each). Once ctrl
+                    # dead-letters it, it drops off the feed — and we still
+                    # never mark it processed, because it genuinely was not
+                    # consumed; marking it would be a lie.
+                    #
+                    # DETERMINISM: a new activity call inside a deployed
+                    # workflow is non-additive for history replay, so it is
+                    # gated per packages/learn/CLAUDE.md.
+                    if workflow.patched("signal_extract_dead_letter_v1"):
+                        err_type = (
+                            getattr(extracted, "type", "")
+                            or type(extracted).__name__
+                        )
+                        # An unknown source_type may become extractable once a
+                        # parser is fixed, so it stays retryable (bounded by
+                        # the budget). A structurally invalid payload never
+                        # will be.
+                        failure_class = (
+                            "non_retryable"
+                            if err_type in _NON_RETRYABLE_EXTRACT_ERRORS
+                            else "retryable"
+                        )
+                        try:
+                            await workflow.execute_activity(
+                                report_ingest_event_failure,
+                                args=[path, str(extracted)[:500], failure_class],
+                                start_to_close_timeout=timedelta(seconds=20),
+                                retry_policy=retry,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            # Reporting is best-effort: a failed report must
+                            # not turn a handled extraction failure into a
+                            # workflow error.
+                            workflow.logger.warning(
+                                "signal_extract.failure_report_failed "
+                                "path=%s err=%s",
+                                path, exc,
+                            )
+                    # Don't mark on extractor failure — next tick retries,
+                    # now bounded: ctrl dead-letters at the budget.
                     continue
 
                 # Normalise both branches to a list[dict] of signals

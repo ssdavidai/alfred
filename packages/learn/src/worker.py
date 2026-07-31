@@ -536,6 +536,7 @@ from src.activities.signals import (
     extract_signals_from_event,
     list_unprocessed_stream_events,
     mark_stream_event_processed,
+    report_ingest_event_failure,
     write_signal_record,
 )
 
@@ -1150,6 +1151,7 @@ ALL_ACTIVITIES = [
     extract_signals_from_event,
     write_signal_record,
     mark_stream_event_processed,
+    report_ingest_event_failure,
     # Steward Phase 6 (T6.5.1) — auto-create tasks for no-target
     # signals. Invoked from inside extract_signal_from_event; the env
     # gate (STEWARD_SIGNAL_AUTOCREATE_TASKS) is read at activity
