@@ -1,8 +1,9 @@
 import http from "node:http";
 import { addRoute } from "../server.js";
-import { sendJson, ValidationError } from "../errors.js";
+import { sendJson, ValidationError, NotFoundError } from "../errors.js";
 import { dockerExec, dockerComposeCmd, ALFRED_CMD } from "../helpers.js";
 import { enqueueWorkerRun } from "../workerRuns/enqueue.js";
+import { readWorkerRun, listWorkerRuns } from "../workerRuns/ledger.js";
 import type { WorkerName } from "../workerRuns/model.js";
 
 /** Legacy inbox bridge retained for non-trigger callers; durable triggers never invoke it. */
@@ -44,6 +45,47 @@ export function registerWorkerRoutes(): void {
   addRoute("GET", "/api/v1/workers/status", async ({ res }) => {
     const stdout = await dockerExec("alfred", [...ALFRED_CMD, "status"]);
     sendJson(res, 200, { raw: stdout.trim() });
+  });
+
+  // --- Durable manual-run handles (#316) ---
+  //
+  // enqueueManualRun answers 202 with `status_url:
+  // /api/v1/workers/runs/<id>`, but nothing ever served that path — the
+  // advertised run handle 404'd, so an operator had a run id and no way to
+  // ask what happened to it. The ledger read helpers already existed; they
+  // were simply never exposed. Registered BEFORE `/runs/:id` so the literal
+  // collection path is not captured as a run id.
+
+  addRoute("GET", "/api/v1/workers/runs", async ({ res, query }) => {
+    const limit = Math.max(1, Math.min(200, parseInt(query.get("limit") ?? "50", 10) || 50));
+    const worker = query.get("worker");
+    const state = query.get("state");
+    let runs = listWorkerRuns();
+    if (worker) runs = runs.filter((r) => r.worker === worker);
+    if (state) runs = runs.filter((r) => r.state === state);
+    // Run ids are ULIDs, so descending id is newest-first.
+    runs.sort((a, b) => (a.run_id < b.run_id ? 1 : a.run_id > b.run_id ? -1 : 0));
+    const counts: Record<string, number> = {};
+    for (const r of runs) counts[r.state] = (counts[r.state] ?? 0) + 1;
+    sendJson(res, 200, {
+      runs: runs.slice(0, limit),
+      count: Math.min(runs.length, limit),
+      total: runs.length,
+      states: counts,
+    });
+  });
+
+  addRoute("GET", "/api/v1/workers/runs/:id", async ({ res, params }) => {
+    let run;
+    try {
+      run = readWorkerRun(params.id);
+    } catch (err: any) {
+      // An invalid or corrupt id is a client/ledger problem, not a 500 —
+      // the whole point of this endpoint is inspectable failure.
+      throw new ValidationError(String(err?.message ?? err).slice(0, 200));
+    }
+    if (!run) throw new NotFoundError(`worker run ${params.id} not found`);
+    sendJson(res, 200, run);
   });
 
   // Start workers
