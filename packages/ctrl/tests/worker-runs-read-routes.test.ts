@@ -52,14 +52,35 @@ async function get(route: string): Promise<Response> {
   return { status, body: payload };
 }
 
+// Seed a ledger entry in a given state.
+//
+// `writeInitialWorkerRun` refuses anything but `queued` ("initial record must
+// be queued"), and a non-queued record additionally needs claimed/started/
+// heartbeat timestamps to satisfy decode. So: write the queued record through
+// the real API, then patch the file to the target state — which is what the
+// worker itself does on claim.
 function seed(worker: "curator" | "distiller" | "janitor", state: string, at: string) {
-  const run = createQueuedWorkerRun(
-    worker,
-    worker === "curator" ? { jobs: 8 } : worker === "distiller" ? { project: null } : {},
-    new Date(at),
-  );
-  (run as any).state = state;
+  const input =
+    worker === "curator" ? { limit: null, dry_run: false, jobs: 8 }
+    : worker === "distiller" ? { project: null }
+    : {};
+  const run = createQueuedWorkerRun(worker as any, input, new Date(at));
   writeInitialWorkerRun(run as any);
+
+  if (state !== "queued") {
+    const file = path.join(root, "state", "worker-runs", `${run.run_id}.json`);
+    const stored = JSON.parse(fs.readFileSync(file, "utf8"));
+    stored.state = state;
+    Object.assign(stored.timestamps, {
+      claimed_at: at, started_at: at, heartbeat_at: at,
+      last_progress_at: at, updated_at: at,
+      ...(state === "succeeded" || state === "failed" || state === "timed_out"
+        ? { finished_at: at, last_successful_output_at: state === "succeeded" ? at : null }
+        : {}),
+    });
+    stored.reliability.attempt = 1;
+    fs.writeFileSync(file, `${JSON.stringify(stored)}\n`);
+  }
   return run;
 }
 

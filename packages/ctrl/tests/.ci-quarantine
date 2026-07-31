@@ -12,7 +12,12 @@
 # channels_ha_hacs        — whole HACS route suite fails on main
 # agent-profiles-channel-context — Lane IV profile-cascade failures
 # voice-routes-lane-vb    — fails on main
+# phone-outbound-call     — NOT in #290's original list; found by this job's
+#                           first real run (2026-07-31). Untouched by the work
+#                           that added the job, so it rotted between #290's scan
+#                           and now — which is the rot this job exists to stop.
 ha_ws_client
 channels_ha_hacs
 agent-profiles-channel-context
 voice-routes-lane-vb
+phone-outbound-call
