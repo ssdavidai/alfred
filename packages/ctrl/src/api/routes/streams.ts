@@ -246,7 +246,26 @@ function appendEvent(streamId: string, event: StreamEvent): void {
 // JSONL append already succeeded, and the puller's contract is "event
 // accepted". We log and continue. (stream, external_id) is the dedup key, so a
 // re-delivered event is idempotent.
+//
+// #372 — SELF-GENERATED events are exempt. The alfred-channel-delivery skill
+// requires the agent to POST an audit record here after every outbound Slack /
+// Telegram / email / voice delivery, so a fresh session can answer "what did
+// you just send me?" (the JSONL side backs that read via
+// /api/v1/streams/:id/events). But those records are Alfred's own outbound
+// traffic, not inbound signal — the extractor has no `source_type` for them,
+// so every one burned 5 retries and dead-lettered (100% of
+// `outbound-deliveries` on home), and dead-lettered rows are never TTL-swept.
+// Keeping them out of Store 4 preserves the memory read path and stops the
+// junk at the source.
+const SELF_GENERATED_STREAM_TYPES = new Set(["outbound-delivery"]);
+
+export function isSelfGeneratedStreamEvent(streamType: string | undefined): boolean {
+  const t = (streamType ?? "").trim().toLowerCase();
+  return SELF_GENERATED_STREAM_TYPES.has(t) || t.startsWith("outbound-");
+}
+
 function mirrorEventToIngestDb(event: StreamEvent): void {
+  if (isSelfGeneratedStreamEvent(event.stream_type)) return;
   try {
     const externalId = event.source_ref ?? null;
     getIngestDb()

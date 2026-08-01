@@ -19,6 +19,13 @@ const INGEST_DB_PATH =
 // TTL window. A PROCESSED stream event older than this is dropped; an
 // UNPROCESSED one is retained (#17) and reported as stale_dropped instead.
 const INGEST_TTL_DAYS = Number(process.env.INGEST_TTL_DAYS ?? "7");
+// Dead-lettered events are terminal (never consumed, so the consume-then-
+// delete TTL can never reach them) but are the forensic record of what the
+// extractor choked on — kept far longer than the live TTL, then reaped so
+// the table stays bounded. (#372)
+const DEAD_LETTER_RETENTION_DAYS = Number(
+  process.env.INGEST_DEAD_LETTER_RETENTION_DAYS ?? "30",
+);
 
 // How often the in-process sweep runs.
 const SWEEP_INTERVAL_MS = Number(
@@ -116,13 +123,42 @@ export function sweepIngestTTL(): SweepResult {
     )
     .get(cutoff) as { n: number };
 
-  const staleDropped = staleRow?.n ?? 0;
+  // #372 — dead-lettered rows are terminal but were never swept: they have
+  // processed_at IS NULL (correctly — they were never consumed), so the
+  // clause above skips them forever and the table grows without bound. They
+  // ARE forensic evidence though, so they get a longer, separate retention
+  // window rather than the consume-then-delete TTL.
+  const deadLetterCutoff = new Date(
+    Date.now() - DEAD_LETTER_RETENTION_DAYS * 24 * 60 * 60 * 1000,
+  ).toISOString();
+  const deadLetterRow = db
+    .prepare(
+      "SELECT COUNT(*) AS n FROM stream_event WHERE dead_lettered_at IS NOT NULL AND dead_lettered_at < ?",
+    )
+    .get(deadLetterCutoff) as { n: number };
+  const deadLetterDeleted = deadLetterRow?.n ?? 0;
+
+  // Aged-out UNPROCESSED rows that are dead-lettered are not "the processor
+  // has fallen behind" — they are parked. Don't let them inflate the alert.
+  const deadLetteredStaleRow = db
+    .prepare(
+      "SELECT COUNT(*) AS n FROM stream_event WHERE ts < ? AND processed_at IS NULL AND dead_lettered_at IS NOT NULL",
+    )
+    .get(cutoff) as { n: number };
+
+  const staleDropped = Math.max(
+    0,
+    (staleRow?.n ?? 0) - (deadLetteredStaleRow?.n ?? 0),
+  );
   const processedDeleted = processedRow?.n ?? 0;
-  const totalDeleted = processedDeleted;
+  const totalDeleted = processedDeleted + deadLetterDeleted;
 
   db.prepare(
     "DELETE FROM stream_event WHERE ts < ? AND processed_at IS NOT NULL",
   ).run(cutoff);
+  db.prepare(
+    "DELETE FROM stream_event WHERE dead_lettered_at IS NOT NULL AND dead_lettered_at < ?",
+  ).run(deadLetterCutoff);
   db.prepare(
     `INSERT INTO ingest_sweep_log
        (cutoff_ts, total_deleted, processed_deleted, stale_dropped)

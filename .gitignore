@@ -24,3 +24,7 @@ __pycache__/
 # staged Wasp SPA bundle (CI build artifact)
 web-app-build/
 .lane
+
+# Investigation outputs land here (CLAUDE.md §2). Never committed — the
+# reports carry tenant hostnames, live DB samples and log excerpts.
+debug/
