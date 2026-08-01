@@ -551,109 +551,33 @@ async def _workers_spawn_subagent(
     run_timeout_s: int = 240,
     poll_timeout_s: int = 300,
 ) -> str:
-    """Spawn an openclaw-workers subagent and return the assistant's final text.
+    """Run a workers-gateway subagent and return the assistant's final text.
 
-    Hits config.execution_gateway_url (workers, :18790) — NOT the main openclaw
-    gateway — because chore LLM calls are pinned to workers per project
-    policy. Uses the existing sessions_spawn → sessions_history polling
-    pattern from _call_clerk, adapted for the workers endpoint.
+    #366: previously sessions_spawn + sessions_history against the retired
+    OpenClaw ``/tools/invoke`` envelope — a 404 on Hermes, which silently
+    killed the LLM-judgement step in 10 of 13 live user-chores. Now a
+    single Hermes-native call via ``_call_clerk`` (workers gateway,
+    heartbeats while in flight, billing/auth failures classified
+    non-retryable).
 
-    Returns the assistant's most recent text message, empty string on
-    timeout or failure. Caller is responsible for JSON-parsing if needed.
+    ``run_timeout_s`` / ``poll_timeout_s`` are retained for caller
+    signature compatibility; the completion budget is _call_clerk's.
+
+    Returns the assistant's final text, empty string on failure —
+    the contract every chore caller already handles. Failures are logged
+    at warning so a dead gateway is visible in the worker log.
     """
-    import asyncio
+    from src.activities.clerk import _call_clerk
 
-    config = load_config()
-    token = config.gateway_token()
-    base = config.execution_gateway_url.rstrip("/")
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-
-    session_key: str | None = None
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        spawn_resp = await client.post(
-            f"{base}/tools/invoke",
-            headers=headers,
-            json={
-                "tool": "sessions_spawn",
-                "args": {
-                    "task": prompt,
-                    "agentId": agent_id,
-                    "mode": "run",
-                    "cleanup": "auto",
-                    "sandbox": "inherit",
-                    "runTimeoutSeconds": run_timeout_s,
-                    "expectsCompletionMessage": False,
-                },
-            },
-        )
-        spawn_resp.raise_for_status()
-        spawn_data = spawn_resp.json()
-
-        for item in spawn_data.get("result", {}).get("content", []):
-            if isinstance(item, dict) and item.get("type") == "text":
-                try:
-                    session_key = json.loads(item["text"]).get("childSessionKey")
-                except (json.JSONDecodeError, KeyError):
-                    pass
-
-    if not session_key:
+    _ = (run_timeout_s, poll_timeout_s)  # legacy knobs, budget lives in clerk
+    try:
+        text = await _call_clerk(prompt, raw=True, agent_id=agent_id)
+    except Exception as exc:
         activity.logger.warning(
-            "_workers_spawn_subagent: no childSessionKey from spawn (agent=%s)", agent_id
+            "_workers_spawn_subagent: clerk call failed (agent=%s): %s", agent_id, exc
         )
         return ""
-
-    # Poll sessions_history for the assistant reply.
-    deadline = asyncio.get_event_loop().time() + poll_timeout_s
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        while asyncio.get_event_loop().time() < deadline:
-            activity.heartbeat(f"polling {agent_id} session {session_key[:8]}")
-            await asyncio.sleep(8)
-            try:
-                hist_resp = await client.post(
-                    f"{base}/tools/invoke",
-                    headers=headers,
-                    json={
-                        "tool": "sessions_history",
-                        "args": {"sessionKey": session_key, "limit": 6},
-                    },
-                )
-                if hist_resp.status_code != 200:
-                    continue
-                hist = hist_resp.json()
-            except Exception:
-                continue
-
-            messages: list[dict[str, Any]] = []
-            for item in hist.get("result", {}).get("content", []):
-                if isinstance(item, dict) and item.get("type") == "text":
-                    try:
-                        parsed = json.loads(item["text"])
-                        messages = parsed.get("messages", [])
-                    except (json.JSONDecodeError, TypeError):
-                        pass
-
-            # Latest assistant message wins. Skip user/system turns.
-            for msg in reversed(messages):
-                if msg.get("role") != "assistant":
-                    continue
-                content = msg.get("content", "")
-                if isinstance(content, str) and content.strip():
-                    return content
-                if isinstance(content, list):
-                    parts = [
-                        p.get("text", "")
-                        for p in content
-                        if isinstance(p, dict) and p.get("type") == "text"
-                    ]
-                    joined = "\n".join(t for t in parts if t).strip()
-                    if joined:
-                        return joined
-                break  # only look at the most recent assistant msg
-
-    activity.logger.warning(
-        "_workers_spawn_subagent: timed out after %ds (agent=%s)", poll_timeout_s, agent_id
-    )
-    return ""
+    return text if isinstance(text, str) else ""
 
 
 def _strip_code_fence(text: str) -> str:

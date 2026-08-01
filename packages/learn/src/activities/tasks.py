@@ -245,23 +245,14 @@ async def assemble_task_context(task: dict[str, Any]) -> str:
 
 @activity.defn
 async def execute_task(task: dict[str, Any], context: str) -> dict[str, Any]:
-    """Execute a task via OpenClaw sessions_spawn.
+    """Execute a task via a Hermes workers-gateway run (#366).
 
-    Spawns a subagent with the assembled context + task instructions.
-    Polls sessions_history for the result.
+    Runs the assembled context + task instructions through _call_clerk
+    (POST /v1/responses on :18790) and parses the final JSON message.
     Returns the execution result including any artifacts.
     """
     config = load_config()
-    token = config.gateway_token()
-    # execute_task spawns ephemeral / clerk-like subagents — routed to the
-    # WORKERS gateway (:18790). The main gateway is reserved for
-    # agentId=main (user-facing Alfred chat).
-    base = config.openclaw_workers_gateway_url
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-
     agent_id = task.get("agent_id", config.clerk_agent_id)
-    tier = task.get("tier", 2)
-    budget = task.get("budget_turns", 25)
     title = task.get("title", task.get("name", "Untitled"))
 
     prompt = f"""You are executing a task. Follow the skill methodology provided.
@@ -287,95 +278,18 @@ Your FINAL message must be a JSON object:
 
 CRITICAL: Your final message must contain ONLY the JSON object above."""
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        spawn_resp = await client.post(
-            f"{base}/tools/invoke",
-            headers=headers,
-            json={
-                "tool": "sessions_spawn",
-                "args": {
-                    "task": prompt,
-                    "agentId": agent_id,
-                    "mode": "run",
-                    "cleanup": "auto",
-                    "sandbox": "inherit",
-                    "runTimeoutSeconds": 240,
-                    "expectsCompletionMessage": False,
-                },
-            },
-        )
-        spawn_resp.raise_for_status()
-        spawn_data = spawn_resp.json()
+    # #366: this used to sessions_spawn + poll the retired OpenClaw
+    # ``/tools/invoke`` envelope, which 404s on Hermes — every AI-task
+    # execution silently died here. _call_clerk is the Hermes-native
+    # POST /v1/responses path (workers gateway, heartbeats, retry-classified).
+    from src.activities.clerk import _call_clerk
 
-        # Extract session key
-        result = spawn_data.get("result", {})
-        content_list = result.get("content", [])
-        session_key = None
-        for item in content_list:
-            if isinstance(item, dict) and item.get("type") == "text":
-                try:
-                    inner = json.loads(item["text"])
-                    session_key = inner.get("childSessionKey")
-                except (json.JSONDecodeError, KeyError):
-                    pass
-
-        if not session_key:
-            return {
-                "status": "error",
-                "summary": f"Failed to spawn subagent: {spawn_data}",
-                "output": "",
-                "follow_up_tasks": [],
-            }
-
-    # Poll for result
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        for attempt in range(28):
-            await asyncio.sleep(10)
-            try:
-                hist_resp = await client.post(
-                    f"{base}/tools/invoke",
-                    headers=headers,
-                    json={
-                        "tool": "sessions_history",
-                        "args": {"sessionKey": session_key, "limit": 5},
-                    },
-                )
-                if hist_resp.status_code != 200:
-                    continue
-                hist_data = hist_resp.json()
-            except Exception:
-                continue
-
-            # Parse messages
-            hist_result = hist_data.get("result", {})
-            hist_content = hist_result.get("content", [])
-            messages = []
-            for item in hist_content:
-                if isinstance(item, dict) and item.get("type") == "text":
-                    try:
-                        parsed = json.loads(item["text"])
-                        messages = parsed.get("messages", [])
-                    except (json.JSONDecodeError, TypeError):
-                        pass
-
-            for msg in messages:
-                if msg.get("role") == "assistant":
-                    msg_content = msg.get("content", "")
-                    text = ""
-                    if isinstance(msg_content, list):
-                        for part in msg_content:
-                            if isinstance(part, dict) and part.get("type") == "text":
-                                text = part["text"]
-                                break
-                    elif isinstance(msg_content, str):
-                        text = msg_content
-
-                    if text:
-                        return _extract_task_result(text, title)
-
+    text = await _call_clerk(prompt, raw=True, agent_id=agent_id)
+    if isinstance(text, str) and text.strip():
+        return _extract_task_result(text, title)
     return {
-        "status": "timeout",
-        "summary": f"Task execution timed out after 280s: {title}",
+        "status": "error",
+        "summary": f"Empty clerk output for task: {title}",
         "output": "",
         "follow_up_tasks": [],
     }
@@ -644,14 +558,9 @@ async def _llm_evaluate_consequentials(
 ) -> list[dict[str, Any]]:
     """Ask the LLM whether follow-up errands are needed after task completion.
 
-    Uses OpenClaw sessions_spawn in run mode with a short timeout.
+    Hermes-native clerk call on the workers gateway (#366).
     Returns a list of follow-up task dicts or empty list.
     """
-    token = config.gateway_token()
-    # Evaluates follow-ups via a clerk subagent on the WORKERS gateway.
-    base = config.openclaw_workers_gateway_url
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-
     title = task.get("title", task.get("name", "Untitled"))
     summary = result.get("summary", "")
     output = result.get("output", "")
@@ -677,86 +586,14 @@ Return ONLY a JSON object:
 
 If no follow-ups are needed, return: {{"follow_up_tasks": []}}"""
 
-    async with httpx.AsyncClient(timeout=30.0) as http_client:
-        spawn_resp = await http_client.post(
-            f"{base}/tools/invoke",
-            headers=headers,
-            json={
-                "tool": "sessions_spawn",
-                "args": {
-                    "task": prompt,
-                    "agentId": config.clerk_agent_id,
-                    "mode": "run",
-                    "cleanup": "auto",
-                    "sandbox": "inherit",
-                    "runTimeoutSeconds": 60,
-                    "expectsCompletionMessage": False,
-                },
-            },
-        )
-        spawn_resp.raise_for_status()
-        spawn_data = spawn_resp.json()
+    # #366: Hermes-native call replaces the retired /tools/invoke poll loop.
+    from src.activities.clerk import _call_clerk
 
-        # Extract session key
-        content_list = spawn_data.get("result", {}).get("content", [])
-        session_key = None
-        for item in content_list:
-            if isinstance(item, dict) and item.get("type") == "text":
-                try:
-                    inner = json.loads(item["text"])
-                    session_key = inner.get("childSessionKey")
-                except (json.JSONDecodeError, KeyError):
-                    pass
-
-        if not session_key:
-            return []
-
-    # Poll for result (shorter timeout for consequentials evaluation)
-    async with httpx.AsyncClient(timeout=15.0) as http_client:
-        for _ in range(12):
-            await asyncio.sleep(5)
-            try:
-                hist_resp = await http_client.post(
-                    f"{base}/tools/invoke",
-                    headers=headers,
-                    json={
-                        "tool": "sessions_history",
-                        "args": {"sessionKey": session_key, "limit": 5},
-                    },
-                )
-                if hist_resp.status_code != 200:
-                    continue
-                hist_data = hist_resp.json()
-            except Exception:
-                continue
-
-            hist_content = hist_data.get("result", {}).get("content", [])
-            for item in hist_content:
-                if isinstance(item, dict) and item.get("type") == "text":
-                    try:
-                        parsed = json.loads(item["text"])
-                        messages = parsed.get("messages", [])
-                    except (json.JSONDecodeError, TypeError):
-                        continue
-
-                    for msg in messages:
-                        if msg.get("role") != "assistant":
-                            continue
-                        msg_content = msg.get("content", "")
-                        text = ""
-                        if isinstance(msg_content, list):
-                            for part in msg_content:
-                                if isinstance(part, dict) and part.get("type") == "text":
-                                    text = part["text"]
-                                    break
-                        elif isinstance(msg_content, str):
-                            text = msg_content
-
-                        if text:
-                            extracted = _extract_follow_ups(text)
-                            if extracted is not None:
-                                return extracted
-
+    text = await _call_clerk(prompt, raw=True, agent_id=config.clerk_agent_id)
+    if isinstance(text, str):
+        extracted = _extract_follow_ups(text)
+        if extracted is not None:
+            return extracted
     return []
 
 
