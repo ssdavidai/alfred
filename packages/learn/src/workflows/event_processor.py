@@ -72,76 +72,89 @@ class EventProcessorWorkflow:
                 )
                 continue
 
-            # Media streams still get routed to their dedicated workflow
-            if event.get("stream_type") == "media":
-                await workflow.execute_child_workflow(
-                    "MediaIngestionWorkflow",
-                    event,
-                    id=f"media-{event_id[:16]}",
-                )
-                result.media_triggered += 1
+            # #371: the whole per-event body sits in one try so a single
+            # poison event (media child-workflow crash, inbox drop failure)
+            # logs + skips instead of failing the run — the same one-bad-
+            # item-wedges-everything class that froze the task runner for
+            # 3 days (#367). The skipped event stays unprocessed and is
+            # re-served next tick, visibly, while every other event flows.
+            try:
+                # Media streams still get routed to their dedicated workflow
+                if event.get("stream_type") == "media":
+                    await workflow.execute_child_workflow(
+                        "MediaIngestionWorkflow",
+                        event,
+                        id=f"media-{event_id[:16]}",
+                    )
+                    result.media_triggered += 1
+                    await workflow.execute_activity(
+                        mark_event_processed,
+                        args=[event_id, "media-ingestion", "media"],
+                        start_to_close_timeout=timedelta(seconds=10),
+                        retry_policy=_MARK_RETRY,
+                    )
+                    continue
+
+                # Tier 3: discard (empty/meaningless)
+                if is_tier3(event):
+                    await workflow.execute_activity(
+                        mark_event_processed,
+                        args=[event_id, "noise-discarded", "tier3"],
+                        start_to_close_timeout=timedelta(seconds=10),
+                        retry_policy=_MARK_RETRY,
+                    )
+                    result.tier3_discarded += 1
+                    continue
+
+                # System-inbox (manual uploads) → existing curator path
+                if event.get("stream_type") in ("system", "inbox-upload"):
+                    inbox_path: str = await workflow.execute_activity(
+                        drop_raw_event_to_inbox,
+                        args=[event],
+                        start_to_close_timeout=timedelta(seconds=30),
+                    )
+                    await workflow.execute_activity(
+                        mark_event_processed,
+                        args=[event_id, inbox_path, "tier1"],
+                        start_to_close_timeout=timedelta(seconds=10),
+                        retry_policy=_MARK_RETRY,
+                    )
+                    result.inbox_routed += 1
+                    result.paths.append(inbox_path)
+                    continue
+
+                # --- Non-inbox stream events ---
+                #
+                # Design-B (#78): a non-inbox stream event is NOT written to
+                # the vault. The promotion contract demotes `stream_event` to
+                # ingest.db (Store 4) and `event`/`memory` audit lines to
+                # state.db — both vault writes the old zero-LLM path performed
+                # (`create_stream_vault_record` → `stream_event/`,
+                # `append_to_stream_log` → `memory/stream-log-*`) now 422 and
+                # used to wedge this workflow on infinite retries.
+                #
+                # The puller already lands every event in ingest.db (ctrl-api
+                # mirrors `POST /api/v1/streams/ingest` into Store 4), and
+                # SignalExtractWorkflow consumes from there via
+                # `GET /api/v1/ingest/events/pending`. So EventProcessor's job
+                # for non-inbox events is simply: mark the JSONL-side event
+                # processed so the streams sidecar doesn't re-serve it. No
+                # vault write, no LLM. The system-inbox → curator path above
+                # is unchanged.
                 await workflow.execute_activity(
                     mark_event_processed,
-                    args=[event_id, "media-ingestion", "media"],
+                    args=[event_id, f"ingest:{event_id}", "ingest-store4"],
                     start_to_close_timeout=timedelta(seconds=10),
                     retry_policy=_MARK_RETRY,
                 )
-                continue
-
-            # Tier 3: discard (empty/meaningless)
-            if is_tier3(event):
-                await workflow.execute_activity(
-                    mark_event_processed,
-                    args=[event_id, "noise-discarded", "tier3"],
-                    start_to_close_timeout=timedelta(seconds=10),
-                    retry_policy=_MARK_RETRY,
+                result.vault_records += 1
+                result.paths.append(f"ingest:{event_id}")
+            except Exception as exc:  # noqa: BLE001
+                workflow.logger.warning(
+                    "event_processor: event %s failed (%s) — skipped this "
+                    "tick, will re-serve",
+                    event_id, str(exc)[:200],
                 )
-                result.tier3_discarded += 1
-                continue
-
-            # System-inbox (manual uploads) → existing curator path
-            if event.get("stream_type") in ("system", "inbox-upload"):
-                inbox_path: str = await workflow.execute_activity(
-                    drop_raw_event_to_inbox,
-                    args=[event],
-                    start_to_close_timeout=timedelta(seconds=30),
-                )
-                await workflow.execute_activity(
-                    mark_event_processed,
-                    args=[event_id, inbox_path, "tier1"],
-                    start_to_close_timeout=timedelta(seconds=10),
-                    retry_policy=_MARK_RETRY,
-                )
-                result.inbox_routed += 1
-                result.paths.append(inbox_path)
-                continue
-
-            # --- Non-inbox stream events ---
-            #
-            # Design-B (#78): a non-inbox stream event is NOT written to the
-            # vault. The promotion contract demotes `stream_event` to
-            # ingest.db (Store 4) and `event`/`memory` audit lines to
-            # state.db — both vault writes the old zero-LLM path performed
-            # (`create_stream_vault_record` → `stream_event/`,
-            # `append_to_stream_log` → `memory/stream-log-*`) now 422 and
-            # used to wedge this workflow on infinite retries.
-            #
-            # The puller already lands every event in ingest.db (ctrl-api
-            # mirrors `POST /api/v1/streams/ingest` into Store 4), and
-            # SignalExtractWorkflow consumes from there via
-            # `GET /api/v1/ingest/events/pending`. So EventProcessor's job
-            # for non-inbox events is simply: mark the JSONL-side event
-            # processed so the streams sidecar doesn't re-serve it. No vault
-            # write, no LLM. The system-inbox → curator path above is
-            # unchanged.
-            await workflow.execute_activity(
-                mark_event_processed,
-                args=[event_id, f"ingest:{event_id}", "ingest-store4"],
-                start_to_close_timeout=timedelta(seconds=10),
-                retry_policy=_MARK_RETRY,
-            )
-            result.vault_records += 1
-            result.paths.append(f"ingest:{event_id}")
 
         result.processed = len(result.paths)
         return result

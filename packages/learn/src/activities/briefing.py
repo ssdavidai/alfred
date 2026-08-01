@@ -2233,9 +2233,15 @@ async def compose_and_write_briefing(
     # the safe shape the parser handles uniformly).
     fm_lines: list[str] = [
         "---",
-        "record_type: briefing",
+        # #368: MUST be `type:` — ctrl-api's vault list endpoint filters
+        # on fm.type, so the old `record_type:` key meant briefing records
+        # never appeared in list_records("briefing") and get_prior_briefing
+        # silently fell back to a naive 24h window on every single run
+        # since the BriefingWorkflow cutover.
+        "type: briefing",
         f"slot: {slot_norm}",
         f"composed_at: {composed_at_iso}",
+        f"created: {composed_at_iso}",
         f"prior_briefing: {prior_briefing_path or ''}",
         f"window_start: {window_start_iso_norm}",
         f"window_end: {window_end_iso_norm}",

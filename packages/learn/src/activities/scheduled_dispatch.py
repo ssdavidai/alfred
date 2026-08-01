@@ -134,6 +134,11 @@ async def fire_due_scheduled_dispatches() -> dict[str, Any]:
             if not isinstance(existing_side_effects, dict):
                 existing_side_effects = {}
             next_side_effects = dict(existing_side_effects)
+            # The /dispatch endpoint above already ran dispatchSignalToAgent,
+            # so this decision's agent IS dispatched — stamp it so any
+            # executing-state recovery sweep keyed on agent_dispatched
+            # (#282-family) never mistakes a scheduled fire for a strand.
+            next_side_effects["agent_dispatched"] = True
             next_side_effects["fired_at"] = now.isoformat()
             next_side_effects["re_routed_signal"] = dispatch_json.get(
                 "re_routed_signal"

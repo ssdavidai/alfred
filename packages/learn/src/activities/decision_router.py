@@ -531,6 +531,42 @@ async def route_decision(decision: dict[str, Any]) -> dict[str, Any]:
         return {"id": decision_id, "skipped": True, "reason": f"state={state}"}
 
     if not decision_id or not intent or not source_record:
+        # #369: this used to be a SILENT skip — the decision stayed
+        # state=open and was re-fetched and re-skipped every 60s forever
+        # (12 live orphans on home, written directly into the vault by an
+        # out-of-repo tool without source_record, wedged 3-14 days).
+        # Terminal-complete with a reason instead, mirroring the #313
+        # source_card_missing retire pattern. Without source_record there
+        # is no card to flip and no observation source — routing is
+        # impossible, so completed-with-reason is the honest state.
+        logger.warning(
+            "decision_router.route_decision: decision=%s missing required "
+            "fields (intent=%r source_record=%r) — retiring as completed "
+            "with side_effects.decision_router=missing_source_record",
+            decision_id, intent, source_record,
+        )
+        if decision_id:
+            retired_side_effects = dict(existing_side_effects)
+            retired_side_effects["decision_router"] = "missing_source_record"
+            retired_side_effects["retired_at"] = (
+                datetime.now(timezone.utc).isoformat()
+            )
+            try:
+                async with _http() as client:
+                    patch_resp = await client.patch(
+                        f"/api/v1/decisions/{decision_id}",
+                        json={
+                            "state": "completed",
+                            "side_effects": retired_side_effects,
+                        },
+                    )
+                    patch_resp.raise_for_status()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "decision_router.route_decision: retire PATCH failed "
+                    "decision=%s err=%s — will retry next tick",
+                    decision_id, exc,
+                )
         return {
             "id": decision_id,
             "skipped": True,

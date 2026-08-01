@@ -468,12 +468,15 @@ async def test_compose_reads_post_mutation_state(fake_vault):
     # The composer prompt must include the POST-MUTATION text — proves
     # it re-read the matter rather than reusing a pre-mutation snapshot.
     assert any("POST-MUTATION" in p for p in captured_prompts)
-    # The write went through ctrl-api with record_type=briefing.
+    # The write went through ctrl-api keyed `type: briefing` — the only
+    # frontmatter key the vault list endpoint filters on (#368; the old
+    # `record_type:` key made briefings invisible to get_prior_briefing).
     assert fake_vault.write_calls
     rtype, name, content = fake_vault.write_calls[0]
     assert rtype == "briefing"
     assert name.endswith("-morning")
-    assert "record_type: briefing" in content
+    assert "type: briefing" in content
+    assert "record_type: briefing" not in content
     assert "slot: morning" in content
     assert "composed_at: 2026-05-13T07:00:00Z" in content
     assert "prior_briefing: briefing/2026-05-12-evening.md" in content

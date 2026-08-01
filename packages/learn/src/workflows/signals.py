@@ -134,6 +134,23 @@ _NON_RETRYABLE_EXTRACT_ERRORS: frozenset[str] = frozenset({
 })
 
 
+def _extract_error_type(err: BaseException) -> str:
+    """Best error-type label for a failed extraction.
+
+    #371: the exception the workflow sees is Temporal's ``ActivityError``
+    WRAPPER, which has no ``.type`` — the ``ApplicationError`` carrying
+    the classification lives at ``__cause__``. Reading ``.type`` off the
+    wrapper made the non-retryable fast path dead code (it always fell
+    through to the wrapper's class name).
+    """
+    cause = getattr(err, "__cause__", None)
+    return (
+        str(getattr(cause, "type", "") or "")
+        or str(getattr(err, "type", "") or "")
+        or type(err).__name__
+    )
+
+
 @workflow.defn(name="SignalExtractWorkflow")
 class SignalExtractWorkflow:
     """Stream events → signal records (Phase 6 T6.0.5).
@@ -289,10 +306,7 @@ class SignalExtractWorkflow:
                     # workflow is non-additive for history replay, so it is
                     # gated per packages/learn/CLAUDE.md.
                     if workflow.patched("signal_extract_dead_letter_v1"):
-                        err_type = (
-                            getattr(extracted, "type", "")
-                            or type(extracted).__name__
-                        )
+                        err_type = _extract_error_type(extracted)
                         # An unknown source_type may become extractable once a
                         # parser is fixed, so it stays retryable (bounded by
                         # the budget). A structurally invalid payload never
