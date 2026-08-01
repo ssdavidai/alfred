@@ -1,1 +1,38 @@
-Ly8gUGVyLXRlbmFudCBlbnZpcm9ubWVudCB2YXJpYWJsZXMgcmVhZCBmcm9tIHRoZSBjb250YWluZXIncyBlbnZpcm9ubWVudC4KLy8gU2V0IHZpYSB0aGUgdGVuYW50IGNvbXBvc2UgYC5lbnZgICh0aGUgcHJvdmlzaW9uZXIgd3JpdGVzIHRoZW0gYXQgc2hpcAovLyB0aW1lOyBleGlzdGluZyB0ZW5hbnRzIGdldCB0aGVtIHZpYSBhIG9uZS1vZmYgb3BzIGNvbW1hbmQpLiBBbGwgdmFsdWVzCi8vIHNjb3BlZCB0byBUSElTIHRlbmFudCDigJQgdGhlIGNvbnRhaW5lciBpcyBzaW5nbGUtdGVuYW50IGJ5IGRlcGxveW1lbnQuCgpleHBvcnQgaW50ZXJmYWNlIEVudiB7CiAgLyoqIGN0cmwtYXBpIGJhc2UgVVJMIGluc2lkZSB0aGUgY29tcG9zZSBuZXR3b3JrLiBBbHdheXMgaHR0cDovL2N0cmwtYXBpOjMxMDAgaW4gcHJvZC4gKi8KICBDVFJMX1VSTDogc3RyaW5nOwogIC8qKiBCZWFyZXIgZm9yIHRoZSBpbi10ZW5hbnQgY3RybC1hcGkuICovCiAgQUFTX0FQSV9LRVk6IHN0cmluZzsKICAvKiogUHJlLXNoYXJlZCBzZWNyZXQgU2lyIGVudGVycyBvbmNlIG9uIC9hdXRob3JpemUgd2hlbiBhZGRpbmcgdGhlIGNvbm5lY3Rvci4gKi8KICBNQ1BfQVBQUk9WQUxfU0VDUkVUOiBzdHJpbmc7CiAgLyoqIFdoZXJlIFNRTGl0ZSBsaXZlcy4gQmluZC1tb3VudGVkIGZyb20gL21udC9lbmNyeXB0ZWQvbWNwLXNlcnZlciBpbiBjb21wb3NlLiAqLwogIERBVEFfRElSOiBzdHJpbmc7CiAgLyoqIFB1YmxpYyBVUkwgdGhlIHRlbmFudCBzdWJkb21haW4gc2VydmVzICh1c2VkIGFzIE9BdXRoIGlzc3VlcikuICovCiAgUFVCTElDX1VSTDogc3RyaW5nOwogIC8qKiBEaXNwbGF5IGxhYmVsIHNob3duIG9uIHRoZSBhcHByb3ZhbCBwYWdlLiBlLmcuICJTaXIiLiAqLwogIFRFTkFOVF9MQUJFTDogc3RyaW5nOwogIC8qKiBIVFRQIGxpc3RlbiBwb3J0LiBEZWZhdWx0IDg3ODcuICovCiAgUE9SVD86IHN0cmluZzsKICAvKiogQm91bmRlZCBwcm94eSBob3AgY291bnQuIFNldCB0byAxIGZvciB0aGUgZG9jdW1lbnRlZCBDYWRkeSBpbmdyZXNzLiAqLwogIFRSVVNUX1BST1hZX0hPUFM/OiBzdHJpbmc7Cn0KCmZ1bmN0aW9uIHZhbGlkYXRlZFRydXN0UHJveHlIb3BzKHJhdzogc3RyaW5nIHwgdW5kZWZpbmVkKTogc3RyaW5nIHwgdW5kZWZpbmVkIHsKICBjb25zdCB2YWx1ZSA9IHJhdyA/PyAiMSI7CiAgY29uc3QgcHJvZHVjdGlvbiA9IHByb2Nlc3MuZW52Lk5PREVfRU5WID09PSAicHJvZHVjdGlvbiI7CiAgaWYgKFsidHJ1ZSIsICIqIiwgImFsbCIsICIwLjAuMC4wLzAiLCAiOjovMCJdLmluY2x1ZGVzKHZhbHVlLnRyaW0oKS50b0xvd2VyQ2FzZSgpKSkgewogICAgaWYgKHByb2R1Y3Rpb24pIHsKICAgICAgdGhyb3cgbmV3IEVycm9yKAogICAgICAgIGBVbnNhZmUgVFJVU1RfUFJPWFlfSE9QUz0ke3ZhbHVlfTsgcHJvZHVjdGlvbiByZXF1aXJlcyBhIGJvdW5kZWQgaW50ZWdlciBob3AgY291bnQgKDAtNSlgLAogICAgICApOwogICAgfQogICAgcmV0dXJuICIwIjsKICB9CiAgaWYgKCEvXlxkKyQvLnRlc3QodmFsdWUpIHx8IE51bWJlcih2YWx1ZSkgPiA1KSB7CiAgICB0aHJvdyBuZXcgRXJyb3IoCiAgICAgIGBJbnZhbGlkIFRSVVNUX1BST1hZX0hPUFM9JHt2YWx1ZX07IHVzZSBhIGJvdW5kZWQgaW50ZWdlciBob3AgY291bnQgZnJvbSAwIHRvIDVgLAogICAgKTsKICB9CiAgcmV0dXJuIHZhbHVlOwp9CgpleHBvcnQgZnVuY3Rpb24gbG9hZEVudigpOiBFbnYgewogIGNvbnN0IHJlcXVpcmVkID0gKG5hbWU6IGtleW9mIEVudikgPT4gewogICAgY29uc3QgdiA9IHByb2Nlc3MuZW52W25hbWVdOwogICAgaWYgKCF2KSB0aHJvdyBuZXcgRXJyb3IoYE1pc3NpbmcgcmVxdWlyZWQgZW52OiAke25hbWV9YCk7CiAgICByZXR1cm4gdjsKICB9OwogIHJldHVybiB7CiAgICBDVFJMX1VSTDogcmVxdWlyZWQoIkNUUkxfVVJMIiksCiAgICBBQVNfQVBJX0tFWTogcmVxdWlyZWQoIkFBU19BUElfS0VZIiksCiAgICBNQ1BfQVBQUk9WQUxfU0VDUkVUOiByZXF1aXJlZCgiTUNQX0FQUFJPVkFMX1NFQ1JFVCIpLAogICAgREFUQV9ESVI6IHByb2Nlc3MuZW52LkRBVEFfRElSID8/ICIvZGF0YSIsCiAgICBQVUJMSUNfVVJMOiByZXF1aXJlZCgiUFVCTElDX1VSTCIpLAogICAgVEVOQU5UX0xBเสJFTDogcmVxdWlyZWQoIlRFTkFOVF9MQUJFTCIpLAogICAgUE9SVDogcHJvY2Vzcy5lbnYuUE9SVCwKICAgIFRSVVNUX1BST1hZX0hPUFM6IHZhbGlkYXRlZFRydXN0UHJveHlIb3BzKHByb2Nlc3MuZW52LlRSVVNUX1BST1hZX0hPUFMpLAogIH07Cn0K
+// Per-tenant environment variables read from the container's environment.
+// Set via the tenant compose `.env` (the provisioner writes them at ship
+// time; existing tenants get them via a one-off ops command). All values
+// scoped to THIS tenant — the container is single-tenant by deployment.
+
+export interface Env {
+  /** ctrl-api base URL inside the compose network. Always http://ctrl-api:3100 in prod. */
+  CTRL_URL: string;
+  /** Bearer for the in-tenant ctrl-api. */
+  AAS_API_KEY: string;
+  /** Pre-shared secret Sir enters once on /authorize when adding the connector. */
+  MCP_APPROVAL_SECRET: string;
+  /** Where SQLite lives. Bind-mounted from /mnt/encrypted/mcp-server in compose. */
+  DATA_DIR: string;
+  /** Public URL the tenant subdomain serves (used as OAuth issuer). */
+  PUBLIC_URL: string;
+  /** Display label shown on the approval page. e.g. "Sir". */
+  TENANT_LABEL: string;
+  /** HTTP listen port. Default 8787. */
+  PORT?: string;
+}
+
+export function loadEnv(): Env {
+  const required = (name: keyof Env) => {
+    const v = process.env[name];
+    if (!v) throw new Error(`Missing required env: ${name}`);
+    return v;
+  };
+  return {
+    CTRL_URL: required("CTRL_URL"),
+    AAS_API_KEY: required("AAS_API_KEY"),
+    MCP_APPROVAL_SECRET: required("MCP_APPROVAL_SECRET"),
+    DATA_DIR: process.env.DATA_DIR ?? "/data",
+    PUBLIC_URL: required("PUBLIC_URL"),
+    TENANT_LABEL: required("TENANT_LABEL"),
+    PORT: process.env.PORT,
+  };
+}
