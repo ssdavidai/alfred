@@ -106,7 +106,16 @@ def derive_signature(
     name field. ``kind == "unknown"`` means "do not match anything".
     """
     source_type = str(event_fm.get("source_type") or event_fm.get("source") or "").lower()
-    if source_type.startswith("composio-gmail") or source_type == "gmail":
+    # #333: composio-ingested email events carry source_type="email" —
+    # without this mapping they derived kind="unknown" and sender-domain
+    # noise instincts NEVER matched on composio-fed tenants (all of them,
+    # for email). The SUPPRESS arm was structurally dead for the most
+    # common event type; home worked around it by re-anchoring instincts
+    # on subject_keywords.
+    if (
+        source_type.startswith("composio-gmail")
+        or source_type in ("gmail", "email")
+    ):
         source_type = "gmail"
     elif source_type.startswith("composio-googlecalendar") or source_type == "gcal":
         source_type = "gcal"
