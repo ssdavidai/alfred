@@ -44,6 +44,17 @@ before(() => {
   indexDecision("decision/legacy.md", { source: "judgment", state: "open" }, null);
   // A non-matching row so the filter is doing real work.
   indexDecision("decision/done.md", { source: "judgment", status: "completed", state: "completed" }, "completed");
+  // #369 — DIVERGENT row: an externally-written decision (the alfred-code
+  // build-gate records on home) carries a frozen `status: open` that its
+  // writer never updates, while the router retires the canonical `state`
+  // to completed. `state` must win, or the retired record keeps coming
+  // back on ?state=open and the router re-skips it every 60s forever.
+  indexDecision(
+    "decision/retired-external.md",
+    { source: "alfred-code-foreman", status: "open", state: "completed",
+      side_effects: { decision_router: "missing_source_record" } },
+    "open",
+  );
 });
 
 async function listDecisions(qs: string): Promise<any> {
@@ -75,12 +86,25 @@ describe("GET /api/v1/decisions — state filter (status-vs-state)", () => {
 
   it("an unfiltered list returns every decision", async () => {
     const out = await listDecisions("");
-    assert.equal(out.decisions.length, 3);
+    assert.equal(out.decisions.length, 4);
   });
 
   it("state=completed still filters correctly", async () => {
     const out = await listDecisions("?state=completed");
     const ids = out.decisions.map((d: any) => d.id);
-    assert.deepEqual(ids.sort(), ["done"]);
+    assert.deepEqual(ids.sort(), ["done", "retired-external"]);
+  });
+
+  it("#369: canonical `state` beats a stale `status` mirror", async () => {
+    // The retired external record must NOT come back as open — that churn
+    // is what kept 12 records cycling through the router on home for
+    // 3-14 days.
+    const open = await listDecisions("?state=open");
+    const openIds = open.decisions.map((d: any) => d.id);
+    assert.ok(
+      !openIds.includes("retired-external"),
+      "a decision retired to state=completed must not list as open just " +
+        "because its writer left status=open behind",
+    );
   });
 });

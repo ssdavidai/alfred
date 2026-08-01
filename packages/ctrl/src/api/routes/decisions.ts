@@ -733,10 +733,19 @@ export function registerDecisionRoutes(): void {
       } catch {
         continue;
       }
-      // Defensive state match: the effective state is the index status column,
-      // or frontmatter `state`, or frontmatter `status` — whichever is set.
+      // Defensive state match. `state` is a decision's CANONICAL lifecycle
+      // field, so it wins — the index `status` column and frontmatter
+      // `status` are fallbacks for legacy rows that carry only those.
+      //
+      // #369: this used to read `row.status ?? fm.state ?? …`, i.e. the
+      // mirror BEFORE the canonical field. Externally-written decisions
+      // (the alfred-code build-gate records) carry a frozen `status: open`
+      // alongside `state`, so once the router retired them to
+      // state=completed they STILL came back on `?state=open` — the router
+      // re-fetched and re-skipped the same 12 records every 60s, exactly
+      // the churn the retire was meant to end.
       if (stateFilter) {
-        const effective = row.status ?? fm.state ?? fm.status ?? null;
+        const effective = fm.state ?? row.status ?? fm.status ?? null;
         if (String(effective ?? "") !== stateFilter) continue;
       }
       if (sourceFilter && String(fm.source ?? "") !== sourceFilter) continue;
