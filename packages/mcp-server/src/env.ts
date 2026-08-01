@@ -1,1 +1,45 @@
-Ly8gUGVyLXRlbmFudCBlbnZpcm9ubWVudCB2YXJpYWJsZXMgcmVhZCBmcm9tIHRoZSBjb250YWluZXIncyBlbnZpcm9ubWVudC4KCmV4cG9ydCBpbnRlcmZhY2UgRW52IHsKICBDVFJMX1VSTDogc3RyaW5nOwogIEFBU19BUElfS0VZOiBzdHJpbmc7CiAgTUNQX0FQUFJPVkFMX1NFQ1JFVDogc3RyaW5nOwogIERBVEFfRElSOiBzdHJpbmc7CiAgUFVCTElDX1VSTDogc3RyaW5nOwogIFRFTkFOVF9MQUJFTDogc3RyaW5nOwogIFBPUlQ/OiBzdHJpbmc7CiAgVFJVU1RfUFJPWFlfSE9QUzogbnVtYmVyOwp9CgpleHBvcnQgZnVuY3Rpb24gcGFyc2VUcnVzdFByb3h5SG9wcyhyYXc6IHN0cmluZyB8IHVuZGVmaW5lZCwgbm9kZUVudj0gcHJvY2Vzcy5lbnYuTk9ERV9FTlYpOiBudW1iZXIgewogIGlmIChyYXcgPT09IHVuZGVmaW5lZCB8fCByYXcudHJpbSgpID09PSAiIikgewogICAgaWYgKG5vZGVFbnYgPT09ICJwcm9kdWN0aW9uIikgdGhyb3cgbmV3IEVycm9yKCJ0cnVzdCBwcm94eSBob3BzIG11c3QgYmUgc2V0IGluIHByb2R1Y3Rpb24iKTsKICAgIHJldHVybiAwOwogIH0KICBpZiAoIS9eWzAtOV0rJC8udGVzdChyYXcudHJpbSgpKSkgewogICAgdGhyb3cgbmV3IEVycm9yKGB0cnVzdCBwcm94eSBob3BzIG11c3QgYmUgYSBub24tbmVnYXRpdmUgaW50ZWdlciAoZ290ICR7cmF3fSlgKTsKICB9CiAgY29uc3QgaG9wcyA9IE51bWJlcihyYXcudHJpbSgpKTsKICBpZiAoIU51bWJlci5pc1NhZmVJbnRlZ2VyKGhvcHMpIHx8IGhvcHMgPiA0KSB0aHJvdyBuZXcgRXJyb3IoInRydXN0IHByb3h5IGhvcHMgbXVzdCBiZSBiZXR3ZWVuIDAgYW5kIDQiKTsKICByZXR1cm4gaG9wczsKfQoKZXhwb3J0IGZ1bmN0aW9uIGxvYWRFbnYoKTogRW52IHsKICBjb25zdCByZXF1aXJlZCA9IChuYW1lOiBrZXlvZiBFbnYpID0+IHsKICAgIGNvbnN0IHYgPSBwcm9jZXNzLmVudltuYW1lXTsKICAgIGlmICghdikgdGhyb3cgbmV3IEVycm9yKGBNaXNzaW5nIHJlcXVpcmVkIGVudjogJHtuYW1lfWApOwogICAgcmV0dXJuIHY7CiAgfTsKICByZXR1cm4gewogICAgQ1RSTF9VUk w6IHJlcXVpcmVkKCJDVFJMX1VSTCIpLAogICAgQUFTX0FQSV9LRVk6IHJlcXVpcmVkKCJBQVNfQVBJX0tFWSIpLAogICAgTUNQX0FQUFJPVkFMX1NFQ1JFVDogcmVxdWlyZWQoIk1DUF9BUFBST1ZBTF9TRUNSRVQiKSwKICAgIERBVEFfRElSOiBwcm9jZXNzLmVudi5EQVRBX0RJUj8/ICI vZGF0YSIsCiAgICBQVUJMSUNfVVJMOiByZXF1aXJlZCgiUFVCTElDX1VSTCIpLAogICAgVEVOQU5UX0xBQkVMOiByZXF1aXJlZCgiVEVOQU5UX0xBQkVMIiksCiAgICBQT1JUOiBwcm9jZXNzLmVudi5QT1JULAogICAgVFJVU1RfUFJPWFlfSE9QUzogcGFyc2VUcnVzdFByb3h5SG9wcyhwcm9jZXNzLmVudi5UUlVTVF9QUk9YWV9IT1BTLCBwcm9jZXNzLmVudi5OT0RFX0VOViksCiAgfTsKfQo=
+// Per-tenant environment variables read from the container's environment.
+
+export interface Env {
+  CTRL_URL: string;
+  AAS_API_KEY: string;
+  MCP_APPROVAL_SECRET: string;
+  DATA_DIR: string;
+  PUBLIC_URL: string;
+  TENANT_LABEL: string;
+  PORT?: string;
+  TRUST_PROXY_HOPS: number;
+}
+
+export function parseTrustProxyHops(raw: string | undefined, nodeEnv = process.env.NODE_ENV): number {
+  if (raw === undefined || raw.trim() === "") {
+    if (nodeEnv === "production") throw new Error("TRUST_PROXY_HOPS must be set in production");
+    return 0;
+  }
+  if (!/^[0-9]+$/.test(raw.trim())) {
+    throw new Error(`TRUST_PROXY_HOPS must be a non-negative integer (got ${raw})`);
+  }
+  const hops = Number(raw.trim());
+  if (!Number.isSafeInteger(hops) || hops > 4) {
+    throw new Error("TRUST_PROXY_HOPS must be between 0 and 4");
+  }
+  return hops;
+}
+
+export function loadEnv(): Env {
+  const required = (name: keyof Env) => {
+    const v = process.env[name];
+    if (!v) throw new Error(`Missing required env: ${name}`);
+    return v;
+  };
+  return {
+    CTRL_URL: required("CTRL_URL"),
+    AAS_API_KEY: required("AAS_API_KEY"),
+    MCP_APPROVAL_SECRET: required("MCP_APPROVAL_SECRET"),
+    DATA_DIR: process.env.DATA_DIR ?? "/data",
+    PUBLIC_URL: required("PUBLIC_URL"),
+    TENANT_LABEL: required("TENANT_LABEL"),
+    PORT: process.env.PORT,
+    TRUST_PROXY_HOPS: parseTrustProxyHops(process.env.TRUST_PROXY_HOPS, process.env.NODE_ENV),
+  };
+}
