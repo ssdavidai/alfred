@@ -1094,10 +1094,19 @@ def _build_instinct_content(instinct: dict[str, Any]) -> str:
     resolver = routing_rule.get("destination_resolver")
     resolver_yaml = "null" if resolver is None else f'"{resolver}"'
 
+    # #330: every instinct carries a promotion-ladder tier. Reflection is
+    # the sole promoter; a fresh instinct always starts at Asking. Before
+    # this, the template omitted tier entirely — 33/34 live instincts had
+    # no tier and the ladder had nothing valid to promote.
+    tier = str(instinct.get("tier") or "Asking").strip()
+    if tier not in ("Asking", "Confirming", "Acting"):
+        tier = "Asking"
+
     return f"""---
 type: instinct
 name: {name}
 status: active
+tier: {tier}
 description: "{description}"
 input_patterns:
   sender_domains: {input_patterns.get("sender_domains", [])}

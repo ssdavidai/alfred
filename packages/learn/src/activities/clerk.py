@@ -433,6 +433,19 @@ Rules:
 - If distiller_learnings are provided, use them to strengthen or refine instincts
 - If janitor_flags are present, reduce confidence for affected records
 
+Tier promotion ladder (the trust gradient — you are its only writer):
+- Every instinct has "tier": "Asking" | "Confirming" | "Acting".
+- New instincts ALWAYS start at "Asking" (surface to the human, never act).
+- Promote Asking → Confirming only when an instinct has 10+ CONSISTENT
+  observations (human agreed with the routing) and no contradicting
+  observation in the window.
+- Promote Confirming → Acting only at 20+ consistent observations AND
+  zero reversals — Acting means autonomous execution; treat it like
+  handing over keys.
+- DEMOTE one step immediately on any reversal/contradiction observation.
+- Propose a tier change via update: {{"changes": {{"tier": "Confirming"}}}}.
+  Never skip a rung in either direction.
+
 When creating or updating instincts, use the rich schema:
 - input_patterns: {{ sender_domains: [], subject_keywords: [], attachment_types: [], input_types: [] }}
 - routing_rule: {{ destination_type: "project|person|process|hold", destination: "[[wikilink]]", destination_resolver: null, process: "", default_assignee: "[[person/name]]" }}
@@ -465,6 +478,7 @@ Return JSON only:
         "requires_approval": true
       }},
       "confidence_score": 0.0,
+      "tier": "Asking",
       "observations": ["[[...]]"],
       "tags": []
     }}
