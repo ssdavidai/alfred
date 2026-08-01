@@ -515,6 +515,10 @@ services:
       # gateway — :18790, never main.
       - OPENCLAW_GATEWAY_URL=http://hermes:18790
       - ALFRED_CTRL_URL=http://ctrl-api:3100
+      # #407: the durable worker-run ledger lives on the alfred_data
+      # volume, which this service mounts at /app/data (ctrl-api mounts
+      # the same volume at /alfred-data). The claimant reads this env.
+      - ALFRED_DATA_DIR=/app/data
       # Surveyor cluster-labeling routes through Hermes (workers profile);
       # the gateway owns the model + provider key. Empty = standalone mode.
       - SURVEYOR_HERMES_GATEWAY_URL=http://hermes:18790
