@@ -319,11 +319,14 @@ HERMES_ROOT="${HERMES_HOME:-/hermes-state}"
 MAIN_AUTH="$HERMES_ROOT/profiles/main/auth.json"
 if [[ -f "$MAIN_AUTH" && -s "$MAIN_AUTH" ]]; then
     MAIN_SIZE=$(stat -c%s "$MAIN_AUTH" 2>/dev/null || echo 0)
+    # #395: staleness is mtime-based, NOT size-based. The old `size <`
+    # heuristic never refreshed a mirror whose stale token file happened
+    # to be BIGGER than the new main auth — live on home,
+    # codex-builder/.codex/auth.json sat 6 weeks stale (8674 bytes vs the
+    # current 5621) because a token refresh SHRANK main/auth.json.
     for p in workers heavy; do
         P_AUTH="$HERMES_ROOT/profiles/$p/auth.json"
-        P_SIZE=0
-        [[ -f "$P_AUTH" ]] && P_SIZE=$(stat -c%s "$P_AUTH" 2>/dev/null || echo 0)
-        if [[ "$P_SIZE" -lt "$MAIN_SIZE" ]]; then
+        if [[ ! -f "$P_AUTH" || "$MAIN_AUTH" -nt "$P_AUTH" ]]; then
             cp "$MAIN_AUTH" "$P_AUTH"
             log "propagated main/auth.json -> $p/auth.json (${MAIN_SIZE} bytes)"
         fi
@@ -333,9 +336,7 @@ if [[ -f "$MAIN_AUTH" && -s "$MAIN_AUTH" ]]; then
     if (( ENABLE_CODEX_BUILDER == 1 )) \
        && [[ -d "$HERMES_ROOT/profiles/codex-builder" ]]; then
         CB_AUTH="$HERMES_ROOT/profiles/codex-builder/auth.json"
-        CB_SIZE=0
-        [[ -f "$CB_AUTH" ]] && CB_SIZE=$(stat -c%s "$CB_AUTH" 2>/dev/null || echo 0)
-        if [[ "$CB_SIZE" -lt "$MAIN_SIZE" ]]; then
+        if [[ ! -f "$CB_AUTH" || "$MAIN_AUTH" -nt "$CB_AUTH" ]]; then
             cp "$MAIN_AUTH" "$CB_AUTH"
             log "propagated main/auth.json -> codex-builder/auth.json (${MAIN_SIZE} bytes, Hermes-LLM auth)"
         fi
@@ -354,9 +355,7 @@ if [[ -f "$MAIN_AUTH" && -s "$MAIN_AUTH" ]]; then
         chown 10001:10001 "$HERMES_ROOT/profiles/codex-builder/.codex" 2>/dev/null || true
         chmod 0700 "$HERMES_ROOT/profiles/codex-builder/.codex" 2>/dev/null || true
         CLI_AUTH="$HERMES_ROOT/profiles/codex-builder/.codex/auth.json"
-        CLI_SIZE=0
-        [[ -f "$CLI_AUTH" ]] && CLI_SIZE=$(stat -c%s "$CLI_AUTH" 2>/dev/null || echo 0)
-        if [[ "$CLI_SIZE" -lt "$MAIN_SIZE" ]]; then
+        if [[ ! -f "$CLI_AUTH" || "$MAIN_AUTH" -nt "$CLI_AUTH" ]]; then
             cp "$MAIN_AUTH" "$CLI_AUTH"
             log "propagated main/auth.json -> codex-builder/.codex/auth.json (${MAIN_SIZE} bytes, codex-CLI auth)"
         fi
