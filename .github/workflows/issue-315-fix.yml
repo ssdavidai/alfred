@@ -1,0 +1,25 @@
+name: issue-315-fix
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('packages/mcp-server/src/index.ts')
+          s=p.read_text()
+          old='  const hopsRaw = Number(env.MCP_TRUST_PROXY_HOPS ?? "");\n  app.set("trust proxy", Number.isFinite(hopsRaw) && hopsRaw >= 0 ? hopsRaw : 1);'
+          assert old in s
+          p.write_text(s.replace(old, '  app.set("trust proxy", createProxyTrust(env));'))
+          Path('.github/workflows/issue-315-fix.yml').unlink(missing_ok=True)
+          PY
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m 'fix(mcp): use validated proxy trust resolver'
+          git push
