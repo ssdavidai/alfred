@@ -23,6 +23,7 @@ import { getIngestDb, startIngestSweep, closeIngestDb } from "../db/ingest.js";
 import { getColdDb, closeColdDb } from "../db/cold.js";
 import { startCompactor, stopCompactor } from "../db/compactor.js";
 import { reconcileVaultIndex } from "../db/vaultIndex.js";
+import { sweepAuditRetention } from "../db/auditRetention.js";
 
 const apiKey = process.env.AAS_API_KEY;
 if (!apiKey) {
@@ -63,6 +64,11 @@ try {
   reconcileVaultIndex();
 } catch (err) {
   console.error(`[boot] vault_index reconcile failed (non-fatal): ${err}`);
+}
+try {
+  sweepAuditRetention();
+} catch (err) {
+  console.error(`[boot] audit retention sweep failed (non-fatal): ${err}`);
 }
 
 const port = parseInt(process.env.AAS_PORT ?? "3100", 10);
