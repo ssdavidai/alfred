@@ -91,7 +91,7 @@ def cmd_up(args: argparse.Namespace) -> None:
             _setup_logging_from_config(raw)
         from alfred.orchestrator import run_all
         from alfred._data import get_skills_dir
-        run_all(raw, only=args.only, skills_dir=get_skills_dir(), pid_path=pid_path, live_mode=live_mode)
+        run_all(raw, only=args.only, skills_dir=get_skills_dir(), pid_path=pid_path, live_mode=live_mode, config_path=getattr(args, 'config', None))
     else:
         # Daemon mode: re-exec as detached background process
         from alfred.daemon import spawn_daemon

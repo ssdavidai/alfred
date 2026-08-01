@@ -170,6 +170,7 @@ def run_all(
     skills_dir: Path | None = None,
     pid_path: Path | None = None,
     live_mode: bool = False,
+    config_path: str | None = None,
 ) -> None:
     """Start selected daemons as child processes with auto-restart."""
     if skills_dir is None:
@@ -221,6 +222,15 @@ def run_all(
         if not live_mode:
             print(f"  [{tool}] started (pid {p.pid})")
         return p
+
+    # #407: the durable worker-run claimant — executes the manual runs
+    # ctrl-api enqueues (janitor fix / distiller run). Without it every
+    # dashboard trigger 202'd into a ledger nothing ever read.
+    try:
+        from alfred.worker_runs import start_claimant
+        start_claimant(config_path)
+    except Exception as exc:  # noqa: BLE001
+        print(f"  [run-claimant] failed to start: {exc}")
 
     # Start all — stagger by 10s to avoid thundering herd on shared infra
     for i, tool in enumerate(tools):
