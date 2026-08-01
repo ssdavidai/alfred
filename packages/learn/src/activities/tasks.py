@@ -223,7 +223,7 @@ async def assemble_task_context(task: dict[str, Any]) -> str:
         matter = task.get("matter", task.get("initiative", ""))
         if matter:
             try:
-                matter_data = await client.read_record(matter)
+                matter_data = await client.read_record(_normalize_record_path(matter))
                 matter_content = _reconstruct_markdown(matter_data)
                 if matter_content:
                     parts.append("## Matter Context")
@@ -483,7 +483,7 @@ async def evaluate_consequentials(
                             break
                 if all_done:
                     # Update matter status to resolved
-                    matter_rec = await client.read_record(matter)
+                    matter_rec = await client.read_record(_normalize_record_path(matter))
                     raw = _reconstruct_markdown(matter_rec)
                     if raw:
                         from src.activities.vault import _apply_frontmatter_updates

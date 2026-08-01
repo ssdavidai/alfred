@@ -654,19 +654,32 @@ async def _load_active_instincts(force: bool = False) -> list[dict[str, Any]]:
 def _build_signal_text(signal_fm: dict[str, Any]) -> str:
     """Compose the signal-side text we score against each instinct.
 
-    Combines ``action_proposal.what`` + the raw quote (which carries
-    the original event content). We deliberately exclude the LLM
-    reasoning to avoid steering the matcher with the LLM's own
-    word choices for the proposed action.
+    #365 smoke follow-up: this used to feed ONLY ``action_proposal.what``
+    + ``raw_quote`` — so a signal whose proposal used other field names
+    scored against EMPTY text, and ``sender_domains`` patterns could only
+    ever match if the sender happened to appear inside the raw quote.
+    Under the old Jaccard scorer more text meant dilution; under
+    pattern-coverage scoring (#365) more text can only reveal matches,
+    so the headline (subject), sender fields and display body are now
+    included. LLM reasoning stays excluded to avoid steering the matcher
+    with the model's own word choices.
     """
     proposal = _parse_action_proposal(signal_fm.get("action_proposal")) or {}
     parts: list[str] = []
-    what = str(proposal.get("what") or "").strip()
-    if what:
-        parts.append(what)
-    raw_quote = str(signal_fm.get("raw_quote") or "").strip()
-    if raw_quote:
-        parts.append(raw_quote)
+    for v in (
+        signal_fm.get("display_headline"),
+        signal_fm.get("subject"),
+        signal_fm.get("sender"),
+        signal_fm.get("sender_email"),
+        signal_fm.get("sender_domain"),
+        proposal.get("what"),
+        proposal.get("summary"),
+        signal_fm.get("raw_quote"),
+        signal_fm.get("display_body"),
+    ):
+        s = str(v or "").strip()
+        if s:
+            parts.append(s)
     return " ".join(parts)
 
 

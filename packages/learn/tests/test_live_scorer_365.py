@@ -116,3 +116,41 @@ class TestConservativeEdges:
         """Some callers pass the frontmatter dict directly."""
         inst = {"input_patterns": {"sender_domains": ["github.com"]}}
         assert _score_signal_against_instinct(CI_SIGNAL_TEXT, inst) == 1.0
+
+
+class TestBuildSignalText:
+    """#365 smoke follow-up: the matcher's input text was only
+    action_proposal.what + raw_quote — a live-shaped state.db signal
+    (display_headline/display_body, proposal.summary) produced EMPTY
+    matcher text and a hard 0.0 score regardless of scorer quality."""
+
+    def test_state_db_signal_shape_is_matchable(self):
+        from src.activities.signal_actions import _build_signal_text
+
+        fm = {
+            "display_headline": "[ssdavidai/alfred] Run failed: build-learn - main",
+            "display_body": "From: GitHub <notifications@github.com>. Job build-learn failed.",
+            "action_proposal": {"summary": "Suppress this routine CI failure"},
+        }
+        text = _build_signal_text(fm)
+        assert "Run failed" in text
+        assert "github.com" in text
+
+    def test_end_to_end_state_db_shape_clears_floor(self):
+        from src.activities.signal_actions import _match_best_instinct
+
+        fm = {
+            "display_headline": "[ssdavidai/alfred] Run failed: build-learn - main",
+            "display_body": "From: GitHub <notifications@github.com>. Job build-learn failed after 22 minutes.",
+            "action_proposal": {"summary": "Suppress this routine CI failure"},
+        }
+        inst, score = _match_best_instinct(fm, [SUPPRESS_CI_INSTINCT])
+        assert inst is SUPPRESS_CI_INSTINCT
+        assert score >= MATCH_FLOOR
+
+    def test_legacy_fields_still_included(self):
+        from src.activities.signal_actions import _build_signal_text
+
+        fm = {"raw_quote": "the original quote", "action_proposal": {"what": "file it"}}
+        text = _build_signal_text(fm)
+        assert "original quote" in text and "file it" in text

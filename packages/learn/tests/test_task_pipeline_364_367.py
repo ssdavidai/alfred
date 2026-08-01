@@ -170,3 +170,26 @@ class TestConsequentialFollowUpShape:
         assert "status: queued" not in content
         assert "parent_matter:" in content
         assert "matter_ref:" in content
+
+
+class TestMatterRefNormalization:
+    """Smoke follow-up: live run showed GET /vault/records/[[matter/...]]
+    404 — matter refs need the same wikilink normalization as depends_on."""
+
+    def test_matter_resolution_normalizes_wikilink(self, monkeypatch):
+        fake_state = _FakeStateClient()
+        fake_vault = _FakeVaultClient(
+            records={"matter/house.md": {"frontmatter": {"status": "active"}}}
+        )
+        monkeypatch.setattr(tasks_mod, "StateClient", lambda _cfg: fake_state)
+        monkeypatch.setattr(tasks_mod, "VaultClient", lambda _cfg: fake_vault)
+
+        asyncio.run(
+            tasks_mod.evaluate_consequentials(
+                {"title": "Parent", "path": "task/parent.md", "matter": "[[matter/house]]"},
+                {"summary": "done", "follow_up_tasks": []},
+            )
+        )
+        # The matter read must hit the normalized path, not the wikilink.
+        assert "matter/house.md" in fake_vault.read_paths
+        assert all("[[" not in p for p in fake_vault.read_paths)

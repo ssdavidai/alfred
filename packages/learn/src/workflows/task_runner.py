@@ -88,11 +88,16 @@ class TaskRunnerWorkflow:
                     start_to_close_timeout=timedelta(seconds=30),
                 )
 
-                # 5. Execute via sessions_spawn
+                # 5. Execute via the Hermes workers gateway. The clerk
+                # completion budget is 900s (_CLERK_COMPLETION_BUDGET_SECONDS);
+                # the old 300s ceiling here guaranteed any task longer than
+                # 5 minutes died on activity timeout before the clerk budget
+                # was ever reached (#365/#366 smoke finding).
                 exec_result: dict[str, Any] = await workflow.execute_activity(
                     execute_task,
                     args=[task, context],
-                    start_to_close_timeout=timedelta(seconds=300),
+                    start_to_close_timeout=timedelta(seconds=960),
+                    heartbeat_timeout=timedelta(seconds=120),
                     retry_policy=RetryPolicy(maximum_attempts=2),
                 )
 
@@ -116,7 +121,10 @@ class TaskRunnerWorkflow:
                 follow_up_paths: list[str] = await workflow.execute_activity(
                     evaluate_consequentials,
                     args=[task, exec_result],
-                    start_to_close_timeout=timedelta(seconds=120),
+                    # Contains one clerk call; 120s starved it (same
+                    # budget-mismatch class as execute_task above).
+                    start_to_close_timeout=timedelta(seconds=300),
+                    heartbeat_timeout=timedelta(seconds=120),
                 )
 
                 result.created_follow_ups += len(follow_up_paths)
