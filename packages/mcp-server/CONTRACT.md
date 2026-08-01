@@ -271,3 +271,7 @@ Known stale-comment debt inside the package (safe to fix in-lane, they are
 comments not interfaces): `stdio-app.ts`/`hermes.ts`/`files.ts` headers still
 enumerate `plane` in the app list; `hermes-config.yaml.njk`'s "base 7 /
 7 baseline servers" counts predate the Plane removal.
+
+## Reverse-proxy trust and client identity
+
+Production must set exactly one bounded topology: `MCP_TRUST_PROXY_HOPS` (0–2; the supported single-VM Caddy/cloudflared path is `1`) or `MCP_TRUST_PROXY_IPS` (comma-separated CIDR allowlist). Startup fails when production has neither, both, or malformed/out-of-bound values. The ingress must overwrite or safely append forwarding headers; callers cannot select their rate-limit identity with arbitrary `X-Forwarded-For`.
