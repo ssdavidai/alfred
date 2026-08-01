@@ -169,11 +169,6 @@ INTERVAL_SCHEDULES = [
         "interval": timedelta(minutes=15),
     },
     {
-        "id": "al-session-tracker",
-        "workflow": "SessionTrackerWorkflow",
-        "interval": timedelta(minutes=15),
-    },
-    {
         "id": "al-learning",
         "workflow": "LearningWorkflow",
         "interval": timedelta(minutes=15),

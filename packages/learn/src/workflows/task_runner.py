@@ -55,25 +55,32 @@ class TaskRunnerWorkflow:
         for task in tasks[:5]:
             task_path = task.get("path", "unknown")
 
-            # 2. Check prerequisites
-            ready: bool = await workflow.execute_activity(
-                check_task_prerequisites,
-                args=[task],
-                start_to_close_timeout=timedelta(seconds=15),
-            )
-
-            if not ready:
-                result.skipped += 1
-                continue
-
-            # 3. Mark active
-            await workflow.execute_activity(
-                update_task_status,
-                args=[task, "active"],
-                start_to_close_timeout=timedelta(seconds=15),
-            )
-
+            # Steps 2-8 all live inside one try so a single poisoned task
+            # (e.g. a depends_on reference that can never resolve) marks
+            # THAT task failed and the loop moves on. Before #367, steps
+            # 2-3 sat outside the try: one bad task failed the whole run,
+            # and with the schedule's SKIP overlap policy a permanently
+            # failing task wedged the entire runner for days (322 skipped
+            # ticks on home).
             try:
+                # 2. Check prerequisites
+                ready: bool = await workflow.execute_activity(
+                    check_task_prerequisites,
+                    args=[task],
+                    start_to_close_timeout=timedelta(seconds=15),
+                )
+
+                if not ready:
+                    result.skipped += 1
+                    continue
+
+                # 3. Mark active
+                await workflow.execute_activity(
+                    update_task_status,
+                    args=[task, "active"],
+                    start_to_close_timeout=timedelta(seconds=15),
+                )
+
                 # 4. Assemble context
                 context: str = await workflow.execute_activity(
                     assemble_task_context,
@@ -116,12 +123,20 @@ class TaskRunnerWorkflow:
                 result.executed += 1
 
             except Exception:
-                # Mark task as blocked on failure
-                await workflow.execute_activity(
-                    update_task_status,
-                    args=[task, "blocked"],
-                    start_to_close_timeout=timedelta(seconds=15),
-                )
+                # Mark task as blocked on failure. Best-effort with a
+                # bounded retry: if even this write fails, count the
+                # failure and move on rather than wedging the run.
+                try:
+                    await workflow.execute_activity(
+                        update_task_status,
+                        args=[task, "blocked"],
+                        start_to_close_timeout=timedelta(seconds=15),
+                        retry_policy=RetryPolicy(maximum_attempts=3),
+                    )
+                except Exception:
+                    workflow.logger.warning(
+                        "task_runner: could not mark %s blocked", task_path
+                    )
                 result.failed += 1
 
         return result

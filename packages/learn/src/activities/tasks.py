@@ -17,6 +17,7 @@ from temporalio import activity
 
 from src.config import load_config
 from src.utils.retry_policy import raise_if_permanent
+from src.utils.state_client import StateClient
 from src.utils.vault_client import VaultClient
 
 
@@ -137,6 +138,7 @@ async def check_task_prerequisites(task: dict[str, Any]) -> bool:
         client = VaultClient(config)
         try:
             for dep_path in depends_on:
+                dep_path = _normalize_record_path(dep_path)
                 try:
                     dep = await client.read_record(dep_path)
                 except httpx.HTTPStatusError as exc:
@@ -450,6 +452,24 @@ async def complete_task(task: dict[str, Any], result: dict[str, Any]) -> None:
         await client.close()
 
 
+def _normalize_record_path(ref: str) -> str:
+    """Normalize a relationship reference to a bare vault record path.
+
+    Vault authors (and Obsidian itself) write relationships as wikilinks —
+    ``[[task/foo]]`` or ``[[task/foo|Alias]]`` — which is the vault's own
+    documented convention. Readers must strip that syntax before using the
+    value as an API path: on home a raw wikilink in ``depends_on`` produced
+    ``GET /vault/records/%5B%5Btask/...%5D%5D`` → 404 on every attempt and
+    wedged the al-task-runner schedule for 3 days (#367).
+    """
+    ref = str(ref).strip()
+    if ref.startswith("[[") and ref.endswith("]]"):
+        ref = ref[2:-2].split("|", 1)[0].strip()
+    if ref and "/" in ref and not ref.endswith(".md"):
+        ref += ".md"
+    return ref
+
+
 def _sanitize_yaml_scalar(value: str) -> str:
     """Escape a string for safe use inside a quoted YAML scalar.
 
@@ -472,40 +492,27 @@ async def write_ledger_entry(
     """Write a ledger entry to vault recording task completion.
 
     Ledger entries are the completion record — what was done, by whom,
-    and what it affected.
+    and what it affected. They are machine bookkeeping, not something the
+    principal reads in the vault: ``ledger_entry`` was never a canonical
+    vault type, so the old vault write was a guaranteed promotion-contract
+    422 on every attempt (#364, the same class that wedged session-tracker
+    for 9 days). Demoted to the audit table per CLAUDE.md §5.1.
 
-    Returns the created ledger entry path.
+    Returns the created audit row id.
     """
     config = load_config()
-    client = VaultClient(config)
+    client = StateClient(config)
     try:
-        from src.activities.vault import vault_record_path, slugify
-
-        now = datetime.now(timezone.utc)
-        title = _sanitize_yaml_scalar(
-            task.get("title", task.get("name", "Untitled Task"))
+        title = task.get("title", task.get("name", "Untitled Task"))
+        return await client.append_audit(
+            action_type="task-completed",
+            actor="alfred",
+            summary=f"Completed: {title} — {result.get('summary', 'No summary')}",
+            source="task_runner.write_ledger_entry",
+            target_path=task.get("path") or None,
+            target_kind="task",
+            subject_ref=task.get("matter", task.get("initiative", "")) or None,
         )
-        matter = task.get("matter", task.get("initiative", ""))
-        summary = _sanitize_yaml_scalar(result.get("summary", "No summary"))
-
-        content = f"""---
-type: ledger_entry
-title: "Completed: {title}"
-source_task: "{task.get('path', '')}"
-matter: "{matter}"
-summary: "{summary}"
-entities_affected: []
-created: "{now.isoformat()}"
-tags: [consequential]
----
-
-# Completed: {title}
-
-{summary}
-"""
-        name = vault_record_path("ledger_entry", slugify(f"completed-{title}"), now)
-        path = await client.write_record("ledger_entry", name, content)
-        return path
     finally:
         await client.close()
 
@@ -600,12 +607,15 @@ async def evaluate_consequentials(
 
             content = f"""---
 type: task
-status: queued
+status: todo
+state: pending
 title: "{fu_title}"
 owner: "{owner}"
 tier: 2
 source_task: "{task.get('path', '')}"
 matter: "{matter}"
+parent_matter: "{matter}"
+matter_ref: "{matter}"
 created: "{now.isoformat()}"
 created_by: consequential
 priority: medium

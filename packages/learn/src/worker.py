@@ -13,7 +13,6 @@ from src.config import load_config
 
 # Workflows
 from src.workflows.event_processor import EventProcessorWorkflow
-from src.workflows.session_tracker import SessionTrackerWorkflow
 from src.workflows.learning import LearningWorkflow
 from src.workflows.reflection import ReflectionWorkflow
 from src.workflows.judgment import JudgmentWorkflow
@@ -216,16 +215,10 @@ from src.activities.classify import (
     extract_metadata,
 )
 
-# Activities — session
-from src.activities.session import (
-    append_to_session,
-    close_session,
-    create_session,
-    detect_session_boundaries,
-    fetch_recent_records,
-    read_session_state,
-    write_session_state,
-)
+# #364: the session activity module was deleted along with
+# SessionTrackerWorkflow — "session" was never a canonical vault type, so
+# create_session 422'd on every attempt since day one and nothing consumes
+# session records.
 
 # Activities — notify
 from src.activities.notify import notify_digest_ready, notify_eod_prompt, escalate_to_user
@@ -778,7 +771,6 @@ def _spawn_workflow_audit(event: dict[str, str]) -> None:
 
 _STATIC_WORKFLOWS = [
     EventProcessorWorkflow,
-    SessionTrackerWorkflow,
     LearningWorkflow,
     ReflectionWorkflow,
     JudgmentWorkflow,
@@ -906,14 +898,6 @@ ALL_ACTIVITIES = [
     # Classify
     classify_event,
     extract_metadata,
-    # Session
-    append_to_session,
-    close_session,
-    create_session,
-    detect_session_boundaries,
-    fetch_recent_records,
-    read_session_state,
-    write_session_state,
     # Notify
     notify_digest_ready,
     notify_eod_prompt,
