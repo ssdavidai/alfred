@@ -16,7 +16,7 @@ from src.workflows.event_processor import EventProcessorWorkflow
 from src.workflows.learning import LearningWorkflow
 from src.workflows.reflection import ReflectionWorkflow
 from src.workflows.media_ingestion import MediaIngestionWorkflow
-from src.workflows.task_runner import TaskRunnerWorkflow
+from src.workflows.task_runner import BlockedTaskRecoveryWorkflow, TaskRunnerWorkflow
 from src.workflows.stream_puller import StreamPullerWorkflow, StreamSweepWorkflow
 from src.workflows.onboarding_pipeline import OnboardingPipelineWorkflow
 from src.workflows.omi_processor import OmiAudioProcessorWorkflow
@@ -299,6 +299,7 @@ from src.activities.tasks import (
     assemble_task_context,
     check_task_prerequisites,
     complete_task,
+    recover_stale_blocked_tasks,
     evaluate_consequentials,
     execute_task,
     fetch_queued_tasks,
@@ -772,6 +773,7 @@ _STATIC_WORKFLOWS = [
     ReflectionWorkflow,
     MediaIngestionWorkflow,
     TaskRunnerWorkflow,
+    BlockedTaskRecoveryWorkflow,
     # StreamPullerWorkflow kept registered as a tombstone (#53): no
     # longer scheduled per-stream, but callable ad-hoc and harmless to
     # register. StreamSweepWorkflow is the scheduled entity.
@@ -913,6 +915,7 @@ ALL_ACTIVITIES = [
     assemble_task_context,
     check_task_prerequisites,
     complete_task,
+    recover_stale_blocked_tasks,
     evaluate_consequentials,
     execute_task,
     fetch_queued_tasks,

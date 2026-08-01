@@ -22,6 +22,7 @@ with workflow.unsafe.imports_passed_through():
         evaluate_consequentials,
         execute_task,
         fetch_queued_tasks,
+        recover_stale_blocked_tasks,
         update_task_status,
         write_task_artifacts,
     )
@@ -137,7 +138,14 @@ class TaskRunnerWorkflow:
                 try:
                     await workflow.execute_activity(
                         update_task_status,
-                        args=[task, "blocked"],
+                        # #399: stamp WHY, with the transient signature the
+                        # recovery sweep keys on — an exception block is
+                        # retryable state, a considered LLM block is not.
+                        args=[
+                            task,
+                            "blocked",
+                            "transient-execution-error: runner exception",
+                        ],
                         start_to_close_timeout=timedelta(seconds=15),
                         retry_policy=RetryPolicy(maximum_attempts=3),
                     )
@@ -148,3 +156,22 @@ class TaskRunnerWorkflow:
                 result.failed += 1
 
         return result
+
+
+@workflow.defn(name="BlockedTaskRecoveryWorkflow")
+class BlockedTaskRecoveryWorkflow:
+    """#399 — bounded recovery for transient-error-blocked tasks.
+
+    Own workflow (not a TaskRunner pre-pass) so the deployed
+    TaskRunnerWorkflow's replay history is untouched. Scheduled as
+    ``al-blocked-task-recovery`` every 6h; the sweep itself is a no-op
+    when nothing carries the transient signature.
+    """
+
+    @workflow.run
+    async def run(self) -> dict:
+        return await workflow.execute_activity(
+            recover_stale_blocked_tasks,
+            start_to_close_timeout=timedelta(seconds=120),
+            retry_policy=RetryPolicy(maximum_attempts=2),
+        )

@@ -169,6 +169,11 @@ INTERVAL_SCHEDULES = [
         "interval": timedelta(minutes=15),
     },
     {
+        "id": "al-blocked-task-recovery",
+        "workflow": "BlockedTaskRecoveryWorkflow",
+        "interval": timedelta(hours=6),
+    },
+    {
         "id": "al-learning",
         "workflow": "LearningWorkflow",
         "interval": timedelta(minutes=15),

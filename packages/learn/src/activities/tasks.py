@@ -163,8 +163,19 @@ async def check_task_prerequisites(task: dict[str, Any]) -> bool:
 
 
 @activity.defn
-async def update_task_status(task: dict[str, Any], new_status: str) -> None:
-    """Update a task's status field in the vault."""
+async def update_task_status(
+    task: dict[str, Any],
+    new_status: str,
+    blocked_reason: str | None = None,
+) -> None:
+    """Update a task's status field in the vault.
+
+    #399: when the runner blocks a task on an EXCEPTION (vs a considered
+    LLM "blocked" verdict), it passes ``blocked_reason`` so the record
+    says WHY — before this, exception-blocked tasks were indistinguishable
+    from principal-blocked ones, and the recovery sweep needs the
+    transient-error signature to know what is safe to retry.
+    """
     config = load_config()
     client = VaultClient(config)
     try:
@@ -177,8 +188,15 @@ async def update_task_status(task: dict[str, Any], new_status: str) -> None:
         if not raw:
             return
 
+        updates: dict[str, Any] = {"status": new_status}
+        if blocked_reason:
+            updates["blocked_by"] = [str(blocked_reason)[:300]]
+            updates["blocked_at"] = datetime.now(timezone.utc).isoformat(
+                timespec="seconds"
+            )
+
         from src.activities.vault import _apply_frontmatter_updates
-        updated = _apply_frontmatter_updates(raw, {"status": new_status})
+        updated = _apply_frontmatter_updates(raw, updates)
         await client.write_record("task", path, updated)
     finally:
         await client.close()
@@ -681,3 +699,99 @@ def _extract_task_result(text: str, task_title: str) -> dict[str, Any]:
         "summary": f"Completed: {task_title}",
         "follow_up_tasks": [],
     }
+
+
+@activity.defn
+async def recover_stale_blocked_tasks(
+    min_age_hours: int = 6,
+    max_recoveries: int = 3,
+) -> dict[str, Any]:
+    """Un-block tasks stranded by TRANSIENT execution failures (#399).
+
+    The runner marks a task blocked when execute_task throws (correct —
+    billing/auth errors must not retry blindly), but nothing ever
+    revisited them: a systemic clerk outage would permanently strand
+    every task touched during the window. This sweep flips ONLY tasks
+    whose ``blocked_by`` carries the runner's transient-error signature
+    back to ``todo`` — bounded per task (``recovery_attempts``), so a
+    genuinely broken task parks after ``max_recoveries``. Tasks blocked
+    by the principal or by an LLM "blocked" verdict are never touched.
+    """
+    from src.activities.vault import _apply_frontmatter_updates
+    from src.utils.state_client import StateClient
+
+    now = datetime.now(timezone.utc)
+    recovered = 0
+    parked = 0
+    config = load_config()
+    client = VaultClient(config)
+    state = StateClient(config)
+    try:
+        stubs = await client.list_records("task", status="blocked")
+        for stub in stubs:
+            path = stub.get("path", "")
+            fm = stub.get("frontmatter") or {}
+            if not path or not isinstance(fm, dict):
+                continue
+            blocked_by = fm.get("blocked_by")
+            first = ""
+            if isinstance(blocked_by, list) and blocked_by:
+                first = str(blocked_by[0])
+            elif isinstance(blocked_by, str):
+                first = blocked_by
+            if not first.startswith("transient-execution-error"):
+                continue
+            blocked_at_raw = str(fm.get("blocked_at") or "")
+            try:
+                blocked_at = datetime.fromisoformat(
+                    blocked_at_raw.replace("Z", "+00:00")
+                )
+                if blocked_at.tzinfo is None:
+                    blocked_at = blocked_at.replace(tzinfo=timezone.utc)
+            except ValueError:
+                blocked_at = None
+            if blocked_at is not None and (
+                now - blocked_at
+            ).total_seconds() < min_age_hours * 3600:
+                continue
+            attempts = int(fm.get("recovery_attempts") or 0)
+            full = await client.read_record(path)
+            raw = _reconstruct_markdown(full)
+            if not raw:
+                continue
+            if attempts >= max_recoveries:
+                updated = _apply_frontmatter_updates(
+                    raw, {"blocked_by": [f"{first} (recovery exhausted)"]}
+                )
+                await client.write_record("task", path, updated)
+                await state.append_audit(
+                    action_type="task_recovery",
+                    actor="alfred-learn",
+                    summary=f"task {path} parked after {attempts} recoveries",
+                    source="task_runner.recover_stale_blocked_tasks",
+                    target_path=path,
+                    target_kind="task",
+                )
+                parked += 1
+                continue
+            updated = _apply_frontmatter_updates(
+                raw,
+                {"status": "todo", "recovery_attempts": attempts + 1},
+            )
+            await client.write_record("task", path, updated)
+            await state.append_audit(
+                action_type="task_recovery",
+                actor="alfred-learn",
+                summary=(
+                    f"task {path} recovered blocked->todo "
+                    f"(attempt {attempts + 1}/{max_recoveries})"
+                ),
+                source="task_runner.recover_stale_blocked_tasks",
+                target_path=path,
+                target_kind="task",
+            )
+            recovered += 1
+    finally:
+        await client.close()
+        await state.close()
+    return {"recovered": recovered, "parked": parked}
