@@ -271,3 +271,9 @@ Known stale-comment debt inside the package (safe to fix in-lane, they are
 comments not interfaces): `stdio-app.ts`/`hermes.ts`/`files.ts` headers still
 enumerate `plane` in the app list; `hermes-config.yaml.njk`'s "base 7 /
 7 baseline servers" counts predate the Plane removal.
+
+## Reverse-proxy trust and client identity
+
+The HTTP server must not use permissive Express proxy trust. Production deployments must set exactly one bounded topology: `MCP_TRUST_PROXY_HOPS` (currently 0–2, with the supported single-VM Caddy/cloudflared path set to `1`) or `MCP_TRUST_PROXY_IPS` (a comma-separated CIDR allowlist). The server fails during startup when production has neither, both, malformed values, or a hop count outside the bound.
+
+The proxy must overwrite or safely append the forwarding headers it owns. Clients must not be able to select their rate-limit identity by supplying arbitrary `X-Forwarded-For` values. Direct, trusted single-hop, spoofed, multi-hop, and malformed forwarding-header cases are covered by the proxy-trust tests.

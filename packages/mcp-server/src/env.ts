@@ -18,6 +18,9 @@ export interface Env {
   TENANT_LABEL: string;
   /** HTTP listen port. Default 8787. */
   PORT?: string;
+  NODE_ENV?: string;
+  MCP_TRUST_PROXY_HOPS?: string;
+  MCP_TRUST_PROXY_IPS?: string;
 }
 
 export function loadEnv(): Env {
@@ -34,5 +37,8 @@ export function loadEnv(): Env {
     PUBLIC_URL: required("PUBLIC_URL"),
     TENANT_LABEL: required("TENANT_LABEL"),
     PORT: process.env.PORT,
+    NODE_ENV: process.env.NODE_ENV,
+    MCP_TRUST_PROXY_HOPS: process.env.MCP_TRUST_PROXY_HOPS,
+    MCP_TRUST_PROXY_IPS: process.env.MCP_TRUST_PROXY_IPS,
   };
 }

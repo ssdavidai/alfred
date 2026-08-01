@@ -17,6 +17,7 @@ import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middlew
 import type { ZodObject, ZodRawShape } from "zod";
 
 import { loadEnv } from "./env.js";
+import { createProxyTrust } from "./http/proxyTrust.js";
 import { OAuthStorage } from "./oauth/storage.js";
 import type { ScopedTokenRow } from "./oauth/storage.js";
 import { SqliteOAuthProvider, issueAuthCode, timingSafeEqual } from "./oauth/provider.js";
