@@ -174,11 +174,6 @@ INTERVAL_SCHEDULES = [
         "interval": timedelta(minutes=15),
     },
     {
-        "id": "al-judgment",
-        "workflow": "JudgmentWorkflow",
-        "interval": timedelta(minutes=15),
-    },
-    {
         "id": "al-task-runner",
         "workflow": "TaskRunnerWorkflow",
         "interval": timedelta(minutes=15),
