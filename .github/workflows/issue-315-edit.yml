@@ -1,0 +1,58 @@
+name: issue-315-edit
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  edit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply bounded proxy trust fix
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          env = Path('packages/mcp-server/src/env.ts')
+          s = env.read_text()
+          s = s.replace('  PORT?: string;\n}', '  PORT?: string;\n  NODE_ENV?: string;\n  MCP_TRUST_PROXY_HOPS?: string;\n  MCP_TRUST_PROXY_IPS?: string;\n}')
+          s = s.replace('    PORT: process.env.PORT,\n', '    PORT: process.env.PORT,\n    NODE_ENV: process.env.NODE_ENV,\n    MCP_TRUST_PROXY_HOPS: process.env.MCP_TRUST_PROXY_HOPS,\n    MCP_TRUST_PROXY_IPS: process.env.MCP_TRUST_PROXY_IPS,\n')
+          env.write_text(s)
+
+          index = Path('packages/mcp-server/src/index.ts')
+          s = index.read_text()
+          s = s.replace('import { loadEnv } from "./env.js";', 'import { loadEnv } from "./env.js";\nimport { createProxyTrust } from "./http/proxyTrust.js";')
+          s = s.replace('app.set("trust proxy", true); // behind cloudflared', 'app.set("trust proxy", createProxyTrust(env));')
+          index.write_text(s)
+
+          proxy = Path('packages/mcp-server/src/http/proxyTrust.ts')
+          proxy.parent.mkdir(parents=True, exist_ok=True)
+          proxy.write_text('''import proxyaddr from "proxy-addr";\n\nexport interface ProxyTrustEnv {\n  NODE_ENV?: string;\n  MCP_TRUST_PROXY_HOPS?: string;\n  MCP_TRUST_PROXY_IPS?: string;\n}\n\nconst MAX_TRUSTED_HOPS = 2;\n\nfunction parseHops(raw: string | undefined): number | undefined {\n  if (raw == null || raw.trim() === "") return undefined;\n  if (!/^[0-9]+$/.test(raw.trim())) throw new Error("MCP_TRUST_PROXY_HOPS must be a non-negative integer");\n  const hops = Number(raw);\n  if (!Number.isSafeInteger(hops) || hops > MAX_TRUSTED_HOPS) {\n    throw new Error(`MCP_TRUST_PROXY_HOPS must be between 0 and ${MAX_TRUSTED_HOPS}`);\n  }\n  return hops;\n}\n\nexport function createProxyTrust(env: ProxyTrustEnv): number | ((ip: string, index: number) => boolean) {\n  const production = env.NODE_ENV === "production";\n  const hops = parseHops(env.MCP_TRUST_PROXY_HOPS);\n  const cidrs = (env.MCP_TRUST_PROXY_IPS ?? "").split(",").map((v) => v.trim()).filter(Boolean);\n  if (hops !== undefined && cidrs.length > 0) throw new Error("Set only one of MCP_TRUST_PROXY_HOPS or MCP_TRUST_PROXY_IPS");\n  if (hops !== undefined) return hops;\n  if (cidrs.length > 0) {\n    let trust: (ip: string) => boolean;\n    try { trust = proxyaddr.compile(cidrs); } catch { throw new Error("MCP_TRUST_PROXY_IPS contains an invalid CIDR"); }\n    return (ip, index) => index <= MAX_TRUSTED_HOPS && trust(ip);\n  }\n  if (production) throw new Error("Production requires MCP_TRUST_PROXY_HOPS or MCP_TRUST_PROXY_IPS; refusing permissive proxy trust");\n  return 0;\n}\n''')
+
+          test = Path('packages/mcp-server/src/http/proxyTrust.test.ts')
+          test.write_text('''import assert from "node:assert/strict";\nimport test from "node:test";\nimport { createProxyTrust } from "./proxyTrust.js";\n\ntest("direct requests trust no proxy", () => {\n  assert.equal(createProxyTrust({ NODE_ENV: "test" }), 0);\n});\n\ntest("production fails closed without explicit topology", () => {\n  assert.throws(() => createProxyTrust({ NODE_ENV: "production" }), /requires MCP_TRUST_PROXY/);\n});\n\ntest("trusted single-hop topology is bounded", () => {\n  const trust = createProxyTrust({ NODE_ENV: "production", MCP_TRUST_PROXY_HOPS: "1" });\n  assert.equal(trust, 1);\n});\n\ntest("spoof-resistant configuration rejects unbounded and malformed values", () => {\n  assert.throws(() => createProxyTrust({ NODE_ENV: "production", MCP_TRUST_PROXY_HOPS: "3" }), /between 0 and 2/);\n  assert.throws(() => createProxyTrust({ NODE_ENV: "production", MCP_TRUST_PROXY_HOPS: "x-forwarded-for" }), /non-negative integer/);\n  assert.throws(() => createProxyTrust({ NODE_ENV: "production", MCP_TRUST_PROXY_HOPS: "1", MCP_TRUST_PROXY_IPS: "127.0.0.1/8" }), /only one/);\n});\n\ntest("CIDR trust is limited to the configured proxy network and hop bound", () => {\n  const trust = createProxyTrust({ NODE_ENV: "production", MCP_TRUST_PROXY_IPS: "10.0.0.0/8" });\n  assert.equal(typeof trust, "function");\n  assert.equal((trust as (ip: string, index: number) => boolean)("10.1.2.3", 0), true);\n  assert.equal((trust as (ip: string, index: number) => boolean)("192.0.2.1", 0), false);\n  assert.equal((trust as (ip: string, index: number) => boolean)("10.1.2.3", 3), false);\n});\n''')
+
+          env_example = Path('.env.example')
+          s = env_example.read_text()
+          marker = '# MCP server tool-approval signing secret.'
+          addition = '# Express proxy trust: production must declare the bounded ingress topology.\n# Caddy/cloudflared is one hop in the supported single-VM deployment.\nMCP_TRUST_PROXY_HOPS=1\n# Alternative: comma-separated trusted proxy CIDRs (do not set both).\n# MCP_TRUST_PROXY_IPS=10.0.0.0/8\n\n'
+          if 'MCP_TRUST_PROXY_HOPS=' not in s:
+              s = s.replace(marker, addition + marker)
+          env_example.write_text(s)
+
+          contract = Path('packages/mcp-server/CONTRACT.md')
+          s = contract.read_text()
+          section = '''\n## Reverse-proxy trust and client identity\n\nThe HTTP server must not use permissive Express proxy trust. Production deployments must set exactly one bounded topology: `MCP_TRUST_PROXY_HOPS` (currently 0–2, with the supported single-VM Caddy/cloudflared path set to `1`) or `MCP_TRUST_PROXY_IPS` (a comma-separated CIDR allowlist). The server fails during startup when production has neither, both, malformed values, or a hop count outside the bound.\n\nThe proxy must overwrite or safely append the forwarding headers it owns. Clients must not be able to select their rate-limit identity by supplying arbitrary `X-Forwarded-For` values. Direct, trusted single-hop, spoofed, multi-hop, and malformed forwarding-header cases are covered by the proxy-trust tests.\n'''
+          if '## Reverse-proxy trust and client identity' not in s:
+              s += section
+          contract.write_text(s)
+
+          Path('.github/workflows/issue-315-edit.yml').unlink()
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'fix(mcp): bound production proxy trust and client identity'
+          git push
