@@ -79,16 +79,24 @@ Current record content:
 - `status`: Only if clearly determinable from context
 - Do NOT overwrite fields that already have values
 
+## How to answer — JSON ONLY, no tools
+
+You do NOT edit anything. You only PROPOSE. The janitor applies your
+proposal deterministically in Python (#288 L3 — the old contract asked
+you to run a CLI that does not exist in your environment, so no
+enrichment ever landed).
+
+Reply with ONLY this JSON object and nothing else:
+
+```json
+{{"frontmatter_updates": {{"<field>": "<value>"}}, "body_append": "<markdown to append, or empty string>"}}
+```
+
+If you cannot enrich meaningfully, reply: `{{"frontmatter_updates": {{}}, "body_append": ""}}`
+
 ## Rules
 
-- Modify ONLY the file `{file_path}`. Do not touch any other file.
-- Do NOT create or delete any files.
-- Do NOT remove base view embeds (`![[*.base#Section]]`)
-- APPEND to the body, never replace existing content
+- frontmatter_updates may ONLY contain fields that are currently empty — never overwrite existing values.
+- body_append is APPENDED — never a replacement. Do NOT include base view embeds.
 - Write in English. Keep proper nouns in original form.
-- Every fact you write MUST be traceable to either the vault context above or verifiable public information.
-- If you cannot enrich meaningfully, output "SKIP: insufficient context" and do nothing.
-
----
-
-{vault_cli_reference}
+- Every fact MUST be traceable to the vault context above or verifiable public information.

@@ -147,6 +147,25 @@ async def _call_llm(
 # ---------------------------------------------------------------------------
 
 
+
+def _parse_llm_json(raw: str) -> dict:
+    """Best-effort JSON object extraction from an agent reply (#288 L3).
+
+    The agent is instructed to reply with pure JSON, but wrappers add
+    fences/prose. Slice first '{' .. last '}' and parse; {} on failure.
+    """
+    if not raw:
+        return {}
+    start, end = raw.find("{"), raw.rfind("}")
+    if start < 0 or end <= start:
+        return {}
+    try:
+        obj = json.loads(raw[start:end + 1])
+        return obj if isinstance(obj, dict) else {}
+    except (json.JSONDecodeError, ValueError):
+        return {}
+
+
 def _find_link_candidates(
     broken_target: str,
     vault_path: Path,
@@ -327,20 +346,28 @@ async def _stage2_link_repair(
         safe_name = re.sub(r'[^a-zA-Z0-9_-]', '', broken_target.replace(' ', '-').replace('/', '-'))[:30]
         stage_label = f"s2-link-{safe_name}"
 
-        # Snapshot file mtime before LLM call to detect actual changes.
-        # The mutation log doesn't work cross-container (openclaw-wrapper
-        # sends prompts via HTTP to the openclaw container which doesn't
-        # have ALFRED_VAULT_SESSION), so we check the filesystem directly.
-        target_path = config.vault.vault_path / issue.file
-        before_mtime = target_path.stat().st_mtime if target_path.exists() else 0
-
-        await _call_llm(prompt, config, session_path, stage_label)
-
-        after_mtime = target_path.stat().st_mtime if target_path.exists() else 0
-        if after_mtime > before_mtime:
-            repaired += 1
-
-        log.info("pipeline.s2_llm_repair", file=issue.file, target=broken_target)
+        # #288 L3: the agent CHOOSES, Python APPLIES. The old contract told
+        # the agent to run `alfred vault edit` — a CLI that does not exist
+        # in its container — so every ambiguous repair failed, re-queued
+        # next sweep, and (pre-L1/L2) spammed the principal with the
+        # failure dumps. Same write path as the unambiguous branch above.
+        raw = await _call_llm(prompt, config, session_path, stage_label)
+        choice = _parse_llm_json(raw).get("chosen")
+        valid_names = {c.get("name", c["path"]) for c in candidates}
+        if isinstance(choice, str) and choice in valid_names:
+            if _fix_link_in_python(
+                issue.file, broken_target, choice, vault_path, session_path
+            ):
+                repaired += 1
+                log.info(
+                    "pipeline.s2_fixed_llm_choice",
+                    file=issue.file, old=broken_target, new=choice,
+                )
+        else:
+            log.info(
+                "pipeline.s2_llm_skip",
+                file=issue.file, target=broken_target, choice=str(choice)[:60],
+            )
 
     log.info("pipeline.s2_complete", repaired=repaired)
     return repaired
@@ -459,6 +486,15 @@ async def _stage3_enrich(
         log.warning("pipeline.s3_no_template")
         return 0
 
+    # #288 L4: never "enrich" scaffolding. Template/docs files are not
+    # thin records — they are deliberately skeletal, and LLM-enriching
+    # them (observed live on zsolt: person-Your-Name, project-My-Project,
+    # _docs/*) is pure token waste that also corrupts the templates.
+    stub_issues = [
+        i for i in stub_issues
+        if not str(i.file).startswith(("_templates/", "_docs/", "_template"))
+    ]
+
     # Issue #15: filter out stale stubs (enrichment exhausted, content unchanged)
     if state is not None:
         filtered: list[Issue] = []
@@ -527,10 +563,11 @@ async def _stage3_enrich(
         type_schema = _load_type_schema(record_type) if record_type else "(unknown type)"
 
         # Collect linked records for context
-        linked_records = _collect_linked_records(file_path, vault_path, ignore_dirs)
+        linked_records = _collect_linked_records(file_path, vault_path, ignore_dirs)[:24_000]
 
-        # Format current record content
-        record_content = json.dumps(record, indent=2, default=str)
+        # Format current record content. #288: cap the interpolations —
+        # a 696k-char prompt (TSMC record on zsolt) crashed the stage.
+        record_content = json.dumps(record, indent=2, default=str)[:16_000]
 
         prompt = template.format(
             file_path=file_path,
@@ -545,8 +582,33 @@ async def _stage3_enrich(
         safe_name = re.sub(r'[^a-zA-Z0-9_-]', '', record_name.replace(' ', '-'))[:30]
         stage_label = f"s3-enrich-{safe_name}"
 
-        await _call_llm(prompt, config, session_path, stage_label)
-        enriched += 1
+        # #288 L3: the agent PROPOSES, Python APPLIES (same rationale as
+        # stage 2 — the old CLI contract could never land a write).
+        raw = await _call_llm(prompt, config, session_path, stage_label)
+        proposal = _parse_llm_json(raw)
+        fm_updates = proposal.get("frontmatter_updates") or {}
+        body_append = str(proposal.get("body_append") or "").strip()
+        # Only fill EMPTY fields — never overwrite.
+        safe_updates = {
+            k: v for k, v in fm_updates.items()
+            if isinstance(k, str) and not fm.get(k)
+        }
+        if not safe_updates and not body_append:
+            log.info("pipeline.s3_llm_skip", file=file_path)
+            if state is not None:
+                state.record_enrichment_attempt(file_path, max_attempts)
+            continue
+        try:
+            from ..vault.ops import vault_edit
+            vault_edit(
+                vault_path,
+                file_path,
+                set_fields=safe_updates or None,
+                body_append=("\n\n" + body_append) if body_append else None,
+            )
+            enriched += 1
+        except Exception as exc:  # noqa: BLE001
+            log.warning("pipeline.s3_apply_failed", file=file_path, err=str(exc)[:200])
 
         # Issue #15: track enrichment attempt in state
         if state is not None:

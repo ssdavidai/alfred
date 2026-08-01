@@ -26,23 +26,28 @@ The following vault records were found as possible matches for `[[{broken_target
 1. Read the file using `alfred vault read "{file_path}"`
 2. Examine the candidates above
 3. If ONE candidate is clearly the correct match, fix the link
-4. If you are NOT SURE, do NOTHING. Reply with "SKIP" and nothing else.
+4. If you are NOT SURE, choose null.
 
-## How to fix
+## How to answer — JSON ONLY, no tools
 
-- To fix a wikilink in the body: `alfred vault edit "{file_path}" --body-replace "[[{broken_target}]]" "[[correct/Target Name]]"`
-- To fix a wikilink in a frontmatter field: `alfred vault edit "{file_path}" --set field="[[correct/Target Name]]"`
+You do NOT edit anything. You only CHOOSE. The janitor applies your
+choice deterministically in Python (#288 L3 — the old contract asked you
+to run a CLI that does not exist in your environment, so no repair ever
+landed).
+
+Reply with ONLY this JSON object and nothing else:
+
+```json
+{{"chosen": "<the correct candidate name exactly as listed>"}}
+```
+
+or, when no candidate is clearly correct:
+
+```json
+{{"chosen": null}}
+```
 
 ## Rules — READ CAREFULLY
 
-- Fix ONLY the one broken link described above. Touch NOTHING else in the file.
-- Do NOT add any fields (no janitor_note, no tags, no metadata).
-- Do NOT modify the body text except for the exact wikilink replacement.
-- Do NOT rewrite, reformat, or "improve" any content.
-- Do NOT delete, move, or create any files.
-- Do NOT modify files other than `{file_path}`.
-- If unsure, do NOTHING. It is better to skip than to make a wrong fix.
-
----
-
-{vault_cli_reference}
+- "chosen" MUST be one of the candidate names listed above, verbatim, or null.
+- If unsure, null. It is better to skip than to pick a wrong link.
