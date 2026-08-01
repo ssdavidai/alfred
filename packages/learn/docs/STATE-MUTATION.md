@@ -660,3 +660,18 @@ This spec depends on, and respects:
 - Making briefings the sole source of truth for matter state. They are one writer.
 - Removing nightly_narrative. It stays, retrofitted.
 - Making Steward's confidence formula universal. Other writers default to `confidence=1.0` (deterministic logic + LLM reasoning that the writer trusts); confidence gating remains a Steward-specific safety belt.
+
+## 18. Steward's per-task emitter is shadow-by-design (#378)
+
+`steward.py`'s per-task `apply_state_change(..., mode="shadow")` call (the
+Phase 0.5 audit emitter, ~line 2840) **hardcodes shadow and deliberately
+bypasses the `state_mutator_mode` resolver**. The `/study` "Agent
+autonomy" toggle therefore does NOT govern this path — Steward's per-task
+sweep only ever writes audit rows, never frontmatter. This is a safety
+choice, not an oversight: flipping Steward's high-volume sweep to live
+mutation is a behavior change the principal must opt into knowingly (it
+would touch every task the sweep visits, versus the state_mutator's
+scoped, confidence-gated transitions). If that opt-in is ever wanted,
+route the call through the same resolver `state_mutator` uses and add a
+DEDICATED settings key — do not silently widen `state_mutator_mode` to
+cover it.

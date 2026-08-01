@@ -2180,3 +2180,107 @@ async def route_signal_action(
         }
     finally:
         await client.close()
+
+
+@activity.defn
+async def recover_stuck_dispatching_signals(
+    threshold_minutes: int = 30,
+    max_recoveries: int = 3,
+) -> dict[str, Any]:
+    """Recover signals stranded in ``status='dispatching'`` (#373).
+
+    ``dispatching`` is the #54 mark-before-dispatch guard state: if the
+    router dies between the mark and the dispatch (crash, OOM, gateway
+    outage), the signal is stranded forever — the router only selects
+    ``unrouted``. Decisions gained this sweep after the office-AC
+    incident (#282); signals never did.
+
+    Bounded exactly like #282's lesson demands: each recovery stamps
+    ``recovery_attempts`` in the payload; past ``max_recoveries`` the
+    signal is parked as ``routed_suppressed`` with an audit row instead
+    of looping. Recovery = flip back to ``unrouted`` so the next router
+    tick re-routes it through the normal (idempotency-guarded) path.
+    """
+    import json as _json
+    from datetime import datetime, timedelta, timezone
+
+    from src.config import load_config
+    from src.utils.state_client import StateClient
+
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(minutes=threshold_minutes)
+    recovered = 0
+    parked = 0
+    examined = 0
+
+    config = load_config()
+    client = StateClient(config)
+    try:
+        rows = await client.list_signals(status="dispatching", limit=100)
+        for row in rows:
+            sid = str(row.get("id") or "")
+            if not sid:
+                continue
+            updated_raw = str(row.get("updated_at") or row.get("ts") or "")
+            try:
+                updated = datetime.fromisoformat(
+                    updated_raw.replace("Z", "+00:00").replace(" ", "T")
+                )
+                if updated.tzinfo is None:
+                    updated = updated.replace(tzinfo=timezone.utc)
+            except ValueError:
+                updated = None
+            if updated is not None and updated > cutoff:
+                continue  # still fresh — a dispatch may be in flight
+            examined += 1
+
+            payload_raw = row.get("payload_json") or row.get("payload") or {}
+            if isinstance(payload_raw, str):
+                try:
+                    payload = _json.loads(payload_raw) or {}
+                except _json.JSONDecodeError:
+                    payload = {}
+            elif isinstance(payload_raw, dict):
+                payload = dict(payload_raw)
+            else:
+                payload = {}
+            attempts = int(payload.get("recovery_attempts") or 0)
+
+            if attempts >= max_recoveries:
+                await client.update_signal(sid, status="routed_suppressed")
+                await client.append_audit(
+                    action_type="signal_recovery",
+                    actor="alfred-learn",
+                    summary=(
+                        f"signal {sid} parked routed_suppressed after "
+                        f"{attempts} failed dispatch recoveries"
+                    ),
+                    source="signal_router.recover_stuck_dispatching_signals",
+                    subject_ref=sid,
+                )
+                parked += 1
+                continue
+
+            payload["recovery_attempts"] = attempts + 1
+            await client.update_signal(sid, status="unrouted", payload=payload)
+            await client.append_audit(
+                action_type="signal_recovery",
+                actor="alfred-learn",
+                summary=(
+                    f"signal {sid} recovered dispatching->unrouted "
+                    f"(attempt {attempts + 1}/{max_recoveries})"
+                ),
+                source="signal_router.recover_stuck_dispatching_signals",
+                subject_ref=sid,
+            )
+            recovered += 1
+    finally:
+        await client.close()
+
+    if examined:
+        logger.info(
+            "signal_actions.recover_stuck_dispatching_signals: "
+            "examined=%d recovered=%d parked=%d",
+            examined, recovered, parked,
+        )
+    return {"examined": examined, "recovered": recovered, "parked": parked}

@@ -1043,8 +1043,22 @@ def _render_task_content(
     # Sir-matter-task #4: ``closure_predicate`` (singular) — optional
     # field downstream tooling reads to distinguish "no predicate set"
     # from "field missing". Closure_predicates (plural) live in
-    # ``signal_sources[*].name`` per the existing schema.
-    lines.append("closure_predicate: null")
+    # ``signal_sources[*].name`` per the existing schema and feed
+    # Steward's gather_signals_* polling. #379: when the synthesized
+    # strings map onto a structured predicate kind, we ALSO stamp the
+    # singular field so TaskClosureWatcher's deterministic fast path
+    # (task_closure.evaluate_predicate) works for auto-created tasks —
+    # before this it evaluated nothing for them (dual mechanisms, one
+    # populated).
+    structured = _structured_predicate_from_strings(closure_predicates or [])
+    if structured is not None:
+        import json as _json
+
+        lines.append(
+            "closure_predicate: " + _yaml_inline_str(_json.dumps(structured))
+        )
+    else:
+        lines.append("closure_predicate: null")
     lines.append("surface_class: normal")
     lines.append("tags:")
     lines.append("  - auto-from-signal")
@@ -1065,6 +1079,40 @@ def _render_task_content(
         lines.append(f"Auto-created from signal: [[{wiki_target}]].")
         lines.append("")
     return "\n".join(lines)
+
+
+def _structured_predicate_from_strings(
+    predicates: list[str],
+) -> dict[str, object] | None:
+    """Map synthesized string predicates onto a structured closure predicate.
+
+    #379: the LLM-synthesized strings feed Steward's gather_signals_*
+    polling; TaskClosureWatcher's deterministic fast path consumes the
+    structured ``{kind, fields}`` shape instead. When the strings map
+    cleanly, populate BOTH. Payment evidence wins over gmail (a matched
+    transaction is the strongest deterministic closure signal);
+    gmail_from_subject requires both halves because the matcher rejects
+    a predicate missing either field.
+    """
+    gmail_from = ""
+    gmail_subject = ""
+    sure_term = ""
+    for raw in predicates:
+        s = str(raw or "").strip()
+        if s.startswith("sure:transaction:match:") and not sure_term:
+            sure_term = s[len("sure:transaction:match:"):].strip()
+        elif s.startswith("gmail:from:") and not gmail_from:
+            gmail_from = s[len("gmail:from:"):].strip()
+        elif s.startswith("gmail:subject_contains:") and not gmail_subject:
+            gmail_subject = s[len("gmail:subject_contains:"):].strip()
+    if sure_term:
+        return {"kind": "payment_to_merchant", "fields": {"merchant": sure_term}}
+    if gmail_from and gmail_subject:
+        return {
+            "kind": "gmail_from_subject",
+            "fields": {"from": gmail_from, "subject_contains": gmail_subject},
+        }
+    return None
 
 
 def _yaml_inline_str(value: str) -> str:

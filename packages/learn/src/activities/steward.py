@@ -2836,6 +2836,11 @@ async def evaluate_task(task_id: str, task_data: dict[str, Any]) -> dict[str, An
         await client.close()
 
     # 8. Audit trail (Phase 0.5 emitter, mode=shadow).
+    #
+    # #378: shadow is HARDCODED here by design — this per-task sweep only
+    # ever emits audit rows and deliberately ignores the
+    # `state_mutator_mode` setting (the /study toggle does not cover it).
+    # See docs/STATE-MUTATION.md §18 before "fixing" this.
     try:
         await apply_state_change(
             task_path,

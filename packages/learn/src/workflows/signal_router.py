@@ -72,7 +72,10 @@ from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
-    from src.activities.signal_actions import route_signal_action
+    from src.activities.signal_actions import (
+        recover_stuck_dispatching_signals,
+        route_signal_action,
+    )
     from src.activities.signal_mutations import (
         apply_signal_mutation,
         list_unrouted_signals,
@@ -236,6 +239,25 @@ class SignalRouterWorkflow:
             backoff_coefficient=2.0,
             maximum_interval=timedelta(seconds=15),
         )
+
+        # 0. Recover stranded `dispatching` signals (#373). Decisions have
+        # had this sweep since #282; signals had NO recovery path — a crash
+        # between the mark and the dispatch stranded the signal forever.
+        # Bounded (3 recoveries, then parked as routed_suppressed).
+        #
+        # DETERMINISM: new activity call inside a deployed workflow —
+        # gated per packages/learn/CLAUDE.md.
+        if workflow.patched("signal_stuck_recovery_v1"):
+            try:
+                await workflow.execute_activity(
+                    recover_stuck_dispatching_signals,
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=retry,
+                )
+            except Exception as exc:  # noqa: BLE001
+                workflow.logger.warning(
+                    "signal_router.stuck_recovery_failed err=%s", exc,
+                )
 
         # 1. List unrouted signals.
         try:

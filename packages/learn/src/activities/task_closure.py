@@ -209,6 +209,16 @@ def evaluate_predicate(
     ``"predicate:<kind>"`` so the closure decision body records which
     rule fired.
     """
+    if isinstance(predicate, str):
+        # #379: auto-created tasks store the structured predicate as an
+        # inline JSON string in frontmatter (flat-YAML-safe). Parse it
+        # so the deterministic fast path works for them too.
+        import json as _json
+
+        try:
+            predicate = _json.loads(predicate)
+        except (ValueError, TypeError):
+            return None
     if not isinstance(predicate, dict):
         return None
     kind = str(predicate.get("kind", "")).strip()

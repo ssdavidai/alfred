@@ -15,7 +15,6 @@ from src.config import load_config
 from src.workflows.event_processor import EventProcessorWorkflow
 from src.workflows.learning import LearningWorkflow
 from src.workflows.reflection import ReflectionWorkflow
-from src.workflows.judgment import JudgmentWorkflow
 from src.workflows.media_ingestion import MediaIngestionWorkflow
 from src.workflows.task_runner import TaskRunnerWorkflow
 from src.workflows.stream_puller import StreamPullerWorkflow, StreamSweepWorkflow
@@ -237,14 +236,11 @@ from src.activities.observe import (
 # Activities — reflect
 from src.activities.reflect import validate_proposals
 
-# Activities — judge
-from src.activities.judge import (
-    attempt_judgment,
-    execute_route,
-    fetch_unrouted_inputs,
-    load_intuition_index,
-    score_instincts,
-)
+# #374: the judge activity module was deleted with JudgmentWorkflow — it
+# was a confirmed-dead no-op (always routed 0 from an always-empty queue)
+# burning a workflow run every 15 minutes. Its activities had no other
+# caller. `src/matching/scorer.py` SURVIVES: decision_observations.py uses
+# it via instinct_match.best_instinct_path to stamp instinct_ref.
 
 # Activities — onboarding v2
 from src.activities.onboarding import (
@@ -561,6 +557,7 @@ from src.activities.signal_mutations import (
 # invocation time.
 from src.activities.signal_actions import (
     dispatch_action_to_agent,
+    recover_stuck_dispatching_signals,
     route_signal_action,
     write_needs_attention_record,
 )
@@ -773,7 +770,6 @@ _STATIC_WORKFLOWS = [
     EventProcessorWorkflow,
     LearningWorkflow,
     ReflectionWorkflow,
-    JudgmentWorkflow,
     MediaIngestionWorkflow,
     TaskRunnerWorkflow,
     # StreamPullerWorkflow kept registered as a tombstone (#53): no
@@ -913,11 +909,6 @@ ALL_ACTIVITIES = [
     # Reflect
     validate_proposals,
     # Judge
-    attempt_judgment,
-    execute_route,
-    fetch_unrouted_inputs,
-    load_intuition_index,
-    score_instincts,
     # Tasks
     assemble_task_context,
     check_task_prerequisites,
@@ -1163,6 +1154,7 @@ ALL_ACTIVITIES = [
     route_signal_action,
     dispatch_action_to_agent,
     write_needs_attention_record,
+    recover_stuck_dispatching_signals,
     # Steward Phase 6 (T6.7.5) — reversal-driven negative-feedback
     # calibration. Activity is gated on
     # STEWARD_REVERSAL_CALIBRATION_ENABLED at invocation time so
