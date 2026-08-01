@@ -352,7 +352,10 @@ async def complete_task(task: dict[str, Any], result: dict[str, Any]) -> None:
             "completed_at": now,
         }
         if result.get("blocked_reason"):
-            updates["blocked_by"] = result["blocked_reason"]
+            # #394: blocked_by is a LIST field — writing a bare string
+            # poisoned 3 live records against every subsequent PATCH
+            # (the daemon revalidates the whole frontmatter on any edit).
+            updates["blocked_by"] = [str(result["blocked_reason"])]
 
         updated = _apply_frontmatter_updates(raw, updates)
 
