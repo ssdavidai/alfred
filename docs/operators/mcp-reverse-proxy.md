@@ -1,7 +1,11 @@
 # MCP reverse-proxy trust and rate-limit identity
 
-The MCP HTTP server is exposed through the single Caddy ingress hop: `mcp.<DOMAIN> -> reverse_proxy mcp-server:8787`. Express must not use `trust proxy=true`: that accepts arbitrary `X-Forwarded-For` values and lets an untrusted caller evade IP-keyed OAuth rate limits.
+The MCP HTTP server must sit behind the supported reverse-proxy topology:
 
-Set `TRUST_PROXY_HOPS=1` for the supported Caddy deployment. The value is a bounded integer from 0 to 5 and is applied to Express's proxy trust. `0` is the safe direct-connection/local-development mode. Do not set `true`, `*`, `all`, or a wildcard CIDR. Production startup rejects those permissive values with an actionable error before the listener is created.
+`mcp.<DOMAIN> -> Caddy (optional cloudflared) -> mcp-server:8787`
 
-The edge proxy must overwrite, not append to, the incoming forwarded headers when it is the trusted hop. Do not expose port 8787 directly to the Internet. With one trusted hop, the client IP is the first address to the left of the Caddy hop; extra forwarded entries are not trusted.
+Set `TRUST_PROXY_HOPS` to the number of proxy hops that Express may trust. For the supported Caddy deployment use `TRUST_PROXY_HOPS=1`. Use `0` only for direct/local development. Values are bounded to 0–5; production startup fails closed when the variable is missing, malformed, or permissive (`true`, `*`, `all`, or wildcard CIDRs).
+
+The proxy must overwrite the incoming `X-Forwarded-For` header rather than append to it. Do not expose port 8787 directly to the Internet. With one trusted hop, Express uses only the address immediately before Caddy as the client identity; extra caller-supplied addresses remain untrusted. This keeps IP-keyed rate limits resistant to spoofing.
+
+After changing the topology, update `TRUST_PROXY_HOPS` and restart the MCP container. Regression coverage lives in `packages/mcp-server/src/trustProxy.test.ts`.

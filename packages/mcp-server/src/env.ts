@@ -1,30 +1,21 @@
-// Per-tenant environment variables read from the container's environment.
-// Set via the tenant compose `.env` (the provisioner writes them at ship
-// time; existing tenants get them via a one-off ops command). All values
-// scoped to THIS tenant — the container is single-tenant by deployment.
+import { parseTrustProxyHops } from "./trustProxy.js";
 
 export interface Env {
-  /** ctrl-api base URL inside the compose network. Always http://ctrl-api:3100 in prod. */
   CTRL_URL: string;
-  /** Bearer for the in-tenant ctrl-api. */
   AAS_API_KEY: string;
-  /** Pre-shared secret Sir enters once on /authorize when adding the connector. */
   MCP_APPROVAL_SECRET: string;
-  /** Where SQLite lives. Bind-mounted from /mnt/encrypted/mcp-server in compose. */
   DATA_DIR: string;
-  /** Public URL the tenant subdomain serves (used as OAuth issuer). */
   PUBLIC_URL: string;
-  /** Display label shown on the approval page. e.g. "Sir". */
   TENANT_LABEL: string;
-  /** HTTP listen port. Default 8787. */
   PORT?: string;
+  TRUST_PROXY_HOPS: number;
 }
 
 export function loadEnv(): Env {
   const required = (name: keyof Env) => {
-    const v = process.env[name];
-    if (!v) throw new Error(`Missing required env: ${name}`);
-    return v;
+    const value = process.env[name];
+    if (!value) throw new Error(`Missing required env: ${name}`);
+    return value;
   };
   return {
     CTRL_URL: required("CTRL_URL"),
@@ -34,5 +25,6 @@ export function loadEnv(): Env {
     PUBLIC_URL: required("PUBLIC_URL"),
     TENANT_LABEL: required("TENANT_LABEL"),
     PORT: process.env.PORT,
+    TRUST_PROXY_HOPS: parseTrustProxyHops(process.env.TRUST_PROXY_HOPS),
   };
 }
