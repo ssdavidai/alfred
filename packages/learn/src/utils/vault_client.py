@@ -256,6 +256,19 @@ class VaultClient:
         resp.raise_for_status()
         return resp.json().get("items", [])
 
+    async def list_decisions(
+        self, *, since: str | None = None, state: str | None = None, limit: int = 500
+    ) -> list[dict[str, Any]]:
+        """List decision records via ctrl's dedicated decisions route."""
+        params: dict[str, Any] = {"limit": limit}
+        if since:
+            params["since"] = since
+        if state:
+            params["state"] = state
+        resp = await self._client.get("/api/v1/decisions", params=params)
+        resp.raise_for_status()
+        return resp.json().get("decisions", [])
+
     async def notify(self, path: str, summary: str) -> None:
         """Send a notification to the main Alfred agent."""
         message = f"Alfred Learn: {summary}\nPath: {path}"

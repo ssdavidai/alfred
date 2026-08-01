@@ -817,6 +817,24 @@ async def apply_instinct_change(proposal: dict[str, Any]) -> None:
                 # Apply field updates to frontmatter
                 updated = _apply_frontmatter_updates(raw, changes)
                 await client.update_record(path, updated)
+                # #332: tier moves are THE flywheel milestone — emit an
+                # audit row so telemetry observes promotions/demotions
+                # instead of declaring them. Best-effort.
+                if "tier" in changes:
+                    try:
+                        from src.utils.state_client import StateClient as _SC
+                        async with _SC(config) as _sc:
+                            await _sc.append_audit(
+                                action_type="instinct_tier_event",
+                                actor="alfred-learn",
+                                source="reflection.apply_instinct_change",
+                                summary=f"{path} tier -> {changes['tier']}",
+                                target_path=path,
+                                target_kind="instinct",
+                                changes={"tier": changes["tier"]},
+                            )
+                    except Exception:  # noqa: BLE001
+                        logger.warning("tier-event audit emit failed for %s", path)
 
         elif action == "merge":
             # Create merged instinct, deprecate sources

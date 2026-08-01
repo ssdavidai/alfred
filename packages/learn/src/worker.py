@@ -17,6 +17,7 @@ from src.workflows.learning import LearningWorkflow
 from src.workflows.reflection import ReflectionWorkflow
 from src.workflows.media_ingestion import MediaIngestionWorkflow
 from src.workflows.task_runner import BlockedTaskRecoveryWorkflow, TaskRunnerWorkflow
+from src.workflows.flywheel_telemetry import FlywheelTelemetryWorkflow
 from src.workflows.stream_puller import StreamPullerWorkflow, StreamSweepWorkflow
 from src.workflows.onboarding_pipeline import OnboardingPipelineWorkflow
 from src.workflows.omi_processor import OmiAudioProcessorWorkflow
@@ -218,6 +219,12 @@ from src.activities.classify import (
 # SessionTrackerWorkflow — "session" was never a canonical vault type, so
 # create_session 422'd on every attempt since day one and nothing consumes
 # session records.
+
+# Activities — flywheel telemetry (#332)
+from src.activities.flywheel_telemetry import (
+    compute_flywheel_rollup,
+    send_flywheel_digest,
+)
 
 # Activities — notify
 from src.activities.notify import notify_digest_ready, notify_eod_prompt, escalate_to_user
@@ -774,6 +781,7 @@ _STATIC_WORKFLOWS = [
     MediaIngestionWorkflow,
     TaskRunnerWorkflow,
     BlockedTaskRecoveryWorkflow,
+    FlywheelTelemetryWorkflow,
     # StreamPullerWorkflow kept registered as a tombstone (#53): no
     # longer scheduled per-stream, but callable ad-hoc and harmless to
     # register. StreamSweepWorkflow is the scheduled entity.
@@ -896,6 +904,8 @@ ALL_ACTIVITIES = [
     # Classify
     classify_event,
     extract_metadata,
+    compute_flywheel_rollup,
+    send_flywheel_digest,
     # Notify
     notify_digest_ready,
     notify_eod_prompt,

@@ -315,6 +315,14 @@ INTERVAL_SCHEDULES = [
 
 CALENDAR_SCHEDULES = [
     {
+        "id": "al-flywheel-telemetry",
+        "workflow": "FlywheelTelemetryWorkflow",
+        "calendar": ScheduleCalendarSpec(
+            hour=[ScheduleRange(start=3)],
+            minute=[ScheduleRange(start=30)],
+        ),
+    },
+    {
         "id": "al-reflection",
         "workflow": "ReflectionWorkflow",
         "calendar": ScheduleCalendarSpec(
