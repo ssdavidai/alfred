@@ -706,4 +706,10 @@ async def run_pipeline(
         stubs_enriched=result.stubs_enriched,
     )
 
+    # #327 interim hardening: reconcile the vault_index after every sweep
+    # (not only at ctrl boot) so any residual direct-fs write can't leave
+    # the mirror stale for hours. Best-effort no-op when ctrl is absent.
+    from alfred.ctrl_client import ctrl_reconcile_index
+    ctrl_reconcile_index()
+
     return result

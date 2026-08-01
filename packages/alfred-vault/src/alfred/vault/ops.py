@@ -336,6 +336,48 @@ def vault_context(
     return {"records_by_type": by_type, "total": sum(len(v) for v in by_type.values())}
 
 
+
+def _render_new_record(
+    vault_path: Path,
+    record_type: str,
+    name: str,
+    set_fields: dict,
+    body: str | None,
+) -> str:
+    """Render a new record's full markdown (template + fields + body).
+
+    #327: shared by the ctrl-routing branch of vault_create so ctrl-api
+    receives exactly the markdown the direct path would have written.
+    """
+    template = _load_template(vault_path, record_type)
+    if template:
+        fm, template_body = template
+    else:
+        fm = {}
+        template_body = f"# {name}\n"
+    fm["type"] = record_type
+    title_field = NAME_FIELD_BY_TYPE.get(record_type, "name")
+    fm[title_field] = name
+    if "created" not in fm or fm["created"] == "{{date}}":
+        fm["created"] = date.today().isoformat()
+    for k, v in (set_fields or {}).items():
+        fm[k] = v
+    _validate_status(record_type, fm.get("status", ""))
+    _validate_list_fields(fm)
+    _validate_required_fields(fm)
+    if body is not None:
+        final_body = body
+        if template:
+            base_embeds = _extract_base_embeds(template_body, name)
+            if base_embeds and base_embeds not in final_body:
+                final_body = final_body.rstrip("\n") + "\n\n---\n" + base_embeds
+    else:
+        final_body = template_body.replace("{{title}}", name).replace(
+            "{{date}}", date.today().isoformat()
+        )
+    return _serialize_record(fm, final_body)
+
+
 def vault_create(
     vault_path: Path,
     record_type: str,
@@ -347,6 +389,15 @@ def vault_create(
     """Create a new vault record. Returns {path, warnings}."""
     _validate_type(record_type)
     set_fields = set_fields or {}
+
+    # #327: same routing rule as vault_edit. Content is rendered locally
+    # (template + fields) so ctrl receives the exact markdown; ctrl owns
+    # contract/index/signal.
+    from alfred.ctrl_client import ctrl_create, via_ctrl_enabled
+    if via_ctrl_enabled():
+        rendered = _render_new_record(vault_path, record_type, name, set_fields, body)
+        out = ctrl_create(record_type, name, rendered)
+        return {"path": out["path"], "warnings": []}
 
     # Determine directory and path
     directory = TYPE_DIRECTORY.get(record_type, record_type)
@@ -419,6 +470,25 @@ def vault_edit(
     body_append: str | None = None,
 ) -> dict:
     """Edit a vault record. Returns {path, fields_changed}."""
+    # #327: daemons route canonical writes through ctrl-api (contract +
+    # index + steward signal). ctrl's own docker-exec backend carries
+    # ALFRED_CTRL_BACKEND=1 and takes the direct path below — no loop.
+    # append_fields has no ctrl PATCH verb; merge client-side first.
+    from alfred.ctrl_client import ctrl_edit, via_ctrl_enabled
+    if via_ctrl_enabled():
+        merged_sets = dict(set_fields or {})
+        if append_fields:
+            fm_now, _ = _parse_record(_resolve_vault_path(vault_path, rel_path))
+            for k, v in append_fields.items():
+                existing = fm_now.get(k)
+                if existing is None:
+                    merged_sets[k] = [v] if k in LIST_FIELDS else v
+                elif isinstance(existing, list):
+                    merged_sets[k] = existing + [v]
+                else:
+                    merged_sets[k] = [existing, v]
+        return ctrl_edit(rel_path, set_fields=merged_sets or None, body_append=body_append)
+
     file_path = _resolve_vault_path(vault_path, rel_path)
     if not file_path.exists():
         raise VaultError(f"File not found: {rel_path}")

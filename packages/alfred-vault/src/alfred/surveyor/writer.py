@@ -205,7 +205,35 @@ class VaultWriter:
         log.info("writer.relationships_written", path=rel_path, added=added)
 
     def _write_atomic(self, full_path: Path, rel_path: str, post: frontmatter.Post) -> None:
-        """Write file atomically and register expected hash in state."""
+        """Persist a mutated record; route through ctrl-api when enabled.
+
+        #327: canonical-record writes go through ctrl-api (contract +
+        index + steward signal). We diff post.metadata against the
+        on-disk frontmatter and PATCH only the changed fields — the
+        surveyor never edits bodies. The self-write watcher hash is NOT
+        marked on this path (the write lands via ctrl→CLI, so content
+        bytes may serialize in a different key order); the follow-up
+        watcher pass is a no-op by the writers' own idempotence.
+        """
+        from alfred.ctrl_client import via_ctrl_enabled
+        if via_ctrl_enabled():
+            from alfred.vault.ops import VaultError, vault_edit, vault_read
+            try:
+                current = vault_read(self.vault_path, rel_path)["frontmatter"]
+            except (VaultError, KeyError):
+                current = {}
+            changed = {
+                k: v for k, v in post.metadata.items()
+                if current.get(k) != v
+            }
+            if not changed:
+                return
+            try:
+                vault_edit(self.vault_path, rel_path, set_fields=changed)
+            except Exception as e:  # noqa: BLE001
+                log.error("writer.ctrl_write_error", path=rel_path, error=str(e)[:200])
+            return
+
         content = frontmatter.dumps(post)
         content_bytes = content.encode("utf-8")
         expected_md5 = compute_md5_bytes(content_bytes)

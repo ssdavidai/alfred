@@ -519,6 +519,9 @@ services:
       # volume, which this service mounts at /app/data (ctrl-api mounts
       # the same volume at /alfred-data). The claimant reads this env.
       - ALFRED_DATA_DIR=/app/data
+      # #327: daemons write canonical records through ctrl-api; the
+      # client authenticates with the tenant API key.
+      - AAS_API_KEY=${AAS_API_KEY}
       # Surveyor cluster-labeling routes through Hermes (workers profile);
       # the gateway owns the model + provider key. Empty = standalone mode.
       - SURVEYOR_HERMES_GATEWAY_URL=http://hermes:18790

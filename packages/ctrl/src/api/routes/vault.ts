@@ -33,7 +33,10 @@ import {
 // bind-mounted into ctrl-api at /vault by default. VAULT_PATH overrides it.
 export const VAULT_PATH = process.env.VAULT_PATH ?? "/vault";
 const INBOX_PATH = `${VAULT_PATH}/inbox`;
-export const VAULT_ENV = { ALFRED_VAULT_PATH: "/vault" };
+// #327: ALFRED_CTRL_BACKEND marks "this CLI invocation IS ctrl's
+// backend" so vault/ops.py takes the direct write path instead of
+// looping back through ctrl-api over HTTP.
+export const VAULT_ENV = { ALFRED_VAULT_PATH: "/vault", ALFRED_CTRL_BACKEND: "1" };
 
 // ---------------------------------------------------------------------------
 // Steward signal stream (#838 Phase 2)
