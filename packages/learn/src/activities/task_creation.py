@@ -1097,6 +1097,8 @@ def _structured_predicate_from_strings(
     gmail_from = ""
     gmail_subject = ""
     sure_term = ""
+    thread_id = ""
+    event_id = ""
     for raw in predicates:
         s = str(raw or "").strip()
         if s.startswith("sure:transaction:match:") and not sure_term:
@@ -1105,12 +1107,25 @@ def _structured_predicate_from_strings(
             gmail_from = s[len("gmail:from:"):].strip()
         elif s.startswith("gmail:subject_contains:") and not gmail_subject:
             gmail_subject = s[len("gmail:subject_contains:"):].strip()
+        elif s.startswith("gmail:thread:") and not thread_id:
+            thread_id = s[len("gmail:thread:"):].strip()
+        elif s.startswith("calendar:event_accepted:") and not event_id:
+            event_id = s[len("calendar:event_accepted:"):].strip()
     if sure_term:
         return {"kind": "payment_to_merchant", "fields": {"merchant": sure_term}}
+    # A thread id is a stronger, cheaper match than from+subject heuristics,
+    # so it outranks them when both are present.
+    if thread_id:
+        return {"kind": "gmail_thread_reply", "fields": {"thread_id": thread_id}}
     if gmail_from and gmail_subject:
         return {
             "kind": "gmail_from_subject",
             "fields": {"from": gmail_from, "subject_contains": gmail_subject},
+        }
+    if event_id:
+        return {
+            "kind": "calendar_event_accepted",
+            "fields": {"event_id": event_id},
         }
     return None
 

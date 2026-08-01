@@ -15,6 +15,43 @@ from src.utils.vault_client import VaultClient
 logger = logging.getLogger("alfred-learn")
 
 
+async def _stamp_chore_failure(workflow_type: str, error: str | None) -> None:
+    """Mark the owning chore's vault record when its workflow run failed.
+
+    Maps ``workflow_type`` back to a chore via the ``workflow_class_name``
+    frontmatter field (the same binding the dynamic loader uses), then
+    patches ``last_run`` / ``last_result`` so /chores shows the failure
+    instead of the last successful run. No-ops for non-chore workflows.
+    """
+    if not workflow_type:
+        return
+    config = load_config()
+    client = VaultClient(config)
+    try:
+        chores = await client.list_records("chore", limit=500)
+        target: str | None = None
+        for rec in chores:
+            fm = rec.get("frontmatter") if isinstance(rec, dict) else None
+            if not isinstance(fm, dict):
+                continue
+            if str(fm.get("workflow_class_name") or "").strip() == workflow_type:
+                target = str(rec.get("path") or "")
+                break
+        if not target:
+            return  # not a chore workflow — nothing to stamp
+        detail = (error or "unknown error").replace("\n", " ")[:180]
+        await client.patch_frontmatter(
+            target,
+            {
+                "last_run": datetime.now(timezone.utc).isoformat(),
+                "last_result": f"FAILED: {detail}",
+            },
+        )
+        logger.info("chore failure stamped on %s (%s)", target, workflow_type)
+    finally:
+        await client.close()
+
+
 _STREAM_LOG_HEADER = """\
 ---
 type: note
@@ -67,12 +104,30 @@ async def emit_workflow_audit_event(
             outcome,
             str(exc)[:200],
         )
+
     finally:
         if client is None and state_client is not None:
             try:
                 await state_client.close()
             except Exception as exc:  # noqa: BLE001 — best-effort cleanup
                 logger.warning("workflow audit client close failed: %s", str(exc)[:200])
+
+    # #366 follow-up — chore failures must be visible WITHOUT SSH.
+    # `record_chore_run` only fires on success paths, so a chore whose run
+    # throws leaves its vault record showing the last SUCCESSFUL run and
+    # the dashboard reads it as healthy. Live example: trkblint showed a
+    # green last_run while Temporal had two Failed scheduled ticks.
+    #
+    # Done here rather than in each of the 13 chore templates: this is the
+    # one place every workflow failure already passes through.
+    if outcome == "failed":
+        try:
+            await _stamp_chore_failure(workflow_type, error)
+        except Exception as exc:  # noqa: BLE001 — never affect a run
+            logger.warning(
+                "chore failure stamp skipped for %s: %s",
+                workflow_type, str(exc)[:200],
+            )
 
 
 @activity.defn

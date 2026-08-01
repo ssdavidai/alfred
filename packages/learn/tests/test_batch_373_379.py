@@ -120,3 +120,56 @@ class TestStructuredPredicateMapping379:
 
     def test_evaluate_predicate_garbage_string_is_none(self):
         assert evaluate_predicate("not json", {}) is None
+
+
+class TestAllFourPredicateKindsCovered:
+    """#379 follow-up (post-fix rescan): the mapper only covered 2 of the
+    4 documented closure-predicate kinds, so thread-reply and
+    calendar-accept auto-tasks still had an inert fast path."""
+
+    def test_gmail_thread_reply(self):
+        from src.activities.task_creation import _structured_predicate_from_strings
+
+        out = _structured_predicate_from_strings(["gmail:thread:18f0abc"])
+        assert out == {"kind": "gmail_thread_reply", "fields": {"thread_id": "18f0abc"}}
+
+    def test_calendar_event_accepted(self):
+        from src.activities.task_creation import _structured_predicate_from_strings
+
+        out = _structured_predicate_from_strings(["calendar:event_accepted:evt_99"])
+        assert out == {"kind": "calendar_event_accepted", "fields": {"event_id": "evt_99"}}
+
+    def test_thread_id_outranks_from_subject(self):
+        """A thread id is an exact match; from+subject is a heuristic."""
+        from src.activities.task_creation import _structured_predicate_from_strings
+
+        out = _structured_predicate_from_strings([
+            "gmail:from:a@b.com", "gmail:subject_contains:invoice",
+            "gmail:thread:18f0abc",
+        ])
+        assert out["kind"] == "gmail_thread_reply"
+
+    def test_payment_still_wins_overall(self):
+        from src.activities.task_creation import _structured_predicate_from_strings
+
+        out = _structured_predicate_from_strings([
+            "gmail:thread:18f0abc", "sure:transaction:match:ACME",
+        ])
+        assert out["kind"] == "payment_to_merchant"
+
+    def test_every_mapped_kind_is_one_the_watcher_consumes(self):
+        """Guard: the mapper must never invent a kind evaluate_predicate
+        doesn't implement — that would look wired and silently no-op."""
+        from src.activities import task_closure
+        from src.activities.task_creation import _structured_predicate_from_strings
+
+        cases = [
+            ["sure:transaction:match:X"],
+            ["gmail:thread:t1"],
+            ["gmail:from:a@b.com", "gmail:subject_contains:s"],
+            ["calendar:event_accepted:e1"],
+        ]
+        known = set(task_closure._PREDICATE_KINDS)
+        for c in cases:
+            out = _structured_predicate_from_strings(c)
+            assert out is not None and out["kind"] in known, (c, out)

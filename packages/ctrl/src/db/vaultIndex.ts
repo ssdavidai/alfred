@@ -65,8 +65,24 @@ function parseRecord(relPath: string, raw: string): ParsedRecord {
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
         fm = parsed as Record<string, unknown>;
       }
-    } catch {
-      /* malformed frontmatter — index with empty fm */
+    } catch (err) {
+      // A malformed-YAML record is indexed with EMPTY frontmatter, which
+      // makes it invisible to every index-backed reader — it does not 404,
+      // it simply never appears. Live on home: 42 decision records written
+      // by an external tool carry an unquoted `name:` containing ": "
+      // (e.g. `name: Build approval needed: GH #298`), so js-yaml throws
+      // "mapping values are not allowed here" and they vanish from
+      // GET /api/v1/decisions entirely — DecisionRouter has never seen
+      // them, and #369's retire cannot reach what it cannot list.
+      //
+      // Still non-fatal (one bad record must not fail the whole index
+      // rebuild), but NEVER silent again: this is the only signal that a
+      // record has fallen out of the system.
+      console.warn(
+        `[vault-index] frontmatter parse failed for ${relPath} — indexing ` +
+          `with EMPTY frontmatter, record will be invisible to filtered ` +
+          `reads: ${String((err as Error)?.message ?? err).slice(0, 200)}`,
+      );
     }
     body = m[2] ?? "";
   }
