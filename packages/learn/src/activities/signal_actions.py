@@ -275,55 +275,62 @@ def _score_signal_against_instinct(
     signal_text: str,
     instinct: dict[str, Any],
 ) -> float:
-    """Return a 0.0–1.0 similarity score between a signal and an instinct.
+    """Return a 0.0–1.0 pattern-coverage score between a signal and an instinct.
 
-    Algorithm: token-set Jaccard between
-    ``tokens(signal_text)`` and
-    ``tokens(instinct.description + flatten(input_patterns))``.
+    #365: the original implementation was token-set Jaccard between the
+    FULL signal text and the instinct corpus. A real signal carries a
+    whole email body, so the union denominator dwarfed any overlap — the
+    max score ever recorded live was 0.1951 against MATCH_FLOOR=0.30,
+    and ``matched_instinct`` was NULL on 1002/1002 signals all-time.
+    (Gap 5b fixed this exact failure class in matching/scorer.py, but
+    that scorer only feeds the dead JudgmentWorkflow — this inline one
+    is what SignalRouter actually runs.) The "2x weighting by repeating
+    tokens" was also a no-op: tokens land in a set.
 
-    We weight ``input_patterns`` 2x by repeating its tokens — the
-    pattern fields (``sender_domains``, ``subject_keywords``,
-    ``input_types``) are the operationally significant signal. The
-    description gets 1x weight to fold in semantic context that
-    patterns can't express.
+    Now: the score is the fraction of the instinct's ``input_patterns``
+    entries (sender_domains, subject_keywords, input_types, …) that the
+    signal satisfies — mirroring matching/scorer.py's fixed
+    ``_score_keyword_overlap``. A pattern matches if EITHER
+      (a) it appears verbatim as a substring of the signal text
+          (multi-word phrases, sender domains), OR
+      (b) every token of the pattern appears in the signal's token set
+          (paraphrase tolerance).
+    An instinct with no usable patterns scores 0.0 — description prose
+    is not an anchoring signal, and the HUMAN path remains the catch-all.
 
-    Pure Python; deterministic; no LLM. Good enough as a first-pass
-    filter — the discretion threshold then gates whether we autonomously
-    dispatch. If the rough score plus the high-confidence threshold
-    isn't enough to safely auto-dispatch, the human path catches it.
+    Pure Python; deterministic; no LLM. The discretion threshold still
+    gates autonomous dispatch above this floor.
     """
     fm = instinct.get("frontmatter")
     if not isinstance(fm, dict):
         fm = instinct
-    description = str(fm.get("description") or "").strip()
     input_patterns = _parse_input_patterns(fm.get("input_patterns"))
 
-    instinct_text_parts: list[str] = []
-    if description:
-        instinct_text_parts.append(description)
-    # Flatten input_patterns values — sender_domains, subject_keywords,
-    # input_types, attachment_types — into one token corpus, then add
-    # them again to weight 2x.
-    pattern_tokens: list[str] = []
+    patterns: list[str] = []
     for v in input_patterns.values():
         if isinstance(v, list):
-            pattern_tokens.extend(str(x) for x in v if x is not None)
-        elif isinstance(v, str):
-            pattern_tokens.append(v)
-    if pattern_tokens:
-        instinct_text_parts.append(" ".join(pattern_tokens))
-        instinct_text_parts.append(" ".join(pattern_tokens))
+            patterns.extend(str(x) for x in v if x is not None)
+        elif isinstance(v, str) and v.strip():
+            patterns.append(v)
+    patterns = [p.lower().strip() for p in patterns if str(p).strip()]
+    if not patterns:
+        return 0.0
 
-    instinct_tokens = _tokenize(" ".join(instinct_text_parts))
+    text_lc = (signal_text or "").lower()
     signal_tokens = _tokenize(signal_text)
-    if not instinct_tokens or not signal_tokens:
+    if not text_lc:
         return 0.0
 
-    overlap = signal_tokens & instinct_tokens
-    union = signal_tokens | instinct_tokens
-    if not union:
-        return 0.0
-    return len(overlap) / len(union)
+    matched = 0
+    for pattern in patterns:
+        if pattern in text_lc:
+            matched += 1
+            continue
+        pattern_tokens = _tokenize(pattern)
+        if pattern_tokens and pattern_tokens <= signal_tokens:
+            matched += 1
+
+    return matched / len(patterns)
 
 
 # ---------------------------------------------------------------------------
