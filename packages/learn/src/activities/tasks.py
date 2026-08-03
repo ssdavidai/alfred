@@ -503,19 +503,41 @@ async def evaluate_consequentials(
                             all_done = False
                             break
                 if all_done:
-                    # Update matter status to resolved
-                    matter_rec = await client.read_record(_normalize_record_path(matter))
-                    raw = _reconstruct_markdown(matter_rec)
-                    if raw:
-                        from src.activities.vault import _apply_frontmatter_updates
-                        updated = _apply_frontmatter_updates(
-                            raw, {"status": "resolved"}
+                    # #328: route the matter-completion through the audited
+                    # state-change primitive instead of a full-record PATCH.
+                    # The old path wrote `status: resolved` (a) bypassing the
+                    # mutex/ledger/enforcement gate and (b) using legacy vocab
+                    # (`resolved` isn't in matter's canonical set
+                    # active|dormant|completed|archived — §6.1). Canonical
+                    # target is `completed`. mode="live" so the env veto
+                    # (STEWARD_LIVE_MODE) governs, exactly like every other
+                    # state writer.
+                    from datetime import timezone as _tz
+                    from src.activities.state_mutator import (
+                        ObservedWindow,
+                        apply_state_change_v2,
+                    )
+                    now_dt = datetime.now(_tz.utc)
+                    try:
+                        await apply_state_change_v2(
+                            target_path=_normalize_record_path(matter),
+                            source="task_runner.matter_resolved",
+                            observed=ObservedWindow(
+                                start=now_dt, end=now_dt,
+                                signal_paths=[], decision_paths=[],
+                                other_refs=[task.get("path", "")] if task.get("path") else [],
+                            ),
+                            propose_fn_name="task_runner.matter_resolved",
+                            propose_fn_args={"trigger_task": task.get("path", "")},
+                            mode="live",
                         )
-                        # Extract type from matter path
-                        matter_type = matter.split("/")[0] if "/" in matter else "matter"
-                        await client.write_record(matter_type, matter, updated)
                         activity.logger.info(
-                            "Matter resolved — all tasks done: %s", matter
+                            "Matter completed — all tasks done: %s", matter
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        activity.logger.warning(
+                            "matter-completion state-change failed matter=%s err=%s",
+                            matter, exc,
                         )
             except Exception as exc:
                 activity.logger.warning(
@@ -795,3 +817,42 @@ async def recover_stale_blocked_tasks(
         await client.close()
         await state.close()
     return {"recovered": recovered, "parked": parked}
+
+
+# ---------------------------------------------------------------------------
+# #328: matter-completion propose function (registry-dispatched, not an
+# activity). Marks a matter `completed` when its last open task finishes,
+# through apply_state_change_v2 so the write is audited + enforced. Canonical
+# vocab (`completed`, not the legacy `resolved`); idempotent — returns None
+# when the matter is already terminal so no state_change round-trip happens.
+# ---------------------------------------------------------------------------
+from src.activities.state_mutator import (  # noqa: E402
+    ObservedWindow as _ObservedWindow,
+    ProposedMutation as _ProposedMutation,
+    propose_fn as _propose_fn,
+)
+
+_MATTER_TERMINAL_STATUS = {"completed", "archived", "abandoned"}
+
+
+@_propose_fn("task_runner.matter_resolved")
+async def propose_matter_resolved(
+    *,
+    target: dict[str, Any],
+    observed: "_ObservedWindow",
+    args: dict[str, Any],
+) -> "_ProposedMutation | None":
+    fm = target.get("frontmatter", target) if isinstance(target, dict) else {}
+    current = str(fm.get("status", "")).strip().lower()
+    if current in _MATTER_TERMINAL_STATUS:
+        return None  # already terminal — no-op, preserves idempotency
+    trigger = args.get("trigger_task", "") if isinstance(args, dict) else ""
+    return _ProposedMutation(
+        fields={"status": "completed"},
+        reason=(
+            "All linked tasks are done/cancelled — matter completed "
+            f"(trigger: {trigger or 'unknown'})."
+        ),
+        confidence=1.0,
+        fan_out=(),
+    )

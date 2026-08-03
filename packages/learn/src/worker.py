@@ -503,6 +503,7 @@ from src.activities.state_mutator import (
 # populated before any workflow asks the mutator for a propose function
 # by name. See ``docs/STATE-MUTATION.md`` §6.1+§6.2.
 import src.activities.archival_sweep  # noqa: F401 — register archival_sweep.cold
+import src.activities.tasks  # noqa: F401 — register task_runner.matter_resolved (#328)
 
 # Steward Phase 4 (#840) — Vexa transcript intake. Activities back the
 # MeetingCaptureWorkflow + TranscriptIntakeWorkflow. NO direct Plane

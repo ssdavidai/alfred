@@ -177,19 +177,29 @@ class TestMatterRefNormalization:
     404 — matter refs need the same wikilink normalization as depends_on."""
 
     def test_matter_resolution_normalizes_wikilink(self, monkeypatch):
+        """#328: matter completion now routes through apply_state_change_v2;
+        its target_path must be the wikilink-normalized matter path."""
         fake_state = _FakeStateClient()
-        fake_vault = _FakeVaultClient(
-            records={"matter/house.md": {"frontmatter": {"status": "active"}}}
-        )
+        fake_vault = _FakeVaultClient(records={})  # list_records -> [] => all_done
         monkeypatch.setattr(tasks_mod, "StateClient", lambda _cfg: fake_state)
         monkeypatch.setattr(tasks_mod, "VaultClient", lambda _cfg: fake_vault)
 
+        seen = {}
+
+        async def fake_v2(*, target_path, **kw):
+            seen["target_path"] = target_path
+            seen["propose"] = kw.get("propose_fn_name")
+            class _R: pass
+            return _R()
+
+        monkeypatch.setattr(
+            "src.activities.state_mutator.apply_state_change_v2", fake_v2
+        )
         asyncio.run(
             tasks_mod.evaluate_consequentials(
                 {"title": "Parent", "path": "task/parent.md", "matter": "[[matter/house]]"},
                 {"summary": "done", "follow_up_tasks": []},
             )
         )
-        # The matter read must hit the normalized path, not the wikilink.
-        assert "matter/house.md" in fake_vault.read_paths
-        assert all("[[" not in p for p in fake_vault.read_paths)
+        assert seen["target_path"] == "matter/house.md"   # normalized, no [[ ]]
+        assert seen["propose"] == "task_runner.matter_resolved"
