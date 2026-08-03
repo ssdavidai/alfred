@@ -469,7 +469,10 @@ async def save_promotion_draft(proposal: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 _GITHUB_API_BASE = "https://api.github.com"
-_DEFAULT_PROMOTION_REPO = "ssdavidai/alfred-platform"
+# #334: the pre-cutover default pointed at the retired alfred-platform
+# repo; the live monorepo is ssdavidai/alfred. Overridable per tenant via
+# ALFRED_PROMOTION_REPO.
+_DEFAULT_PROMOTION_REPO = "ssdavidai/alfred"
 _DEFAULT_PROMOTION_BASE_BRANCH = "main"
 _STANDARD_LIBRARY_DIR = "packages/learn/src/workflows/chores"
 
