@@ -3,15 +3,15 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 const {
-  _normalizeTask,
+  normalizeTask,
   announceDedupKey,
   checkAnnounceDedup,
   _resetAnnounceDedupForTests,
-} = await import("../src/api/routes/agents.js");
+} = await import("../src/api/announceDedup.js");
 
 test("normalize collapses volatile bits (timestamps/uuids/digit runs)", () => {
-  const a = _normalizeTask("Research pancake route at 2026-08-04T14:25:41Z run 12345678");
-  const b = _normalizeTask("Research pancake route at 2026-08-04T14:40:22Z run 99887766");
+  const a = normalizeTask("Research pancake route at 2026-08-04T14:25:41Z run 12345678");
+  const b = normalizeTask("Research pancake route at 2026-08-04T14:40:22Z run 99887766");
   assert.equal(a, b, "retried research with different ts/ids must normalize equal");
 });
 

@@ -7,56 +7,12 @@ import { sendJson, ValidationError } from "../errors.js";
 import { execAsync, dockerExec, dockerComposeCmd, HERMES_CMD, HERMES_CONTAINER } from "../helpers.js";
 import { resolveDeliveryTarget } from "../hermes-sessions.js";
 import { getStateDb } from "../../db/state.js";
+import {
+  ANNOUNCE_DEDUP_WINDOW_MS,
+  announceDedupKey,
+  checkAnnounceDedup,
+} from "../announceDedup.js";
 
-// ── #416: schedule-time dedup for announce:true spawns ───────────────────────
-// spawn_alfred_task creates a fresh Hermes cron per call with zero
-// idempotency (its own doc: "NOT idempotent — calling twice schedules two
-// runs"). On 2026-08-04 the main agent fired three announce:true spawns to the
-// same Slack channel in 15 minutes for one request → three duplicate messages.
-// This collapses near-identical channel-delivering spawns to the same target
-// within a short window. announce:false (silent) spawns are never deduped —
-// they don't reach the principal. In-process TTL map: duplicate spawns arrive
-// seconds apart in the same ctrl process, so a persisted tail isn't needed.
-const ANNOUNCE_DEDUP_WINDOW_MS = (() => {
-  const raw = parseInt(process.env.ANNOUNCE_DEDUP_WINDOW_SECONDS ?? "", 10);
-  return Number.isFinite(raw) && raw > 0 ? raw * 1000 : 600_000; // 10 min
-})();
-const _announceDedup = new Map<string, { at: number; job: string }>();
-export function _resetAnnounceDedupForTests(): void { _announceDedup.clear(); }
-
-export function _normalizeTask(task: string): string {
-  // Strip volatile bits so a retried research reply collapses onto its
-  // first attempt: timestamps, ULIDs/uuids, long digit runs, run ids.
-  return task
-    .toLowerCase()
-    .replace(/\d{4}-\d{2}-\d{2}t[\d:.]+z?/g, "")      // ISO timestamps
-    .replace(/[0-9a-f]{8}-[0-9a-f-]{20,}/g, "")          // uuids
-    .replace(/\b[0-9a-hjkmnp-tv-z]{26}\b/g, "")        // ULIDs
-    .replace(/\d{5,}/g, "")                              // long digit runs
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-export function announceDedupKey(channel: string, to: string | undefined, task: string): string {
-  const h = crypto.createHash("sha256")
-    .update(`${channel}\u0000${to ?? ""}\u0000${_normalizeTask(task)}`)
-    .digest("hex")
-    .slice(0, 24);
-  return h;
-}
-
-/** Returns the existing job name if a matching announce was scheduled within
- *  the window, else null (and records this one). Prunes expired entries. */
-export function checkAnnounceDedup(key: string, job: string): string | null {
-  const now = Date.now();
-  for (const [k, v] of _announceDedup) {
-    if (now - v.at > ANNOUNCE_DEDUP_WINDOW_MS) _announceDedup.delete(k);
-  }
-  const hit = _announceDedup.get(key);
-  if (hit && now - hit.at <= ANNOUNCE_DEDUP_WINDOW_MS) return hit.job;
-  _announceDedup.set(key, { at: now, job });
-  return null;
-}
 
 
 // alfred daemon config (the surveyor lives here, not in the Hermes config).
