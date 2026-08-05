@@ -10,6 +10,7 @@ import {
   resolveChatCorsOrigin,
   resolveGatewayTokenFromEnv,
 } from "./chatProxyCore";
+import { tryFastPath } from "./intentRouterCore";
 
 /**
  * Chat proxy — single-VM edition, Hermes runtime.
@@ -41,6 +42,28 @@ import {
 // compose network and serves the `/v1/*` API. Overridable for local dev.
 const HERMES_GATEWAY_URL =
   process.env.HERMES_GATEWAY_URL ?? "http://hermes:18789";
+
+// ctrl-api for the #425 deterministic fast-path (same access pattern as
+// filesProxy: CTRL_API_URL + the shared AAS_API_KEY bearer). Simple data
+// lookups (decisions/matters/chores/balance) are answered here directly,
+// skipping a full ~2s+ LLM turn. Fail-open — any error falls through to Hermes.
+const CTRL_API_URL = process.env.CTRL_API_URL ?? "http://ctrl-api:3100";
+const CTRL_API_KEY = process.env.AAS_API_KEY ?? "";
+
+async function ctrlGet(path: string): Promise<unknown> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 4000);
+  try {
+    const r = await fetch(`${CTRL_API_URL}${path}`, {
+      headers: CTRL_API_KEY ? { Authorization: `Bearer ${CTRL_API_KEY}` } : {},
+      signal: ctrl.signal,
+    });
+    if (!r.ok) throw new Error(`ctrl-api ${r.status}`);
+    return await r.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 // Hermes upstream auth. The Hermes API server validates inbound requests
 // against the gateway token written by the init container to
@@ -184,6 +207,15 @@ export function registerChatProxy(app: Application): void {
         return;
       }
 
+      // #425 deterministic fast-path — answer simple lookups from ctrl-api,
+      // skip the LLM. Fail-open: a miss/unfamiliar-shape/error returns null.
+      const fastTurn = await tryFastPath(input, ctrlGet);
+      if (fastTurn) {
+        res.status(200).setHeader("Content-Type", "application/json");
+        res.send(JSON.stringify(fastTurn));
+        return;
+      }
+
       // Hermes `/v1/responses` payload. `store:true` makes the response
       // retrievable and chainable via `previous_response_id`.
       const payload: Record<string, unknown> = { input, store: true };
@@ -245,6 +277,15 @@ export function registerChatProxy(app: Application): void {
       const input = typeof body.input === "string" ? body.input : "";
       if (!input.trim()) {
         res.status(400).json({ error: "input is required" });
+        return;
+      }
+
+      // #425 fast-path (streaming path too): the widget renders a completed
+      // envelope immediately without opening SSE. Fail-open to a real run.
+      const fastRun = await tryFastPath(input, ctrlGet);
+      if (fastRun) {
+        res.status(200).setHeader("Content-Type", "application/json");
+        res.send(JSON.stringify(fastRun));
         return;
       }
 
