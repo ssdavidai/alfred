@@ -9,8 +9,11 @@
 # 2026-07-02 (fleet bake): installed from the PyPI WHEEL (==0.17.0), not a git
 # ref, so the dashboard `web_dist` bundle ships (the git build omits it). The
 # Dockerfile `ARG HERMES_VERSION` default is the source of truth.
-# 0.17.0 == the fleet bake  (was v2026.5.16 == 0.14.0, git-installed).
-HERMES_VERSION=0.17.0
+# 0.19.0 == 2026-08 bump (was 0.17.0 == fleet bake; 0.14.0 == git v2026.5.16).
+# Upgrade 0.17->0.19 (0.18.0/.1/.2 + 0.19.0): no documented breaking changes,
+# config schema + CLI stable, adapters reliability-patched. Canaried on home
+# before fleet. Rollback: retag :0.17-rollback -> :latest + recreate.
+HERMES_VERSION=0.19.0
 
 # openai SDK is pinned to 2.24.0 (Dockerfile ARG OPENAI_VERSION) — the version
 # the golden home box runs. Hermes 0.17's floor otherwise floats openai to a

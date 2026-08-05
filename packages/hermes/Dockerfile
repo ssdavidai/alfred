@@ -144,7 +144,7 @@ RUN echo 'codex-builder:x:10001:10001::/hermes-state/profiles/codex-builder:/usr
 # site-packages files regardless of install source (wheel lands in the same
 # /usr/local/lib/python3.12/site-packages tree) and are tripwire'd, so a moved
 # 0.17 symbol fails the build loudly rather than silently no-op'ing.
-ARG HERMES_VERSION=0.17.0
+ARG HERMES_VERSION=0.19.0
 # Pin the openai SDK to the version the golden home box runs (2.24.0). Hermes
 # 0.17's openai floor lets pip float openai to a NEWER release that reintroduced
 # the null-output loop (`for output in response.output:`) — the first canary
