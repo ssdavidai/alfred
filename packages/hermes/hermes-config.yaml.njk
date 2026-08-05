@@ -57,7 +57,7 @@
 # this profile shells out to authenticates via ChatGPT OAuth, and the
 # supervising agent's LLM turns should use the same provider so the system
 # stays internally consistent. NOT overridable from .env: a future tenant
-# .env edit cannot accidentally swing this profile back to openrouter.
+# .env edit cannot accidentally swing this profile to a non-Codex provider.
 model:
   default: "{{ codex_builder_model | default('gpt-5-codex') }}"
   provider: "openai-codex"
@@ -68,7 +68,7 @@ model:
 model:
 {%- if is_main %}
   # User-facing Alfred — a capable model for the live chat surface.
-  # Bare OpenRouter model ID; provider/base_url below do the routing.
+  # Codex model tier (e.g. gpt-5.6-terra / gpt-5.6-luna).
   default: "{{ main_model }}"
 {%- elif profile == "heavy" %}
   # Heavy background reasoning (onboarding + chore heavy steps) — an
@@ -80,23 +80,13 @@ model:
   # high-volume (clerk classification, vault curation, ephemeral executors).
   default: "{{ workers_model }}"
 {%- endif %}
-  provider: "openrouter"
-  base_url: "https://openrouter.ai/api/v1"
-  # Per-request output-token ceiling.
-  #
-  # OpenRouter's affordability gate reserves `max_tokens × upstream-output
-  # cost` before billing. With the default (unset → model max ≈ 65 536) on
-  # gpt-5.5, the reservation exceeds the typical $50–100 credit floor and
-  # OpenRouter returns 402 ("can only afford N tokens of 65 536 requested")
-  # before the request ever runs. 8 192 is well above any chore or chat
-  # turn's real need, and small enough to stay under the reserve gate.
-  #
-  # When a profile is later flipped to `provider: openai-codex` this value
-  # is harmless — run_agent translates it via `_max_tokens_param()` into
-  # `max_completion_tokens` for direct-OpenAI / Codex endpoints.
-  #
-  # Sir 2026-05-27 — see joe.alfred.black cdsk incident: tool routing died
-  # on this exact gate while the OpenRouter key still had $46 of credit.
+  # Codex-only (Sir, 2026-08-05): OpenRouter is permanently banned. Every
+  # profile runs on openai-codex, authenticated via the shared ChatGPT
+  # auth.json. No base_url — Hermes resolves the Codex endpoint internally.
+  provider: "openai-codex"
+  # Per-request output-token ceiling. 8 192 is well above any chore or
+  # chat turn's real need. run_agent maps it to `max_completion_tokens`
+  # for the Codex endpoint via `_max_tokens_param()`.
   max_tokens: 8192
 {%- endif %}
 

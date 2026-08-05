@@ -15,7 +15,7 @@ Usage:
     render_hermes.py <profile> <profile_dir> <template_dir> <gateway_token>
 
 Environment (read for template variables):
-    OPENROUTER_API_KEY, ANTHROPIC_API_KEY, OPENAI_API_KEY
+    ANTHROPIC_API_KEY, OPENAI_API_KEY
     COMPOSIO_API_KEY, COMPOSIO_USER_ID
     AAS_API_KEY
     ALFRED_PRIME, CROSS_TENANT_PEERS
@@ -105,12 +105,12 @@ _RESERVED_PORT = {
 # (packages/ctrl/src/db/agentProfiles.ts: _SLUG_RE).
 _SLUG_RE = re.compile(r"^[a-z][a-z0-9-]{1,30}$")
 
-# The template renders the `model:` block with `provider: openrouter`. Hermes
-# owns provider/model selection natively (`hermes model`, with a live model
-# picker) and that edit lands in config.yaml — which this script re-renders
-# on every boot. To avoid clobbering a deliberate switch, a re-render keeps
-# the existing `model:` block whenever its provider is no longer the default.
-_DEFAULT_PROVIDER = "openrouter"
+# Codex-only (Sir, 2026-08-05): the template renders `provider: openai-codex`
+# for every profile. OpenRouter is permanently banned. On re-render we keep an
+# existing `model:` block ONLY when it is already openai-codex (so a hand-tuned
+# Codex model tier survives a reseed); any legacy non-codex block is forced
+# back to the template's Codex render.
+_DEFAULT_PROVIDER = "openai-codex"
 
 
 def _model_block_span(text: str):
@@ -164,10 +164,13 @@ def _preserve_switched_model_block(rendered: str, config_path: Path) -> str:
     old_lines = old_text.splitlines(keepends=True)
     old_block = "".join(old_lines[old_span[0]:old_span[1]])
     provider = _block_provider(old_block)
-    if not provider or provider == _DEFAULT_PROVIDER:
-        return rendered  # still on the default — re-render from the template
+    # Codex-only: preserve ONLY an existing openai-codex block (keeps a
+    # hand-tuned Codex model tier across reseed). A legacy non-codex block
+    # (e.g. openrouter) is NOT preserved — it re-renders to the Codex template.
+    if not provider or provider != _DEFAULT_PROVIDER:
+        return rendered
     new_lines = rendered.splitlines(keepends=True)
-    print(f"[render] preserving user-switched model: block (provider={provider})")
+    print(f"[render] preserving codex model: block (provider={provider})")
     return (
         "".join(new_lines[: new_span[0]])
         + old_block
@@ -423,7 +426,7 @@ def main() -> int:
     # --- config.yaml ---------------------------------------------------------
     # #120 Lane II — user-facing profiles (anything NOT in the reserved set)
     # render through the same template branch as main: a capable
-    # conversational model via OpenRouter, with the standard agent posture.
+    # conversational model via openai-codex, with the standard agent posture.
     # The HERMES_RENDER_MODEL env var (set by entrypoint.sh from the registry
     # row) overrides the template's main_model default — so a profile created
     # with model="anthropic/claude-opus-4-6" gets that model in its config.
@@ -433,7 +436,7 @@ def main() -> int:
     main_model_value = (
         model_override
         if (is_main_like and model_override)
-        else os.environ.get("HERMES_MAIN_MODEL", "x-ai/grok-4.3")
+        else os.environ.get("HERMES_MAIN_MODEL", "gpt-5.6-terra")
     )
 
     config_tmpl = env.get_template("hermes-config.yaml.njk")
@@ -448,12 +451,12 @@ def main() -> int:
         runtime_profile_dir=runtime_profile_dir,
         alfred_prime=alfred_prime,
         cross_tenant_peers=cross_tenant_peers,
-        # Bare OpenRouter model IDs (no `openrouter/` prefix — `provider:
-        # openrouter` + base_url route it). Overridable via .env so a
-        # stale model ID is a one-line fix, not a rebuild.
+        # Codex model tiers (gpt-5.6-terra / gpt-5.6-luna). Overridable via
+        # .env (HERMES_MAIN_MODEL / _WORKERS_MODEL / _HEAVY_MODEL) so a model
+        # bump is a one-line fix, not a rebuild.
         main_model=main_model_value,
-        workers_model=os.environ.get("HERMES_WORKERS_MODEL", "openai/gpt-4.1-nano"),
-        heavy_model=os.environ.get("HERMES_HEAVY_MODEL", "anthropic/claude-opus-4-6"),
+        workers_model=os.environ.get("HERMES_WORKERS_MODEL", "gpt-5.6-luna"),
+        heavy_model=os.environ.get("HERMES_HEAVY_MODEL", "gpt-5.6-terra"),
         # codex-builder runs Hermes' supervising agent on the same openai-
         # codex model the CLI it shells out to uses. Overridable so a
         # future Codex model bump is a one-line .env change, not a
@@ -518,7 +521,6 @@ def main() -> int:
         # the compose network (the shim that used to front it is gone).
         api_server_host="0.0.0.0",
         api_server_cors=os.environ.get("HERMES_API_CORS_ORIGINS", ""),
-        openrouter_api_key=os.environ.get("OPENROUTER_API_KEY", ""),
         anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
         openai_api_key=os.environ.get("OPENAI_API_KEY", ""),
         # Relay/dashboard voice: Groq Whisper STT + the OpenAI realtime model.
