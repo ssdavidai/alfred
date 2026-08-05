@@ -189,26 +189,13 @@ RUN pip install --no-cache-dir \
     && python3 -c "import faster_whisper, playwright, segno, fitz, pytesseract, docx, openpyxl, boto3; print('extra relay/voice/doc deps OK')"
 
 # =============================================================================
-# Patch: teach the Slack adapter (and base SUPPORTED_DOCUMENT_TYPES) about
-# HTML attachments. Upstream Hermes drops .html/.htm uploads silently —
-# they're not in the whitelist at gateway/platforms/base.py:SUPPORTED_DOCUMENT_TYPES,
-# so the Slack adapter's else-branch hits `continue` and the file never
-# reaches the agent. Same gap on Telegram & Discord adapters by inheritance.
-#
-# See patch_upstream_hermes.py for the full rationale; the script is
-# idempotent and tripwire'd so a future HERMES_REF bump that moves the
-# upstream needle fails the build loudly.
-#
-# Sir 2026-05-26 — local-only durable fix for an upstream Hermes bug.
-COPY packages/hermes/patch_upstream_hermes.py /tmp/patch_upstream_hermes.py
-# 0.17 note: base.py's SUPPORTED_DOCUMENT_TYPES already includes .html/.htm
-# natively (the base.py patch self-skips); only the slack.py TEXT_INJECT_EXTENSIONS
-# hunk still needs the patch. Tripwires are format-agnostic (just assert `.html`
-# is present in each file) so they survive 0.17's dict-vs-set reshaping.
-RUN python3 /tmp/patch_upstream_hermes.py \
- && grep -q '"\.html"' /usr/local/lib/python3.12/site-packages/gateway/platforms/base.py \
- && grep -q '"\.html"' /usr/local/lib/python3.12/site-packages/gateway/platforms/slack.py \
- && rm /tmp/patch_upstream_hermes.py
+# (removed 2026-08-05) The HTML-attachment patch (patch_upstream_hermes.py) is
+# obsolete as of Hermes 0.19.0: upstream now ships .html/.htm in base.py's
+# _TEXT_INJECT_EXTENSIONS (base.py:1446 comment acknowledges the exact gap),
+# and the Slack adapter moved to plugins/platforms/slack/adapter.py consuming
+# that shared set. The old script's docstring sanctioned dropping it "if
+# upstream finally accepts HTML." The auth (#2) + fd-leak (#3) patches below
+# still apply cleanly to 0.19 (verified) and are retained.
 
 # =============================================================================
 # Patch: handle response.output=None in the openai SDK's streaming parser.
