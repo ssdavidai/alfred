@@ -107,11 +107,31 @@ agent:
   max_turns: 50
 {%- endif %}
 {%- if profile != "codex-builder" %}
+{%- if is_main %}
+  # Interactive chat: low reasoning for snappy turns (Sir 2026-08-05).
+  reasoning_effort: "low"
+{%- else %}
   reasoning_effort: "medium"
+{%- endif %}
 {%- endif %}
   verbose: false
   # Graceful drain on gateway stop/restart — let in-flight agents finish.
   restart_drain_timeout: 60
+
+# =============================================================================
+# Tool search — defer MCP tool schemas behind 3 bridge tools (Sir 2026-08-05)
+# =============================================================================
+# `enabled: on` forces deferral regardless of context-window headroom: the
+# model sees tool_search / tool_describe / tool_call instead of the full MCP
+# schema set, and loads any tool on demand — big prompt shrink, and
+# hass/esignatures/etc. stay callable without being preloaded.
+{%- if profile != "codex-builder" %}
+tool_search:
+  enabled: "on"
+  threshold_pct: 10
+  search_default_limit: 5
+  max_search_limit: 20
+{%- endif %}
 
 # =============================================================================
 # Kanban dispatcher — disabled fleet-wide
@@ -324,7 +344,10 @@ approvals:
 tool_loop_guardrails:
   warnings_enabled: true
 {%- if is_main %}
-  hard_stop_enabled: false
+  # Cap runaway tool loops on the interactive surface too (Sir 2026-08-05).
+  hard_stop_enabled: true
+  hard_stop_after:
+    exact_failure: 5
 {%- else %}
   # Background runs have no human watching — a hard stop is preferable to
   # burning the full iteration budget in a stuck loop.
@@ -367,7 +390,11 @@ terminal:
 # Skills
 # =============================================================================
 skills:
+{%- if is_main %}
+  creation_nudge_interval: 50
+{%- else %}
   creation_nudge_interval: 0
+{%- endif %}
   # Platform-native Alfred skills are deployed by the init container into
   # the profile's skills/ directory. The vault-worker skills
   # (vault-curator / vault-janitor / vault-distiller) are also synced there.
@@ -454,6 +481,7 @@ mcp_servers:
   # generic HTTP proxy to ctrl-api. On Alfred Prime it additionally exposes
   # the `tenant` and `ask_alfred` cross-tenant tools.
   alfred-ctrl:
+    supports_parallel_tool_calls: true
     command: "node"
     args: ["{{ mcp_ctrl_script }}"]
     env:
@@ -474,6 +502,7 @@ mcp_servers:
   # Custom Connectors, served over stdio so the gateway can spawn each app
   # as a child process. Source: packages/mcp-server/src/bin/stdio-app.ts.
   alfred:
+    supports_parallel_tool_calls: true
     command: "node"
     args: ["{{ mcp_stdio_dir }}/dist/bin/stdio-app.js", "alfred"]
     env:
@@ -512,6 +541,7 @@ mcp_servers:
 {%- endif %}
 
   sure:
+    supports_parallel_tool_calls: true
     command: "node"
     args: ["{{ mcp_stdio_dir }}/dist/bin/stdio-app.js", "sure"]
     env:
@@ -582,6 +612,7 @@ mcp_servers:
 {%- endif %}
 
   vaultwarden:
+    supports_parallel_tool_calls: true
     command: "node"
     args: ["{{ mcp_stdio_dir }}/dist/bin/stdio-app.js", "vaultwarden"]
     env:
