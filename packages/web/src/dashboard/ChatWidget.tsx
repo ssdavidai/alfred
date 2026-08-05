@@ -35,6 +35,28 @@ interface Message {
   role: Role;
   text: string;
   pending?: boolean;
+  /** #429 — activity label shown while a pending turn has produced no text
+   *  yet (e.g. "Alfred is working", "using sure"). Codex turns don't stream
+   *  token deltas, so without this the bubble looks frozen for the whole turn. */
+  note?: string;
+}
+
+/** #429 — animated "working…" indicator for a pending turn with no text yet. */
+function WorkingDots({ label }: { label: string }) {
+  return (
+    <span
+      className="inline-flex items-center gap-1 italic opacity-80"
+      style={{ color: "var(--brass)" }}
+      aria-live="polite"
+    >
+      {label}
+      <span className="inline-flex">
+        <span className="animate-bounce" style={{ animationDelay: "0ms" }}>.</span>
+        <span className="animate-bounce" style={{ animationDelay: "150ms" }}>.</span>
+        <span className="animate-bounce" style={{ animationDelay: "300ms" }}>.</span>
+      </span>
+    </span>
+  );
 }
 
 type Status = "idle" | "checking" | "ready" | "unavailable";
@@ -486,7 +508,12 @@ export default function ChatWidget() {
               >
                 {m.role === "user" ? "You" : "Alfred"}
               </div>
-              {m.text || (m.pending ? "…" : "")}
+              {m.text ||
+                (m.pending ? (
+                  <WorkingDots label={m.note || "Alfred is working"} />
+                ) : (
+                  ""
+                ))}
               {m.pending && m.text && (
                 <span
                   className="ml-0.5 inline-block animate-pulse"
