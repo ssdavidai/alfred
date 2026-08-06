@@ -59,12 +59,22 @@ import {
 // `status === "proposed"` no longer forces Asking: an unpromoted instinct
 // already carries `tier: Asking`, and readTier fails closed anyway.
 
+// Describes how well-established the pattern is — i.e. where the
+// discretion BAR sits. It must NOT speak about autonomy: that is the
+// tier's job (`autonomyStatement`), and the two lines render adjacently.
+//
+// The old copy ("Routine — I handle it automatically.") did claim
+// autonomy, which after #446/#447 produced a visible contradiction on
+// home: `suppress-github-paperclip-build-approval-machinery` (60
+// observations, bar 0.75, tier Asking) rendered "I'll bring this to you
+// and ask how to proceed." immediately above "Routine — I handle it
+// automatically." A well-observed pattern is not an authorised one.
 function butlerLine(threshold: number): string {
-  if (threshold >= 0.95) return "I'd ask before acting on this.";
-  if (threshold >= 0.90) return "I'd rather confirm before acting.";
-  if (threshold >= 0.85) return "I'm fairly certain — quiet confirm.";
-  if (threshold >= 0.80) return "I've seen this enough times to handle it.";
-  return "Routine — I handle it automatically.";
+  if (threshold >= 0.95) return "Barely seen — a match would need to be near-certain.";
+  if (threshold >= 0.90) return "Seen a handful of times.";
+  if (threshold >= 0.85) return "Seen fairly often.";
+  if (threshold >= 0.80) return "Well established by now.";
+  return "Routine — seen many times over.";
 }
 
 function titleCaseSlug(slug: string): string {
