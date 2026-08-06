@@ -2,11 +2,14 @@
 
 # Alfred Black
 
-### Your private chief of staff. Seen, not heard.
+### Your attention is the business. Alfred gives it back.
 
-An agentic butler that runs your calendar, email, finances, and household
-logistics in the background — so you talk to it **less** over time, not more,
-and get to be present for your actual life.
+A self-hosted operator that carries the coordination layer of a one-person
+company — the inbox triage, the follow-ups, the context reconstruction — so you
+talk to it **less** over time, not more.
+
+**This repository is the system itself.** Every gate, every audit row, every
+line of the machine that decides what Alfred may do without asking you.
 
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-green.svg)](https://python.org)
@@ -29,25 +32,50 @@ and get to be present for your actual life.
 
 ---
 
-## Presence, not productivity
+## Attentionmaxxing
 
 Alfred Black is **not a productivity tool.** It will not gamify your to-dos or
 nudge you toward inbox zero. It is built to do the opposite of most software:
 to need your attention *less* the longer you use it.
 
-Your life has outgrown your nervous system. The number of inputs — email,
-messages, calendars, bills, contracts, logistics — has scaled past what a human
-brain was built to hold. The usual answer is another app, another dashboard,
-another screen demanding you. Alfred's answer is a butler that quietly absorbs
-all of it and surfaces only what genuinely needs *you*.
+In a one-person company, every line of the P&L is downstream of one asset — the
+owner's attention. Revenue is attention converted at your hourly judgment rate.
+Costs are attention leaks with logos on them. Underneath the billable work sits
+a second, unbilled job: inbox triage, meeting prep, chasing, and re-reading
+three threads to remember what was agreed. Call it forty-something hours a
+month. It isn't billable, and it isn't life.
 
-The goal is to become **seen, not heard** — a system that knows your life well
-enough to act on your behalf, so you spend less time looking at screens and more
-time being a human. Call it *presencemaxxing*: Alfred becomes your interface to
-the web, so you don't have to be.
+Most AI hasn't fixed this, because every AI subscription shows you one number —
+the price — and never the other one. **The token bill is visible. The mess bill
+is hidden:** the prompting, reviewing, correcting, re-doing, and the ambient
+cost of being quality control for a fast, confident intern. For high-stakes
+work the mess bill is routinely the larger of the two.
 
-> This is the working philosophy behind the project. The longer version:
-> [**Life has outgrown your nervous system**](https://screenlessdad.com/p/life-has-outgrown-your-nervous-system).
+So the number worth maximising isn't output. It's **Net Attention Returned** —
+accepted work lifted off you, *minus every minute you spent making it happen*.
+Only accepted work counts. Every supervision minute subtracts.
+
+That metric is why this system is shaped the way it is. You cannot produce an
+honest attention ledger from a chat window; it needs a substrate where every
+decision is a record, every state change writes an audit row, and every
+suppression is logged. That substrate is what this repository is.
+
+> The long version: [**Attentionmaxxing — the thesis**](https://alfred.black).
+
+---
+
+## What this repo is, and what it isn't
+
+**This is the machine.** MIT-licensed, self-hosted, yours. One repo, one VM,
+one `docker compose up`. Nothing phones home; your data never leaves your box.
+
+**It is not the service.** [alfred.black](https://alfred.black) is *managed AI
+employment* — a Client Operator placed inside your company, where the
+supervising, quality control and repair are somebody else's job and you receive
+a monthly statement of hours returned. The management is the product there.
+
+If you run this yourself, **you are the manager.** That is a real job, and the
+honest note further down says what it costs.
 
 ---
 
@@ -150,10 +178,51 @@ Asking        →   Confirming        →   Acting
  I do here?"       X — ok?"               what I did"
 ```
 
-This is **progressive autonomy**: Alfred starts by asking, learns your patterns,
-begins suggesting, then — only once it has earned it — quietly automates the
-things you've shown it you'd always approve. The more it learns, the less it
-asks. Seen, not heard.
+This is **progressive autonomy** — and in this system it is a mechanism, not a
+promise. The tier is a **ceiling, enforced in code**, checked *before*
+confidence, at two independent points:
+
+- the **signal router**, which decides whether Alfred acts alone or brings you
+  a card; and
+- the **pre-extraction noise gate**, which decides whether something reaches
+  you at all — the most consequential thing an instinct can do.
+
+Both read the same tier. Both **fail closed**: a missing, malformed or unknown
+tier degrades to `Asking`, as does an unmatched signal. No amount of confidence
+promotes an `Asking` instinct into autonomy.
+
+**Alfred cannot promote himself.** Reflection may *propose* that an instinct
+has earned `Acting`; applying it requires your explicit approval. Demotion is
+never gated — dropping *out* of autonomy is always immediate.
+
+Every routing decision is auditable after the fact, including the ones where
+nothing happened:
+
+```
+signal-action: human (tier_gate_asking) — conf=0.94 bar=0.85 tier=Asking mode=live
+```
+
+That line says: it matched, it was confident enough, and it still didn't act —
+because it hadn't been authorised to. The suppression path is audited the same
+way, so "what did Alfred keep from me last week?" is a query, not a guess.
+
+Three tiers, one rule: **only `Acting` acts unattended, and only you grant it.**
+
+### Bring your own model
+
+The runtime is provider-agnostic. Hermes ships support for **Anthropic,
+OpenAI, OpenRouter, Google, Groq, Together, Mistral, DeepSeek, xAI** and
+OpenAI Codex, and `hermes model` is an interactive provider + model picker.
+
+Each of the three profiles takes its own model, so you can put reasoning where
+it earns its keep and stay cheap everywhere else. This repo ships **Codex
+tiers as the default** — that is a choice about defaults, not a limitation —
+and a profile's `config.yaml` is operator-owned, so a provider you set stays
+set across upgrades and reseeds.
+
+Nothing downstream cares: the intelligence layer only ever speaks
+`POST /v1/responses` to a local gateway. Swapping providers changes one block
+of one file.
 
 ### Composio — 1000+ integrations, instantly
 
@@ -162,6 +231,47 @@ Alfred connects to your world through **[Composio](https://composio.dev)**:
 Stripe, and on and on) available instantly with managed OAuth — no per-app
 client setup, no token plumbing on your VM. Credentials stay server-side with
 Composio; Alfred just calls the tools.
+
+### One VM, several principals
+
+Alfred runs as **profiles** — isolated operators on the same box. Each gets its
+own Hermes gateway, its own channels (Slack, Telegram, email, a phone number),
+its own MCP catalogue and skills, and its own identity on the wire. Adding one
+is a form, not a deployment.
+
+That is what makes placing an operator inside a company a routine act rather
+than a project.
+
+### Built for the mess, not the demo
+
+The interesting failures in agent systems are never the model. They are the
+disk that fills, the provider that rate-limits you at 3am, the poison record
+that jams a queue forever, the job that fails while reporting healthy. This
+stack has met all four and carries the scar tissue:
+
+- a **durable run ledger** with atomic I/O, idempotent enqueueing, stall
+  detection and terminal-state derivation — because maintenance workers used
+  to fail silently while the status said fine;
+- **dead-lettering** for poison ingest events, and classification of permanent
+  vs. transient failures so activities stop retrying forever;
+- **provider-cap-aware backoff**, request pacing and quarantine, so a rate
+  limit degrades throughput instead of correctness;
+- **retention everywhere** — session pruning, audit sweeps, log caps, a cold
+  archive for anything older than 90 days.
+
+None of it is exciting. All of it is the difference between a demo and
+something you'd let near a client.
+
+### Your data never leaves your VM
+
+There is no vendor cloud in this architecture. The vault is markdown on your
+disk; the databases are SQLite files next to it; secrets live in your own
+Vaultwarden. Model calls go to whichever provider you chose, from your box,
+under your account.
+
+For anyone under a confidentiality obligation — most consultants, most
+fractional executives — this is not a preference. It is the difference between
+being able to use a system like this and not.
 
 ### Sidecars — the back office
 
@@ -185,12 +295,6 @@ that share one engine:
 | **`alfred-vault`** | The pip-installable CLI. Turns *any* agentic runtime into an ambient butler over an Obsidian vault — the Curator / Janitor / Distiller / Surveyor workers + a Temporal workflow engine. Runs on a Mac Mini under your desk or any box with Python. | [`packages/alfred-vault/`](packages/alfred-vault/) · [`pip install alfred-vault`](https://pypi.org/project/alfred-vault/) |
 | **Alfred Black** | The full self-hosted **platform**: the web dashboard, the Hermes runtime, the signal pipeline, durable workflows, multi-channel delivery, and the Sure / Vaultwarden sidecars — brought up with a single `docker compose up`, served on your own domain over HTTPS. | this repo · *the rest of `packages/`* |
 
-> **2026-05-20 — the platform release.** The project that gave you the `alfred`
-> CLI is now a complete, deployable platform. `alfred-vault` is the same
-> dependable engine it always was — `pip install alfred-vault` still works
-> exactly as before — and Alfred Black wraps it in everything you need to
-> actually live with an agentic butler. See [`CHANGELOG.md`](CHANGELOG.md).
-
 ---
 
 ## Two ways to run Alfred
@@ -198,8 +302,8 @@ that share one engine:
 ### 1 · Just the CLI (`alfred-vault`)
 
 If you already run an agentic runtime ([Claude Code](https://docs.anthropic.com/en/docs/claude-code),
-[OpenClaw](https://openclaw.com), [Zo Computer](https://zo.computer)) and want
-the vault engine on a single machine:
+[Zo Computer](https://zo.computer), or Hermes itself) and want the vault engine
+on a single machine:
 
 ```bash
 pip install alfred-vault
@@ -218,10 +322,9 @@ you control: read on. You bring a fresh Linux VM and a domain; the stack brings
 everything else and serves the web app on your domain over HTTPS. No managed
 provisioning, no billing — **one repo, one VM, one `docker compose up`.**
 
-> **Don't want to run servers?** A fully-managed cloud version is in **private
-> beta at [alfred.black](https://alfred.black)** — we're working with a small
-> group of design partners. Self-hosting (this repo) is, and always will be, the
-> open path.
+> **Don't want to be the manager?** [alfred.black](https://alfred.black) places
+> and manages an operator for you — see [the honest note](#running-this-yourself-means-you-are-the-manager)
+> near the end. Self-hosting (this repo) is, and always will be, the open path.
 
 ---
 
@@ -396,12 +499,47 @@ is needed and Let's Encrypt is not re-hit.
 
 ---
 
-## The cloud version
+## Running this yourself means you are the manager
 
-Prefer not to run a VM? **[alfred.black](https://alfred.black)** is the
-fully-managed, hosted Alfred Black — currently in **private beta with design
-partners**. This repository is the open, self-hosted path and remains the source
-of truth for the platform.
+Worth being straight about, because it is the part no README usually prints.
+
+Self-hosting gives you the whole capability and none of the management. Alfred
+still has to be supervised, and that supervision is a job:
+
+- **Instincts need reviewing.** Alfred proposes what he thinks he's learned.
+  Something has to decide whether a pattern is real, and approve any promotion
+  to `Acting`. The gates make that safe; they don't make it automatic.
+- **Decisions need checking.** The audit trail is only worth having if somebody
+  reads it.
+- **Failures need catching.** Dead-letters, stalled runs, a provider changing
+  its limits, a token that quietly expires.
+- **A VM needs keeping alive.** Disk, memory, upgrades, backups of the vault
+  and the certs.
+
+Budget a few hours a month once it's settled, and meaningfully more while it's
+learning your work. That's not a warning — plenty of people will happily pay
+that in exchange for owning the whole thing, and the fact that you *can* is the
+point of the licence.
+
+But notice what it is: the coordination tax, converted into a management tax.
+If your reason for wanting Alfred was to stop being the person who supervises
+the work, self-hosting hands that job straight back to you.
+
+## If you'd rather not hold that job
+
+**[alfred.black](https://alfred.black)** is the other answer: *managed AI
+employment*. One Client Operator, placed inside your one-person company,
+accountable for a defined job — with the supervision, quality control and
+repair as **our** job, not yours.
+
+The difference isn't hosting. It's who is accountable when the work is wrong.
+You review a monthly statement of hours actually returned — accepted work,
+minus every minute you spent on prompting, review, correction and repair — not
+the work itself.
+
+Keep your Claude. Keep your ChatGPT. Alfred works through them.
+
+**[Apply to hire Alfred →](https://alfred.black)**
 
 ---
 
