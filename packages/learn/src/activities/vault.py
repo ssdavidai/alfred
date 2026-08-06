@@ -779,7 +779,23 @@ async def fetch_unprocessed_observations() -> list[dict[str, Any]]:
         batch = int(os.environ.get("REFLECTION_BATCH_SIZE", "250") or "250")
         async with StateClient(config) as sc:
             rows = await sc.list_observations(status="unprocessed", limit=batch)
-        return [observation_row_to_record(r) for r in rows]
+        records = [observation_row_to_record(r) for r in rows]
+        # #454 — mark backlog clear-outs. A run of same-intent decisions in
+        # quick succession is ONE gesture; Reflection previously read the
+        # 2026-07-15 clear-out (28 × `done` in 23 min) as 28 independent
+        # lessons and generalised a suppression rule from whoever happened
+        # to be in the batch. Annotated, never dropped: every row must stay
+        # in the batch so the workflow still marks it processed.
+        from src.matching.bursts import annotate_decision_bursts, burst_summary
+
+        records = annotate_decision_bursts(records)
+        bursts = burst_summary(records)
+        if bursts:
+            logger.info(
+                "fetch_unprocessed_observations: %d burst(s) annotated %s",
+                len(bursts), bursts,
+            )
+        return records
     except Exception:  # noqa: BLE001
         return []
 

@@ -418,6 +418,19 @@ CURRENT INSTINCTS (learned patterns):
 NEW OBSERVATIONS (today's routing decisions):
 {json.dumps(observations, indent=2)}
 {distiller_section}{janitor_section}
+BURSTS (#454): observations sharing a `burst_id` were a single bulk gesture —
+the principal clearing a backlog in one sitting, not N separate judgements.
+Weigh a whole burst as ONE observation. In particular:
+- Do NOT treat a burst as evidence that its senders are unwanted. Clicking
+  "done" on a card means "I have handled this", never "never show me this
+  sender again".
+- Do NOT collect `sender_domains` from the senders that happened to appear in
+  a burst. A domain belongs in a rule only when the evidence is about THAT
+  domain specifically.
+- A suppression rule (`routing_rule.destination_type: hold`) is the only kind
+  that can make information disappear before the principal sees it. Propose
+  one only from explicit `noise` intent, never from `done` or `defer`.
+
 Analyze the observations against existing instincts. For each observation, determine:
 
 1. Does it strengthen an existing instinct? → UPDATE (add signals, increment count)
