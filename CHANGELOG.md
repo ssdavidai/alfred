@@ -5,6 +5,146 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the `alfred-vault` package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-08-06]
+
+The **progressive-autonomy release**. 176 commits since `v2026.05.30`, but the
+headline is one theme: the Asking → Confirming → Acting ladder went from being
+a label on a page to being an enforced safety control, and Alfred lost the
+ability to grant himself autonomy.
+
+### The incident that drove it
+
+On 2026-08-06 an instinct the dashboard displayed as **Asking** — one stored
+observation — cleared the numeric confidence bar, dispatched an executor agent,
+and sent a subscription-cancellation email to a vendor from the principal's own
+Gmail. Four minutes earlier he had been in Slack setting that same service up.
+
+Nothing had gone wrong mechanically. The ladder simply wasn't wired to
+anything: no gate read `tier`. Autonomy came from observation counts alone, and
+the surface that said "Asking" was computing its own answer from confidence.
+A second, unrelated instinct had fired autonomously the same day.
+
+### Fixed — the ladder is now the control
+
+- **The signal router gates on tier** (#445 → #446). `tier` is a *ceiling*
+  checked **before** confidence: only `Acting` may dispatch an agent
+  unattended, and no amount of confidence promotes an `Asking`/`Confirming`
+  instinct. Fails closed — a missing, malformed, or unknown tier degrades to
+  `Asking`, as does a signal with no matched instinct. An explicit Delegate
+  click from the principal is unaffected: that is instruction, not autonomy.
+- **The pre-extraction noise gate gates on tier too** (#453). This gate decides
+  whether an inbound email becomes a signal *at all* — the most destructive
+  thing an instinct can do — and it consulted no tier and wrote no audit row.
+  Below `Acting` a match is now recorded and the email still reaches the Desk.
+  Note the direction is deliberately the inverse of the router: the router
+  fails toward *not acting*, this one fails toward *visibility*, because a
+  false positive here loses mail.
+- **Every noise-gate match is audited** (#453). A suppressed email previously
+  left one line in a rotating container log and nothing durable. There was no
+  way to answer "what did Alfred hide from me last week?" — which is exactly
+  why a rule carrying the principal's primary client domain went unnoticed.
+- **Sender domains are anchored** (#453). Matching was an unanchored substring,
+  so a `google.com` rule also matched `notgoogle.community` and
+  `google.com.phish.example`.
+- **Reaching `Acting` requires the principal's explicit approval** (#452).
+  Reflection may propose the promotion; it may not apply it. The request is
+  recorded as `pending_promotion` on the instinct — idempotent by construction
+  and visible on `/instincts` — and `resolve_instinct_promotion` is the only
+  path that writes the tier. Demotions and `Asking → Confirming` still apply
+  immediately; dropping *out* of autonomy is never gated.
+- **`/instincts` shows the real tier** (#447 → #448, #449). The page had been
+  *deriving* a badge from confidence and observation count, never reading
+  `frontmatter.tier`. After the gate landed that badge could contradict the
+  machine in both directions. It now renders the authoritative field, states in
+  plain language what each tier means for unattended action, and demotes the
+  discretion bar to evidence.
+
+### Fixed — the learning loop itself
+
+- **Instinct promotion had silently no-op'd for ~2 months** (#442 → #443).
+  `apply_instinct_change` wrote via a body-append verb that cannot touch
+  frontmatter, so every promotion returned 200, emitted an audit row claiming
+  success, and changed nothing. All 35 live instincts were frozen at `Asking`
+  while the audit trail lied about it.
+- **Clicking Done taught Alfred to silence the sender** (#454). `hold` was
+  overloaded across noise / done / defer, and the noise gate enrolled on all of
+  them. A 23-minute backlog clear-out (28 × `done`) therefore became a
+  permanent suppression rule whose `sender_domains` were whoever happened to be
+  in that batch. `done` no longer produces a routing rule, and the gate ignores
+  the machine-generated archive/defer markers.
+- **A bulk dismissal now counts as one lesson, not N** (#454). Runs of
+  same-intent decisions in quick succession are marked with a `burst_id`, and
+  Reflection is told to weigh a burst as a single gesture and to justify
+  `sender_domains` per domain rather than harvesting them from a batch.
+- **Reflection runs on the heavy profile** (#451). The docs had claimed this
+  since the cutover; only onboarding actually honoured it. `clerk_reflect` had
+  been running on the workers profile the whole time, alongside routine
+  extraction traffic — for the most judgement-bound call in the system.
+- Instincts always carry a tier, and Reflection understands the ladder (#330).
+  The live scorer's Jaccard was replaced with pattern coverage (#365).
+  `instinct` was added to the alfred-vault schema, ending a stream of
+  `FM002 Unknown type` janitor noise (#444).
+
+### Hermes runtime
+
+- **Codex-only, permanently** (#433 → #435, #450). OpenRouter is purged from
+  the runtime, the render defaults, and `.env.example`. That last one mattered
+  more than it looks: those variables *override* the code defaults, so the
+  sample file still shipping `anthropic/claude-opus-4-6` for the heavy profile
+  meant a fresh deploy would have provisioned a non-Codex fleet.
+- Model tiers: `main=gpt-5.6-terra`, `workers=gpt-5.6-luna`,
+  `heavy=gpt-5.6-sol`.
+- **~3× faster interactive turns.** `tool_search: on` (defers 169 tool schemas
+  behind three bridge tools), `reasoning_effort: low` on main, parallel tool
+  execution on the read-mostly MCP servers, and a hard stop on runaway tool
+  loops. A trivial turn went from 4–8s and wildly variable to a steady ~2s.
+- Hermes 0.17.0 → 0.19.0 (#422); the template now renders the live baseline so
+  a reseed reproduces it (#439).
+- **A dashboard fast path** (#425) answers deterministic questions
+  ("my chores", "open decisions") straight from ctrl-api in ~73ms instead of a
+  full agent turn, failing open to the agent on anything nuanced. Plus a
+  working indicator, since Codex does not stream token deltas and the bubble
+  looked frozen (#429).
+- Session retention: 30-day prune + optimise, weekly (#430).
+
+### Infrastructure and reliability
+
+- **Plane removed fleet-wide**; hermes memory raised to 12g with swap (#279).
+  The root cause of prose-less briefs was the VM OOM-killing the workers
+  gateway.
+- **Hermes worker sessions had no retention** and filled a 300 GB disk in six
+  days, taking a tenant's whole stack down (#335, #336).
+- Background workers can no longer reach the principal's channels (#288) —
+  after a janitor repair loop delivered 13 failure dumps to Slack.
+- Audit retention sweep at boot (#380 → #406); silently-dropped records now
+  surface (#397); stuck-signal recovery (#373).
+- Matter completion routes through `apply_state_change_v2` with
+  `STATE_CHANGE_ENFORCEMENT=reject` (#328).
+- Backup and restore contract, with a restore drill (#237, #238).
+- Voice is per-profile (#209), with per-call timezone anchoring (#226).
+- Paperclip: agent-driven company bootstrap (#242), Vaultwarden secret sync
+  (#253).
+
+### Documentation
+
+A forensic audit checked every claim against the code and a live tenant rather
+than against other docs, and found eight that would actively mislead. Most
+consequential: `README` still told new operators to get an OpenRouter key;
+`CLAUDE.md` listed the cold archive as deferred when it is built and live,
+listed a removed MCP server, and claimed *every* vault write route enforces the
+promotion contract when two deliberately bypass it to write a compatibility
+record. `packages/learn/CLAUDE.md` and `SPEC.md` described an architecture —
+the OpenClaw gateway, a `packages/saas`, six workflows — that no longer exists.
+
+### Known gaps
+
+- Approving a pending `Acting` promotion has no one-click surface yet; it goes
+  through `resolve_instinct_promotion`. Tracked in #459.
+- Older tenants carry inert vault directories for demoted record types
+  (`assumption/`, `synthesis/`, `constraint/`, …). Harmless, not yet cleaned.
+- `packages/alfred-vault`'s tests are not wired into the push-to-main gate, and
+  the web `node:test` core suites are not run by CI at all.
+
 ## [2026-05-31]
 
 **Lane Vb** (this release) makes **voice (Twilio phone)** per-profile.
