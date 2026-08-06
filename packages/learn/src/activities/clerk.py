@@ -501,7 +501,16 @@ execution field rules:
 - requires_approval: ALWAYS true for newly created instincts. The trust gradient will auto-relax this as observation_count grows.
 - task_title_template: use {{title}} as default; can include variables like {{source}} or {{domain}}"""
 
-    return await _call_clerk(prompt)
+    # Reflection runs on HEAVY (gpt-5.6-sol), not workers (Sir, 2026-08-06).
+    # This is the call that reads every accumulated observation and proposes
+    # instinct changes — including tier promotions, which decide how much
+    # Alfred may do unattended (#446). It is the most judgement-bound call in
+    # the system and the one place worth the strongest model.
+    #
+    # CLAUDE.md §9 already described heavy as "onboarding + Reflection"; only
+    # onboarding_v3 actually honoured it. Reflection had been running on the
+    # workers profile (gpt-5.6-luna) the whole time.
+    return await _call_clerk(prompt, profile="heavy", agent_id="learn-reflect")
 
 
 @activity.defn
@@ -687,6 +696,7 @@ async def _call_clerk(
     prompt: str,
     raw: bool = False,
     agent_id: str | None = None,
+    profile: str = "workers",
 ) -> dict[str, Any] | str:
     """Run a one-shot Hermes job on the workers gateway and return its output.
 
@@ -719,7 +729,16 @@ async def _call_clerk(
     """
     config = load_config()
     token = config.gateway_token()
-    base = config.openclaw_workers_gateway_url
+    # `profile` selects the gateway. Default WORKERS (the bulk of clerk
+    # traffic: extraction, routing, summarisation). `heavy` is for the
+    # reasoning-bound calls — Reflection, which proposes instinct
+    # promotions and therefore decides how much autonomy Alfred earns.
+    # main (:18789) is never a target: it is reserved for Sir's live chat.
+    base = (
+        config.heavy_gateway_url
+        if profile == "heavy"
+        else config.openclaw_workers_gateway_url
+    )
     session_key = agent_id or config.clerk_agent_id
     headers = {
         "Authorization": f"Bearer {token}",
