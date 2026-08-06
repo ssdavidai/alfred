@@ -477,6 +477,60 @@ async def _recent_open_card_exists(client: Any, fm: dict[str, Any]) -> str | Non
     return None
 
 
+# Progressive-autonomy ladder (#445). The ONLY tier permitted to route a
+# signal to the agent without the principal in the loop. `Asking` and
+# `Confirming` both mean "the principal decides"; they differ in what the
+# card says, not in whether Alfred may act unilaterally.
+#
+# Why `Confirming` is also blocked here: ``route_signal_action`` only ever
+# sees signals with ``effect == "action"`` (validated at step 2) — external,
+# side-effecting work like sending mail or calling a vendor API. There is no
+# internal/reversible subset arriving at this gate to let through, so #445's
+# "Confirming → human for anything with external side effects" resolves to
+# "Confirming → human" here. The needs_attention card IS the confirm surface.
+TIER_ASKING = "Asking"
+TIER_CONFIRMING = "Confirming"
+TIER_ACTING = "Acting"
+VALID_TIERS = (TIER_ASKING, TIER_CONFIRMING, TIER_ACTING)
+AUTONOMOUS_TIER = TIER_ACTING
+
+
+def _coerce_int_or_none(raw: Any) -> int | None:
+    """Best-effort int for audit observability — never raises (#445)."""
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _instinct_tier(instinct: dict[str, Any]) -> str:
+    """Return the instinct's promotion-ladder tier, failing CLOSED.
+
+    Anything missing, unparseable, or outside ``VALID_TIERS`` degrades to
+    ``Asking`` — the least-autonomy tier. A malformed instinct must never
+    be able to buy autonomy it hasn't earned (#445).
+
+    Only the frontmatter ``tier`` string is authoritative. The nested
+    ``execution.tier`` integer / ``execution.requires_approval`` pair is a
+    legacy shape that is deliberately NOT consulted: it disagreed with the
+    ladder on live data (``tier: Asking`` alongside
+    ``execution: {tier: 1, requires_approval: false}``) and the weaker of
+    two conflicting fields must not satisfy the gate.
+    """
+    fm = instinct.get("frontmatter")
+    if not isinstance(fm, dict):
+        fm = instinct
+    raw = fm.get("tier")
+    if not isinstance(raw, str):
+        return TIER_ASKING
+    normalized = raw.strip().capitalize()
+    if normalized not in VALID_TIERS:
+        return TIER_ASKING
+    return normalized
+
+
 def _instinct_threshold(instinct: dict[str, Any]) -> float:
     """Compute the effective per-instinct discretion bar from frontmatter.
 
@@ -503,40 +557,15 @@ def _instinct_threshold(instinct: dict[str, Any]) -> float:
     Falling back to the stored ``observation_count`` keeps the gate
     sane if ctrl-api is on an older build that doesn't enrich the
     response yet.
+
+    #445: delegates to ``discretion.effective_threshold`` — the single
+    shared implementation. This used to be a second, divergent copy of
+    the raise-only rule, and it was the copy the live router actually
+    used while the tests exercised the other one.
     """
-    fm = instinct.get("frontmatter")
-    if not isinstance(fm, dict):
-        fm = instinct
+    from src.matching.discretion import effective_threshold
 
-    # Floor: the bar the live observation count has earned. Prefer the
-    # ctrl-api-enriched live count over the stored snapshot.
-    obs_count_raw = (
-        fm.get("live_observation_count")
-        if fm.get("live_observation_count") is not None
-        else fm.get("observation_count", 0)
-    )
-    try:
-        obs_count = int(obs_count_raw)
-    except (TypeError, ValueError):
-        obs_count = 0
-    if obs_count < 0:
-        obs_count = 0
-
-    from src.matching.discretion import get_discretion_threshold
-    earned = get_discretion_threshold(obs_count)
-
-    # Raise-only override: an explicit threshold can only make the bar
-    # stricter, never lower it below the earned floor.
-    raw = fm.get("discretion_threshold")
-    if raw is not None:
-        try:
-            f = float(raw)
-        except (TypeError, ValueError):
-            f = None
-        if f is not None and f == f and f >= 0.0:
-            return max(earned, min(f, 1.0))
-
-    return earned
+    return effective_threshold(instinct)
 
 
 def _safe_filename_slug(s: str) -> str:
@@ -722,6 +751,9 @@ async def _emit_signal_action_audit(
     matched_instinct_name: str | None,
     match_score: float,
     threshold: float,
+    matched_instinct_tier: str = TIER_ASKING,
+    observation_count: int | None = None,
+    live_observation_count: int | None = None,
     combined_confidence: float,
     chosen_path: str,
     decision_reason: str,
@@ -762,6 +794,13 @@ async def _emit_signal_action_audit(
         "match_score": round(match_score, 4),
         "threshold": round(threshold, 4),
         "combined_confidence": round(combined_confidence, 4),
+        # #445 — the gate's inputs, so a routing decision can be
+        # reconstructed from the audit row alone. Before this, the
+        # effective bar was invisible after the fact and diagnosing the
+        # 2026-08-06 ElevenLabs incident meant reading source to infer it.
+        "instinct_tier": matched_instinct_tier,
+        "observation_count": observation_count,
+        "live_observation_count": live_observation_count,
         "effective_mode": effective_mode,
         "env_mode": env_mode,
         "needs_attention_path": needs_attention_path,
@@ -774,7 +813,8 @@ async def _emit_signal_action_audit(
 
     summary = (
         f"signal-action: {chosen_path} ({decision_reason}) — "
-        f"conf={combined_confidence:.2f} mode={effective_mode}"
+        f"conf={combined_confidence:.2f} bar={threshold:.2f} "
+        f"tier={matched_instinct_tier} mode={effective_mode}"
     )
 
     cfg = load_config()
@@ -1874,12 +1914,24 @@ async def route_signal_action(
         matched_path: str | None = None
         matched_name: str | None = None
         threshold = DEFAULT_DISCRETION_THRESHOLD
+        # #445 — fail closed: with no matched instinct there is no earned
+        # autonomy at all, so the tier defaults to the blocking value.
+        matched_tier = TIER_ASKING
+        matched_obs_count: int | None = None
+        matched_live_obs_count: int | None = None
         if matched is not None:
             matched_path = str(matched.get("path") or "").strip() or None
             inst_fm = matched.get("frontmatter") or matched
             if isinstance(inst_fm, dict):
                 matched_name = str(inst_fm.get("name") or "").strip() or None
+                matched_obs_count = _coerce_int_or_none(
+                    inst_fm.get("observation_count")
+                )
+                matched_live_obs_count = _coerce_int_or_none(
+                    inst_fm.get("live_observation_count")
+                )
             threshold = _instinct_threshold(matched)
+            matched_tier = _instinct_tier(matched)
 
         # 5. Combined confidence — for actions, target_confidence only
         # gates when there IS a target (target_kind set). Many actions
@@ -1941,7 +1993,15 @@ async def route_signal_action(
         #      clicked Delegate from /desk that's the opposite case and
         #      shadow shouldn't apply.
         #   2. shadow mode for autonomous signals → human.
-        #   3. confidence / instinct-match tier gates.
+        #   3. the promotion-ladder tier ceiling (#445).
+        #   4. confidence / discretion-bar gate.
+        #
+        # #445 — the tier is a CEILING evaluated BEFORE confidence, not a
+        # tiebreaker after it. No amount of confidence promotes an `Asking`
+        # or `Confirming` instinct into autonomy; the discretion bar still
+        # applies underneath for instincts that have reached `Acting`.
+        # Ordering matters: checking tier first means the audit reason
+        # names the real blocker instead of masking it as `low_confidence`.
         if principal_delegate_override:
             chosen_path = "agent"
             decision_reason = "principal_delegated"
@@ -1951,6 +2011,9 @@ async def route_signal_action(
         elif matched is None or matched_path is None:
             chosen_path = "human"
             decision_reason = "no_matching_instinct"
+        elif matched_tier != AUTONOMOUS_TIER:
+            chosen_path = "human"
+            decision_reason = f"tier_gate_{matched_tier.lower()}"
         elif combined_confidence < threshold:
             chosen_path = "human"
             decision_reason = "low_confidence"
@@ -2117,6 +2180,9 @@ async def route_signal_action(
             matched_instinct_name=matched_name,
             match_score=match_score,
             threshold=threshold,
+            matched_instinct_tier=matched_tier,
+            observation_count=matched_obs_count,
+            live_observation_count=matched_live_obs_count,
             combined_confidence=combined_confidence,
             chosen_path=chosen_path,
             decision_reason=decision_reason,

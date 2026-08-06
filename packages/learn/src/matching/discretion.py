@@ -30,6 +30,45 @@ def get_discretion_threshold(observation_count: int) -> float:
         return 0.75
 
 
+def effective_threshold(instinct: dict[str, Any]) -> float:
+    """The instinct's effective discretion bar (#445).
+
+    SINGLE source of truth for the raise-only override rule. Previously
+    this logic existed twice — here and in
+    ``signal_actions._instinct_threshold`` — with only the latter wired
+    into the live router, so the tested copy was not the running copy.
+    ``_instinct_threshold`` now delegates here.
+
+    Accepts either a bare frontmatter mapping or a full record dict with
+    a ``frontmatter`` key.
+    """
+    fm = instinct.get("frontmatter")
+    if not isinstance(fm, dict):
+        fm = instinct
+
+    obs_raw = fm.get("live_observation_count")
+    if obs_raw is None:
+        obs_raw = fm.get("observation_count", 0)
+    try:
+        obs_count = int(obs_raw)
+    except (TypeError, ValueError):
+        obs_count = 0
+    earned = get_discretion_threshold(max(obs_count, 0))
+
+    explicit = fm.get("discretion_threshold")
+    if explicit is not None:
+        try:
+            f = float(explicit)
+        except (TypeError, ValueError):
+            f = None
+        # ``f == f`` rejects NaN, which would make every comparison False.
+        if f is not None and f == f and f >= 0.0:
+            # Raise-only: an explicit override may only make the bar
+            # stricter, never looser than what observations earned.
+            return max(earned, min(f, 1.0))
+    return earned
+
+
 def should_route_autonomously(
     score: float,
     instinct: dict[str, Any],
@@ -47,28 +86,14 @@ def should_route_autonomously(
 
     Prefers the ctrl-api-enriched ``live_observation_count`` (the same
     decision-sourced count the badge uses) over the stored snapshot.
-    """
-    obs_raw = instinct.get("live_observation_count")
-    if obs_raw is None:
-        obs_raw = instinct.get("observation_count", 0)
-    try:
-        obs_count = int(obs_raw)
-    except (TypeError, ValueError):
-        obs_count = 0
-    earned = get_discretion_threshold(max(obs_count, 0))
 
-    explicit = instinct.get("discretion_threshold")
-    threshold = earned
-    if explicit is not None:
-        try:
-            f = float(explicit)
-        except (TypeError, ValueError):
-            f = None
-        if f is not None and f == f:
-            # Raise-only: an explicit override may only make the bar
-            # stricter, never looser than what observations earned.
-            threshold = max(earned, f)
-    return score >= threshold
+    NOTE (#445): this answers "does the score clear the numeric bar", NOT
+    "may this instinct act autonomously". The promotion-ladder tier is a
+    separate, stricter ceiling enforced in
+    ``signal_actions.route_signal_action`` — an ``Asking`` instinct never
+    routes to the agent no matter what this returns.
+    """
+    return score >= effective_threshold(instinct)
 
 
 def format_discretion_level(observation_count: int) -> str:
