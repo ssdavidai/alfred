@@ -488,11 +488,20 @@ async def _recent_open_card_exists(client: Any, fm: dict[str, Any]) -> str | Non
 # internal/reversible subset arriving at this gate to let through, so #445's
 # "Confirming → human for anything with external side effects" resolves to
 # "Confirming → human" here. The needs_attention card IS the confirm surface.
-TIER_ASKING = "Asking"
-TIER_CONFIRMING = "Confirming"
-TIER_ACTING = "Acting"
-VALID_TIERS = (TIER_ASKING, TIER_CONFIRMING, TIER_ACTING)
-AUTONOMOUS_TIER = TIER_ACTING
+#
+# #453 — the ladder now has a SECOND enforcement point (the pre-extraction
+# noise gate in noise_patterns), so the constants and the reader moved to
+# src.matching.tiers. Re-exported here under their existing names: this
+# module's callers and tests import them from here, and two copies of a
+# safety constant is the failure mode #446 just finished removing.
+from src.matching.tiers import (  # noqa: E402
+    AUTONOMOUS_TIER,
+    TIER_ACTING,
+    TIER_ASKING,
+    TIER_CONFIRMING,
+    VALID_TIERS,
+    instinct_tier as _shared_instinct_tier,
+)
 
 
 def _coerce_int_or_none(raw: Any) -> int | None:
@@ -518,17 +527,12 @@ def _instinct_tier(instinct: dict[str, Any]) -> str:
     ladder on live data (``tier: Asking`` alongside
     ``execution: {tier: 1, requires_approval: false}``) and the weaker of
     two conflicting fields must not satisfy the gate.
+
+    #453: delegates to ``src.matching.tiers.instinct_tier`` — the shared
+    reader both enforcement points use. Kept as a module-local name because
+    the router's tests and call sites reference it.
     """
-    fm = instinct.get("frontmatter")
-    if not isinstance(fm, dict):
-        fm = instinct
-    raw = fm.get("tier")
-    if not isinstance(raw, str):
-        return TIER_ASKING
-    normalized = raw.strip().capitalize()
-    if normalized not in VALID_TIERS:
-        return TIER_ASKING
-    return normalized
+    return _shared_instinct_tier(instinct)
 
 
 def _instinct_threshold(instinct: dict[str, Any]) -> float:
