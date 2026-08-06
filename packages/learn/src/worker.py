@@ -189,6 +189,7 @@ from src.activities.enrichment import (
 # Activities — vault
 from src.activities.vault import (
     apply_instinct_change,
+    resolve_instinct_promotion,
     assign_records_to_session,
     collect_daily_activity,
     collect_living_brief_data,
@@ -884,6 +885,7 @@ ALL_ACTIVITIES = [
     update_cursor,
     # Vault
     apply_instinct_change,
+    resolve_instinct_promotion,
     assign_records_to_session,
     collect_daily_activity,
     collect_living_brief_data,

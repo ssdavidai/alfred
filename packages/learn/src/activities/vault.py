@@ -3,15 +3,23 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from temporalio import activity
 
 from src.config import load_config
 from src.utils.vault_client import VaultClient
+
+logger = logging.getLogger("alfred-learn.vault")
+
+
+def _now_iso() -> str:
+    """UTC now, ISO-8601 — for frontmatter timestamps."""
+    return datetime.now(timezone.utc).isoformat()
 
 
 def slugify(name: str) -> str:
@@ -815,6 +823,172 @@ async def fetch_active_instincts() -> list[dict[str, Any]]:
         await client.close()
 
 
+async def _hold_acting_promotion(
+    client: VaultClient,
+    path: str,
+    changes: dict[str, Any],
+) -> dict[str, Any]:
+    """Withhold a self-granted promotion to ``Acting`` (#452).
+
+    Reaching ``Acting`` is what authorises Alfred to act unattended — the
+    router (#446) and the noise gate (#453) both key on it. Reflection may
+    still propose the promotion; it may not apply it. This converts such a
+    proposal into a pending request and returns ``changes`` with the tier
+    stripped, so the rest of the proposal lands normally.
+
+    Deliberately NOT held:
+      * demotions and lateral moves — dropping OUT of Acting must always be
+        immediate;
+      * Asking → Confirming — Alfred earns that rung himself;
+      * an instinct already at Acting (nothing is being granted).
+
+    Idempotent by construction: the request is a ``pending_promotion`` field
+    on the instinct itself, so a nightly Reflection proposing the same
+    promotion again finds it already pending and does not re-request. That
+    also makes the request visible on /instincts rather than living only in
+    an audit table.
+    """
+    from src.matching.tiers import AUTONOMOUS_TIER, instinct_tier
+
+    proposed = changes.get("tier")
+    if not isinstance(proposed, str) or proposed.strip().capitalize() != AUTONOMOUS_TIER:
+        return changes
+
+    remaining = {k: v for k, v in changes.items() if k != "tier"}
+    try:
+        existing = await client.read_record(path)
+        fm = existing.get("frontmatter") or {}
+        current = instinct_tier(fm if isinstance(fm, dict) else {})
+        already_pending = str(fm.get("pending_promotion") or "").strip()
+    except Exception:  # noqa: BLE001
+        # Can't read the record — fail CLOSED: withhold the promotion rather
+        # than grant autonomy we couldn't verify was warranted.
+        logger.warning("_hold_acting_promotion: read failed for %s — withheld", path)
+        return remaining
+
+    if current == AUTONOMOUS_TIER:
+        return changes  # already there; nothing is being granted
+
+    if already_pending == AUTONOMOUS_TIER:
+        logger.info("_hold_acting_promotion: %s already pending — no re-request", path)
+        return remaining
+
+    requested_at = _now_iso()
+    try:
+        await client.patch_frontmatter(path, {
+            "pending_promotion": AUTONOMOUS_TIER,
+            "pending_promotion_requested": requested_at,
+            "pending_promotion_from": current,
+        })
+    except Exception:  # noqa: BLE001
+        logger.warning("_hold_acting_promotion: could not mark %s pending", path)
+
+    try:
+        from src.utils.state_client import StateClient as _SC
+        async with _SC(load_config()) as _sc:
+            await _sc.append_audit(
+                action_type="instinct_promotion_requested",
+                actor="alfred-learn",
+                source="reflection.apply_instinct_change",
+                summary=(
+                    f"{path} requests {current} -> {AUTONOMOUS_TIER}; "
+                    "awaiting Sir's approval"
+                ),
+                target_path=path,
+                target_kind="instinct",
+                changes={
+                    "from_tier": current,
+                    "to_tier": AUTONOMOUS_TIER,
+                    "requested_at": requested_at,
+                },
+            )
+    except Exception:  # noqa: BLE001
+        logger.warning("_hold_acting_promotion: audit emit failed for %s", path)
+
+    logger.info(
+        "_hold_acting_promotion: WITHHELD %s -> %s for %s (awaiting approval)",
+        current, AUTONOMOUS_TIER, path,
+    )
+    return remaining
+
+
+@activity.defn
+async def resolve_instinct_promotion(
+    path: str,
+    approved: bool,
+    actor: str = "sir",
+) -> dict[str, Any]:
+    """Approve or decline a pending ``Acting`` promotion (#452).
+
+    The only path by which an instinct reaches ``Acting``. On approval the
+    tier is written and the usual ``instinct_tier_event`` audit row is
+    emitted — the same row telemetry already watches — so an approved
+    promotion is indistinguishable downstream from any other tier move.
+
+    On refusal the tier is untouched and the refusal is recorded, so
+    Reflection has evidence not to keep proposing it.
+    """
+    from src.matching.tiers import AUTONOMOUS_TIER, instinct_tier
+
+    config = load_config()
+    client = VaultClient(config)
+    try:
+        existing = await client.read_record(path)
+        fm = existing.get("frontmatter") or {}
+        pending = str(fm.get("pending_promotion") or "").strip()
+        current = instinct_tier(fm if isinstance(fm, dict) else {})
+        if pending != AUTONOMOUS_TIER:
+            return {"path": path, "applied": False, "reason": "no_pending_request"}
+
+        clear = {
+            "pending_promotion": "",
+            "pending_promotion_requested": "",
+            "pending_promotion_from": "",
+        }
+        if approved:
+            await client.patch_frontmatter(path, {"tier": AUTONOMOUS_TIER, **clear})
+        else:
+            await client.patch_frontmatter(path, {
+                **clear,
+                "promotion_declined_at": _now_iso(),
+                "promotion_declined_from": current,
+            })
+
+        try:
+            from src.utils.state_client import StateClient as _SC
+            async with _SC(config) as _sc:
+                if approved:
+                    await _sc.append_audit(
+                        action_type="instinct_tier_event",
+                        actor=actor,
+                        source="promotion.approved",
+                        summary=f"{path} tier -> {AUTONOMOUS_TIER} (approved by {actor})",
+                        target_path=path,
+                        target_kind="instinct",
+                        changes={"tier": AUTONOMOUS_TIER, "approved_by": actor},
+                    )
+                else:
+                    await _sc.append_audit(
+                        action_type="instinct_promotion_declined",
+                        actor=actor,
+                        source="promotion.declined",
+                        summary=f"{path} promotion to {AUTONOMOUS_TIER} declined by {actor}",
+                        target_path=path,
+                        target_kind="instinct",
+                        changes={"from_tier": current, "declined_by": actor},
+                    )
+        except Exception:  # noqa: BLE001
+            logger.warning("resolve_instinct_promotion: audit emit failed for %s", path)
+
+        return {
+            "path": path,
+            "applied": approved,
+            "tier": AUTONOMOUS_TIER if approved else current,
+        }
+    finally:
+        await client.close()
+
+
 @activity.defn
 async def apply_instinct_change(proposal: dict[str, Any]) -> None:
     """Apply a single instinct change proposal (create/update/merge/deprecate)."""
@@ -831,6 +1005,14 @@ async def apply_instinct_change(proposal: dict[str, Any]) -> None:
         elif action == "update":
             path = proposal.get("path", "")
             changes = proposal.get("changes", {})
+            # #452 — Alfred may climb to Confirming on his own, but crossing
+            # into Acting is what authorises unattended action (#446 for the
+            # router, #453 for the noise gate). That crossing is Sir's to
+            # make, so a proposal for it is held as a request instead of
+            # being applied. Everything else in the same proposal still
+            # applies — only the tier field is withheld.
+            if path and changes:
+                changes = await _hold_acting_promotion(client, path, changes)
             if path and changes:
                 # fix #1: patch frontmatter directly via {"set": ...}. The old
                 # update_record() sent {"body_append": ...} — a body-only verb

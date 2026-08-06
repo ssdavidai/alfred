@@ -88,12 +88,32 @@ async def test_update_patches_frontmatter_and_never_body_appends():
 
 
 async def test_update_with_tier_emits_truthful_audit():
+    # Confirming, not Acting: since #452 a self-granted promotion to Acting
+    # is WITHHELD for Sir's approval, so it deliberately does NOT emit a
+    # tier_event (it emits instinct_promotion_requested instead — covered in
+    # tests/test_acting_approval.py). Every other tier move still applies and
+    # still audits, which is what this test is for.
     await apply_instinct_change(
-        {"action": "update", "path": "instinct/x.md", "changes": {"tier": "Acting"}}
+        {"action": "update", "path": "instinct/x.md", "changes": {"tier": "Confirming"}}
     )
     # audit now rides *after* a real frontmatter patch (patch_frontmatter raises on
     # non-2xx, so the audit only lands when the write actually succeeded).
     assert any(a.get("action_type") == "instinct_tier_event" for a in _FakeStateClient.audits)
+
+
+async def test_self_granted_acting_promotion_is_withheld():
+    """#452 — the promotion that authorises unattended action is Sir's."""
+    await apply_instinct_change(
+        {"action": "update", "path": "instinct/x.md", "changes": {"tier": "Acting"}}
+    )
+    fc = _FakeVaultClient.last
+    written = [u for _, u in fc.patched]
+    assert not any(u.get("tier") == "Acting" for u in written), (
+        "Acting must never be written without Sir's approval"
+    )
+    assert any("pending_promotion" in u for u in written), (
+        "the request must be recorded on the instinct"
+    )
 
 
 async def test_deprecate_patches_status_frontmatter_not_body_append():
