@@ -790,7 +790,11 @@ async def fetch_active_instincts() -> list[dict[str, Any]]:
     config = load_config()
     client = VaultClient(config)
     try:
-        return await client.list_records("instinct", status="active")
+        # Gap-3 / fix #2: do NOT filter status="active". Reflection must see
+        # every non-deprecated instinct (unconfirmed/proposed included), matching
+        # `_load_active_instincts`. The active-only filter hid new instincts from
+        # the reflection pass so they never accumulated toward promotion.
+        return await client.list_records("instinct")
     finally:
         await client.close()
 
@@ -811,12 +815,13 @@ async def apply_instinct_change(proposal: dict[str, Any]) -> None:
         elif action == "update":
             path = proposal.get("path", "")
             changes = proposal.get("changes", {})
-            if path:
-                existing = await client.read_record(path)
-                raw = existing.get("content", "")
-                # Apply field updates to frontmatter
-                updated = _apply_frontmatter_updates(raw, changes)
-                await client.update_record(path, updated)
+            if path and changes:
+                # fix #1: patch frontmatter directly via {"set": ...}. The old
+                # update_record() sent {"body_append": ...} — a body-only verb
+                # that never touched tier / confidence_score / observation_count,
+                # so EVERY promotion silently no-op'd (200 OK + a "promoted"
+                # audit row, but the record's frontmatter never changed on disk).
+                await client.patch_frontmatter(path, changes)
                 # #332: tier moves are THE flywheel milestone — emit an
                 # audit row so telemetry observes promotions/demotions
                 # instead of declaring them. Best-effort.
@@ -843,24 +848,20 @@ async def apply_instinct_change(proposal: dict[str, Any]) -> None:
             content = _build_instinct_content(merged)
             await client.write_record("instinct", name, content)
             for source_path in proposal.get("source_paths", []):
-                existing = await client.read_record(source_path)
-                raw = existing.get("content", "")
-                updated = _apply_frontmatter_updates(raw, {
+                # fix #1: frontmatter patch (was a body-append no-op).
+                await client.patch_frontmatter(source_path, {
                     "status": "deprecated",
                     "deprecation_reason": f"merged into {name}",
                 })
-                await client.update_record(source_path, updated)
 
         elif action == "deprecate":
             path = proposal.get("path", "")
             if path:
-                existing = await client.read_record(path)
-                raw = existing.get("content", "")
-                updated = _apply_frontmatter_updates(
-                    raw,
+                # fix #1: frontmatter patch (was a body-append no-op).
+                await client.patch_frontmatter(
+                    path,
                     {"status": "deprecated", "deprecation_reason": proposal.get("reason", "")},
                 )
-                await client.update_record(path, updated)
     finally:
         await client.close()
 
