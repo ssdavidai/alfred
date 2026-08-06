@@ -352,8 +352,19 @@ def _intent_to_routing_rule(intent_key: str) -> dict[str, str] | None:
         return {"destination_type": "person", "destination": "alfred"}
     if key == "defer":
         return {"destination_type": "hold", "destination": "auto-defer"}
-    if key == "done":
-        return {"destination_type": "hold", "destination": "auto-archive"}
+    # #454 — `done` deliberately yields NO routing rule.
+    #
+    # "Done" is a statement about ONE card ("I've handled this"), not about
+    # the sender ("never show me this again"). It used to return
+    # {"destination_type": "hold", "destination": "auto-archive"}, and the
+    # pre-extraction noise gate enrols on `destination_type == "hold"` — so
+    # an instinct born from Done clicks became a sender kill-switch.
+    #
+    # That is how a 23-minute backlog clear-out on 2026-07-15 (28 × `done`)
+    # taught Alfred a rule carrying the principal's client domain. Returning
+    # None means "no routing rule" — the caller falls back to the rule +
+    # action prose and lets the LearningWorkflow refine routing later, which
+    # is the honest representation of what a Done click actually said.
     return None
 
 

@@ -61,9 +61,18 @@ def test_defer_intent_routes_to_hold() -> None:
     assert rr["destination_type"] == "hold"
 
 
-def test_done_intent_routes_to_hold() -> None:
-    rr = _intent_to_routing_rule("done")
-    assert rr["destination_type"] == "hold"
+def test_done_intent_yields_no_routing_rule() -> None:
+    """#454 — contract change: `done` used to return `hold`/`auto-archive`.
+
+    The pre-extraction noise gate enrols on `destination_type == "hold"`, so
+    that mapping turned "I've handled this card" into "never show me this
+    sender again". A 23-minute backlog clear-out on 2026-07-15 (28 × `done`)
+    is how Alfred learned a suppression rule carrying Sir's client domain.
+
+    A Done click is a statement about one card, not about the sender, so it
+    now yields no routing rule at all.
+    """
+    assert _intent_to_routing_rule("done") is None
 
 
 def test_unknown_intent_returns_none() -> None:

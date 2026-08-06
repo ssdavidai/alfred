@@ -50,6 +50,13 @@ from src.matching.tiers import AUTONOMOUS_TIER, TIER_ASKING, instinct_tier
 
 logger = logging.getLogger("noise-patterns")
 
+#: #454 — machine-generated `destination_type: hold` markers that do NOT mean
+#: "suppress this sender". `auto-archive` came from a Done click ("I handled
+#: that card"); `auto-defer` from a Defer click ("show me later") — the
+#: opposite of suppression. Only `auto-noise`, and hand-authored rules whose
+#: destination is a self-reference, belong in the pre-extraction gate.
+_NON_NOISE_HOLD_DESTINATIONS = frozenset({"auto-archive", "auto-defer"})
+
 
 def _http() -> httpx.AsyncClient:
     cfg = load_config()
@@ -478,6 +485,22 @@ async def load_noise_instincts() -> list[dict[str, Any]]:
         if isinstance(rr, dict):
             dest_type = str(rr.get("destination_type") or "").strip().lower()
         if intent_key != "noise" and dest_type != "hold":
+            continue
+        # #454 — `hold` is overloaded. `_intent_to_routing_rule` used it for
+        # noise AND for archive/defer, so an instinct meaning "I dealt with
+        # that card" or "show me later" enrolled here as a sender
+        # kill-switch. Only genuine noise belongs in this gate; `auto-defer`
+        # is in fact the OPPOSITE of suppression.
+        #
+        # Belt-and-braces with the `done` fix in decision_observations:
+        # machine-generated markers are excluded by name, while
+        # hand-authored rules (whose destination is a self-reference, e.g.
+        # suppress-ci-github-workflow-noise) still enrol — that was BUG 3
+        # and must not regress.
+        destination = ""
+        if isinstance(rr, dict):
+            destination = str(rr.get("destination") or "").strip().lower()
+        if intent_key != "noise" and destination in _NON_NOISE_HOLD_DESTINATIONS:
             continue
         # Pull sender_domains from input_patterns (preferred) or legacy
         # signals.domain_patterns mirror; also collect subject_keywords —
