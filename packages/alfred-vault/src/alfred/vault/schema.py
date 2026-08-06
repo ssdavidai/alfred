@@ -9,6 +9,9 @@ KNOWN_TYPES: set[str] = {
     "location", "note", "decision", "process", "run", "event",
     "account", "asset", "conversation", "assumption", "constraint",
     "contradiction", "synthesis",
+    # Canonical progressive-autonomy record (Asking→Confirming→Acting). Was
+    # absent, so the janitor stamped every instinct FM002 "Unknown type".
+    "instinct",
 }
 
 LEARN_TYPES: set[str] = {
@@ -46,6 +49,7 @@ STATUS_BY_TYPE: dict[str, set[str]] = {
     "constraint": {"active", "expired", "waived", "superseded"},
     "contradiction": {"unresolved", "resolved", "accepted"},
     "synthesis": {"draft", "active", "superseded"},
+    "instinct": {"unconfirmed", "active", "deprecated"},
 }
 
 # Type → expected top-level directory
@@ -67,6 +71,7 @@ TYPE_DIRECTORY: dict[str, str] = {
     "constraint": "constraint",
     "contradiction": "contradiction",
     "synthesis": "synthesis",
+    "instinct": "instinct",
     # session, input have flexible placement
 }
 
