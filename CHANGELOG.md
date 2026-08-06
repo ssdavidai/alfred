@@ -7,143 +7,271 @@ and the `alfred-vault` package adheres to [Semantic Versioning](https://semver.o
 
 ## [2026-08-06]
 
-The **progressive-autonomy release**. 176 commits since `v2026.05.30`, but the
-headline is one theme: the Asking → Confirming → Acting ladder went from being
-a label on a page to being an enforced safety control, and Alfred lost the
-ability to grant himself autonomy.
+178 commits since `v2026.05.30`, across ~213 issues. Two months of work, with
+one headline: **the Asking → Confirming → Acting ladder became an enforced
+safety control**, and Alfred lost the ability to grant himself autonomy.
 
-### The incident that drove it
+---
+
+### The incident that named the release
 
 On 2026-08-06 an instinct the dashboard displayed as **Asking** — one stored
-observation — cleared the numeric confidence bar, dispatched an executor agent,
-and sent a subscription-cancellation email to a vendor from the principal's own
-Gmail. Four minutes earlier he had been in Slack setting that same service up.
+observation — cleared the numeric confidence bar, dispatched an executor
+agent, and sent a subscription-cancellation email to a vendor from the
+principal's own Gmail. Four minutes earlier he had been in Slack setting that
+same service up. A second instinct fired autonomously the same day.
 
-Nothing had gone wrong mechanically. The ladder simply wasn't wired to
-anything: no gate read `tier`. Autonomy came from observation counts alone, and
-the surface that said "Asking" was computing its own answer from confidence.
-A second, unrelated instinct had fired autonomously the same day.
+Nothing failed mechanically. The ladder simply wasn't wired to anything: no
+gate read `tier`. Autonomy came from observation counts alone, and the page
+that said "Asking" was computing its own answer from confidence.
 
-### Fixed — the ladder is now the control
+#### Progressive autonomy, now enforced
 
 - **The signal router gates on tier** (#445 → #446). `tier` is a *ceiling*
-  checked **before** confidence: only `Acting` may dispatch an agent
-  unattended, and no amount of confidence promotes an `Asking`/`Confirming`
-  instinct. Fails closed — a missing, malformed, or unknown tier degrades to
-  `Asking`, as does a signal with no matched instinct. An explicit Delegate
-  click from the principal is unaffected: that is instruction, not autonomy.
-- **The pre-extraction noise gate gates on tier too** (#453). This gate decides
-  whether an inbound email becomes a signal *at all* — the most destructive
-  thing an instinct can do — and it consulted no tier and wrote no audit row.
-  Below `Acting` a match is now recorded and the email still reaches the Desk.
-  Note the direction is deliberately the inverse of the router: the router
-  fails toward *not acting*, this one fails toward *visibility*, because a
-  false positive here loses mail.
+  checked **before** confidence: only `Acting` dispatches unattended, and no
+  amount of confidence promotes an `Asking`/`Confirming` instinct. Fails
+  closed on missing/malformed/unknown tier and on no-match. An explicit
+  Delegate click is unaffected — that is instruction, not autonomy.
+- **The pre-extraction noise gate gates on tier too** (#453) — the stage that
+  decides whether an email becomes a signal *at all*. It consulted no tier and
+  wrote no audit row. Below `Acting` a match is now recorded and the email
+  still reaches the Desk. This gate deliberately fails toward *visibility*,
+  the inverse of the router, because a false positive here loses mail.
 - **Every noise-gate match is audited** (#453). A suppressed email previously
-  left one line in a rotating container log and nothing durable. There was no
-  way to answer "what did Alfred hide from me last week?" — which is exactly
-  why a rule carrying the principal's primary client domain went unnoticed.
-- **Sender domains are anchored** (#453). Matching was an unanchored substring,
-  so a `google.com` rule also matched `notgoogle.community` and
-  `google.com.phish.example`.
-- **Reaching `Acting` requires the principal's explicit approval** (#452).
-  Reflection may propose the promotion; it may not apply it. The request is
-  recorded as `pending_promotion` on the instinct — idempotent by construction
-  and visible on `/instincts` — and `resolve_instinct_promotion` is the only
-  path that writes the tier. Demotions and `Asking → Confirming` still apply
-  immediately; dropping *out* of autonomy is never gated.
-- **`/instincts` shows the real tier** (#447 → #448, #449). The page had been
-  *deriving* a badge from confidence and observation count, never reading
-  `frontmatter.tier`. After the gate landed that badge could contradict the
-  machine in both directions. It now renders the authoritative field, states in
-  plain language what each tier means for unattended action, and demotes the
-  discretion bar to evidence.
+  left one line in a rotating log — there was no way to ask "what did Alfred
+  hide from me last week?"
+- **Sender domains are suffix-anchored** (#453); the old substring match meant
+  a `google.com` rule also matched `notgoogle.community`.
+- **Reaching `Acting` requires the principal's approval** (#452). Reflection
+  proposes; `pending_promotion` records the request on the instinct;
+  `resolve_instinct_promotion` is the only writer. Demotions and
+  `Asking → Confirming` still apply immediately.
+- **`/instincts` shows the real tier** (#447 → #448, #449), states what each
+  tier means for unattended action, and demotes the discretion bar to
+  evidence.
 
-### Fixed — the learning loop itself
+---
+
+### Multi-profile Alfred
+
+The largest feature of the cycle: one VM can now run several distinct
+principals/agents side by side.
+
+- **Agent-profile registry + CRUD** and per-profile Hermes activation
+  (#120) — the supervisor self-renders missing profile dirs, and ports are
+  allocated from the registry.
+- **`/profiles` UI + ProfileSwitcher** (#120 Lane III).
+- **Per-profile channels** (#120 Lane V) — the full channel surface, with
+  channel routes resolving the target profile.
+- **Per-profile AgentMail inboxes** (#120 Lane Vb2) and **per-profile voice**
+  (#120 Lane Vb) — a Twilio number per profile, resolved at TwiML time.
+- **Per-profile MCP catalogue** (#204) and **skill catalogue** (#205) with
+  their `/profiles/:slug` sections.
+- **Per-profile channel identity** (#206) — a `channel_identity` table and
+  adapters that apply the override.
+
+### Files — Store 5
+
+- **Content-extraction pipeline** with an "Alfred read it" badge (#114 Lane B).
+- **Restore route + audit-ledger writes** (#114 Lane C).
+- **MCP file completeness** — move, describe, hard_delete (#114 Lane D₁).
+- Cold archive for files (`files_cold_data`) alongside the Store 3 archive.
+
+### The learning loop
 
 - **Instinct promotion had silently no-op'd for ~2 months** (#442 → #443).
-  `apply_instinct_change` wrote via a body-append verb that cannot touch
-  frontmatter, so every promotion returned 200, emitted an audit row claiming
-  success, and changed nothing. All 35 live instincts were frozen at `Asking`
-  while the audit trail lied about it.
+  `apply_instinct_change` used a body-append verb that cannot touch
+  frontmatter: every promotion returned 200, wrote an audit row claiming
+  success, and changed nothing. All 35 instincts were frozen at `Asking`.
 - **Clicking Done taught Alfred to silence the sender** (#454). `hold` was
-  overloaded across noise / done / defer, and the noise gate enrolled on all of
-  them. A 23-minute backlog clear-out (28 × `done`) therefore became a
-  permanent suppression rule whose `sender_domains` were whoever happened to be
-  in that batch. `done` no longer produces a routing rule, and the gate ignores
-  the machine-generated archive/defer markers.
-- **A bulk dismissal now counts as one lesson, not N** (#454). Runs of
-  same-intent decisions in quick succession are marked with a `burst_id`, and
-  Reflection is told to weigh a burst as a single gesture and to justify
-  `sender_domains` per domain rather than harvesting them from a batch.
+  overloaded across noise/done/defer and the noise gate enrolled on all of
+  them, so a 23-minute backlog clear-out became a permanent suppression rule
+  whose domains were whoever happened to be in the batch.
+- **Bulk dismissals now count as one lesson** (#454) — runs of same-intent
+  decisions get a `burst_id` and Reflection weighs them as a single gesture.
 - **Reflection runs on the heavy profile** (#451). The docs had claimed this
-  since the cutover; only onboarding actually honoured it. `clerk_reflect` had
-  been running on the workers profile the whole time, alongside routine
-  extraction traffic — for the most judgement-bound call in the system.
-- Instincts always carry a tier, and Reflection understands the ladder (#330).
-  The live scorer's Jaccard was replaced with pattern coverage (#365).
-  `instinct` was added to the alfred-vault schema, ending a stream of
+  since the cutover; only onboarding honoured it. The most judgement-bound
+  call in the system had been running on the workers tier all along.
+- **The instinct scorer's Jaccard replaced with pattern coverage** (#365), plus
+  matcher-input widening and matter-ref normalisation (#365/#367 fast-follows).
+- **`derive_signature` maps `source_type=email` to gmail semantics** (#333) —
+  until this, sender-domain matching was structurally inert on every
+  Composio-fed tenant, i.e. all of them.
+- **Instincts always carry a tier**, and Reflection understands the ladder
+  (#330). `instinct` added to the alfred-vault schema, ending a stream of
   `FM002 Unknown type` janitor noise (#444).
+- **The observation→instinct loop relit** (#233) and **repaired** (#276) —
+  reflection wedge, click→instinct linkage, noise suppression.
+- **Flywheel loop-health telemetry** — daily rollup + Sunday digest (#332).
+- **Judgment retirement completed**, stuck-signal recovery, structured
+  auto-task predicates, steward shadow mode documented (#373/#374/#378/#379).
+- **Orphaned decisions retired**, briefing type key, dead-letter net holes
+  (#368/#369/#371), and canonical `state` beating the stale `status` mirror in
+  the decisions list (#369 completion).
+
+### Durable maintenance runs
+
+Vault maintenance workers used to fail synchronously while reporting healthy.
+A full durable-run subsystem replaced that (#316):
+
+- Frozen contract for the durable maintenance run and the janitor
+  scheduled-consumer.
+- **Atomic worker-run ledger I/O**, concurrency-safe idempotent enqueueing,
+  canonical queued records from normalised trigger inputs.
+- **Freshness + terminal status derivation**, reliability/throughput
+  summaries, non-blocking trigger routes, and a served `status_url`.
+- **Structured worker status with stall detection.**
+- **A durable run-claimant** (#407) — the ledger finally has an executor —
+  plus its `ALFRED_DATA_DIR` fix (#407 follow-up).
+- **Janitor agentic stages now propose JSON and Python applies it** (#288
+  L3+L4), so repairs can actually land.
+
+### Reliability under provider limits
+
+- **Codex usage-cap-aware backoff** in signal-extract and decision-router.
+- **Signal-extract pacing** under the per-minute burst limit, and exemption
+  from the `per_matter_per_day` cap.
+- **Curator cap-burn hardening** — honour `enabled`, shared 429 backoff,
+  poison quarantine.
+- **Rate guard honours the full provider reset horizon** plus a recent-429
+  grace window.
+- **Permanent HTTP failures are classified** so activities stop retrying
+  forever (#296).
+- **The workers gateway is probed before spending a delegation budget** (#297).
+- **Poison ingest events dead-letter** instead of jamming the pipeline (#311,
+  provider + consumer halves), with extraction failures reported.
+- **Bounded recovery for transient-error-blocked tasks** (#399).
+- **`recover_stuck_dispatching` resurrection capped**, dead-lettering to a new
+  terminal `failed` decision state (#282). An uncapped recovery loop on a
+  stuck delegate decision had spammed a principal's channel indefinitely.
+- **`blocked_by` written as a list** (#394) — bare strings had poisoned records
+  against every subsequent PATCH.
 
 ### Hermes runtime
 
-- **Codex-only, permanently** (#433 → #435, #450). OpenRouter is purged from
-  the runtime, the render defaults, and `.env.example`. That last one mattered
-  more than it looks: those variables *override* the code defaults, so the
-  sample file still shipping `anthropic/claude-opus-4-6` for the heavy profile
-  meant a fresh deploy would have provisioned a non-Codex fleet.
+- **Codex-only, permanently** (#433 → #435, #450). OpenRouter purged from the
+  runtime, the render defaults and `.env.example` — the last mattering most,
+  since those values *override* the code defaults and would have provisioned a
+  non-Codex fleet on any fresh deploy.
 - Model tiers: `main=gpt-5.6-terra`, `workers=gpt-5.6-luna`,
   `heavy=gpt-5.6-sol`.
-- **~3× faster interactive turns.** `tool_search: on` (defers 169 tool schemas
+- **~3× faster interactive turns** — `tool_search: on` (defers 169 tool schemas
   behind three bridge tools), `reasoning_effort: low` on main, parallel tool
-  execution on the read-mostly MCP servers, and a hard stop on runaway tool
-  loops. A trivial turn went from 4–8s and wildly variable to a steady ~2s.
-- Hermes 0.17.0 → 0.19.0 (#422); the template now renders the live baseline so
-  a reseed reproduces it (#439).
-- **A dashboard fast path** (#425) answers deterministic questions
-  ("my chores", "open decisions") straight from ctrl-api in ~73ms instead of a
-  full agent turn, failing open to the agent on anything nuanced. Plus a
-  working indicator, since Codex does not stream token deltas and the bubble
-  looked frozen (#429).
-- Session retention: 30-day prune + optimise, weekly (#430).
+  execution on read-mostly MCP servers, hard stop on runaway tool loops. A
+  trivial turn went from 4–8s and wildly variable to a steady ~2s.
+- **Hermes 0.14 → 0.17 → 0.19** (#422), a four-canary upgrade: re-authored
+  upstream patches, pinned `openai==2.24.0`, negative-assertion patch verify,
+  and dropping an obsolete HTML-attachment patch that broke the 0.19 build.
+- **Relay (:8767) + dashboard (:9119)** supervised; hermes-relay vendored.
+- **Kanban dispatcher disabled** with a migration for existing tenants — it was
+  crashing the workers gateway.
+- **MCP tool catalogue trimmed** 321 → 170 tools on main (#175); retired MCP
+  registrations removed from deployed profiles (#314).
+- **`auth.json` mirrors no longer go stale forever** when a token refresh
+  shrinks the file (#395).
+- **Session prune + `VACUUM` on a nightly cron** (#266), plus a 30-day
+  retention policy (#430).
+- Main gateway published on host loopback; `edge-tts` baked into the image.
 
-### Infrastructure and reliability
+### Channels, integrations, security
+
+- **Background workers can no longer reach the principal's channels** (#288),
+  applied to deployed tenants too (#358) — after a janitor repair loop
+  delivered 13 failure dumps to Slack.
+- **One-reply-path guardrail** — a request maps to exactly one
+  channel-delivering task (#417) — and **schedule-time dedup for
+  `announce:true` agent-task spawns** (#416).
+- **Per-app scoped bearer tokens for MCP clients** + management UI (#278).
+- **MCP reverse-proxy trust contract** — bounded proxy hop validation and a
+  trust resolver, with a documented contract.
+- **Paperclip**: agent-driven company bootstrap (#242), principal company
+  access on bootstrap (#246), Hermes skill set surfaced in the adapter (#248),
+  Vaultwarden → Paperclip secret sync (#253), and a GitHub evidence-packet
+  generator.
+- **Voice**: outbound calls use the local Twilio originator, per-call timezone
+  anchoring (#226), and a TwiML-inbound route matched on pathname (#263).
+- **Home Assistant**: `GET /channels/ha/state/:entity_id` (#110), and the HA
+  WS client LLAT shape fixed to unblock `HaBootstrapWorkflow` (#155).
+- **Tailscale opt-in**: privacy/ToS, operator runbook, and live
+  `tailscaleHostname` population (#109 PR5).
+- **Live MCP-server tool enumeration** on `/tools`, with real per-server counts
+  (#185).
+
+### Storage and data integrity
+
+- **Daemon canonical-record writes route through ctrl-api** (#327) — closing
+  the direct-filesystem writer seam.
+- **Matter completion routes through `apply_state_change_v2`** with
+  `STATE_CHANGE_ENFORCEMENT=reject` (#328).
+- **Audit retention sweep at boot** (#380).
+- **`observations status=unprocessed` now means "not yet processed"** (#232) —
+  it previously did not, so Reflection's input set was wrong.
+- **Sure balance freshness provenance + sync-health endpoint** frozen into the
+  contracts (#318).
+- **Self-generated deliveries no longer pollute the signal feed**;
+  dead-letters reaped (#372).
+- **Silently-dropped records now surface** — chore failures, unparseable vault
+  frontmatter, uncovered closure predicates (#397).
+- **Dead `SessionTracker` deleted**, `ledger_entry` demoted to audit (#364),
+  and chore/task LLM calls migrated off the retired OpenClaw
+  `/tools/invoke` envelope (#366).
+- **Backup and restore contract** with a restore drill (#237/#238).
+
+### Infrastructure and operations
 
 - **Plane removed fleet-wide**; hermes memory raised to 12g with swap (#279).
-  The root cause of prose-less briefs was the VM OOM-killing the workers
-  gateway.
+  The prose-less-briefs symptom was the VM OOM-killing the workers gateway.
 - **Hermes worker sessions had no retention** and filled a 300 GB disk in six
-  days, taking a tenant's whole stack down (#335, #336).
-- Background workers can no longer reach the principal's channels (#288) —
-  after a janitor repair loop delivered 13 failure dumps to Slack.
-- Audit retention sweep at boot (#380 → #406); silently-dropped records now
-  surface (#397); stuck-signal recovery (#373).
-- Matter completion routes through `apply_state_change_v2` with
-  `STATE_CHANGE_ENFORCEMENT=reject` (#328).
-- Backup and restore contract, with a restore drill (#237, #238).
-- Voice is per-profile (#209), with per-call timezone anchoring (#226).
-- Paperclip: agent-driven company bootstrap (#242), Vaultwarden secret sync
-  (#253).
+  days, taking a tenant's whole stack down (#335/#336), with a disk-bloat
+  runbook and `FAILURE-MODES` S1 marked realized (#267).
+- **Container log size capped fleet-wide** (json-file 50m × 5).
+- **fd-pressure**: raised the hermes `nofile` ceiling with an early
+  fd-pressure healthcheck (#222), and an fd-safe atomic write.
+- **`spawn_alfred_task` migrated** to the current `hermes cron create` CLI.
+- **Sibling-container profiles route to `hermes-<slug>`** (#262).
+- `rami` added to the deploy-compose fleet (#280).
+
+### Developer experience
+
+- **The lane gate hardened** (#285): CI replay of the gate on every PR, full
+  package coverage, and audit fixes — it is now a required status check, not
+  an advisory local hook.
+- **The ctrl test suite runs in CI** (#290).
+- **Contract layer regenerated from code** (#287).
+- **Prioritization taxonomy enforced** on every open issue (#309).
+- **alfred-code Tier 2 wired** — notify, PR review gate, fleet deploy.
+- Deterministic `compose-lint` + `test-voice-bridge` (killed recurring
+  false-reds); Markdown escaped in Telegram notifications.
+- **A deterministic dashboard fast path** (#425) answers simple questions
+  ("my chores", "open decisions") from ctrl-api in ~73ms instead of a full
+  agent turn, failing open to the agent on anything nuanced — plus a working
+  indicator, since Codex doesn't stream token deltas and the bubble looked
+  frozen (#429).
+- Batch of five minimum-diff bug fixes (#310/#312/#313/#315/#325); admin
+  activity feed no longer empty despite active workflows (#322/#324).
 
 ### Documentation
 
 A forensic audit checked every claim against the code and a live tenant rather
 than against other docs, and found eight that would actively mislead. Most
-consequential: `README` still told new operators to get an OpenRouter key;
-`CLAUDE.md` listed the cold archive as deferred when it is built and live,
-listed a removed MCP server, and claimed *every* vault write route enforces the
-promotion contract when two deliberately bypass it to write a compatibility
-record. `packages/learn/CLAUDE.md` and `SPEC.md` described an architecture —
+consequential: `README` still told new operators to get an OpenRouter key and
+advertised Plane as a shipped sidecar; `CLAUDE.md` listed the cold archive as
+deferred when it is built and live, listed a removed MCP server, and claimed
+*every* vault write route enforces the promotion contract when two deliberately
+bypass it. `packages/learn/CLAUDE.md` and `SPEC.md` described an architecture —
 the OpenClaw gateway, a `packages/saas`, six workflows — that no longer exists.
 
 ### Known gaps
 
 - Approving a pending `Acting` promotion has no one-click surface yet; it goes
-  through `resolve_instinct_promotion`. Tracked in #459.
+  through `resolve_instinct_promotion` (#459).
+- `deploy-compose` still ships `caddy/plane-proxy.Caddyfile` to every tenant
+  for a service that no longer exists (#462).
 - Older tenants carry inert vault directories for demoted record types
-  (`assumption/`, `synthesis/`, `constraint/`, …). Harmless, not yet cleaned.
+  (`assumption/`, `synthesis/`, `constraint/`, …).
 - `packages/alfred-vault`'s tests are not wired into the push-to-main gate, and
   the web `node:test` core suites are not run by CI at all.
+- Deep `plane_sync` code in learn/ctrl remains dormant rather than deleted.
 
 ## [2026-05-31]
 
