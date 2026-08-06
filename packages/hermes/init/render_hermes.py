@@ -456,7 +456,13 @@ def main() -> int:
         # bump is a one-line fix, not a rebuild.
         main_model=main_model_value,
         workers_model=os.environ.get("HERMES_WORKERS_MODEL", "gpt-5.6-luna"),
-        heavy_model=os.environ.get("HERMES_HEAVY_MODEL", "gpt-5.6-terra"),
+        # heavy = gpt-5.6-sol (Sir, 2026-08-06). The heavy profile carries
+        # the reasoning-bound work — onboarding and Reflection, where
+        # Reflection is what proposes instinct promotions — so it gets the
+        # strongest tier. Baked here, not only on the volume, because
+        # config.yaml is seed-once: a reseed would otherwise silently drop
+        # heavy back to terra (the #433 drift class).
+        heavy_model=os.environ.get("HERMES_HEAVY_MODEL", "gpt-5.6-sol"),
         # codex-builder runs Hermes' supervising agent on the same openai-
         # codex model the CLI it shells out to uses. Overridable so a
         # future Codex model bump is a one-line .env change, not a
