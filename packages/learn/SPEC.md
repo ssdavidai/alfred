@@ -1,3 +1,10 @@
+> **HISTORICAL — day-1 design doc, superseded.**
+> This spec describes the original 6-workflow architecture on the OpenClaw
+> gateway. `JudgmentWorkflow` and `SessionTrackerWorkflow` were deleted;
+> `clerk.py` no longer uses `sessions_spawn`; there are now ~46 workflow
+> classes. Kept for design rationale only.
+> **For current truth read `CONTRACT.md`.**
+
 # Alfred Learn — Production Specification
 
 **Monorepo path:** `packages/learn`

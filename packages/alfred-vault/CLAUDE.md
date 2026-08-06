@@ -35,7 +35,15 @@ alfred down              # Stop daemons
 alfred status            # Per-tool status overview
 ```
 
-There are no tests, linter, or CI configured.
+20 pytest files live under `tests/` (see the `test` extra in `pyproject.toml`),
+plus a dedicated release workflow (`.github/workflows/release-alfred-vault.yml`)
+that builds and publishes to PyPI on an `alfred-vault-v*` tag.
+
+Two real caveats: those tests are **not** wired into the push-to-main gate
+(`ci-check.yml`'s pytest job covers `packages/learn` only), and there is no
+lint config (`pyproject.toml` has no `[tool.ruff]`). The package's code DOES
+ship to every tenant — `build-alfred-worker.yml` bakes it into
+`alfred-worker:latest`, which runs as the `alfred` compose service.
 
 ## Architecture
 
@@ -63,7 +71,13 @@ Curator, Janitor, and Distiller delegate work to an AI agent backend. The agent 
 
 **Scope enforcement:** Each tool has a scope (`curator`, `janitor`, `distiller`) that restricts which vault operations the agent can perform. Defined in `vault/scope.py` with `SCOPE_RULES` dict. Curator can create/edit but not delete; janitor can edit/delete but not create; distiller can only create learning types.
 
-Three pluggable backends in each tool's `backends/`: Claude Code (subprocess via `claude -p`), Zo Computer (HTTP API), OpenClaw (subprocess via `openclaw agent --message`). Selected via `agent.backend` in config.
+Pluggable backends in each tool's `backends/`: Claude Code (subprocess via
+`claude -p`), Zo Computer (HTTP API), OpenClaw (subprocess — legacy, the
+runtime is Hermes now), and **`hermes.py`**. Selected via `agent.backend`.
+
+Gotcha: `hermes.py` currently exists ONLY under `curator/backends/` — `janitor`
+and `distiller` have not been given one yet. Check before assuming a tool can
+target Hermes.
 
 ### Each Tool's Backend Has Its Own Prompt Builder
 

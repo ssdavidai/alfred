@@ -1,52 +1,56 @@
 # Alfred Learn — Claude Code Context
 
 ## What This Is
-Alfred Learn is a Python + Temporal Docker container that provides Alfred Black's self-improving intelligence layer. It sits alongside existing tenant Docker services (openclaw, temporal, alfred, alfred-ctrl).
+Alfred Learn is the Python + Temporal intelligence layer. It runs as the
+`alfred-learn` compose service alongside ctrl-api, hermes and temporal.
 
 ## Read First
-- `docs/SPEC.md` — full production spec. This is the source of truth. Read it in full before writing any code.
-- Build exactly what the spec says. No improvisation on architecture or naming.
+- **`CONTRACT.md`** — the CURRENT contract: workflows, activities, schedules,
+  configuration. Regenerated against `src/worker.py` +
+  `scripts/register_schedules.py`. **This is the source of truth. Start here.**
+- `SPEC.md` — HISTORICAL day-1 design doc. Kept for rationale only; several of
+  the workflows it specifies (`JudgmentWorkflow`, `SessionTrackerWorkflow`)
+  were deleted. Do not build against it.
 
 ## Key Constraints
-- Python 3.12, temporalio SDK, httpx, pyyaml — no other dependencies without justification
-- All LLM calls go through OpenClaw gateway (clerk.py) — NEVER direct Anthropic API
-- All vault writes go through alfred-ctrl API (vault_client.py) — NEVER direct filesystem writes from Python
-- Trust model is non-negotiable: Temporal=when, Python=structure, LLM=creative only
-- Terminology: observation (not cognition), instinct (not skill), intuition (not skill-graph), reflection (not synthesis), judgment (not router), discretion (not confidence gate), clerk (not subken)
+- Python 3.12, temporalio SDK, httpx, pyyaml — no other dependencies without
+  justification.
+- **All LLM calls go through the Hermes gateway** (`activities/clerk.py`).
+  NEVER call a provider API directly. The runtime is Codex-only.
+  - workers profile (`:18790`) — the default for clerk traffic
+  - heavy profile (`:18791`) — Reflection (`clerk_reflect`) and onboarding
+  - main (`:18789`) is Sir's live chat and is never a clerk target
+  - the gateway URL setting is still named `OPENCLAW_GATEWAY_URL` for legacy
+    reasons; it points at `http://hermes:18789`
+- **All vault writes go through ctrl-api** (`utils/vault_client.py`) — never
+  direct filesystem writes from Python.
+- Trust model is non-negotiable: Temporal=when, Python=structure, LLM=creative
+  only.
+- Terminology: observation (not cognition), instinct (not skill), intuition
+  (not skill-graph), reflection (not synthesis), judgment (not router),
+  discretion (not confidence gate), clerk (not subken).
 
 ## Monorepo Paths That Integrate With This
-- `packages/ctrl` — tenant API (port 3100). Vault routes, streams routes, workflow routes
-- `packages/saas` — SaaS platform (Wasp/Prisma). Streams dashboard, webhook receiver
-- `packages/openclaw` — OpenClaw Docker image. Gateway at port 18789
-
-## Environment Variables
-- TEMPORAL_HOST=temporal:7233
-- OPENCLAW_GATEWAY_URL=http://openclaw:18789
-- OPENCLAW_GATEWAY_TOKEN_FILE=/alfred-data/.gateway-token
-- VAULT_PATH=/vault
-- TASK_QUEUE=alfred-learn
-- ALFRED_LEARN_ENABLED=true
+- `packages/ctrl` — tenant API (port 3100). Vault routes, state routes,
+  workflow routes.
+- `packages/web` — the Wasp dashboard. (There is no `packages/saas`.)
+- `packages/hermes` — the Hermes runtime image; gateways on 18789/18790/18791.
 
 ## Temporal Task Queue
-`alfred-learn` — all 6 workflows use this queue
+`alfred-learn` — every workflow uses this queue.
 
-## 6 Workflows
-1. EventProcessorWorkflow — schedule: every 2 min. Simplified: fetch events → drop raw content to inbox → mark processed. No LLM classification — the curator handles everything.
-2. SessionTrackerWorkflow — schedule: every 5 min
-3. BriefingWorkflow — schedules: `chore-briefing-morning` (cron `0 5 * * *`, tenant-local) and `chore-briefing-evening` (cron `0 17 * * *`, tenant-local). Same workflow class, dispatched with `slot="morning"` or `slot="evening"`. Visits every active matter through `state_mutator.apply_state_change_v2`, then composes the brief body from the freshly-written `current_state` paragraphs and writes a snapshot to `briefing/<YYYY-MM-DD>-<slot>.md`. The SaaS `/brief` page reads those records via the `getBriefing` operation. (Replaced the old `DailyDigestWorkflow` / `DailyMorningBriefingWorkflow` / `DailyEveningDigestWorkflow` trio in commit f20556d.)
-4. LearningWorkflow — schedule: every 5 min
-5. ReflectionWorkflow — schedule: daily 2am
-6. JudgmentWorkflow — schedule: every 2 min
+## Workflows
+`src/worker.py` registers ~46 workflow classes and the live tenant runs ~36
+Temporal schedules. **Do not maintain a list here — it goes stale.** Read
+`CONTRACT.md`, or ask the box:
 
-## Build Order (phases in SPEC.md)
-Phase 1: Core infrastructure (config, clients, validators, worker, Dockerfile)
-Phase 2: Processor layer (event processor, session tracker, briefing composer)
-Phase 3: Intuition engine (learning, reflection, judgment)
-Phase 4: Integration hooks + scripts
-Phase 5: Dashboard (`packages/saas` changes)
-Phase 6: Tests + polish
+```sh
+docker exec alfred-black-temporal-1 temporal schedule list --address temporal:7233
+```
 
-Start with Phase 1. Get the worker booting and connecting to Temporal before writing any workflow logic.
+Deleted, despite what older docs claim: `SessionTrackerWorkflow` ("session"
+was never a canonical vault type) and `JudgmentWorkflow` (its activity module
+was removed with it).
 
 ## Temporal workflow rewrites
 

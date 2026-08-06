@@ -151,7 +151,7 @@ alfred-black persists data in **four stores**, not one markdown directory:
 |---|-------|---------|-------------|---------|
 | 1 | **Vault** | Markdown (`vault_data` volume) | ctrl-api (via alfred daemon) | The principal's published surface |
 | 2 | **`alfred-state.db`** | SQLite + WAL + sqlite-vec (`state_data`) | **ctrl-api** | Machine working memory |
-| 3 | **Cold archive** | DuckDB/Parquet | deferred (Phase 3) | Forensic long tail (>90d) |
+| 3 | **Cold archive** | SQLite + zstd (`cold.db`, `cold_data` volume) | ctrl-api | Forensic long tail (>90d) — rows aged out of alfred-state.db by the TTL compactor |
 | 4 | **`ingest.db`** | SQLite (`ingest_data`) | ctrl-api | Raw inbound stream events (7d TTL) |
 
 The operational store is named **`alfred-state.db`** (not `state.db`) to
@@ -173,8 +173,8 @@ matter  task  note  person  org  place  asset  chore  instinct  decision  briefi
 
 Plus the `SOUL.md` / `RULES.md` singletons and `_templates/`.
 
-**ctrl-api is the sole vault writer**, and it **enforces this in code**:
-every vault write route calls `assertCanonicalVaultPath()`
+**ctrl-api is the sole vault writer.** Most vault write routes enforce the
+contract in code by calling `assertCanonicalVaultPath()`
 (`packages/ctrl/src/db/promotionContract.ts`) before touching the
 filesystem. A write to a non-canonical path returns HTTP 422
 `PROMOTION_CONTRACT_VIOLATION` with a `suggestion` field pointing at the
@@ -189,9 +189,32 @@ right endpoint.
 | `observation` / `pattern_proposal` / `synthesis` / `contradiction` / `assumption` / `constraint` | `alfred-state.db` **`observation`** (via `POST /api/v1/state/observations`) |
 | `stream_event` | `ingest.db` **`stream_event`** (via `POST /api/v1/ingest/events`) |
 
-Vault operator paths that **bypass** the canonical-12 check:
-`_templates/`, `_archive/`, `_migrated*/`, `_rescue/`, `_raw/`,
-`_migrate/`, `inbox/`, `SOUL.md`, `RULES.md`, `CLAUDE.md`.
+Paths the contract CODE exempts — the whole list, from
+`promotionContract.ts` (`CANONICAL_NON_RECORD_DIRS` + `CANONICAL_TOP_LEVEL_FILES`):
+`_templates/`, `needs_attention/`, `SOUL.md`, `RULES.md`.
+
+`needs_attention/` is exempt on purpose: Desk cards stay vault-markdown until
+storage-epic #28 lands.
+
+**Two routes write demoted types straight to `vault/event/` with raw
+`fs.writeFileSync`, bypassing their own contract check** — a deliberate
+migration shim, not a rule:
+
+| Route | Writes | Also writes (the real source of truth) |
+|---|---|---|
+| `stateChanges.ts:585` | `event/state-change-*.md` | `audit` row, `action_type: state_change` |
+| `attention.ts:186` | `event/needs_attention_action-*.md` | `audit` row |
+
+They persist because callers still resolve `audit_record_path` and the
+calibration loop still reads the markdown. Single-writer discipline holds
+(both are ctrl-api) and `state.db` is authoritative — but do NOT read §5.1 as
+"a demoted type can never reach the vault." It can, via these two.
+
+Other top-level dirs you may find in an older vault (`_rescue/`, `inbox/`,
+`assumption/`, `synthesis/`, `constraint/`, `project/`, `stream_event/`, and a
+tail of empty ones) are historical debris written before the cutover by
+out-of-band scripts — NOT a code exemption. Adding a new one requires editing
+`promotionContract.ts`.
 
 ### 5.2 Single-writer discipline
 
@@ -350,9 +373,33 @@ on `status='active'`**. Lane II Gap 3 fix: `_load_active_instincts` accepts
 all non-deprecated instincts. The discretion gate at signal_actions:1825 is
 the real safety belt (high threshold for low-observation_count instincts).
 
+**The tier is the safety gate (#445/#446/#453).** It is a CEILING checked
+BEFORE confidence, at two independent enforcement points, both reading the
+shared reader in `matching/tiers.py` (fail-closed to `Asking`):
+
+1. `signal_actions.route_signal_action` — may this instinct dispatch an agent
+   unattended? Only `Acting` may.
+2. `noise_patterns` / the pre-extraction noise gate — may this instinct make
+   an inbound email cease to exist? Only `Acting` may; below that the match is
+   audited and the email still reaches Sir.
+
+No amount of confidence promotes an `Asking`/`Confirming` instinct into
+autonomy. The legacy nested `execution.tier` integer is deliberately ignored —
+it disagreed with the ladder on live data.
+
+**Reaching `Acting` requires Sir's explicit approval (#452).** Reflection may
+propose it; `apply_instinct_change` withholds it and records
+`pending_promotion: Acting` on the instinct (idempotent, and visible on
+`/instincts`). `resolve_instinct_promotion` is the only path that writes the
+tier. Demotions, lateral moves, and `Asking → Confirming` still apply
+immediately.
+
 **Discretion threshold**: per-instinct, computed from `observation_count`
-via `matching/discretion.py`. The `live_observation_count` (ctrl-api
-enrichment) takes precedence over the snapshotted `observation_count`.
+via `matching/discretion.py` (`effective_threshold` — the single shared
+implementation; an explicit `discretion_threshold` may only RAISE the bar).
+It applies *underneath* the tier ceiling. The `live_observation_count`
+(ctrl-api enrichment) takes precedence over the snapshotted
+`observation_count`.
 
 ---
 
@@ -364,6 +411,12 @@ inbound webhook / composio poll / agent action
 ingest.db.stream_event (7d TTL)
        ↓ EventProcessorWorkflow (every 15 min)
    marks processed_at; signals routed directly from ingest.db (#78 Design-B)
+       ↓ PRE-EXTRACTION NOISE GATE  (noise_patterns.py, inside extract_signal_from_event)
+   active instincts with intent_key=noise OR routing_rule.destination_type=hold
+   match on sender_domains (suffix-anchored) / subject_keywords →
+     tier == Acting  → event DROPPED, never becomes a signal
+     tier <  Acting  → audited (`signal_noise_match`) and ALLOWED THROUGH (#453)
+   every match writes an audit row either way
        ↓ SignalExtractWorkflow (every 5 min, gated on STEWARD_SIGNAL_EXTRACT_ENABLED)
    chunked extraction via clerk → alfred-state.db.signal (status=unrouted)
    + extract_observation_from_signal → state.db.observation (kind=signal)
@@ -455,16 +508,22 @@ gateway token from `/alfred-data/.gateway-token`).
 
 ### 9.2 MCP servers
 
-Each Hermes profile registers 6 MCP servers in its `config.yaml`:
+Each Hermes profile registers up to 8 MCP servers in its `config.yaml`
+(the last three are profile-conditional):
 
 | Name | Type | What it surfaces |
 |------|------|------------------|
 | `alfred-ctrl` | HTTP | The ctrl-api itself (40+ routes) |
 | `alfred` | stdio (Node) | Vault read/write + agent delegation + workflow orchestration |
 | `sure` | stdio (Node) | Sure personal-finance ~80 tools |
-| `plane` | stdio (Node) | Plane project management (v2 catalogue) |
 | `vaultwarden` | stdio (Node) | Vault items list/search/get/CRUD + vault_refresh |
 | `execute` | stdio (Node) | Composio surface — every connected third-party app via one execute primitive |
+| `hass` | stdio (Node) | Home Assistant (profile-conditional) |
+| `paperclip` | stdio (Node) | Paperclip adapter (profile-conditional) |
+| `files` | stdio (Node) | Store-5 file/blob surface (profile-conditional) |
+
+**`plane` is GONE** — Plane was removed from the compose stack fleet-wide
+(PR #279). `packages/ctrl/src/api/routes/plane.ts` is dormant, not deployed.
 
 Source for the 5 stdio apps: `packages/mcp-server/src/` (compiled bundle
 copied into the Hermes image at build time). The 6th `alfred-ctrl` is an
@@ -637,6 +696,10 @@ For mapping unknown breakage (e.g. a sweep over the live product):
   pre-commit` so the gate fires under either config value, and strips
   stale per-worktree overrides — re-run it whenever in doubt. The CI
   `lane-gate` workflow is the authoritative backstop either way.
+  **Status 2026-08-06: the local gate IS firing.** It blocked commits
+  repeatedly during the #445–#454 campaign (scope-limit and VERIFY
+  rejections), so the symlink fix holds. Do not assume it is off — but do
+  keep the CI backstop, it is what makes the guarantee unconditional.
 - **`isolation: worktree` does NOT guarantee isolation.** Agents have
   shared the working tree and overwritten each other's `.lane`. Either
   confirm each agent got a real separate worktree, **or** run coordinated
@@ -679,7 +742,13 @@ Path-filtered, push-to-main:
 | `build-voice-bridge.yml` | `packages/voice-bridge/**` | voice-bridge image |
 | `build-paperclip.yml` | `packages/paperclip/**` | paperclip image |
 | `build-setup.yml` | `packages/setup/**` | setup image |
-| `ci-check.yml` | * (all) | `tsc --noEmit` + `pytest` + `docker compose config` |
+| `build-alfred-worker.yml` | `packages/alfred-vault/**`, `packages/hermes/*` | `ssdavidai00/alfred-worker:latest` — the vault daemon/curator image; **runs on every tenant** as the `alfred` compose service |
+| `deploy-compose.yml` | compose/Caddy/env | rsyncs compose + Caddyfile to tenants |
+| `deploy-fleet.yml` | manual | fleet-wide pull + up |
+| `release-alfred-vault.yml` | tag `alfred-vault-v*` | publishes `alfred-vault` to PyPI |
+| `issue-taxonomy.yml` | issues | issue labelling |
+| `notify-telegram.yml` | * | build/deploy notifications |
+| `ci-check.yml` | * (all) | `tsc --noEmit` + `pytest` (learn only) + `docker compose config` |
 | `lane-gate.yml` | PRs | server-side replay of the lane gate on the PR diff (see §11.2.5) |
 | `pr-review-gate.yml` | PRs | `smoke-evidence-check` — PR body must carry `## Smoke evidence` |
 | `gitleaks.yml` | * (all) | Secret scanning |
@@ -701,6 +770,8 @@ On the VM:
 | `/var/lib/docker/volumes/alfred-black_vault_data/_data/` | The vault (markdown files) |
 | `/var/lib/docker/volumes/alfred-black_state_data/_data/` | alfred-state.db + WAL |
 | `/var/lib/docker/volumes/alfred-black_ingest_data/_data/` | ingest.db + WAL |
+| `/var/lib/docker/volumes/alfred-black_cold_data/_data/` | cold.db — Store 3 forensic archive |
+| `/var/lib/docker/volumes/alfred-black_files_cold_data/_data/` | Store 5 cold file/blob archive |
 | `/var/lib/docker/volumes/alfred-black_alfred_data/_data/` | Shared scratch (.gateway-token, settings.json, .hermes-* etc.) |
 | `/var/lib/docker/volumes/alfred-black_hermes_data/_data/` | $HERMES_HOME (profiles, SOUL.md, sessions, plugins) |
 | `/var/lib/docker/volumes/alfred-black_caddy_data/_data/` | LE certs (PRESERVE across redeploys to avoid rate limits) |
@@ -840,6 +911,8 @@ the `IdentityAgent=none` opt.
 `state_data` / `ingest_data` / `alfred_data` / `hermes_data` are
 recoverable but contain history — back them up if you care about the
 audit trail / observations / instinct training data.
+`cold_data` / `files_cold_data` hold everything aged OUT of state.db —
+if you care about the long tail, they are the only copy.
 `tailscale_data` (when the optional Tailscale sidecar is on — §15.11)
 holds the `tailscaled.state` node identity; lose it and the principal
 has to re-approve the device on `login.tailscale.com`.
@@ -900,6 +973,11 @@ containers.
 
 | Date | Incident | Fix commit(s) |
 |------|----------|---------------|
+| 2026-08-06 | **Alfred emailed a vendor to cancel a subscription, unattended** — an `Asking`-tier instinct (1 stored observation) cleared the numeric bar and dispatched an executor that mailed team@elevenlabs.io from Sir's Gmail, 4 min after he'd been setting the service up. The ladder was decorative: no gate read `tier`. | #445 → `#446` (tier ceiling on the router), `#448`/`#449` (/instincts renders the real tier), `#453` (noise gate too), `#452`/`#458` (Acting needs Sir's approval) |
+| 2026-08-06 | **Clicking Done taught Alfred to silence senders.** A 23-min backlog clear-out on 2026-07-15 (28 × `intent: done`) became a suppression rule whose `sender_domains` were harvested from that batch — including Sir's primary client. It sat in the pre-extraction noise gate, which consulted no tier and wrote no audit row. | `#454` (done ≠ noise; burst-weighting), `#453` (gate obeys the ladder + audits), instinct data cleaned by hand |
+| 2026-08-06 | Reflection had never actually run on the `heavy` profile despite §9 saying so — `clerk.py` hard-coded the workers gateway (luna) | `#451` + `#450` (heavy = gpt-5.6-sol) |
+| 2026-08-06 | `.env.example` still shipped OpenRouter-era model IDs (incl. an Anthropic model) that OVERRIDE the code defaults — a fresh deploy would have provisioned a non-Codex fleet | `#450` |
+| 2026-08-05 | Instinct promotion silently no-op'd for ~2 months: `apply_instinct_change` body-appended instead of patching frontmatter, so all 35 instincts froze at `Asking` while audit rows claimed promotions | `#442` → `#443`, `#444` |
 | 2026-05-24 | Hermes web dashboard at hermes.{$DOMAIN} (Sir reverted; upstream wheel ships no web bundle) | `fc91b16`, `9f40199` → reverted `ce6c177` |
 | 2026-05-24 | `_resolve_parent_matter_path` was slugifying blindly + `matter/inbox.md` not auto-seeded → 33 orphan tasks on live tenant | Lane V `b0bc0cc` (inbox seed) + Lane II `935692f` (4-tier resolver) |
 | 2026-05-24 | Task `status: queued` rejected by alfred-vault validator → backfill 100% errored | orchestrator `eed3799` + tests `e3c1ad2` |
@@ -927,7 +1005,8 @@ containers.
 - `packages/ctrl/docs/STORAGE-ARCHITECTURE.md` — the 4-store model
 - `packages/ctrl/CONTRACT.md` — what ctrl-api provides + requires
 - `packages/learn/CONTRACT.md` — what alfred-learn provides + requires
-- `packages/learn/SPEC.md` — full intelligence-layer spec (6 workflows, terminology)
+- `packages/learn/CONTRACT.md` — CURRENT intelligence-layer contract (workflows, activities, env). Use this.
+- `packages/learn/SPEC.md` — HISTORICAL day-1 design doc (describes 6 workflows + JudgmentWorkflow/SessionTracker, both deleted; ~46 workflow classes exist now). Do not treat as current.
 - `packages/learn/docs/STATE-MUTATION.md` — state-mutator contract (#889 spec §5.2)
 - `packages/learn/CLAUDE.md` — terminology constraints (observation/instinct/intuition/reflection/judgment/discretion/clerk)
 - `packages/web/main.wasp` — the Wasp app config (routes, queries, actions, jobs, entities)
