@@ -43,6 +43,10 @@ import httpx
 from temporalio import activity
 
 from src.config import load_config
+# #453 — the noise gate now honours the same promotion ladder the signal
+# router does. `src.matching.tiers` imports no activities, so there is no
+# cycle with signal_actions (which also reads from it).
+from src.matching.tiers import AUTONOMOUS_TIER, TIER_ASKING, instinct_tier
 
 logger = logging.getLogger("noise-patterns")
 
@@ -496,16 +500,50 @@ async def load_noise_instincts() -> list[dict[str, Any]]:
                     sender_domains.extend(str(x) for x in v if isinstance(x, str))
         if not sender_domains and not subject_keywords:
             continue  # Noise instinct without anchors — can't filter
+        # #453 — carry the ladder tier. Suppression is the most
+        # destructive thing an instinct can do (the email ceases to
+        # exist), so it must respect the same ladder the router does.
+        # We still LOAD every noise instinct — the caller decides what a
+        # sub-Acting match means — so a match stays observable instead of
+        # the instinct silently vanishing from the gate.
         out.append({
             "path": str(r.get("path") or ""),
             "sender_domains": sender_domains,
             "subject_keywords": subject_keywords,
+            "tier": instinct_tier(fm),
         })
 
     _NOISE_INSTINCT_CACHE["loaded_at"] = now
     _NOISE_INSTINCT_CACHE["instincts"] = out
     logger.info("noise_patterns: %d noise instincts cached", len(out))
     return out
+
+
+def _domain_matches(sig_value: str, glob: str) -> bool:
+    """Does `sig_value` (an address or sender string) match a domain rule?
+
+    #453 — the previous test was ``fnmatch(sig_value, f"*{g}*")``: an
+    UNANCHORED substring. A rule for ``google.com`` therefore also matched
+    ``notgoogle.community`` and ``google.com.phish.example``. For a filter
+    whose effect is "this email ceases to exist", that is far too loose.
+
+    Now a bare domain matches only as a proper domain component:
+    ``google.com`` matches ``x@google.com`` and ``x@mail.google.com`` but
+    not ``notgoogle.community``. Explicit globs (containing ``*`` / ``?``)
+    are still honoured verbatim, so hand-authored ``*.szamlazz.hu`` rules
+    keep working.
+    """
+    g = (glob or "").strip().lower()
+    v = (sig_value or "").strip().lower()
+    if not g or not v:
+        return False
+    if "*" in g or "?" in g:
+        return fnmatch.fnmatch(v, g) or fnmatch.fnmatch(v, f"*{g}")
+    # Bare domain: match the domain itself or any subdomain of it, whether
+    # the signature is a bare domain or a full address.
+    local, _, host = v.rpartition("@")
+    host = host or v
+    return host == g or host.endswith("." + g)
 
 
 def event_matches_noise_instinct(
@@ -539,21 +577,18 @@ def event_matches_noise_instinct(
     # the old allowlist listed ``gcal_organiser`` and was dead.
     sender_kinds = ("gmail_sender", "gcal_organiser_title", "slack_user")
     for inst in noise_instincts:
-        # 1. sender-domain globs (tolerate a bare domain via *glob*)
+        tier = str(inst.get("tier") or TIER_ASKING)
+        # 1. sender-domain globs
         if sig.get("kind") in sender_kinds and sig_value:
             for glob in inst.get("sender_domains", []):
-                g = glob.strip().lower()
-                if not g:
-                    continue
-                if fnmatch.fnmatch(sig_value, g) or (
-                    "*" not in g and "?" not in g
-                    and fnmatch.fnmatch(sig_value, f"*{g}*")
-                ):
+                if _domain_matches(sig_value, glob):
                     return {
                         "kind": f"instinct_{sig['kind']}",
                         "value": sig_value,
                         "path": inst["path"],
                         "matched_glob": glob,
+                        "tier": tier,
+                        "suppress": tier == AUTONOMOUS_TIER,
                     }
         # 2. subject-keyword substrings (the anchor CI instincts carry)
         if subject_text:
@@ -565,5 +600,7 @@ def event_matches_noise_instinct(
                         "value": subject_text[:120],
                         "path": inst["path"],
                         "matched_keyword": kw,
+                        "tier": tier,
+                        "suppress": tier == AUTONOMOUS_TIER,
                     }
     return None

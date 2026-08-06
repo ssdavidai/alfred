@@ -1405,6 +1405,57 @@ def _validate_llm_classification(
     }
 
 
+async def _audit_noise_match(
+    *,
+    stream_event_path: str,
+    matched: dict[str, Any],
+    suppressed: bool,
+) -> None:
+    """Record a noise-gate match in the audit trail (#453).
+
+    Before this, a suppressed email produced a single ``logger.info`` in a
+    rotating container log and nothing durable. There was no way to answer
+    "what did Alfred hide from me last week?" — which is precisely why a
+    rule carrying the principal's own client domain went unnoticed.
+
+    Best-effort: the audit trail must never be the reason an extraction
+    fails, so every error is swallowed. The caller's behaviour does not
+    depend on this returning.
+    """
+    try:
+        from src.utils.state_client import StateClient
+
+        cfg = load_config()
+        anchor = matched.get("matched_glob") or matched.get("matched_keyword")
+        anchor_kind = "sender_domain" if matched.get("matched_glob") else "subject_keyword"
+        verb = "suppressed" if suppressed else "spared (tier below Acting)"
+        async with StateClient(cfg) as sc:
+            await sc.append_audit(
+                action_type="signal_noise_match",
+                actor="signal_extract",
+                source="noise_gate",
+                summary=(
+                    f"noise-gate: {verb} — instinct={matched.get('path')} "
+                    f"tier={matched.get('tier')} {anchor_kind}={anchor!r}"
+                ),
+                target_path=stream_event_path,
+                target_kind="stream_event",
+                changes={
+                    "suppressed": suppressed,
+                    "instinct": matched.get("path"),
+                    "tier": matched.get("tier"),
+                    "anchor_kind": anchor_kind,
+                    "anchor": anchor,
+                    "matched_value": matched.get("value"),
+                },
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "signals._audit_noise_match: audit write failed path=%s err=%s",
+            stream_event_path, exc,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Activity: extract_signal_from_event
 # ---------------------------------------------------------------------------
@@ -1561,16 +1612,34 @@ async def extract_signal_from_event(
                     event_body=_event_body(event),
                 )
                 if matched is not None:
+                    # #453 — suppression is the most destructive thing an
+                    # instinct can do: the email ceases to exist, with no
+                    # Desk card and (until now) no audit row. So it obeys
+                    # the same ladder the router does, and every decision
+                    # — suppressed or spared — is written to the audit
+                    # trail. Below `Acting` the match is recorded and the
+                    # event continues to extraction, so Sir still sees it.
+                    suppress = bool(matched.get("suppress"))
+                    await _audit_noise_match(
+                        stream_event_path=stream_event_path,
+                        matched=matched,
+                        suppressed=suppress,
+                    )
                     logger.info(
-                        "signals.extract_signal_from_event: NOISE-FILTERED "
-                        "(instinct) path=%s sig=%s/%s glob=%s instinct=%s",
+                        "signals.extract_signal_from_event: NOISE-%s "
+                        "(instinct) path=%s sig=%s/%s glob=%s kw=%s "
+                        "instinct=%s tier=%s",
+                        "FILTERED" if suppress else "MATCH-SPARED",
                         stream_event_path,
                         matched.get("kind"),
                         matched.get("value"),
                         matched.get("matched_glob"),
+                        matched.get("matched_keyword"),
                         matched.get("path"),
+                        matched.get("tier"),
                     )
-                    return None
+                    if suppress:
+                        return None
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "signals.extract_signal_from_event: noise check failed "
