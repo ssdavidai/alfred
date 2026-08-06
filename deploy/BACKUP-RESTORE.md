@@ -53,10 +53,6 @@ compose config --volumes` and `docker volume ls` to confirm the prefix.
 | `web_db_data` | Dashboard auth/application Postgres data | Loss of users, auth state, dashboard metadata | Critical |
 | `temporal_data` | Temporal state store | Loss of workflow execution history and in-flight workflow state | High |
 | `mcp_server_data` | MCP server local state | Loss of local integration/cache state | Medium |
-| `plane_pgdata` | Plane Postgres | Loss of Plane projects/issues | High |
-| `plane_redis` | Plane Redis | Mostly cache/queue state; in-flight work may be lost | Medium |
-| `plane_rabbitmq` | Plane RabbitMQ | Queue loss; in-flight Plane background jobs may be lost | Medium |
-| `plane_uploads` | Plane file uploads/export data | Loss of issue/project attachments | High |
 | `sure_pgdata` | Sure Postgres | Loss of finance application data | Critical |
 | `sure_redis` | Sure Redis | Mostly cache/queue state | Medium |
 | `paperclip_data` | Paperclip SQLite/data workspace | Loss of Paperclip company/issue/agent state | High |

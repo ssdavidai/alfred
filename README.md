@@ -165,13 +165,12 @@ Composio; Alfred just calls the tools.
 
 ### Sidecars — the back office
 
-Three best-in-class open-source services ship in the stack so Alfred can manage
+Two best-in-class open-source services ship in the stack so Alfred can manage
 real domains of your life, not just notes:
 
 | Sidecar | What it is | What Alfred uses it for |
 |---|---|---|
 | **[Sure](https://github.com/we-promise/sure)** | Personal finance | Accounts, transactions, budgets — Alfred categorises and reconciles your money |
-| **[Plane](https://plane.so)** | Project management | The durable task/issue backbone behind Matters and chores |
 | **[Vaultwarden](https://github.com/dani-garcia/vaultwarden)** | Secrets manager | A real vault for credentials Alfred (and you) need |
 
 ---
@@ -184,7 +183,7 @@ that share one engine:
 | | What it is | Where |
 |---|---|---|
 | **`alfred-vault`** | The pip-installable CLI. Turns *any* agentic runtime into an ambient butler over an Obsidian vault — the Curator / Janitor / Distiller / Surveyor workers + a Temporal workflow engine. Runs on a Mac Mini under your desk or any box with Python. | [`packages/alfred-vault/`](packages/alfred-vault/) · [`pip install alfred-vault`](https://pypi.org/project/alfred-vault/) |
-| **Alfred Black** | The full self-hosted **platform**: the web dashboard, the Hermes runtime, the signal pipeline, durable workflows, multi-channel delivery, and the Sure / Plane / Vaultwarden sidecars — brought up with a single `docker compose up`, served on your own domain over HTTPS. | this repo · *the rest of `packages/`* |
+| **Alfred Black** | The full self-hosted **platform**: the web dashboard, the Hermes runtime, the signal pipeline, durable workflows, multi-channel delivery, and the Sure / Vaultwarden sidecars — brought up with a single `docker compose up`, served on your own domain over HTTPS. | this repo · *the rest of `packages/`* |
 
 > **2026-05-20 — the platform release.** The project that gave you the `alfred`
 > CLI is now a complete, deployable platform. `alfred-vault` is the same
@@ -214,7 +213,7 @@ Three commands. Drop a file into `inbox/` and it's handled. Full docs:
 ### 2 · The full platform (Alfred Black)
 
 If you want the whole product — web dashboard, Hermes runtime, the daily Brief,
-multi-channel delivery, and the Sure / Plane / Vaultwarden sidecars — on a VM
+multi-channel delivery, and the Sure / Vaultwarden sidecars — on a VM
 you control: read on. You bring a fresh Linux VM and a domain; the stack brings
 everything else and serves the web app on your domain over HTTPS. No managed
 provisioning, no billing — **one repo, one VM, one `docker compose up`.**
@@ -258,7 +257,7 @@ provisioning, no billing — **one repo, one VM, one `docker compose up`.**
 | Disk     | 80 GB   | 80 GB+      |
 
 The full stack — web app, ctrl-api, Temporal, Ollama, Hermes, the vault
-daemon, Plane (~13 containers), Sure (~5 containers), and Vaultwarden — is
+daemon, Sure (~5 containers), and Vaultwarden — is
 memory-hungry.
 
 > At-rest disk encryption is **not** applied by the stack (no LUKS). The
@@ -277,7 +276,6 @@ your VM's public IP, where `example.com` is your domain:
 |---------|---------------------|-----------------------------------|
 | `@`     | `example.com`       | the Alfred Black dashboard (SPA)  |
 | `api`   | `api.example.com`   | the Alfred Black API server       |
-| `plane` | `plane.example.com` | Plane (project management)        |
 | `sure`  | `sure.example.com`  | Sure (personal finance)           |
 | `vault` | `vault.example.com` | Vaultwarden (secrets manager)     |
 | `mcp`   | `mcp.example.com`   | MCP server (Claude connector)     |
@@ -335,7 +333,7 @@ docker compose up -d
 
 `scripts/bootstrap.sh` validates the required fields and appends every
 auto-generated secret (`AAS_API_KEY`, `COLUMN_ENCRYPTION_KEY`, `JWT_SECRET`, the
-Hermes gateway token, Plane/Sure datastore credentials, the Vaultwarden
+Hermes gateway token, the Sure datastore credentials, the Vaultwarden
 admin token, …) with `openssl rand -hex 32`. It is idempotent — re-running never
 overwrites an existing value.
 
@@ -443,7 +441,7 @@ host ports (`:80`/`:443`).
   vault and the operational SQLite stores, and enforces the read/write contract.
 - **Data** — Hermes (AI runtime), Temporal, Ollama, the vault daemon
   (`packages/alfred-vault`, run as `alfred-worker`), `alfred-learn` (the signal
-  pipeline + the learner), the MCP server, plus the Sure / Plane / Vaultwarden
+  pipeline + the learner), the MCP server, plus the Sure / Vaultwarden
   sidecars.
 
 Four-store memory model: **vault** (markdown — the principal's surface),

@@ -84,8 +84,8 @@ cd alfred
 cp .env.example .env
 
 # 2. Fill required vars in .env: DOMAIN, ACME_EMAIL, OWNER_NAME, OWNER_EMAIL,
-#    ANTHROPIC_API_KEY (or OPENROUTER_API_KEY), COMPOSIO_API_KEY.
-#    Optional: GOOGLE_CLIENT_*, SENDGRID_API_KEY.
+#    COMPOSIO_API_KEY. Hermes needs NO model API key — it authenticates to
+#    OpenAI Codex over OAuth (see §9). Optional: GOOGLE_CLIENT_*, SENDGRID_API_KEY.
 
 # 3. Generate auto-secrets (AAS_API_KEY, COLUMN_ENCRYPTION_KEY, JWT_SECRET,
 #    HERMES_API_SERVER_KEY, plane/sure DB passwords, vaultwarden admin token,
