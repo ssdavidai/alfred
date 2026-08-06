@@ -13,12 +13,20 @@
 //   enableIntuition / disableIntuition / getIntuitionStatus
 //                         → master toggle in the header
 //
-// Stage mapping:
-//   confidence_score < 0.5  → Asking
-//   0.5 ≤ confidence < 0.8  → Confirming
-//   confidence ≥ 0.8        → Acting
-// (When `status === "proposed"` we force Asking; `deprecated` collapses
-// the row out of the index.)
+// Stage mapping (#447): the stage IS `frontmatter.tier` — the ladder
+// Reflection writes via `apply_instinct_change` and, since #446, the field
+// the signal router gates autonomous dispatch on. Read through
+// `instinctTierCore.readTier`, which fails closed to Asking exactly like
+// `signal_actions._instinct_tier`, so this badge cannot contradict what
+// Alfred will actually do.
+//
+// It used to be DERIVED from confidence / observation count / threshold.
+// That was defensible while the gate was threshold-only; after #446 it
+// misstated autonomy in both directions (a 23-observation `Asking`
+// instinct rendered as "Acting" while the router held it for Sir).
+// The discretion bar is still shown — as progress toward the next
+// promotion, not as the thing that names the stage.
+// (`deprecated` still collapses the row out of the index.)
 import { useMemo, useState } from "react";
 import {
   useQuery,
@@ -32,50 +40,24 @@ import {
 import { Frame } from "../client/components/ab/Frame";
 import { Markdown } from "../client/components/ab/Markdown";
 
-type Stage = "Asking" | "Confirming" | "Acting";
-const STAGES: Stage[] = ["Asking", "Confirming", "Acting"];
+import {
+  STAGES,
+  autonomyStatement,
+  effectiveThreshold,
+  progressNote,
+  readTier,
+  tierCaption,
+  type Stage,
+} from "./instinctTierCore";
 
-// Progressive autonomy — mirrors src/matching/discretion.py exactly.
-// That module is the runtime authority on whether a matched score
-// passes the gate (`should_route_autonomously(score, instinct)`);
-// the page just visualises the tier the user is currently in.
+// The stage is read straight off `frontmatter.tier` (#447). The old
+// derivation — `classifyStage` / `earnedCeiling` / a local
+// `discretionThreshold` — is gone: it computed a stage the router did not
+// use. `effectiveThreshold` survives in instinctTierCore because the
+// discretion bar is still real; it just no longer names the stage.
 //
-// Observations  Threshold  Butler                                 Stage
-// ─────────────  ─────────  ─────────────────────────────────────  ─────────
-//   < 5          0.95       "your guidance?"                       Asking
-//   5–9          0.90       "rather confirm"                       Confirming
-//   10–19        0.85       "fairly certain"                       Confirming
-//   20–49        0.80       "handling it"                          Acting
-//   50+          0.75       "automatic"                            Acting
-function discretionThreshold(matchCount: number): number {
-  if (matchCount < 5) return 0.95;
-  if (matchCount < 10) return 0.90;
-  if (matchCount < 20) return 0.85;
-  if (matchCount < 50) return 0.80;
-  return 0.75;
-}
-
-function effectiveThreshold(instinct: any, matchCount: number): number {
-  // The runtime prefers the explicit `discretion_threshold` field
-  // when set (onboarding-pipeline instincts ship with 0.92 etc.),
-  // otherwise it falls back to the obs-count formula. Same here.
-  const explicit = Number(
-    instinct?.frontmatter?.discretion_threshold ?? NaN,
-  );
-  if (Number.isFinite(explicit) && explicit > 0) return explicit;
-  return discretionThreshold(matchCount);
-}
-
-// Observation-earned ceiling (#B6). A seeded `discretion_threshold` may
-// only *lower* displayed trust, never promote an instinct above what its
-// accumulated decision-observations have earned. Mirrors the obs-count
-// buckets of `discretionThreshold` (5 / 20 breakpoints) collapsed to the
-// three stages: <5 → Asking, 5–19 → Confirming, ≥20 → Acting.
-function earnedCeiling(matchCount: number): Stage {
-  if (matchCount < 5) return "Asking";
-  if (matchCount < 20) return "Confirming";
-  return "Acting";
-}
+// `status === "proposed"` no longer forces Asking: an unpromoted instinct
+// already carries `tier: Asking`, and readTier fails closed anyway.
 
 function butlerLine(threshold: number): string {
   if (threshold >= 0.95) return "I'd ask before acting on this.";
@@ -83,32 +65,6 @@ function butlerLine(threshold: number): string {
   if (threshold >= 0.85) return "I'm fairly certain — quiet confirm.";
   if (threshold >= 0.80) return "I've seen this enough times to handle it.";
   return "Routine — I handle it automatically.";
-}
-
-function classifyStage(instinct: any, matchCount: number): Stage {
-  const status = String(instinct?.status ?? instinct?.frontmatter?.status ?? "");
-  if (status === "proposed") return "Asking";
-  // Use the effective threshold the runtime actually uses (explicit
-  // override OR the obs-count formula). The three buckets compress the
-  // 5-tier discretion.py table by where the threshold sits, not by
-  // raw obs count — that way the stage badge agrees with the butler
-  // line + threshold the runtime gate enforces.
-  //
-  //   threshold ≥ 0.95  →  Asking
-  //   0.85 ≤ thr < 0.95 →  Confirming
-  //   threshold <  0.85 →  Acting
-  const t = effectiveThreshold(instinct, matchCount);
-  let thresholdStage: Stage;
-  if (t >= 0.95) thresholdStage = "Asking";
-  else if (t >= 0.85) thresholdStage = "Confirming";
-  else thresholdStage = "Acting";
-  // Clamp to the observation-earned ceiling (#B6): a seeded threshold can
-  // only lower the displayed trust, never show Acting/Confirming an
-  // instinct hasn't earned. Render the LOWER of the two by STAGES index.
-  const ceiling = earnedCeiling(matchCount);
-  return STAGES.indexOf(thresholdStage) <= STAGES.indexOf(ceiling)
-    ? thresholdStage
-    : ceiling;
 }
 
 function titleCaseSlug(slug: string): string {
@@ -405,7 +361,8 @@ export default function InstinctsPage() {
                   0,
               );
               const matchedSeen = obs.length;
-              const stage = classifyStage(p, firedCount);
+              // #447 — the ladder tier, not a confidence derivation.
+              const stage = readTier(p);
               const stageIdx = STAGES.indexOf(stage);
               const displayBody = String(
                 p?.frontmatter?.display_body ?? "",
@@ -472,6 +429,16 @@ export default function InstinctsPage() {
                             </span>
                           ))}
                         </div>
+                        {/* #447 — name the consequence of the current
+                            rung right under the ladder, so the tier
+                            reads as an autonomy setting rather than a
+                            progress score. */}
+                        <div
+                          className="mt-2 font-mono text-[9px] uppercase tracking-[0.22em]"
+                          style={{ color: "var(--brass)" }}
+                        >
+                          {tierCaption(stage)}
+                        </div>
                       </div>
 
                       {/* Body — markdown display_body if present, else
@@ -500,24 +467,38 @@ export default function InstinctsPage() {
                         </p>
                       )}
 
-                      {/* Discretion line — the actual runtime gate
-                          (mirrors should_route_autonomously in
-                          src/matching/discretion.py). Threshold is
-                          either the explicit instinct override or the
-                          obs-count formula; whichever, that's the
-                          score a match must clear to fire. */}
+                      {/* Autonomy line (#447) — what the TIER means for
+                          what Alfred will do unattended. This is the
+                          safety statement and it comes first, because
+                          it is what the router actually enforces
+                          (signal_actions gates dispatch on tier: only
+                          Acting may act alone).
+
+                          The discretion bar follows, demoted to
+                          evidence: it still gates *within* Acting, but
+                          it no longer names the stage — promotion is
+                          Reflection's call, not a threshold crossing. */}
                       {(() => {
                         const thr = effectiveThreshold(p, firedCount);
                         return (
-                          <p
-                            className="mt-5 font-body italic text-[14px]"
-                            style={{ color: "var(--marginalia)" }}
-                          >
-                            <span style={{ color: "var(--brass)" }}>
-                              {butlerLine(thr)}
-                            </span>{" "}
-                            Fires when a match scores ≥ {thr.toFixed(2)}.
-                          </p>
+                          <>
+                            <p
+                              className="mt-5 font-body text-[14px]"
+                              style={{ color: "var(--marginalia)" }}
+                            >
+                              <span style={{ color: "var(--brass)" }}>
+                                {autonomyStatement(stage)}
+                              </span>{" "}
+                              {progressNote(stage, firedCount)}
+                            </p>
+                            <p
+                              className="mt-2 font-body italic text-[14px]"
+                              style={{ color: "var(--marginalia)" }}
+                            >
+                              {butlerLine(thr)} Matches score ≥{" "}
+                              {thr.toFixed(2)} to clear the discretion bar.
+                            </p>
+                          </>
                         );
                       })()}
 
