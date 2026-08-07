@@ -35,9 +35,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
-import re
 import sys
 from typing import Any
+
+import yaml
 
 from src.config import load_config
 from src.utils.vault_client import VaultClient
@@ -66,26 +67,27 @@ def _slug(path: str) -> str:
     return path.rsplit("/", 1)[-1].removesuffix(".md")
 
 
-def _retype(raw: str) -> str:
-    """Rewrite the frontmatter `type:` from task to commitment.
+def compose(frontmatter: dict[str, Any], body: str) -> str:
+    """Rebuild a record from the shape ctrl-api actually returns.
 
-    Operates on the first occurrence inside the frontmatter block only, so a
-    body that happens to mention `type: task` is untouched.
+    GET /api/v1/vault/records/<path> returns `{path, frontmatter, body}` —
+    there is NO `content` key. An earlier version of this script assumed one,
+    matching the test fake rather than the API, and every record failed the
+    empty-source guard. The guard did its job (nothing was written), but the
+    lesson is the one that keeps recurring in this codebase: verify the shape
+    against the running system, not against the mock.
+
+    `type` is forced to `commitment`; every other field is preserved by value.
+    Formatting is not preserved — YAML is re-emitted — which is safe because
+    the read-back check compares values, and safer than hand-editing text that
+    may contain YAML-significant characters.
     """
-    if not raw.startswith("---"):
-        return raw
-    end = raw.find("\n---", 3)
-    if end == -1:
-        return raw
-    head, rest = raw[:end], raw[end:]
-    head = re.sub(
-        r'^type:\s*["\']?task["\']?\s*$',
-        'type: "commitment"',
-        head,
-        count=1,
-        flags=re.MULTILINE,
+    fm = dict(frontmatter)
+    fm["type"] = "commitment"
+    head = yaml.safe_dump(
+        fm, sort_keys=False, allow_unicode=True, default_flow_style=False
     )
-    return head + rest
+    return f"---\n{head}---\n\n{body.lstrip(chr(10))}"
 
 
 async def _load_candidates(client: VaultClient) -> list[dict[str, Any]]:
@@ -145,11 +147,15 @@ async def migrate(execute: bool) -> int:
 
             try:
                 source = await client.read_record(path)
-                raw = source.get("content") or ""
-                if not raw.strip():
-                    raise ValueError("source record is empty")
+                sfm = source.get("frontmatter")
+                body = source.get("body") or ""
+                if not isinstance(sfm, dict) or not sfm:
+                    raise ValueError(
+                        "source record has no frontmatter "
+                        f"(keys: {sorted(source.keys())})"
+                    )
 
-                await client.write_record("commitment", slug, _retype(raw))
+                await client.write_record("commitment", slug, compose(sfm, body))
 
                 # Read back and compare identity before removing the original.
                 check = await client.read_record(f"commitment/{slug}.md")
