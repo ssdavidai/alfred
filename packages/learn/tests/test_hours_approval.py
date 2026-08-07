@@ -124,17 +124,22 @@ class TestLedgerLine:
 
 class TestStatusIsNotWritten:
     """A proposal is a `note`, and the validator allows only
-    active|draft|final|review there. Writing `status: accepted` 500s the PATCH
-    and the acceptance never lands.
+    active|draft|final|review. Writing `accepted` — or leaving a `proposed`
+    already on the record — 500s the PATCH and the acceptance never lands.
 
-    Found end-to-end on a live tenant, not here: existing proposals carry
-    `status: proposed` only because they were created through the raw-content
-    path, which skips validation. Copying that convention into a PATCH was the
-    mistake."""
+    Cost two live runs. The second is the subtler one: the validator re-checks
+    the WHOLE record on any edit, so an invalid value written through the
+    raw-content path (which skips validation) sits inert until the first PATCH
+    and then blocks every subsequent write to that record.
 
-    def test_acceptance_does_not_set_status(self):
+    Hence the skill writes `draft` for a proposal and this writes `final` on
+    acceptance — the valid vocabulary maps cleanly, and `accepted: true`
+    remains the machine marker."""
+
+    def test_acceptance_sets_a_status_the_validator_accepts(self):
         f = build_acceptance({"total_hours": 8.0}, "", "d1", "t")
-        assert "status" not in f
+        assert f["status"] in {"active", "draft", "final", "review"}
+        assert f["status"] == "final"
 
     def test_accepted_flag_is_the_marker(self):
         f = build_acceptance({"total_hours": 8.0}, "", "d1", "t")

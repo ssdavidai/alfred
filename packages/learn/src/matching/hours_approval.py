@@ -74,19 +74,22 @@ def build_acceptance(
     except (TypeError, ValueError):
         estimated_f = None
 
-    # NOTE: deliberately does NOT set `status`. A proposal is a `note`, and the
-    # vault validator allows only active|draft|final|review there — a PATCH
-    # setting `status: accepted` returns 500 and the acceptance never lands.
+    # A proposal is a `note`, and the validator allows only
+    # active|draft|final|review. `accepted` is not a valid status, so writing
+    # it 500s the PATCH and the acceptance never lands — found end-to-end on a
+    # live tenant, twice.
     #
-    # Found end-to-end on a live tenant, not by these tests: existing proposal
-    # records carry `status: proposed` only because they were written through
-    # the raw-content path, which bypasses validation. A PATCH goes through the
-    # CLI, which does not. Copying the convention from the record was the
-    # mistake.
+    # The valid vocabulary maps cleanly: a proposal is a `draft`, an accepted
+    # period is `final`. `accepted: true` remains the machine marker, and
+    # `is_already_accepted` also reads a legacy `status: accepted` so records
+    # written before this keep working.
     #
-    # `accepted: true` is the marker. `is_already_accepted` still reads the
-    # legacy `status` too, so records written the old way keep working.
+    # The wider lesson, since this cost two live runs: the validator re-checks
+    # the WHOLE record on any edit. An invalid value written through the
+    # raw-content path (which skips validation) is inert until the first PATCH,
+    # then blocks every subsequent write to that record.
     fields: dict[str, Any] = {
+        "status": "final",
         "accepted": True,
         "accepted_at": now_iso,
         "accepted_by": "principal",
