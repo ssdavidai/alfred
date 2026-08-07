@@ -35,17 +35,23 @@ Everything else is derived:
 | sources | whatever the tenant actually has connected |
 | projection | `note/<matter-slug>-commitment-register.md` |
 | policy note | `note/<matter-slug>-commitment-management.md` |
+| external actions | always forbidden — not a choice |
 
-**`<matter-slug>` means the slug, never the display name.** Derive it once and
-reuse it for every path and for the ID prefix:
+**`<matter-slug>` is the matter's filename without `.md`. Nothing else.**
 
-> lowercase → strip diacritics → replace every run of non-alphanumeric
-> characters with a single `-` → trim leading and trailing `-`
+Read it off the record's path: `matter/neoterra-ai-consulting-ntpos-build.md`
+gives `neoterra-ai-consulting-ntpos-build`. Do **not** derive it by slugifying
+the `name` field. A matter's display name drifts — it gets retitled when a
+product is renamed — while its filename does not, so the two often disagree.
 
-So a matter named `Hungarian Company & Admin Compliance` yields
-`hungarian-company-admin-compliance`, and its projection is
-`note/hungarian-company-admin-compliance-commitment-register.md` — never
-`note/Hungarian Company & Admin Compliance commitment register.md`.
+A live example: a matter whose file is
+`matter/neoterra-ai-consulting-ntpos-build.md` carries the name
+`NeoTerra AI Consulting Ken Build`. Slugifying the name produced
+`...-ken-build-commitment-register.md`, a projection at a path nothing else
+would ever look for. The filename is the stable identifier; the name is prose.
+
+Use that one string for the projection path, the policy-note path, and the
+`commitment_scope`.
 
 This is not cosmetic. A derived path is only useful if it is *predictable*:
 anything that later resolves a register by constructing its path — a rollup, a
@@ -58,7 +64,6 @@ than exists.
 writing the projection, read it back at the exact derived path. A read-back
 that locates the file by any other means passes while the derivation is broken
 — which is precisely how this went unnoticed.
-| external actions | always forbidden — not a choice |
 
 Use the object form only to override a derived value that is wrong — a prefix
 collision, a participant the matter does not list, a different destination:
