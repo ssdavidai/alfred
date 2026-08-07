@@ -73,6 +73,11 @@ from src.activities.state_mutator import (
     propose_fn,
 )
 from src.config import load_config
+from src.matching.hours_approval import (
+    build_acceptance,
+    is_already_accepted,
+    ledger_line,
+)
 
 logger = logging.getLogger("decision-router")
 
@@ -466,6 +471,93 @@ async def _emit_recovery_audit(
 
 
 # ---------------------------------------------------------------------
+# Hours-proposal approval (#485)
+# ---------------------------------------------------------------------
+
+
+async def _accept_hours_proposal_if_any(
+    client: Any,
+    source_record: str,
+    note: str,
+    decision_id: str,
+) -> dict[str, Any] | None:
+    """Book an approved hours period, when the Desk card is an hours approval.
+
+    Returns None for every other card — the overwhelmingly common case — so
+    this is a cheap no-op on the normal `done` path.
+
+    ORDERING IS LOAD-BEARING: the ledger is appended BEFORE the proposal is
+    marked accepted. The reverse order loses hours on a partial failure — a
+    proposal marked accepted with nothing in the ledger means those hours
+    vanish AND the next window silently skips the period, because the accepted
+    ledger is the cursor. This order at worst leaves a re-runnable duplicate,
+    which `is_already_accepted` catches.
+    """
+    card = await client.get(f"/api/v1/vault/records/{source_record}")
+    if card.status_code >= 400:
+        return None
+    card_fm = (card.json() or {}).get("frontmatter") or {}
+    if str(card_fm.get("approval_kind") or "") != "hours_proposal":
+        return None
+
+    proposal_ref = str(card_fm.get("proposal_ref") or "")
+    ledger_ref = str(card_fm.get("ledger_ref") or "")
+    if not proposal_ref or not ledger_ref:
+        logger.warning(
+            "decision_router: hours card %s lacks proposal_ref/ledger_ref — "
+            "nothing booked",
+            source_record,
+        )
+        return None
+
+    pr = await client.get(f"/api/v1/vault/records/{proposal_ref}")
+    pr.raise_for_status()
+    proposal = (pr.json() or {}).get("frontmatter") or {}
+
+    if is_already_accepted(proposal):
+        logger.info(
+            "decision_router: hours proposal %s already accepted — "
+            "not appending twice",
+            proposal_ref,
+        )
+        return {"proposal": proposal_ref, "skipped": "already_accepted"}
+
+    fields = build_acceptance(proposal, note, decision_id, _now_iso())
+    accepted_hours = fields.get("accepted_total_hours")
+
+    # 1. Ledger first. See the ordering note above.
+    lr = await client.patch(
+        f"/api/v1/vault/records/{ledger_ref}",
+        json={"body_append": "\n" + ledger_line(proposal, accepted_hours) + "\n"},
+    )
+    lr.raise_for_status()
+
+    # 2. Only now mark the proposal accepted.
+    ar = await client.patch(
+        f"/api/v1/vault/records/{proposal_ref}", json={"set": fields}
+    )
+    ar.raise_for_status()
+
+    # 3. Read back — a 200 on this route can be a silent no-op when the body
+    #    shape is wrong (CLAUDE.md §15.1), so the write is not proof.
+    check = await client.get(f"/api/v1/vault/records/{proposal_ref}")
+    check_fm = (check.json() or {}).get("frontmatter") or {}
+    if not is_already_accepted(check_fm):
+        raise RuntimeError(
+            f"hours proposal {proposal_ref} did not read back as accepted; "
+            "ledger row was appended — re-run will be blocked by the "
+            "idempotency guard, so reconcile by hand"
+        )
+
+    return {
+        "proposal": proposal_ref,
+        "ledger": ledger_ref,
+        "hours": accepted_hours,
+        "corrected": "correction_delta_hours" in fields,
+    }
+
+
+# ---------------------------------------------------------------------
 # Forward routing (state=open → executing | completed)
 # ---------------------------------------------------------------------
 
@@ -629,6 +721,24 @@ async def route_decision(decision: dict[str, Any]) -> dict[str, Any]:
                             "done decision=%s: %s — NA flip stands",
                             task_ref, decision_id, exc,
                         )
+
+                # #485 — an hours-proposal card is an approval, and approving
+                # it must actually book the hours. Without this the card is
+                # decorative, and worse than decorative: it looks like
+                # approval happened while the ledger stays empty.
+                try:
+                    booked = await _accept_hours_proposal_if_any(
+                        client, source_record, note, decision_id
+                    )
+                    if booked:
+                        actions_taken.append("hours.accepted")
+                        side_effects["hours_accepted"] = booked
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "decision_router: hours acceptance failed for %s on "
+                        "decision=%s: %s — NA flip stands, proposal left open",
+                        source_record, decision_id, exc,
+                    )
             elif intent == "defer":
                 # #5: resolve the resurface intent FIRST, independent of (and
                 # before) the skip flip. The hourly DeferResurfaceWorkflow only
