@@ -153,7 +153,7 @@ const VAULT_INDEX_TTL_MS = 60_000;
 const VAULT_INDEX_CACHE_KEY = "_self";
 const _vaultIndexCache = new Map<string, { at: number; body: unknown }>();
 
-const KNOWN_TYPES = [
+export const KNOWN_TYPES = [
   "person", "org", "project", "task", "event", "note", "location",
   "process", "account", "asset", "conversation", "input", "run",
   "session", "decision", "triage",
@@ -197,9 +197,17 @@ const KNOWN_TYPES = [
   //  - place   : a location/venue record.
   // (Demoted legacy types above stay until the C11 contract-enforcement pass.)
   "daybook", "place",
+  //  - commitment : a promise with an accountable party and an evidence
+  //                 handle (#469/#470). Added to CANONICAL_RECORD_TYPES so
+  //                 the WRITE path accepts commitment/, but missing here —
+  //                 so GET /vault/list/commitment 400'd and every register
+  //                 bootstrap failed. Third instance of this exact split;
+  //                 the test in tests/vault-known-types.test.ts now makes a
+  //                 fourth impossible.
+  "commitment",
 ];
 
-const STATUS_BY_TYPE: Record<string, string[]> = {
+export const STATUS_BY_TYPE: Record<string, string[]> = {
   project: ["active", "paused", "completed", "abandoned", "proposed"],
   task: ["todo", "active", "blocked", "done", "cancelled"],
   session: ["active", "paused", "finished"],
@@ -223,6 +231,11 @@ const STATUS_BY_TYPE: Record<string, string[]> = {
   matter: ["active", "resolved", "abandoned"],
   ledger_entry: ["active"],
   chore: ["active", "paused", "completed"],
+  // commitment carries only the coarse four-value vocabulary here. The real
+  // 11-state lifecycle lives in `commitment_state`, because `status` cannot
+  // express `delivered_awaiting_acceptance` and forcing it would assert a
+  // closure that has not happened. Mirrors alfred-vault's STATUS_BY_TYPE.
+  commitment: ["todo", "active", "blocked", "done"],
   // pattern_proposal lifecycle (OBS-3..OBS-5):
   //  - proposed  : freshly written by PatternDetectionWorkflow,
   //                awaiting principal review on /desk
