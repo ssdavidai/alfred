@@ -12,6 +12,10 @@ KNOWN_TYPES: set[str] = {
     # Canonical progressive-autonomy record (Asking→Confirming→Acting). Was
     # absent, so the janitor stamped every instinct FM002 "Unknown type".
     "instinct",
+    # A promise inside a matter — who asked, who is accountable, the evidence,
+    # and where it is in its lifecycle. The unit the commitment register
+    # reconciles against.
+    "commitment",
 }
 
 LEARN_TYPES: set[str] = {
@@ -50,6 +54,13 @@ STATUS_BY_TYPE: dict[str, set[str]] = {
     "contradiction": {"unresolved", "resolved", "accepted"},
     "synthesis": {"draft", "active", "superseded"},
     "instinct": {"unconfirmed", "active", "deprecated"},
+    # COARSE rollup only. The real lifecycle (captured → accepted →
+    # in_progress → ready_to_deliver → delivered_awaiting_acceptance →
+    # fulfilled, plus waiting_*/blocked and released/superseded) lives in
+    # `commitment_state` and is validated in the intelligence layer. This
+    # daemon has no business enforcing that state machine, so `status` stays
+    # the same four-value rollup every other reader already understands.
+    "commitment": {"todo", "active", "blocked", "done"},
 }
 
 # Type → expected top-level directory
@@ -72,6 +83,7 @@ TYPE_DIRECTORY: dict[str, str] = {
     "contradiction": "contradiction",
     "synthesis": "synthesis",
     "instinct": "instinct",
+    "commitment": "commitment",
     # session, input have flexible placement
 }
 
