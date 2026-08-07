@@ -74,8 +74,19 @@ def build_acceptance(
     except (TypeError, ValueError):
         estimated_f = None
 
+    # NOTE: deliberately does NOT set `status`. A proposal is a `note`, and the
+    # vault validator allows only active|draft|final|review there — a PATCH
+    # setting `status: accepted` returns 500 and the acceptance never lands.
+    #
+    # Found end-to-end on a live tenant, not by these tests: existing proposal
+    # records carry `status: proposed` only because they were written through
+    # the raw-content path, which bypasses validation. A PATCH goes through the
+    # CLI, which does not. Copying the convention from the record was the
+    # mistake.
+    #
+    # `accepted: true` is the marker. `is_already_accepted` still reads the
+    # legacy `status` too, so records written the old way keep working.
     fields: dict[str, Any] = {
-        "status": "accepted",
         "accepted": True,
         "accepted_at": now_iso,
         "accepted_by": "principal",
@@ -117,3 +128,38 @@ def ledger_line(proposal: dict[str, Any], accepted_hours: float | None) -> str:
     end = proposal.get("period_end") or "?"
     hours = "?" if accepted_hours is None else f"{accepted_hours:g}"
     return f"| {start} | {end} | {hours} | accepted |"
+
+
+def ledger_already_has_period(ledger_body: str, proposal: dict[str, Any]) -> bool:
+    """True when this period is already booked in the ledger body.
+
+    THE GUARD THAT ACTUALLY PROTECTS THE LEDGER. `is_already_accepted` reads
+    the proposal, which is useless in the failure mode that matters: if the
+    ledger append succeeds and the proposal patch then fails, the proposal
+    still says `accepted: false`, so a retry sails past that check and appends
+    the period a second time.
+
+    That is not hypothetical — it happened on the first live run, when the
+    proposal patch 500'd on an invalid `status` value while the ledger row had
+    already landed. The claim that the ordering left "a re-runnable duplicate
+    the idempotency check catches" was simply wrong; the check keyed on the one
+    record that had not been written.
+
+    So the ledger is asked about itself. A duplicate row is not merely a wrong
+    total — the accepted ledger is the cursor for the next window, so it also
+    corrupts the following period's boundary.
+    """
+    start = str(proposal.get("period_start") or "").strip()
+    end = str(proposal.get("period_end") or "").strip()
+    if not start or not end:
+        # Cannot prove absence without a period. Refuse rather than risk a
+        # duplicate: an unbooked period is recoverable, a double-booked one
+        # silently mis-states both this window and the next.
+        return True
+    for line in ledger_body.splitlines():
+        if not line.lstrip().startswith("|"):
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) >= 2 and cells[0] == start and cells[1] == end:
+            return True
+    return False

@@ -76,6 +76,7 @@ from src.config import load_config
 from src.matching.hours_approval import (
     build_acceptance,
     is_already_accepted,
+    ledger_already_has_period,
     ledger_line,
 )
 
@@ -525,12 +526,24 @@ async def _accept_hours_proposal_if_any(
     fields = build_acceptance(proposal, note, decision_id, _now_iso())
     accepted_hours = fields.get("accepted_total_hours")
 
-    # 1. Ledger first. See the ordering note above.
-    lr = await client.patch(
-        f"/api/v1/vault/records/{ledger_ref}",
-        json={"body_append": "\n" + ledger_line(proposal, accepted_hours) + "\n"},
-    )
-    lr.raise_for_status()
+    # 1. Ledger first — but ask the LEDGER whether this period is already
+    #    booked. `is_already_accepted` above reads the proposal, which is
+    #    exactly the record that fails to update when step 2 errors, so it
+    #    cannot protect a retry. Only the ledger knows what the ledger holds.
+    lg = await client.get(f"/api/v1/vault/records/{ledger_ref}")
+    lg.raise_for_status()
+    if ledger_already_has_period((lg.json() or {}).get("body") or "", proposal):
+        logger.info(
+            "decision_router: ledger %s already books %s..%s — not appending "
+            "twice; marking the proposal accepted to close the gap",
+            ledger_ref, proposal.get("period_start"), proposal.get("period_end"),
+        )
+    else:
+        lr = await client.patch(
+            f"/api/v1/vault/records/{ledger_ref}",
+            json={"body_append": "\n" + ledger_line(proposal, accepted_hours) + "\n"},
+        )
+        lr.raise_for_status()
 
     # 2. Only now mark the proposal accepted.
     ar = await client.patch(
