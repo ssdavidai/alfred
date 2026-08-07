@@ -36,10 +36,11 @@ class FakeResp:
 class FakeClient:
     """Records the order of writes — the property that matters most here."""
 
-    def __init__(self, card_fm, proposal_fm, ledger_fails=False):
+    def __init__(self, card_fm, proposal_fm, ledger_fails=False, ledger_body=""):
         self.card_fm = card_fm
         self.proposal_fm = dict(proposal_fm)
         self.ledger_fails = ledger_fails
+        self.ledger_body = ledger_body
         self.writes: list[str] = []
 
     async def get(self, path):
@@ -48,6 +49,8 @@ class FakeClient:
             return FakeResp({"path": rel, "frontmatter": self.card_fm, "body": ""})
         if rel == PROPOSAL:
             return FakeResp({"path": rel, "frontmatter": self.proposal_fm, "body": ""})
+        if rel == LEDGER:
+            return FakeResp({"path": rel, "frontmatter": {}, "body": self.ledger_body})
         return FakeResp({}, 404)
 
     async def patch(self, path, json=None):
@@ -56,6 +59,7 @@ class FakeClient:
             if self.ledger_fails:
                 return FakeResp({}, 500)
             self.writes.append("ledger")
+            self.ledger_body += "\n" + ((json or {}).get("body_append") or "")
             return FakeResp({"ok": True})
         if rel == PROPOSAL:
             self.writes.append("proposal")
@@ -163,3 +167,22 @@ class TestReadBack:
         c = NoOpPatch(HOURS_CARD, OPEN_PROPOSAL)
         with pytest.raises(RuntimeError, match="did not read back as accepted"):
             run(c)
+
+    def test_a_retry_after_a_failed_proposal_patch_does_not_double_book(self):
+        """The live failure, reproduced.
+
+        On the first real run the ledger row landed and the proposal patch
+        500'd (invalid `status` for a note). The proposal therefore still reads
+        accepted:false, so `is_already_accepted` waves the retry through — and
+        the old code would have appended the period a second time.
+
+        A duplicate is not just a wrong total: the accepted ledger is the
+        cursor for the next window, so it corrupts the following period too.
+        """
+        booked = "| 2026-08-01 | 2026-08-07 | 6 | accepted |\n"
+        c = FakeClient(HOURS_CARD, OPEN_PROPOSAL, ledger_body=booked)
+        out = run(c, note="6")
+        assert c.writes == ["proposal"], "must not append the ledger again"
+        assert c.ledger_body.count("2026-08-01 | 2026-08-07") == 1
+        assert c.proposal_fm["accepted"] is True, "and must close the gap"
+        assert out["hours"] == 6.0

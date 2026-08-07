@@ -13,6 +13,7 @@ from src.matching.hours_approval import (
     MAX_PLAUSIBLE_PERIOD_HOURS,
     build_acceptance,
     is_already_accepted,
+    ledger_already_has_period,
     ledger_line,
     parse_corrected_hours,
 )
@@ -119,3 +120,70 @@ class TestLedgerLine:
 
     def test_whole_numbers_do_not_render_a_trailing_zero(self):
         assert "| 8 |" in ledger_line({"period_start": "a", "period_end": "b"}, 8.0)
+
+
+class TestStatusIsNotWritten:
+    """A proposal is a `note`, and the validator allows only
+    active|draft|final|review there. Writing `status: accepted` 500s the PATCH
+    and the acceptance never lands.
+
+    Found end-to-end on a live tenant, not here: existing proposals carry
+    `status: proposed` only because they were created through the raw-content
+    path, which skips validation. Copying that convention into a PATCH was the
+    mistake."""
+
+    def test_acceptance_does_not_set_status(self):
+        f = build_acceptance({"total_hours": 8.0}, "", "d1", "t")
+        assert "status" not in f
+
+    def test_accepted_flag_is_the_marker(self):
+        f = build_acceptance({"total_hours": 8.0}, "", "d1", "t")
+        assert f["accepted"] is True
+        assert is_already_accepted(f) is True
+
+    def test_legacy_status_records_are_still_recognised(self):
+        # Records written the old way must keep working.
+        assert is_already_accepted({"status": "accepted"}) is True
+
+
+class TestLedgerGuard:
+    """The guard that actually protects the ledger.
+
+    `is_already_accepted` reads the proposal — useless in the failure mode that
+    matters. When the ledger append succeeds and the proposal patch then fails,
+    the proposal still says accepted:false, so a retry sails past that check
+    and books the period twice. This happened on the first live run."""
+
+    LEDGER = (
+        "# Ledger\n\n| Start | End | Hours | Status |\n|---|---|---|---|\n"
+        "| 2026-08-01 | 2026-08-07 | 6 | accepted |\n"
+    )
+    P = {"period_start": "2026-08-01", "period_end": "2026-08-07"}
+
+    def test_detects_a_period_already_booked(self):
+        assert ledger_already_has_period(self.LEDGER, self.P) is True
+
+    def test_a_different_period_is_not_a_duplicate(self):
+        other = {"period_start": "2026-08-08", "period_end": "2026-08-14"}
+        assert ledger_already_has_period(self.LEDGER, other) is False
+
+    def test_empty_ledger_is_appendable(self):
+        assert ledger_already_has_period("# Ledger\n", self.P) is False
+
+    def test_header_row_is_not_mistaken_for_a_booking(self):
+        assert ledger_already_has_period(
+            "| Start | End | Hours | Status |\n|---|---|---|---|\n", self.P
+        ) is False
+
+    def test_the_exact_retry_scenario_from_the_live_run(self):
+        """Ledger appended, proposal patch failed, retry arrives."""
+        proposal_after_failure = dict(self.P, accepted=False, status="proposed")
+        # The old guard would let this through...
+        assert is_already_accepted(proposal_after_failure) is False
+        # ...the ledger guard stops it.
+        assert ledger_already_has_period(self.LEDGER, proposal_after_failure) is True
+
+    def test_a_period_that_cannot_be_identified_is_refused(self):
+        # Cannot prove absence without a period. An unbooked period is
+        # recoverable; a double-booked one mis-states this window and the next.
+        assert ledger_already_has_period(self.LEDGER, {}) is True
