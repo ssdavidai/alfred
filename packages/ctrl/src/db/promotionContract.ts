@@ -22,9 +22,14 @@
 import { ApiError } from "../api/errors.js";
 
 /**
- * The 12 canonical vault record types. Each is a top-level directory under
+ * The 13 canonical vault record types. Each is a top-level directory under
  * VAULT_PATH; a record lives at `<type>/<slug>.md` (state transitions may move
  * it into a `<type>/_closed/` subdirectory — still canonical).
+ *
+ * `commitment` (#467 phase 0b) is a promise inside a matter: who asked, who is
+ * accountable, the evidence, and where it sits in its lifecycle. It always
+ * references a matter — `matter/inbox.md` when Alfred cannot attribute one,
+ * which is an explicit triage queue rather than a dumping ground.
  */
 export const CANONICAL_RECORD_TYPES = [
   "matter",
@@ -39,6 +44,7 @@ export const CANONICAL_RECORD_TYPES = [
   "decision",
   "briefing",
   "daybook",
+  "commitment",
 ] as const;
 
 export type CanonicalRecordType = (typeof CANONICAL_RECORD_TYPES)[number];
