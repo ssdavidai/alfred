@@ -96,7 +96,7 @@ Search first, so one period has exactly one proposal. Write
 `note/<matter-slug>-timesheet-proposal-<period-end>.md` with:
 
 ```yaml
-status: proposed
+status: draft
 accepted: false
 period_start: <date>
 period_end: <date>
@@ -106,6 +106,13 @@ scope: <matter-slug>
 source_coverage: <which sources were read, which were unavailable>
 confidence: <overall>
 ```
+
+`status` must be `draft`, not `proposed`. A proposal is a `note`, and the vault
+validator accepts only `active|draft|final|review` there. An invalid value
+written here is inert at creation — the raw-content path skips validation — but
+the validator re-checks the **whole record** on the first PATCH, so it then
+blocks the acceptance and every later write to that record. Acceptance sets
+`final`. `accepted: true/false` is the machine marker either way.
 
 Body:
 
