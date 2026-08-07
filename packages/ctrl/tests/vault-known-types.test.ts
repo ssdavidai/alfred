@@ -18,12 +18,18 @@
 // Each time it was found in production rather than in CI, because no test
 // compared the two lists. This one does, so a fourth occurrence fails here
 // instead of on a live tenant.
+//
+// It imports the tables from `api/vaultTypes.ts`, not from the route module.
+// The first version imported `routes/vault.js` and died at load with
+// `ReferenceError: Cannot access 'VAULT_PATH' before initialization` — that
+// module is in an import cycle with `routes/admin.ts` and is only safely
+// loadable through the app's entry order.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { CANONICAL_RECORD_TYPES } from "../src/db/promotionContract.js";
-import { KNOWN_TYPES, STATUS_BY_TYPE } from "../src/api/routes/vault.js";
+import { KNOWN_TYPES, STATUS_BY_TYPE } from "../src/api/vaultTypes.js";
 
 test("every canonical record type is listable", () => {
   const listable = new Set(KNOWN_TYPES as readonly string[]);
