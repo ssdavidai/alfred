@@ -5,6 +5,114 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the `alfred-vault` package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-08-07]
+
+10 commits since `v2026.08.06`, across 8 issues. One theme: **commitments
+became a thing the platform knows about**, rather than a thing one tenant's
+hand-written skills happened to maintain.
+
+A commitment is a promise with an accountable party and an evidence handle —
+one Sir made, or one made to him. Holding all of them is the "continuity" half
+of the operator's job: it is what stops context reconstruction from being a
+recurring category of work. Until this release the machinery for it existed
+only as a skill directory on a single VM, versioned nowhere, tested nowhere,
+and available to nobody else.
+
+---
+
+### `commitment` is a canonical vault record type
+
+Phase 0 of #467, landed as three provider-first changes so nothing built on a
+type that did not yet exist:
+
+- **The vault schema knows it** (#469 → #472). Added to `KNOWN_TYPES` and
+  `TYPE_DIRECTORY`, with `STATUS_BY_TYPE["commitment"]` holding only the coarse
+  four-value vocabulary. Deliberately **not** in `LEARN_TYPES`: a commitment is
+  Sir's record, not a distiller artifact.
+- **ctrl-api accepts it** (#470 → #473). Added to `CANONICAL_RECORD_TYPES`, so
+  `assertCanonicalVaultPath()` permits `commitment/` — including
+  `commitment/_closed/` — while every demoted type stays rejected. Widening a
+  canonical set risks widening it too far, so the tests pin the exemption list
+  (`_templates`, `needs_attention`) as much as the addition.
+- **The existing records moved onto it** (#471 → #474, fixed by #476). 64
+  records migrated from `task/` to `commitment/`.
+
+The coarse `status` and the 11-state `commitment_state` coexist on purpose. The
+four-value vocabulary cannot express `delivered_awaiting_acceptance`, and
+collapsing it into `done` would assert a closure that has not happened.
+
+#### The migration failed first, safely
+
+Its first live run failed all 64 records and wrote nothing. It read
+`source["content"]`; the API returns `{path, frontmatter, body}`. The `content`
+key belonged to a **test fake** — the script had been written against the mock,
+and its tests agreed with it because they only exercised pure helpers and never
+touched the read shape (#476).
+
+Nothing was at risk, because the ordering is **write → verify → delete**: a
+failed read aborts before anything is written, so a failure leaves a detectable
+duplicate rather than a lost record. All 64 originals were intact and the re-run
+after the fix moved 64 with 0 failures.
+
+The lesson is the one this codebase keeps re-teaching, and it is now recorded
+at the top of that test file: **a test that agrees with your mock proves
+nothing about the system.**
+
+### Two capabilities you switch on with one word
+
+```yaml
+commitment_register: true     # #466
+hours_tracking: true          # #468
+```
+
+Both ship in `packages/hermes/workspace-template/skills/`, which
+`init/entrypoint.sh` already distributes to every profile on every tenant,
+hash-gated so it re-syncs on change. No new plumbing was needed — the
+distribution channel existed.
+
+- **`alfred-commitment-register`** (#466 → #477, #478). The framework,
+  generalised: prefix derives from the matter slug, participants from its
+  related persons and orgs, sources from whatever the tenant has connected,
+  projection paths from the slug. The object form exists only to override a
+  derived value that is wrong.
+- **`alfred-hours-reconstruction`** (#468 → #479). Reconstructs work from
+  bounded cross-source evidence and **proposes** it. Two rules sit above
+  everything else: nothing enters the ledger without Sir's explicit approval,
+  and the accepted ledger — not the calendar, not the schedule — is the cursor
+  for the next window. Keyed to the schedule, a missed Friday silently loses a
+  week's work; keyed to the ledger, a missed run widens the next window and
+  self-heals.
+
+Both default to working on a tenant with **no integrations at all**: the
+register projects to a vault note, and Slack is opt-in. The original made a
+Slack Canvas the happy path, which would have baked an external dependency into
+a default capability.
+
+Each acts only on matters carrying its block, so existing per-tenant wrapper
+skills keep running untouched. Migration is per matter: add the block, delete
+the wrapper, verify one reconciliation.
+
+#### The convention, named once (#480)
+
+> **A capability is a shipped skill, switched on by a boolean on the matter,
+> with an object form as the escape hatch.**
+
+#466 and #468 arrived at this shape independently. Recording it in `CLAUDE.md`
+§6.1 makes the next per-matter capability an instance of a documented
+convention rather than a third bespoke thing — cheaper to state than to
+rediscover. Two properties are recorded as non-negotiable rather than default:
+no external sends during reconciliation, and no hours accepted without explicit
+approval **at any confidence level**.
+
+### Documentation
+
+- `CLAUDE.md` §5.1 — 12 canonical record types became 13 (#480).
+- `README.md` rewritten around attentionmaxxing (#464).
+- The 2026-08-06 changelog entry rewritten to actually cover its release
+  (#463) — the first draft cited 38 of ~213 issues.
+
+---
+
 ## [2026-08-06]
 
 178 commits since `v2026.05.30`, across ~213 issues. Two months of work, with
