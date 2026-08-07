@@ -122,17 +122,50 @@ Read the note back before delivering anything.
 **The ledger is not touched.** Not on generation, not on a test run, not
 because the reconstruction was thorough.
 
-## Ask for approval
+## Ask for approval — on the Desk
 
-Deliver a concise but itemised request: the period and total; one line per
+A proposal delivered only as a message is a message: easy to miss, easy to
+defer, invisible once scrolled past. Write a Desk card, so the decision sits
+where Sir's other decisions sit.
+
+Create a `needs_attention` record carrying:
+
+```yaml
+approval_kind: hours_proposal
+proposal_ref: note/<matter-slug>-timesheet-proposal-<period-end>.md
+ledger_ref:   note/<matter-slug>-timesheet.md
+action_what:  "Approve <n.nn> h for <matter name> — <period-start> to <period-end>"
+suggested_actor: human
+```
+
+Those three fields are a contract, not decoration. `route_decision` reads
+`approval_kind` to recognise the card, and `proposal_ref` / `ledger_ref` to
+know what to book. **A card missing any of them books nothing** — the click
+will close the card and silently do nothing else.
+
+Then deliver the itemised request as well: the period and total; one line per
 non-zero day; the confidence and coverage caveat; the proposal note's path; and
-an explicit prompt to approve or supply corrected days and hours.
+an explicit prompt to approve or supply a corrected figure.
+
+Tell Sir he can correct the number **in the note when approving** — typing
+`6`, or `6.5 — Tuesday ran short`, books that figure instead of the estimate.
+A note that is only prose (`looks fine`) approves the estimate unchanged; the
+number is never guessed from wording.
 
 Only Sir's explicit approval of the identified period is acceptance. **A
 generated proposal is not approval. Silence is not approval. A successful
 scheduled run is not approval. A reaction or a "thanks" is not approval.**
 
 ## On approval
+
+Approving the Desk card does the booking automatically — `route_decision`
+appends the period to the ledger, then marks the proposal accepted, then reads
+both back. Do **not** perform these writes yourself when the card path was
+used; you would double-append, and the ledger is the cursor for the next
+window, so a duplicate corrupts the following period too.
+
+When approval arrives some other way — Sir replies in chat, or no card was
+written — do it by hand, in this order:
 
 1. Read the exact proposal note. Confirm its period overlaps no other accepted
    or proposed record.
