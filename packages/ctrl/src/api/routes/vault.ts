@@ -641,6 +641,35 @@ export function registerVaultRoutes(): void {
         (r.frontmatter as Record<string, unknown>).live_observation_count = live;
       }
     }
+    // `?fields=a,b` — return only the named frontmatter keys and drop the
+    // body preview. Without this, listing a type whose records carry long
+    // narrative frontmatter is unusable: 16 matters (each with a multi-
+    // sentence `current_state`) produced a 372 KB response that truncated
+    // before the caller could read the list, so a job iterating matters
+    // could not even discover them.
+    //
+    // Applied after the cache so one cached full payload serves every field
+    // selection, and after the instinct enrichment so `live_observation_count`
+    // remains selectable.
+    const fieldsParam = (query.get("fields") ?? "").trim();
+    if (fieldsParam) {
+      const wanted = new Set(
+        fieldsParam.split(",").map((f) => f.trim()).filter(Boolean),
+      );
+      sendJson(res, 200, {
+        results: payload.results.map((r) => {
+          const fm: Record<string, unknown> = {};
+          for (const k of wanted) {
+            if (k in (r.frontmatter as Record<string, unknown>)) {
+              fm[k] = (r.frontmatter as Record<string, unknown>)[k];
+            }
+          }
+          return { path: r.path, name: r.name, status: r.status, frontmatter: fm };
+        }),
+        count: payload.count,
+      });
+      return;
+    }
     sendJson(res, 200, payload);
   });
 
