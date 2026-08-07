@@ -165,13 +165,22 @@ avoid a filename collision with Hermes' own gateway-session store at
 > **A record exists in the vault only if the principal has a reason to read
 > or edit it. Everything else is SQLite.**
 
-The vault (Store 1) holds **exactly 12 canonical record types**:
+The vault (Store 1) holds **exactly 13 canonical record types**:
 
 ```
 matter  task  note  person  org  place  asset  chore  instinct  decision  briefing  daybook
+commitment
 ```
 
 Plus the `SOUL.md` / `RULES.md` singletons and `_templates/`.
+
+`commitment` joined the set in #469/#470/#471 (phase 0 of #467). A commitment
+is a promise with an accountable party and an evidence handle — one Sir made,
+or one made to him. It hangs off a matter via `matter_ref`: the matter is the
+ongoing concern, the commitments are the promises inside it. Its coarse
+`status` uses the normal four-value vocabulary; the real 11-state lifecycle
+lives in `commitment_state`, because the coarse field cannot express
+`delivered_awaiting_acceptance` and forcing it would mean a false closure.
 
 **ctrl-api is the sole vault writer.** Most vault write routes enforce the
 contract in code by calling `assertCanonicalVaultPath()`
@@ -262,6 +271,35 @@ in_progress; `waiting` = otherwise.
 a `state_change` audit row to alfred-state.db AND patches frontmatter.
 
 **Mode-gated**: `state_mutator_mode` setting (see §8). Default `"live"`.
+
+**Per-matter capabilities.** A matter's frontmatter can switch on shipped
+skills. The convention, which any future capability should follow:
+
+> **A capability is a shipped skill, switched on by a boolean on the matter,
+> with an object form as the escape hatch.**
+
+```yaml
+commitment_register: true     # #466 — alfred-commitment-register
+hours_tracking: true          # #468 — alfred-hours-reconstruction
+```
+
+Everything is derived — ID prefix from the matter slug, participants from its
+related persons/orgs, sources from what the tenant has connected, projection
+paths from the slug. The object form (`{enabled: true, prefix: ACME, …}`)
+exists only to override a derived value that is wrong.
+
+Two rules that are not configurable, because they are not choices: the skills
+never perform external sends or client-facing writes during reconciliation, and
+`hours_tracking` never accepts hours without Sir's explicit approval, at any
+confidence level.
+
+Defaults are chosen so a capability works on a tenant with **no integrations at
+all** — `commitment_register`'s projection defaults to a vault note, with Slack
+as an opt-in (`projection: slack:<channel>`).
+
+The skills act only on matters carrying the block, so a matter driven by a
+bespoke per-tenant wrapper skill keeps running on it, untouched. Migration is
+per matter: add the block, delete the wrapper, verify one reconciliation.
 
 ### 6.2 Task
 
