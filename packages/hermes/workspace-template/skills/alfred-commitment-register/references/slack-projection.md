@@ -38,14 +38,26 @@ If an intended private Canvas is also visible from a forbidden destination:
 
 ## Canvas helper and read-back
 
-Where a tenant has the Slack Canvas helper installed, it uses **positional**
-arguments, not GNU-style flags:
+Where a tenant has the Slack Canvas helper installed, it lives in a **profile's**
+`bin/` directory — not at the top of `$HERMES_HOME`. Locate it before use rather
+than assuming a path:
 
 ```bash
-python3 "$HERMES_HOME/bin/slack_canvas.py" create "<title>" "<markdown>"
-python3 "$HERMES_HOME/bin/slack_canvas.py" channel-create <channel_id> "<markdown>"
-python3 "$HERMES_HOME/bin/slack_canvas.py" read <canvas_id>
-python3 "$HERMES_HOME/bin/slack_canvas.py" list 500
+HELPER=$(ls "$HERMES_HOME"/profiles/*/bin/slack_canvas.py 2>/dev/null | head -1)
+[ -n "$HELPER" ] || echo "no Canvas helper on this tenant — use a vault note"
+```
+
+It is typically under the `main` profile, because that is where the tenant's
+Slack credentials live. A tenant with no helper has no Slack projection
+available; fall back to the vault note rather than failing the reconciliation.
+
+The helper uses **positional** arguments, not GNU-style flags:
+
+```bash
+python3 "$HELPER" create "<title>" "<markdown>"
+python3 "$HELPER" channel-create <channel_id> "<markdown>"
+python3 "$HELPER" read <canvas_id>
+python3 "$HELPER" list 500
 ```
 
 Do not assume a remembered `--channel-id`, `--title`, `--markdown-file`,
