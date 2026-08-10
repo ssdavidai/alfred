@@ -1221,14 +1221,23 @@ export function registerVaultRoutes(): void {
     // 2. Create a task record from the triage content
     const taskSlug = triageName.replace(/[^a-zA-Z0-9 -]/g, "").replace(/\s+/g, "-").toLowerCase().slice(0, 80);
     const now = new Date().toISOString().slice(0, 10);
+    // §6.2 / §15.2: writers must set BOTH status (alfred-vault validator vocab:
+    // active|blocked|cancelled|done|todo) AND state (matters-aggregator vocab:
+    // pending|in_progress|done|archived).  `queued` is not a valid validator
+    // status and causes HTTP 500 from the alfred daemon — same defect that broke
+    // the 2026-05-24 backfill (commit eed3799).
     const taskFrontmatter = [
       "---",
       "type: task",
       `name: "${triageName}"`,
-      `status: queued`,
+      `status: todo`,
+      `state: pending`,
       `owner: ${owner}`,
       `priority: ${priority}`,
-      matter ? `matter: "[[matter/${matter}]]"` : "",
+      matter ? `parent_matter: "matter/${matter}.md"` : "",
+      matter ? `matter_ref: "matter/${matter}.md"` : "",
+      `signal_sources: []`,
+      `closure_predicate: null`,
       `source_triage: "[[${triagePath.replace(/\.md$/, "")}]]"`,
       `created: ${now}`,
       "---",

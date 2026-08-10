@@ -1,6 +1,7 @@
 ---
 type: task
-status: queued # queued | active | blocked | done | cancelled
+status: todo # todo | active | blocked | done | cancelled
+state: pending # pending | in_progress | done | archived
 title:
 owner: "alfred" # "alfred" | "human" | agent-id
 tier: 2 # 1 (classify) | 2 (synthesis) | 3 (agentic)
