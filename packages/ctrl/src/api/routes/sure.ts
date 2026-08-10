@@ -4,7 +4,7 @@ import crypto from "node:crypto";
 import { addRoute } from "../server.js";
 import { sendJson, ApiError, ValidationError } from "../errors.js";
 import { dockerExec, dockerExecWithStdin } from "../helpers.js";
-import { fetchAnchorMap, classifyProvenance } from "../lib/sure_freshness.js";
+import { fetchAnchorMap, classifyProvenance, buildDataQuality, remediationHint } from "../lib/sure_freshness.js";
 
 interface SureConfig {
   token: string;
@@ -416,15 +416,66 @@ export function registerSureRoutes(): void {
   });
 
   // --- Balance sheet --------------------------------------------------
+  // Appends data_quality. Three parallel fetches (totals + accounts + anchor);
+  // if either sidecar fails counts degrade to unknown and 200 still returns.
   addRoute("GET", "/api/v1/sure/balance_sheet", async ({ res }) => {
-    const r = await sureProxy("GET", "/balance_sheet", null, null);
-    forwardSureResponse(res, r);
+    const cfg = requireSureConfig();
+    const [bsResult, acctResult, anchorMap] = await Promise.all([
+      sureProxy("GET", "/balance_sheet", null, null),
+      sureProxy("GET", "/accounts", null, null),
+      fetchAnchorMap(cfg.base, cfg.token),
+    ]);
+    if (bsResult.status !== 200 || !bsResult.data) { forwardSureResponse(res, bsResult); return; }
+    const accts = (acctResult.status === 200
+      ? ((acctResult.data as Record<string, unknown>)["accounts"] as Array<{id?: unknown}> | undefined) ?? []
+      : []);
+    sendJson(res, 200, { ...(bsResult.data as object), data_quality: buildDataQuality(anchorMap, accts) });
   });
   // Backward-compat alias for the hyphenated form shipped in the initial
   // skill draft. New callers should use /balance_sheet to match Sure.
   addRoute("GET", "/api/v1/sure/balance-sheet", async ({ res }) => {
-    const r = await sureProxy("GET", "/balance_sheet", null, null);
-    forwardSureResponse(res, r);
+    const cfg = requireSureConfig();
+    const [bsResult, acctResult, anchorMap] = await Promise.all([
+      sureProxy("GET", "/balance_sheet", null, null),
+      sureProxy("GET", "/accounts", null, null),
+      fetchAnchorMap(cfg.base, cfg.token),
+    ]);
+    if (bsResult.status !== 200 || !bsResult.data) { forwardSureResponse(res, bsResult); return; }
+    const accts = (acctResult.status === 200
+      ? ((acctResult.data as Record<string, unknown>)["accounts"] as Array<{id?: unknown}> | undefined) ?? []
+      : []);
+    sendJson(res, 200, { ...(bsResult.data as object), data_quality: buildDataQuality(anchorMap, accts) });
+  });
+
+  // --- Sync health -------------------------------------------------------
+  // Per-account freshness + actionable remediation_hint (provider_status-specific).
+  // Missing SURE_API_KEY → NOT_CONFIGURED via requireSureConfig().
+  addRoute("GET", "/api/v1/sure/sync-health", async ({ res }) => {
+    const cfg = requireSureConfig();
+    const [acctResult, anchorMap] = await Promise.all([
+      sureProxy("GET", "/accounts", null, null),
+      fetchAnchorMap(cfg.base, cfg.token),
+    ]);
+    if (acctResult.status !== 200 || !acctResult.data) { forwardSureResponse(res, acctResult); return; }
+    const accts = ((acctResult.data as Record<string, unknown>)["accounts"] as Array<Record<string, unknown>> | undefined) ?? [];
+    sendJson(res, 200, {
+      accounts: accts.map((acc) => {
+        const id = acc["id"] as string;
+        const entry = anchorMap.get(id);
+        const prov = classifyProvenance(entry);
+        return {
+          account_id: id,
+          name: acc["name"] ?? null,
+          freshness: prov.freshness,
+          source: prov.source,
+          observed_at: prov.observed_at,
+          provider_status: entry?.provider_status ?? null,
+          fallback_reason: prov.fallback_reason,
+          remediation_hint: remediationHint(prov.freshness, entry?.provider_status ?? null),
+        };
+      }),
+      generated_at: new Date().toISOString(),
+    });
   });
 
   // --- Categories -----------------------------------------------------

@@ -42,6 +42,52 @@ export function buildAnchorMap(accounts: AnchorEntry[]): Map<string, AnchorEntry
   return map;
 }
 
+// --- Aggregate data_quality (#318 slice 2) ---------------------------------
+// partial:true when any account is stale or unknown — the signal that a
+// net-worth figure must not be presented as settled fact.
+// Accounts absent from anchorMap (empty map = upstream anchor call failed)
+// classify as "unknown" so the aggregate still returns 200 gracefully.
+
+export interface DataQuality {
+  fresh_accounts: number;
+  stale_accounts: number;
+  unknown_accounts: number;
+  partial: boolean;
+}
+
+export function buildDataQuality(
+  anchorMap: Map<string, AnchorEntry>,
+  accounts: Array<{ id?: unknown }>,
+): DataQuality {
+  let fresh = 0, stale = 0, unknown = 0;
+  for (const acc of accounts) {
+    const p = classifyProvenance(anchorMap.get(acc.id as string));
+    if (p.freshness === "fresh") fresh++;
+    else if (p.freshness === "stale") stale++;
+    else unknown++;
+  }
+  return { fresh_accounts: fresh, stale_accounts: stale, unknown_accounts: unknown,
+           partial: stale > 0 || unknown > 0 };
+}
+
+// --- Sync-health remediation hint (#318 slice 2) ---------------------------
+// Specific to provider_status (not boilerplate) so the principal knows
+// exactly what to do: re-authorise vs trigger a sync vs no action needed.
+
+export function remediationHint(
+  freshness: "fresh" | "stale" | "unknown",
+  providerStatus: string | null,
+): string | null {
+  if (freshness === "fresh") return null;
+  if (freshness === "stale") {
+    return providerStatus === "DISCONNECTED"
+      ? "Re-authorise the provider connection in Sure to restore live balance updates."
+      : "Trigger a manual sync in Sure — the provider connection is active but the last balance pull failed.";
+  }
+  return "Account not linked to a provider or anchor state unavailable. If manually entered, no action is needed.";
+}
+
+// ---------------------------------------------------------------------------
 // Fetch anchor-state from Sure and return a map keyed by account_id.
 // Returns empty Map on any error, timeout, or malformed response so the
 // caller still returns 200 with every account marked freshness:"unknown".
