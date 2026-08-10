@@ -234,6 +234,19 @@ TARGET_CANDIDATE_LIMIT: int = 5
 # evaluate_state prompt, long enough to disambiguate intent.
 RAW_QUOTE_MAX: int = 200
 
+# Maximum body length forwarded to the LLM extraction prompt.
+# Verbatim webhook payloads (e.g. meeting transcripts) can be 50–242 KB.
+# Passing them unbounded triggers the context-overflow class from
+# CLAUDE.md §14 / #193 ("max compression attempts"), which is why
+# onboarding fact-extraction had to be chunked.  16 KB captures any
+# meeting summary or short transcript in full while keeping the
+# extraction pipeline well under context budget.  The prompt builder
+# applies a tighter internal cap (2 KB) when assembling the LLM prompt;
+# this outer cap limits in-memory footprint and is defence-in-depth
+# against prompt-builder changes.  Apply via _cap_at_word_boundary so
+# the cut never lands mid-word.
+MAX_CLERK_BODY_CHARS: int = 16_000
+
 
 # ---------------------------------------------------------------------------
 # Phase 6.7 (T6.7.4) — per-source-type confidence priors
@@ -540,6 +553,17 @@ def _normalize_source_type(raw: str) -> str:
         return "vault_edit"
     if raw.startswith("sure"):
         return "sure"
+
+    # webhook:<label> is a structured, explicit transport marker stamped
+    # by ctrl-api's inbound webhook route (webhooksInbound.ts).  The label
+    # is the handler name (e.g. "fathom").  Return the full token so the
+    # open-world gate in _pre_filter accepts it and the event rides the
+    # generic extraction path — same contract as an unenumerated composio
+    # app, which also returns its raw token rather than "unknown".
+    if raw.startswith("webhook:"):
+        label = raw[len("webhook:"):]
+        if label:
+            return raw  # "webhook:<label>" — never "unknown"
 
     return "unknown"
 
@@ -912,6 +936,24 @@ def _is_unknown_source_only_drop(event_dict: dict[str, Any]) -> bool:
     return _infer_source_type(event_dict) == "unknown"
 
 
+def _cap_at_word_boundary(text: str, max_chars: int) -> str:
+    """Truncate *text* to *max_chars* at a word boundary where possible.
+
+    Prefers the last space within the budget so the cut does not land
+    mid-word; falls back to a hard slice when there is no space in the
+    final 40 chars (e.g. a long URL or base64 blob).  Appends '…' to
+    signal the truncation to downstream consumers; returns *text*
+    unchanged when it is already within budget.
+    """
+    if len(text) <= max_chars:
+        return text
+    cut = text[:max_chars]
+    last_space = cut.rfind(" ")
+    if last_space > max_chars - 40:
+        cut = cut[:last_space]
+    return cut.rstrip() + "…"
+
+
 def _extract_raw_quote(event_dict: dict[str, Any]) -> str:
     """Build the 200-char ground-truth excerpt preserved on the signal.
 
@@ -967,16 +1009,7 @@ def _extract_raw_quote(event_dict: dict[str, Any]) -> str:
 
     # Collapse whitespace for YAML-friendliness.
     quote = re.sub(r"\s+", " ", quote).strip()
-    if len(quote) <= RAW_QUOTE_MAX:
-        return quote
-
-    # Word-boundary truncation. Prefer the last space within budget;
-    # fall back to a hard slice if there's no space (e.g. a long URL).
-    cut = quote[: RAW_QUOTE_MAX]
-    last_space = cut.rfind(" ")
-    if last_space > RAW_QUOTE_MAX - 40:
-        cut = cut[:last_space]
-    return cut.rstrip() + "…"
+    return _cap_at_word_boundary(quote, RAW_QUOTE_MAX)
 
 
 def _strip_gmail_headers(body: str) -> str:
@@ -1654,7 +1687,7 @@ async def extract_signal_from_event(
         prompt = build_signal_extraction_prompt(
             source_type=source_type,
             event_frontmatter=event.get("frontmatter") or {},
-            event_body=_event_body(event),
+            event_body=_cap_at_word_boundary(_event_body(event), MAX_CLERK_BODY_CHARS),
             raw_quote=raw_quote,
         )
 
@@ -2301,7 +2334,7 @@ async def extract_signals_from_event(
         prompt = build_signal_extraction_prompt_multi(
             source_type=source_type,
             event_frontmatter=event.get("frontmatter") or {},
-            event_body=_event_body(event),
+            event_body=_cap_at_word_boundary(_event_body(event), MAX_CLERK_BODY_CHARS),
             raw_quote=event_level_raw_quote,
             soul_md=soul_md,
         )
