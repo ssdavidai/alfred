@@ -50,7 +50,7 @@ const vaultTools: ToolDef[] = [
       "List every record of a given vault type (matter, task, note, person, org, place, asset, chore, instinct, briefing, daybook, decision, …). Returns one entry per record with `path` (vault-relative, suitable for get_vault_record / update_vault_record), `name`, `status`, full `frontmatter`, a truncated `body_preview` (default 500 chars, max 2000 via `preview` query), and `created`. Use this when Sir asks 'what matters am I working on?', 'what tasks are open?', or before creating a record so you don't duplicate an existing one. Cheap, idempotent, no pagination — the list is bounded by what the type directory holds. Backing: filesystem walk of /vault/<type>/.",
     inputSchema: z.object({
       type: z.string().min(1).describe(
-        "One of: matter, task, note, person, org, place, asset, chore, instinct, briefing, daybook, decision (the 12 canonical types). Legacy/derived directories (event, observation, reflection, triage, …) may also still resolve. Unknown types return 400.",
+        "One of: matter, task, note, person, org, place, asset, chore, instinct, briefing, daybook, decision, commitment (the 13 canonical types). Legacy/derived directories (event, observation, reflection, triage, …) may also still resolve. Unknown types return 400.",
       ),
       preview: z.number().int().min(0).max(2000).optional().describe(
         "Body-preview character count; 0 to omit, max 2000. Default 500.",
@@ -103,13 +103,13 @@ const vaultTools: ToolDef[] = [
   {
     name: "create_vault_record",
     description:
-      "Create a new vault record. `type` MUST be one of the 12 canonical vault types — matter, task, note, person, org, place, asset, chore, instinct, briefing, daybook, decision. Anything else (observation, reflection, project, event, …) is rejected by ctrl-api with a 422; those classes are NOT principal-facing vault records (observations/audit live in state.db, not the vault). Two modes: (1) high-level, pass `type` + `name` + optional `fields` to let the alfred CLI scaffold the file with default frontmatter (`type`, `name`, `created`, `status`, …); or (2) raw, pass `type` + `name` + `content` where `content` is the entire file body INCLUDING frontmatter — used when you already have a fully-formed record (typical when migrating or transcribing). Returns 201 with the new record's path. Side effects: matter/* and task/* records mirror to Plane via the 15s forward-sync cron. Pre-reqs: search_vault first to avoid duplicates; check the vault schema if unsure which fields a type needs (every record needs `type`, `name`, `created`; tasks additionally need `owner: alfred|human`). Backing: docker exec alfred CLI for mode 1, direct fs.writeFile for mode 2.",
+      "Create a new vault record. `type` MUST be one of the 13 canonical vault types — matter, task, note, person, org, place, asset, chore, instinct, briefing, daybook, decision, commitment. Anything else (observation, reflection, project, event, …) is rejected by ctrl-api with a 422; those classes are NOT principal-facing vault records (observations/audit live in state.db, not the vault). Two modes: (1) high-level, pass `type` + `name` + optional `fields` to let the alfred CLI scaffold the file with default frontmatter (`type`, `name`, `created`, `status`, …); or (2) raw, pass `type` + `name` + `content` where `content` is the entire file body INCLUDING frontmatter — used when you already have a fully-formed record (typical when migrating or transcribing). Returns 201 with the new record's path. Pre-reqs: search_vault first to avoid duplicates; check the vault schema if unsure which fields a type needs (every record needs `type`, `name`, `created`; tasks additionally need `owner: alfred|human`). Backing: docker exec alfred CLI for mode 1, direct fs.writeFile for mode 2.",
     inputSchema: z.object({
       type: z.enum([
         "matter", "task", "note", "person", "org", "place", "asset",
-        "chore", "instinct", "briefing", "daybook", "decision",
+        "chore", "instinct", "briefing", "daybook", "decision", "commitment",
       ]).describe(
-        "Record type — one of the 12 canonical vault types: matter, task, note, person, org, place, asset, chore, instinct, briefing, daybook, decision. Non-canonical types (observation, reflection, project, event) are 422'd by ctrl-api.",
+        "Record type — one of the 13 canonical vault types: matter, task, note, person, org, place, asset, chore, instinct, briefing, daybook, decision, commitment. Non-canonical types (observation, reflection, project, event) are 422'd by ctrl-api.",
       ),
       name: z.string().min(1).describe(
         "Slug or filename. May include the `.md` extension or a `<type>/` prefix; backend normalises both. Use lowercase-with-dashes.",
@@ -130,7 +130,7 @@ const vaultTools: ToolDef[] = [
   {
     name: "update_vault_record",
     description:
-      "Patch an existing vault record. Three orthogonal operations, all optional and all applied to the same record under a per-path mutex: `set` rewrites frontmatter scalars (e.g. `{status: 'done'}`), `append` extends frontmatter list fields (e.g. `{tags: 'urgent'}` adds 'urgent' to the existing `tags:` array), `body_append` concatenates a Markdown blob onto the body, `body_set` REPLACES the entire body wholesale (frontmatter preserved). Always get_vault_record FIRST so you patch deltas, not the whole record. Idempotent for `set` (re-applying the same value is a no-op); NOT idempotent for `append` / `body_append` — re-running duplicates entries / appends. matter/* and task/* writes trigger Plane sync. Returns 200 + the CLI's parsed JSON response. Backing: docker exec alfred CLI under per-path lock.",
+      "Patch an existing vault record. Three orthogonal operations, all optional and all applied to the same record under a per-path mutex: `set` rewrites frontmatter scalars (e.g. `{status: 'done'}`), `append` extends frontmatter list fields (e.g. `{tags: 'urgent'}` adds 'urgent' to the existing `tags:` array), `body_append` concatenates a Markdown blob onto the body, `body_set` REPLACES the entire body wholesale (frontmatter preserved). Always get_vault_record FIRST so you patch deltas, not the whole record. Idempotent for `set` (re-applying the same value is a no-op); NOT idempotent for `append` / `body_append` — re-running duplicates entries / appends. Returns 200 + the CLI's parsed JSON response. Backing: docker exec alfred CLI under per-path lock.",
     inputSchema: z.object({
       path: VaultRelPath,
       set: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional().describe(
@@ -143,7 +143,7 @@ const vaultTools: ToolDef[] = [
         "Markdown text to concatenate onto the end of the body. NOT idempotent.",
       ),
       body_set: z.string().optional().describe(
-        "Replace the body wholesale, preserving frontmatter. Use sparingly — typically only to clear stub bodies before plane_sync renders them as descriptions.",
+        "Replace the body wholesale, preserving frontmatter. Use sparingly — prefer body_append for incremental updates; body_set discards any content that was there before.",
       ),
     }),
     buildRequest: ({ path, ...body }) => ({
@@ -684,7 +684,7 @@ const dispositionTools: ToolDef[] = [
       "\n" +
       "RELAY THE SUBAGENT'S REPLY VERBATIM. Don't summarize, don't reformat unless the channel truly demands it. The subagent's wording is calibrated for direct relay; rewriting it dilutes correctness and burns tokens.\n" +
       "\n" +
-      "Backing: POST /api/v1/agents/focused-subagent. 60s timeout. Returns `{ok, reply, session_key, domain}`. NOT idempotent — each call spawns a fresh session.",
+      "Backing: POST /api/v1/agents/focused-subagent. 300s default timeout (env-tunable via HERMES_DELEGATE_TIMEOUT_MS). Returns `{ok, reply, session_key, domain}`. NOT idempotent — each call spawns a fresh session.",
     inputSchema: z.object({
       task: z.string().min(1).describe(
         "What the subagent should do, in plain language. BE SPECIFIC — the subagent doesn't see this conversation, only your task + the optional context. Include any record paths, vault slugs, recipient handles, time windows, etc.",
