@@ -204,21 +204,71 @@ export function registerIngestRoutes(): void {
 
   // POST /api/v1/ingest/events/:id/requeue — operator puts a parked event back
   // on the feed (e.g. after the deploy that teaches the consumer its shape).
-  // Idempotent: requeueing a live or already-requeued event is a 200 no-op.
-  addRoute("POST", "/api/v1/ingest/events/:id/requeue", async ({ res, params }) => {
+  // Handles two distinct recovery cases:
+  //
+  // 1. Dead-lettered (repeated failures): cleared unconditionally. A dead-lettered
+  //    event has processed_at IS NULL — it was never successfully consumed, so
+  //    re-queueing is always safe.
+  //
+  // 2. Processed-under-a-bug (event accepted, downstream dropped it — no signals
+  //    written): clearing processed_at risks a second extraction pass on a
+  //    correctly-consumed event and could duplicate signals in state.db. Requires
+  //    explicit opt-in: POST .../requeue {"force_replay": true}.
+  //    Without the flag the route returns 200 with replayed: false, letting the
+  //    operator see the event state without accidentally triggering replay.
+  //
+  // Idempotent: requeueing a live event (already on the pending feed) is a 200 no-op.
+  addRoute("POST", "/api/v1/ingest/events/:id/requeue", async ({ res, params, body }) => {
+    const b = (body && typeof body === "object" && !Array.isArray(body)
+      ? body
+      : {}) as Record<string, unknown>;
+    const forceReplay = b.force_replay === true;
+
     const row = db()
-      .prepare("SELECT dead_lettered_at FROM stream_event WHERE id = ?")
-      .get(params.id) as { dead_lettered_at: string | null } | undefined;
+      .prepare("SELECT dead_lettered_at, processed_at FROM stream_event WHERE id = ?")
+      .get(params.id) as
+      | { dead_lettered_at: string | null; processed_at: string | null }
+      | undefined;
     if (!row) throw new NotFoundError(`stream_event ${params.id} not found`);
+
     const wasDeadLettered = Boolean(row.dead_lettered_at);
+    const wasProcessed = Boolean(row.processed_at);
+
+    // Processed-but-not-dead-lettered without force_replay: safe no-op. The
+    // event may have been correctly consumed; require explicit confirmation.
+    if (wasProcessed && !wasDeadLettered && !forceReplay) {
+      sendJson(res, 200, {
+        ok: true,
+        id: params.id,
+        was_dead_lettered: false,
+        was_processed: true,
+        replayed: false,
+      });
+      return;
+    }
+
+    // Clear all poison + processed fields. Safe because:
+    //   - dead-lettered events: processed_at is NULL (never consumed), and
+    //     force_replay is irrelevant but harmless to apply;
+    //   - processed + force_replay: operator confirmed re-flow is intended;
+    //   - live events: all fields already NULL — idempotent no-op.
     db()
       .prepare(
         `UPDATE stream_event
-            SET dead_lettered_at = NULL, dead_letter_reason = NULL, failure_count = 0
+            SET dead_lettered_at = NULL, dead_letter_reason = NULL, failure_count = 0,
+                processed_at = NULL, processed_by = NULL
           WHERE id = ?`,
       )
       .run(params.id);
-    sendJson(res, 200, { ok: true, id: params.id, was_dead_lettered: wasDeadLettered });
+
+    sendJson(res, 200, {
+      ok: true,
+      id: params.id,
+      was_dead_lettered: wasDeadLettered,
+      was_processed: wasProcessed,
+      // true only when an actual state change put the event back on the feed.
+      replayed: wasDeadLettered || wasProcessed,
+    });
   });
 
   // POST /api/v1/ingest/events/:id/processed — mark an event consumed.
