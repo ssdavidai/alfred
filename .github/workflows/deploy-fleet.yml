@@ -83,7 +83,16 @@ jobs:
               build-alfred-worker) services="alfred" ;;
               *) echo "::error::unknown trigger workflow: $wf"; exit 1 ;;
             esac
-            hosts="${{ vars.ALFRED_FLEET_HOSTS || 'home,rj,joe,zsolt,miguel,rami' }}"
+            # Fail SAFE, not open. An auto-rollout triggered by a merge goes to
+            # the dev tenant only unless someone has explicitly widened it via
+            # the ALFRED_FLEET_HOSTS repo variable. The previous default here
+            # was the full fleet, so deleting or never setting that variable
+            # silently rolled every merge to all six tenants — which is what
+            # happened on 2026-08-10 (six fleet-wide deploys before anyone
+            # noticed). Reaching the rest of the fleet is a deliberate act:
+            # set the variable, or use workflow_dispatch with an explicit
+            # `hosts` input.
+            hosts="${{ vars.ALFRED_FLEET_HOSTS || 'home' }}"
           fi
           services_space="${services//,/ }"
           hosts_space="${hosts//,/ }"
