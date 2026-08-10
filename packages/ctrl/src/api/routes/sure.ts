@@ -4,6 +4,7 @@ import crypto from "node:crypto";
 import { addRoute } from "../server.js";
 import { sendJson, ApiError, ValidationError } from "../errors.js";
 import { dockerExec, dockerExecWithStdin } from "../helpers.js";
+import { fetchAnchorMap, classifyProvenance } from "../lib/sure_freshness.js";
 
 interface SureConfig {
   token: string;
@@ -304,9 +305,34 @@ export function registerSureRoutes(): void {
   // --- Accounts ------------------------------------------------------
   // GET goes through Sure's REST API. POST/PATCH/DELETE go through the
   // Rails-runner script because Sure's public API exposes only `index`.
+  //
+  // balance_provenance is stamped on each account using the anchor-state
+  // endpoint shipped in PR #527/#528.  The anchor fetch is parallel with the
+  // accounts fetch; if it fails or times out every account gets
+  // freshness:"unknown" and the response still returns 200.
   addRoute("GET", "/api/v1/sure/accounts", async ({ res, query }) => {
-    const r = await sureProxy("GET", "/accounts", query, null);
-    forwardSureResponse(res, r);
+    const cfg = requireSureConfig();
+    const [r, anchorMap] = await Promise.all([
+      sureProxy("GET", "/accounts", query, null),
+      fetchAnchorMap(cfg.base, cfg.token),
+    ]);
+    if (r.status !== 200 || !r.data) {
+      forwardSureResponse(res, r);
+      return;
+    }
+    const d = r.data as Record<string, unknown>;
+    const accounts = d["accounts"];
+    if (!Array.isArray(accounts)) {
+      forwardSureResponse(res, r);
+      return;
+    }
+    sendJson(res, 200, {
+      ...d,
+      accounts: (accounts as Array<Record<string, unknown>>).map((acc) => ({
+        ...acc,
+        balance_provenance: classifyProvenance(anchorMap.get(acc["id"] as string)),
+      })),
+    });
   });
   addRoute("POST", "/api/v1/sure/accounts", async ({ res, body }) => {
     const result = await runAccountMutate("create", body);
