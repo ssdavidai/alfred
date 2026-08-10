@@ -123,3 +123,128 @@ def test_adapter_tolerates_garbage_payload() -> None:
 
 def test_ingest_ref_prefix_constant() -> None:
     assert _INGEST_REF_PREFIX == "ingest:"
+
+
+# ---------------------------------------------------------------------------
+# Webhook source_type passthrough — the shape ctrl-api's webhook route
+# actually writes to ingest.db, pasted verbatim from the live store evidence.
+# The pre-#520-fix failure: _ingest_row_to_record never read payload.source_type,
+# so kind="webhook" fell through to _normalize_source_type which returned
+# "unknown", causing the retry loop to spin indefinitely.
+# ---------------------------------------------------------------------------
+
+def _webhook_ingest_row(label: str = "Fathom meeting content") -> dict:
+    """Real ingest.db row shape for a ctrl-api webhook event.
+
+    Keys match the live store evidence:
+      row.kind    = "webhook"
+      row.channel = "webhook:<label>"
+      payload_json is a JSON *string* with exactly the four keys the
+      ctrl-api webhook route writes, plus a summary so the body check
+      in _pre_filter (MIN_CONTENT_LENGTH=20) has something to read.
+    """
+    payload = {
+        "source_type": f"webhook:{label}",
+        "source_ref": f"webhook:{label}:1723280000",
+        "received_at": _recent_iso,
+        "payload": {"text": "Meeting complete. Action items: schedule follow-up."},
+        # _ingest_row_to_record reads payload.summary as the body fallback.
+        "summary": "Meeting complete. Action items: schedule follow-up by Friday.",
+    }
+    return {
+        "id": "01JABCWEBHOOK",
+        "ts": _recent_iso,
+        "stream": "webhook-stream",
+        # row.channel mirrors the source_type that ctrl-api writes.
+        "channel": f"webhook:{label}",
+        # row.kind is just the bare transport class — no colon.
+        "kind": "webhook",
+        "payload_json": json.dumps(payload),
+    }
+
+
+def test_webhook_row_source_type_passthrough() -> None:
+    """payload.source_type must win over row.kind in the fallback chain.
+
+    Before this fix, _ingest_row_to_record skipped payload.source_type and
+    fell through to row.kind ("webhook"), which _normalize_source_type
+    then classified as "unknown", triggering the retry valve.
+    """
+    rec = _ingest_row_to_record(_webhook_ingest_row())
+    fm = rec["frontmatter"]
+    # The explicit payload.source_type must propagate into frontmatter
+    # (case-preserved as ctrl-api wrote it).
+    assert fm["source_type"] == "webhook:Fathom meeting content", (
+        f"expected 'webhook:Fathom meeting content', got {fm['source_type']!r}"
+    )
+    # _infer_source_type lowercases before normalizing, so the returned
+    # token is the lowercased labelled form — not "unknown".
+    inferred = _infer_source_type(rec)
+    assert inferred == "webhook:fathom meeting content", (
+        f"expected 'webhook:fathom meeting content', got {inferred!r}"
+    )
+    assert inferred != "unknown"
+
+
+def test_webhook_row_accepted_by_pre_filter() -> None:
+    """A webhook ingest row with a labelled source_type must pass pre_filter."""
+    rec = _ingest_row_to_record(_webhook_ingest_row())
+    accepted, reason = _pre_filter(rec)
+    assert accepted, f"webhook ingest row must be accepted, got: {reason!r}"
+    assert not _is_unknown_source_only_drop(rec)
+
+
+def test_bare_webhook_kind_no_payload_source_type_classifies_as_webhook() -> None:
+    """kind='webhook' with no payload.source_type → 'webhook', not 'unknown'.
+
+    A producer that only stamps kind="webhook" (bare, no colon label) must
+    not trigger the unknown-source retry valve. Fix 2 in _normalize_source_type
+    makes bare "webhook" a classified transport.
+    """
+    payload = {
+        "source_ref": "webhook:anon:1723280000",
+        "received_at": _recent_iso,
+        "payload": {"text": "Some webhook payload with enough content to clear the filter."},
+    }
+    row = {
+        "id": "01JBARE",
+        "ts": _recent_iso,
+        "kind": "webhook",
+        "payload_json": json.dumps(payload),
+    }
+    rec = _ingest_row_to_record(row)
+    # Must classify as "webhook" — not "unknown".
+    inferred = _infer_source_type(rec)
+    assert inferred == "webhook", f"expected 'webhook', got {inferred!r}"
+    # Must not be flagged as a retry-only unknown-source drop.
+    assert not _is_unknown_source_only_drop(rec)
+
+
+def test_composio_ordering_not_regressed_by_payload_source_type() -> None:
+    """Adding payload.source_type must not affect composio rows.
+
+    Composio rows derive source_type from stream_id (ahead of
+    payload.source_type in the chain) — the fix must leave that untouched.
+    """
+    rec = _ingest_row_to_record(_gmail_ingest_row())
+    # Composio Gmail must still classify as "gmail", not fall through to
+    # payload.source_type or any other field.
+    assert _infer_source_type(rec) == "gmail"
+
+
+def test_no_transport_markers_still_unknown_and_defers() -> None:
+    """A row with no transport markers at all must still be 'unknown' and deferred."""
+    payload = {
+        "received_at": _recent_iso,
+        "payload": {"text": "Some content long enough to clear the body-length check."},
+    }
+    row = {
+        "id": "01JNONE",
+        "ts": _recent_iso,
+        "payload_json": json.dumps(payload),
+    }
+    rec = _ingest_row_to_record(row)
+    assert _infer_source_type(rec) == "unknown"
+    accepted, reason = _pre_filter(rec)
+    assert not accepted and "unknown" in reason
+    assert _is_unknown_source_only_drop(rec) is True

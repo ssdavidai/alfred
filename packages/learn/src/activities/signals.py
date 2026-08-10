@@ -494,6 +494,15 @@ def _infer_source_type(event_dict: dict[str, Any]) -> str:
             return normalized
 
     # 3. channel — Slack-specific
+    # ORDERING HAZARD: this branch returns "slack" for ANY non-empty channel
+    # value, including "webhook:..." labels written by the ctrl-api webhook
+    # route (e.g. channel="webhook:Fathom meeting content"). It is
+    # intentionally positioned after step 0 (source_type) and step 1
+    # (stream_type) so those fields classify a webhook row before this
+    # branch can fire. Fix: _ingest_row_to_record now reads
+    # payload.source_type ahead of kind/channel, so a labelled webhook row
+    # resolves in _infer_source_type step 0 and never reaches this branch.
+    # Do not reorder this branch above source_type/stream_type resolution.
     channel = str(fm.get("channel") or "").strip().lower()
     if channel:
         # Channel-only metadata almost certainly means Slack.
@@ -564,6 +573,15 @@ def _normalize_source_type(raw: str) -> str:
         label = raw[len("webhook:"):]
         if label:
             return raw  # "webhook:<label>" — never "unknown"
+
+    # Bare "webhook" (no colon/label): a producer that stamps only
+    # kind="webhook" on the ingest row without a payload.source_type is
+    # still a classified webhook transport — returning "unknown" would cause
+    # the unknown-source retry valve to spin indefinitely on these rows.
+    # The labelled form (webhook:<label>) is preferred and more informative;
+    # this fallback prevents a bare producer from silently becoming unclassified.
+    if raw == "webhook":
+        return "webhook"
 
     return "unknown"
 
@@ -687,6 +705,13 @@ def _ingest_row_to_record(row: dict[str, Any]) -> dict[str, Any]:
         )
     source_type = str(
         composio_source_type
+        # payload.source_type is the explicit field ctrl-api's webhook route
+        # writes (e.g. "webhook:Fathom meeting content"). Read it AFTER the
+        # composio derivation (composio stream_id is deliberately ahead of
+        # event_type and that ordering is correct) but BEFORE meta.event_type
+        # and the generic kind/channel fallbacks so a producer-stamped value
+        # beats an inferred one.
+        or payload.get("source_type")
         or meta.get("event_type")
         or payload.get("stream_type")
         or row.get("kind")
