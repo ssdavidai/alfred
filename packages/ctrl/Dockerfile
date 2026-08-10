@@ -104,6 +104,14 @@ WORKDIR /app
 # everything else).
 COPY --from=builder /build/dist/api.mjs ./api.mjs
 
+# Aggregate health script (#526). Baked here so GET /api/v1/admin/health reports
+# real disk status instead of the permanent "degraded" produced by a missing file.
+# The `test -x` is intentional: a missing source file must fail the BUILD, not
+# produce a silent runtime degradation (the very failure mode this fixes).
+COPY healthcheck.sh /opt/alfred/healthcheck.sh
+RUN chmod +x /opt/alfred/healthcheck.sh \
+  && test -x /opt/alfred/healthcheck.sh
+
 # sqlite-vec loadable extension. ctrl-api loads it via SQLITE_VEC_PATH at boot.
 COPY --from=vecfetch /sqlite-vec/vec0.so /usr/local/lib/sqlite-vec/vec0.so
 ENV SQLITE_VEC_PATH=/usr/local/lib/sqlite-vec/vec0.so
