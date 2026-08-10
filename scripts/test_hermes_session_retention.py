@@ -12,6 +12,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 _mod = importlib.util.module_from_spec(
     s := importlib.util.spec_from_file_location("_hsr", Path(__file__).parent / "hermes-session-retention.py")
@@ -86,11 +87,20 @@ class TestEligibility(unittest.TestCase):
         _ins(con, "new", 5); con.close()
         self.assertNotIn("new", self._eligible_ids())
 
-    def test_open_session_excluded(self):
-        """ended_at IS NULL — must never be pruned."""
+    def test_old_open_session_eligible(self):
+        """ended_at IS NULL but started_at outside window — background agent that never
+        wrote ended_at; must be pruned (COALESCE keying on started_at makes it eligible)."""
         con = sqlite3.connect(str(self.db)); con.row_factory = sqlite3.Row
-        _ins(con, "live", 60, ended=False); con.close()
-        self.assertNotIn("live", self._eligible_ids(), "open session leaked through liveness predicate")
+        _ins(con, "old-open", 60, ended=False); con.close()
+        self.assertIn("old-open", self._eligible_ids(),
+                      "old unended session must be eligible — background agents never write ended_at")
+
+    def test_recent_open_session_excluded(self):
+        """ended_at IS NULL and started_at inside window — may still be active."""
+        con = sqlite3.connect(str(self.db)); con.row_factory = sqlite3.Row
+        _ins(con, "new-open", 5, ended=False); con.close()
+        self.assertNotIn("new-open", self._eligible_ids(),
+                         "recent unended session must not be pruned")
 
     def test_live_lock_excluded(self):
         """expires_at > now — lock held.  NO released_at column in the real schema."""
@@ -128,6 +138,64 @@ class TestDryRun(unittest.TestCase):
         self.assertIn("error", dry_run(Path("/nonexistent/state.db"), "t", 30))
 
 
+class TestDryRunPreflight(unittest.TestCase):
+    """Defect 5 regression: dry_run() called PRAGMA integrity_check (or quick_check),
+    which takes ~6.5 min on a 13 GB store and killed every dry run attempt.
+    A read-only count cannot corrupt anything; there is nothing to guard."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        pd = Path(self.tmp.name) / "profiles" / "workers"; pd.mkdir(parents=True)
+        self.db = pd / "state.db"; _make_db(self.db)
+        con = sqlite3.connect(str(self.db)); con.row_factory = sqlite3.Row
+        _ins(con, "old", 60); con.close()
+
+    def tearDown(self): self.tmp.cleanup()
+
+    def test_dry_run_does_not_call_integrity(self):
+        """dry_run must not invoke _integrity or _quick_check — spy via patch."""
+        with patch.object(_mod, "_integrity",
+                          side_effect=AssertionError("_integrity must not be called in dry_run")):
+            with patch.object(_mod, "_quick_check",
+                              side_effect=AssertionError("_quick_check must not be called in dry_run")):
+                r = dry_run(self.db, "workers", 30)
+        self.assertNotIn("error", r, r)
+        self.assertEqual(r["eligible_sessions"], 1)
+
+
+class TestZeroEligibleReport(unittest.TestCase):
+    """Defect 6 report: when eligible == 0, the output said '0' with no context,
+    making 'nothing old enough yet' indistinguishable from 'truly nothing to do'."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        pd = Path(self.tmp.name) / "profiles" / "main"; pd.mkdir(parents=True)
+        self.db = pd / "state.db"; _make_db(self.db)
+        con = sqlite3.connect(str(self.db)); con.row_factory = sqlite3.Row
+        # Session 70 days old — inside the 90-day main window, not eligible.
+        _ins(con, "almost", 70); con.close()
+
+    def tearDown(self): self.tmp.cleanup()
+
+    def test_zero_eligible_includes_oldest_age(self):
+        r = dry_run(self.db, "main", 90)
+        self.assertNotIn("error", r, r)
+        self.assertEqual(r["eligible_sessions"], 0)
+        self.assertIsNotNone(r.get("oldest_session_days"),
+                             "zero-eligible result must include oldest_session_days so "
+                             "operator can tell 'nothing old enough' from 'store is empty'")
+        self.assertAlmostEqual(r["oldest_session_days"], 69, delta=1,
+                               msg="oldest_session_days should reflect the session's age "
+                                   "(ended_at = started_at + DAY, so ~69d old)")
+
+    def test_has_eligible_omits_oldest_age(self):
+        """oldest_session_days is None when there are eligible sessions — not needed."""
+        r = dry_run(self.db, "main", 30)  # 70d old IS eligible under 30d window
+        self.assertNotIn("error", r, r)
+        self.assertGreater(r["eligible_sessions"], 0)
+        self.assertIsNone(r.get("oldest_session_days"))
+
+
 class TestApply(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -139,16 +207,16 @@ class TestApply(unittest.TestCase):
     def tearDown(self): self.tmp.cleanup()
 
     def test_deletes_eligible_only(self):
-        r = apply(self.db, "workers", 30, verbose=False)
+        r = apply(self.db, "workers", 30, verbose=False, skip_integrity=True)
         self.assertEqual(r["deleted_sessions"], 15)
         self.assertEqual(sqlite3.connect(str(self.db)).execute("SELECT COUNT(*) FROM sessions").fetchone()[0], 1)
 
     def test_idempotent(self):
-        apply(self.db, "workers", 30, verbose=False)
-        self.assertEqual(apply(self.db, "workers", 30, verbose=False)["deleted_sessions"], 0)
+        apply(self.db, "workers", 30, verbose=False, skip_integrity=True)
+        self.assertEqual(apply(self.db, "workers", 30, verbose=False, skip_integrity=True)["deleted_sessions"], 0)
 
     def test_preserves_young_sessions(self):
-        apply(self.db, "workers", 30, verbose=False)
+        apply(self.db, "workers", 30, verbose=False, skip_integrity=True)
         self.assertIsNotNone(sqlite3.connect(str(self.db)).execute("SELECT id FROM sessions WHERE id='keep'").fetchone())
 
 
@@ -172,7 +240,7 @@ class TestFts(unittest.TestCase):
         self.assertEqual(con.execute("SELECT COUNT(*) FROM messages_fts").fetchone()[0], 1,
                          "insert trigger must have populated messages_fts")
         con.close()
-        apply(db, "workers", 30, verbose=False)
+        apply(db, "workers", 30, verbose=False, skip_integrity=True)
         con2 = sqlite3.connect(str(db))
         self.assertEqual(con2.execute("SELECT COUNT(*) FROM messages").fetchone()[0], 0)
         self.assertEqual(con2.execute("SELECT COUNT(*) FROM messages_fts").fetchone()[0], 0,
@@ -297,7 +365,7 @@ class TestDeletedCountAccuracy(unittest.TestCase):
         orig_batch = _mod.BATCH_SIZE
         _mod.BATCH_SIZE = 5  # forces 3 batches (5+5+2); old total_changes bug triples the count
         try:
-            r = apply(self.db, "workers", 30, verbose=False)
+            r = apply(self.db, "workers", 30, verbose=False, skip_integrity=True)
         finally:
             _mod.BATCH_SIZE = orig_batch
         self.assertNotIn("error", r, r)

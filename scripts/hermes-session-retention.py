@@ -7,10 +7,14 @@ Per-profile windows (not one global number):
   heavy   90d — reflection/onboarding reasoning; low volume, worth keeping.
 
 Liveness predicate — session excluded if ANY holds:
-  1. ended_at IS NULL          — in progress
-  2. started_at > cutoff       — within window
-  3. compression_locks.expires_at > now  — LCM compression in flight
+  1. COALESCE(ended_at, started_at) >= cutoff — within window (or open and recent)
+  2. compression_locks.expires_at > now        — LCM compression in flight
      (expiry-time semantics; there is NO released_at column)
+
+Rationale: background agents never write ended_at.  Keying on
+COALESCE(ended_at, started_at) means an old open session is eligible
+(a 14-day-old background run does not exist), while a session started
+inside the window is protected whether or not it ended.
 
 FTS5: messages_fts is USING fts5(content) — 'content' is a column name, NOT
 the content='tablename' option (very different).  Six triggers maintain both
@@ -49,6 +53,11 @@ def _integrity(con: sqlite3.Connection) -> bool:
     row = con.execute("PRAGMA integrity_check").fetchone()
     return bool(row and row[0] == "ok")
 
+def _quick_check(con: sqlite3.Connection) -> bool:
+    """Faster structural check (~6.5 min on 13 GB vs much longer for integrity_check)."""
+    row = con.execute("PRAGMA quick_check").fetchone()
+    return bool(row and row[0] == "ok")
+
 def _has_fts_triggers(con: sqlite3.Connection) -> bool:
     rows = con.execute(
         "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='messages'"
@@ -60,13 +69,17 @@ def _cutoff(days: int) -> float:
     return time.time() - days * 86400
 
 def _eligible(con: sqlite3.Connection, cutoff_ts: float) -> list[str]:
-    """Session IDs eligible for deletion (ended, outside window, no live lock)."""
+    """Session IDs eligible for deletion (outside window, no live lock).
+
+    Uses COALESCE(ended_at, started_at) so that old open sessions (background
+    agents that never wrote ended_at) are included.  A session started inside
+    the window is protected whether or not it ended.
+    """
     now = time.time()
     rows = con.execute(
         """
         SELECT s.id FROM sessions s
-        WHERE s.ended_at IS NOT NULL
-          AND s.started_at < ?
+        WHERE COALESCE(s.ended_at, s.started_at) < ?
           AND s.id NOT IN (
               SELECT session_id FROM compression_locks WHERE expires_at > ?
           )
@@ -125,12 +138,10 @@ def vacuum_db(db_path: Path, verbose: bool, _free_override: int = -1) -> dict:
 
 
 def dry_run(db_path: Path, profile: str, days: int) -> dict:
+    """Count eligible sessions.  No preflight check — read-only cannot corrupt."""
     if not db_path.exists():
         return {"error": f"missing: {db_path}"}
     con = _open(db_path, readonly=True)
-    if not _integrity(con):
-        con.close()
-        return {"error": "integrity_check failed"}
     cut = _cutoff(days)
     now = time.time()
     # Predicate-based counts — never materialise the session id list.
@@ -139,49 +150,61 @@ def dry_run(db_path: Path, profile: str, days: int) -> dict:
     # and hung.  A single predicate-join query runs in <1 s on 678 k messages.
     n_sess = con.execute(
         "SELECT COUNT(*) FROM sessions"
-        " WHERE ended_at IS NOT NULL AND started_at < ?"
+        " WHERE COALESCE(ended_at, started_at) < ?"
         " AND id NOT IN (SELECT session_id FROM compression_locks WHERE expires_at > ?)",
         (cut, now),
     ).fetchone()[0]
     n_msgs = con.execute(
         "SELECT COUNT(*) FROM messages m"
         " JOIN sessions s ON m.session_id = s.id"
-        " WHERE s.ended_at IS NOT NULL AND s.started_at < ?"
+        " WHERE COALESCE(s.ended_at, s.started_at) < ?"
         " AND s.id NOT IN (SELECT session_id FROM compression_locks WHERE expires_at > ?)",
         (cut, now),
     ).fetchone()[0]
     size_b = _db_bytes(con)
-    oldest = newest = None
+    oldest = newest = oldest_session_days = None
     if n_sess:
         row = con.execute(
             "SELECT MIN(started_at), MAX(started_at) FROM sessions"
-            " WHERE ended_at IS NOT NULL AND started_at < ?"
+            " WHERE COALESCE(ended_at, started_at) < ?"
             " AND id NOT IN (SELECT session_id FROM compression_locks WHERE expires_at > ?)",
             (cut, now),
         ).fetchone()
         ts2d = lambda ts: datetime.fromtimestamp(ts, tz=timezone.utc).date().isoformat() if ts else None
         oldest, newest = ts2d(row[0]), ts2d(row[1])
+    else:
+        # Zero eligible — report oldest session age so the operator can tell
+        # "nothing old enough yet" from "store is empty or truly clean".
+        row = con.execute(
+            "SELECT MIN(COALESCE(ended_at, started_at)) FROM sessions"
+        ).fetchone()
+        if row and row[0]:
+            oldest_session_days = (time.time() - row[0]) / 86400
     con.close()
     return {
         "profile": profile, "window_days": days, "db": str(db_path),
         "db_bytes": size_b, "eligible_sessions": n_sess,
         "eligible_messages": n_msgs, "oldest": oldest, "newest": newest,
+        "oldest_session_days": oldest_session_days,
     }
 
 
-def apply(db_path: Path, profile: str, days: int, verbose: bool) -> dict:
+def apply(db_path: Path, profile: str, days: int, verbose: bool, skip_integrity: bool = False) -> dict:
     if not db_path.exists():
         return {"error": f"missing: {db_path}"}
     con = _open(db_path, readonly=False)
-    if not _integrity(con):
-        con.close()
-        return {"error": "integrity_check failed"}
+    if not skip_integrity:
+        print(f"  PRAGMA quick_check on {db_path.name} "
+              f"(may take ~6.5 min on a 13 GB store — normal, not wedged)...", flush=True)
+        if not _quick_check(con):
+            con.close()
+            return {"error": "quick_check failed"}
     cut = _cutoff(days)
     now = time.time()
     # Count without materialising the id list (same predicate as the LIMIT loop).
     total = con.execute(
         "SELECT COUNT(*) FROM sessions"
-        " WHERE ended_at IS NOT NULL AND started_at < ?"
+        " WHERE COALESCE(ended_at, started_at) < ?"
         " AND id NOT IN (SELECT session_id FROM compression_locks WHERE expires_at > ?)",
         (cut, now),
     ).fetchone()[0]
@@ -197,7 +220,7 @@ def apply(db_path: Path, profile: str, days: int, verbose: bool) -> dict:
     while True:
         rows = con.execute(
             "SELECT id FROM sessions"
-            " WHERE ended_at IS NOT NULL AND started_at < ?"
+            " WHERE COALESCE(ended_at, started_at) < ?"
             " AND id NOT IN (SELECT session_id FROM compression_locks WHERE expires_at > ?)"
             " LIMIT ?",
             (cut, now, BATCH_SIZE),
@@ -239,6 +262,8 @@ def main():
     p.add_argument("--hermes-home", default=HERMES_HOME)
     p.add_argument("--checkpoint", action="store_true", help="WAL checkpoint (TRUNCATE) each profile store")
     p.add_argument("--vacuum", action="store_true", help="VACUUM each profile store (needs ~2x file size free)")
+    p.add_argument("--skip-integrity", action="store_true",
+                   help="Skip quick_check preflight on --apply (safe when re-running in the same window)")
     p.add_argument("--verbose", action="store_true")
     args = p.parse_args()
 
@@ -263,7 +288,7 @@ def main():
         do_scan = args.apply or (not args.checkpoint and not args.vacuum)
         if do_scan:
             if args.apply:
-                r = apply(db_path, profile, days, args.verbose)
+                r = apply(db_path, profile, days, args.verbose, skip_integrity=args.skip_integrity)
                 if "error" in r:
                     print(f"  ERROR: {r['error']}")
                 else:
@@ -278,6 +303,9 @@ def main():
                     print(f"  DB: {r['db_bytes'] / (1024**3):.2f} GB | "
                           f"Eligible: {r['eligible_sessions']:,} sessions {r['eligible_messages']:,} msgs | "
                           f"Range: {r['oldest']} → {r['newest']}")
+                    osd = r.get("oldest_session_days")
+                    if r["eligible_sessions"] == 0 and osd is not None:
+                        print(f"  (nothing old enough yet — oldest is {osd:.1f}d old; window is {days}d)")
         if args.checkpoint:
             cr = checkpoint(db_path, args.verbose)
             if "error" in cr:
