@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from src.activities.signals import (  # noqa: E402
+    MAX_CLERK_BODY_CHARS,
     _INGEST_REF_PREFIX,
     _ingest_row_to_record,
     _infer_source_type,
@@ -248,3 +249,83 @@ def test_no_transport_markers_still_unknown_and_defers() -> None:
     accepted, reason = _pre_filter(rec)
     assert not accepted and "unknown" in reason
     assert _is_unknown_source_only_drop(rec) is True
+
+
+# ---------------------------------------------------------------------------
+# Webhook body extraction — #465 gap 3
+#
+# The real webhook envelope ctrl-api writes to ingest.db has exactly four
+# top-level keys: source_type, source_ref, received_at, payload.  None of
+# the composio-shape body keys (metadata.body, raw.messageText, summary)
+# exist.  Before the gap-3 fix _ingest_row_to_record produced body="" for
+# every webhook row, so _pre_filter dropped all of them as "body too short".
+#
+# Fixtures here use the verified four-key shape.  No "summary" workaround,
+# no extra keys — the exact shape the live store had at the time of the bug.
+# ---------------------------------------------------------------------------
+
+
+def _real_webhook_ingest_row(
+    label: str = "meeting-notes",
+    nested_payload: dict | None = None,
+) -> dict:
+    """Ingest row with the exact four-key envelope shape ctrl-api writes.
+
+    payload_json is a JSON string with exactly:
+      source_type, source_ref, received_at, payload
+    No "summary", no "metadata", no "raw".
+    """
+    if nested_payload is None:
+        nested_payload = {
+            "transcript": "The team agreed to deliver the feature spec by end of sprint."
+        }
+    return {
+        "id": "test-real-wh-001",
+        "kind": "webhook",
+        "channel": f"webhook:{label}",
+        "ts": _recent_iso,
+        "payload_json": json.dumps({
+            "source_type": f"webhook:{label}",
+            "source_ref": f"wh-{label}-001",
+            "received_at": _recent_iso,
+            "payload": nested_payload,
+        }),
+    }
+
+
+def test_real_webhook_row_body_from_nested_transcript_field() -> None:
+    """Body must come from payload.payload.transcript for the real envelope shape."""
+    rec = _ingest_row_to_record(_real_webhook_ingest_row())
+    body = _event_body(rec)
+    assert body, "body must be non-empty when payload.payload has a transcript field"
+    assert "feature spec" in body
+
+
+def test_real_webhook_row_passes_pre_filter() -> None:
+    """A real webhook row (no summary key) must pass _pre_filter after the gap-3 fix."""
+    rec = _ingest_row_to_record(_real_webhook_ingest_row())
+    accepted, reason = _pre_filter(rec)
+    assert accepted, f"expected accept, got: {reason!r}"
+
+
+def test_real_webhook_oversized_payload_capped_at_word_boundary() -> None:
+    """A 25 000-char nested payload must be capped at MAX_CLERK_BODY_CHARS."""
+    oversized = {"transcript": ("word " * 5000).strip()}  # ~25 000 chars
+    rec = _ingest_row_to_record(_real_webhook_ingest_row(nested_payload=oversized))
+    body = _event_body(rec)
+    # Cap leaves at most MAX_CLERK_BODY_CHARS chars before the ellipsis.
+    assert len(body) <= MAX_CLERK_BODY_CHARS + 1  # +1 for the appended "…"
+    assert body.endswith("…"), "capped body must end with ellipsis"
+    # Word boundary: the cut must not land inside the word "word".
+    assert not body[:-1].endswith("wor"), "cut must not land mid-word"
+
+
+def test_real_webhook_json_fallback_for_opaque_schema() -> None:
+    """When nested payload has no text field, compact JSON is the body fallback."""
+    opaque = {"meeting_id": "mtg-42", "attendee_count": 5, "status": "completed"}
+    rec = _ingest_row_to_record(_real_webhook_ingest_row(nested_payload=opaque))
+    body = _event_body(rec)
+    assert body, "JSON fallback must yield non-empty body for an opaque schema"
+    assert "meeting_id" in body, "compact JSON must include the key"
+    accepted, reason = _pre_filter(rec)
+    assert accepted, f"opaque-schema webhook must pass pre_filter: {reason!r}"

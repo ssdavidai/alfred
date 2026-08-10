@@ -725,6 +725,38 @@ def _ingest_row_to_record(row: dict[str, Any]) -> dict[str, Any]:
         body = str(payload["raw"].get("messageText") or "")
     if not body:
         body = str(payload.get("summary") or "")
+    # Webhook envelope: the nested content lives at payload["payload"].
+    # ctrl-api's inbound webhook route stores the full provider JSON under
+    # that key; none of the composio-shape keys above (metadata.body,
+    # raw.messageText, summary) exist in a webhook row, so without this
+    # branch every webhook event is pre-filtered as "body too short (0 < 20)".
+    #
+    # Strategy: try well-known text fields in provider-agnostic priority
+    # order (a transcript or summary is far more useful to the clerk than
+    # raw JSON). Fall back to compact JSON serialisation when no recognisable
+    # text field is present — this guarantees the clerk always has *something*
+    # to work with regardless of the provider's schema, while keeping the
+    # fallback as compact as possible (no indent, ASCII-safe).
+    #
+    # The MAX_CLERK_BODY_CHARS cap is applied here so a 50–242 KB transcript
+    # payload does not propagate as a large in-memory string. The LLM call
+    # site applies the same cap again as defence-in-depth.
+    if not body:
+        nested = payload.get("payload")
+        if isinstance(nested, dict):
+            for _wh_field in (
+                "transcript", "summary", "body", "text", "content", "description"
+            ):
+                _candidate = str(nested.get(_wh_field) or "").strip()
+                if _candidate:
+                    body = _candidate
+                    break
+            if not body:
+                body = json.dumps(nested, ensure_ascii=False, separators=(",", ":"))
+        elif isinstance(nested, str) and nested.strip():
+            body = nested.strip()
+        if body:
+            body = _cap_at_word_boundary(body, MAX_CLERK_BODY_CHARS)
     created = str(payload.get("received_at") or row.get("ts") or "")
     tags = [source_type] if source_type else []
 
