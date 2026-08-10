@@ -52,7 +52,7 @@ export const RESOLVED_MEMORY_PATH = `${VAULT_PATH}/MEMORY.md`;
 export const RESOLVED_SOUL_PATH = `${VAULT_PATH}/SOUL.md`;
 export const RESOLVED_VOICE_SKILL_PATH = `${SKILLS_DIR}/alfred-voice/SKILL.md`;
 const OPENCLAW_GATEWAY_URL =
-  process.env.OPENCLAW_GATEWAY_URL ?? "http://openclaw:18789";
+  process.env.OPENCLAW_GATEWAY_URL ?? "http://hermes:18789";
 // Gateway token lookup paths. ctrl-api mounts the same file as
 // openclaw + alfred-learn but at a different path (/mnt/encrypted/alfred/
 // rather than /alfred-data/). The env var set by docker-compose is the

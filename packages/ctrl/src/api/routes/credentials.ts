@@ -17,14 +17,14 @@ const KNOWN_CREDENTIALS: CredentialDef[] = [
   {
     key: "OPENROUTER_API_KEY",
     label: "OpenRouter",
-    description: "Routes to 200+ models. Primary provider for all OpenClaw agents",
-    used_by: ["OpenClaw agents (all)", "Surveyor (labeler)", "Surveyor (embedder, if configured)"],
+    description: "HTTP model router. Optional — Hermes authenticates to Codex over OAuth and does not require this key by default.",
+    used_by: ["Hermes agents (if a profile is configured to route via OpenRouter)"],
   },
   {
     key: "ANTHROPIC_API_KEY",
     label: "Anthropic",
-    description: "Direct Claude access. Required when using anthropic/ models directly",
-    used_by: ["OpenClaw agents (if model requires it)"],
+    description: "Direct Claude access. Required only if a Hermes profile is explicitly set to an anthropic/ model.",
+    used_by: ["Hermes agents (if model requires it)"],
   },
   {
     key: "OPENAI_API_KEY",
@@ -36,19 +36,19 @@ const KNOWN_CREDENTIALS: CredentialDef[] = [
     key: "XAI_API_KEY",
     label: "xAI",
     description: "Grok models from xAI",
-    used_by: ["OpenClaw agents (if model requires it)"],
+    used_by: ["Hermes agents (if model requires it)"],
   },
   {
     key: "GOOGLE_API_KEY",
     label: "Google",
     description: "Gemini and other Google AI models",
-    used_by: ["OpenClaw agents (if model requires it)"],
+    used_by: ["Hermes agents (if model requires it)"],
   },
   {
     key: "KIMI_API_KEY",
     label: "Kimi Code",
     description: "Moonshot Kimi Code subscription. Required for the main agent when set to a kimi/* model (kimi/kimi-code, kimi/k2p5). Get a key at https://platform.moonshot.ai/console/keys",
-    used_by: ["OpenClaw agents (if model requires it)"],
+    used_by: ["Hermes agents (if model requires it)"],
   },
   // Vaultwarden bootstrap entries — only the four values vault-init needs
   // to log in to the local Vaultwarden and pull every other secret. Listed
@@ -248,13 +248,13 @@ export function registerCredentialRoutes(): void {
     invalidateModelCatalogCache();
 
     // Choose which services to recreate based on which credentials changed.
-    // Every credential rotation needs openclaw/hermes + alfred picked up
+    // Every credential rotation needs hermes + alfred picked up
     // (their env is the LLM provider keys). OPENAI_API_KEY ALSO drives
     // voice-bridge — without this, setting the key via the /channels Phone
     // card surfaces "saved" but the container keeps crash-looping until the
     // next manual restart.
     const changedKeys = new Set(Object.keys(updates));
-    const services = ["openclaw", "alfred"];
+    const services = ["hermes", "alfred"];
     if (changedKeys.has("OPENAI_API_KEY")) {
       services.push("voice-bridge");
     }
@@ -271,7 +271,7 @@ export function registerCredentialRoutes(): void {
     });
 
     // Fire-and-forget: recreate each service sequentially so we don't
-    // contend with health-checks. Sequential = openclaw → alfred → (voice).
+    // contend with health-checks. Sequential = hermes → alfred → (voice).
     (async () => {
       for (const svc of services) {
         try {
@@ -291,7 +291,7 @@ export function registerCredentialRoutes(): void {
   // Body shape:
   //   {
   //     services?: string[]   // services to recreate after vault-init runs.
-  //                           // Defaults to ["openclaw", "alfred"] which
+  //                           // Defaults to ["hermes", "alfred"] which
   //                           // matches PATCH /admin/credentials. Pass
   //                           // explicitly when rotating tenant-specific
   //                           // creds (e.g. ["sure-web", "sure-worker"]
@@ -324,7 +324,7 @@ export function registerCredentialRoutes(): void {
     }
 
     const b = (body ?? {}) as { services?: unknown };
-    let services: string[] = ["openclaw", "alfred"];
+    let services: string[] = ["hermes", "alfred"];
     if (b.services !== undefined) {
       if (!Array.isArray(b.services)) {
         throw new ValidationError("services must be an array of service names");

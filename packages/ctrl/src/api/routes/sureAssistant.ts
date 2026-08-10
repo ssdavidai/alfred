@@ -24,7 +24,7 @@ Acknowledge briefly and wait for Sir's first question.`;
 
 const SURE_PRIMING_ASSISTANT = `Understood, Sir. I'll load \`alfred-sure-operations\` and lead with a fresh Sure API call for any question about your finances. Ready when you are.`;
 
-const OPENCLAW_URL = process.env.OPENCLAW_GATEWAY_URL || "http://openclaw:18789";
+const OPENCLAW_URL = process.env.OPENCLAW_GATEWAY_URL || "http://hermes:18789";
 const OPENCLAW_AGENT_ID = "openclaw/main";
 const GATEWAY_TOKEN_FILE =
   process.env.OPENCLAW_GATEWAY_TOKEN_FILE || "/alfred-data/.gateway-token";
@@ -39,7 +39,7 @@ function readGatewayToken(): string {
     throw new ApiError(
       500,
       "GATEWAY_TOKEN_MISSING",
-      `OpenClaw gateway token at ${GATEWAY_TOKEN_FILE} is empty`,
+      `Hermes gateway token at ${GATEWAY_TOKEN_FILE} is empty`,
     );
   }
   cachedGatewayToken = tok;

@@ -84,16 +84,16 @@ export const CHORE_ACTION_MANIFEST: Record<string, ChoreActionSpec> = {
   spawn_subagent: {
     name: "spawn_subagent",
     description:
-      "Fire-and-wait an openclaw-workers subagent with a prompt. Use when a chore step genuinely needs LLM reasoning — filtering / formatting / aggregation should stay in the workflow's Python body instead. Arguments: prompt (string), agent_id (default `learn-clerk`), timeout_s (default 300). Returns the subagent's final text. Subagents on workers run maxConcurrent=1 — two LLM-bearing chores firing the same minute will serialise.",
+      "Fire-and-wait a Hermes workers subagent with a prompt. Use when a chore step genuinely needs LLM reasoning — filtering / formatting / aggregation should stay in the workflow's Python body instead. Arguments: prompt (string), agent_id (default `learn-clerk`), timeout_s (default 300). Returns the subagent's final text. Subagents on workers run maxConcurrent=1 — two LLM-bearing chores firing the same minute will serialise.",
     reads: [
-      { kind: "llm_context", resource: "openclaw-workers subagent on grok-4.1-fast (default)" },
+      { kind: "llm_context", resource: "Hermes workers subagent (Codex default)" },
     ],
     writes: [
       { kind: "llm_output", resource: "assistant text reply" },
     ],
     llm: true,
     required_data: [
-      "Requires openclaw-workers gateway healthy (check /api/v1/admin/containers).",
+      "Requires Hermes workers gateway healthy (check /api/v1/admin/containers).",
       "Default agent learn-clerk is pre-registered on every tenant.",
       "Specialized agents (alfred-vault-curator, alfred-voice, etc.) also available; custom tool sets require a follow-up platform change to register a new agent.",
     ],
@@ -183,7 +183,7 @@ export const CHORE_ACTION_MANIFEST: Record<string, ChoreActionSpec> = {
   ask_alfred_to_judge_anomalies: {
     name: "ask_alfred_to_judge_anomalies",
     description:
-      "Escalates filtered anomalies to the OpenClaw agent to decide if the user should be notified. Makes an LLM call only when anomalies are present.",
+      "Escalates filtered anomalies to the Hermes agent to decide if the user should be notified. Makes an LLM call only when anomalies are present.",
     reads: [
       {
         kind: "llm_context",
@@ -198,8 +198,8 @@ export const CHORE_ACTION_MANIFEST: Record<string, ChoreActionSpec> = {
     ],
     llm: true,
     required_data: [
-      "OpenClaw gateway must be running and healthy.",
-      "OpenRouter or Anthropic API key must be configured.",
+      "Hermes gateway must be running and healthy.",
+      "Hermes authenticates via OAuth — no external API key required.",
       "Only fires when the filter stage returned at least one anomaly.",
     ],
   },
@@ -241,7 +241,7 @@ export const CHORE_ACTION_MANIFEST: Record<string, ChoreActionSpec> = {
     ],
     llm: true,
     required_data: [
-      "OpenClaw gateway must be running.",
+      "Hermes gateway must be running.",
       "Non-empty event list from fetch_matter_events_last_week.",
     ],
   },
@@ -266,17 +266,17 @@ export const CHORE_ACTION_MANIFEST: Record<string, ChoreActionSpec> = {
   send_chore_notification: {
     name: "send_chore_notification",
     description:
-      "Delivers a message through the OpenClaw session manager so it appears in the user's Alfred chat. Used when a chore decides the user should be nudged.",
+      "Delivers a message through the Hermes session manager so it appears in the user's Alfred chat. Used when a chore decides the user should be nudged.",
     reads: [],
     writes: [
       {
         kind: "notification",
-        resource: "openclaw session message",
+        resource: "hermes session message",
       },
     ],
     llm: false,
     required_data: [
-      "OpenClaw gateway must be running on :18789.",
+      "Hermes gateway must be running on :18789.",
       "A valid session_id must exist (usually 'main' — verified at workflow startup).",
     ],
   },

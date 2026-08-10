@@ -80,17 +80,17 @@ function dockerExecStart(execId: string): Promise<import("node:net").Socket> {
   });
 }
 
-async function findOpenClawContainer(): Promise<string | null> {
+async function findHermesContainer(): Promise<string | null> {
   const data = await dockerApiJson(
-    "/containers/json?filters=" + encodeURIComponent(JSON.stringify({ name: ["compose-openclaw-1"] })),
+    "/containers/json?filters=" + encodeURIComponent(JSON.stringify({ name: ["compose-hermes-1"] })),
     "GET",
   );
   if (Array.isArray(data) && data.length > 0) return data[0].Id;
-  // Fallback: try any container with "openclaw" in the name
+  // Fallback: try any running container named "hermes"
   const all = await dockerApiJson("/containers/json", "GET");
   if (Array.isArray(all)) {
-    const oc = all.find((c: any) => c.Names?.some((n: string) => n.includes("openclaw")));
-    if (oc) return oc.Id;
+    const hc = all.find((c: any) => c.Names?.some((n: string) => n.includes("hermes")));
+    if (hc) return hc.Id;
   }
   return null;
 }
@@ -163,21 +163,18 @@ export function attachTerminalUpgrade(server: HttpServer): void {
       if (activeSession === ws) activeSession = null;
     }
 
-    // Find OpenClaw container
-    const containerId = await findOpenClawContainer();
+    // Find Hermes container
+    const containerId = await findHermesContainer();
     if (!containerId) {
-      sendControl({ type: "disconnect", reason: "OpenClaw container not found" });
+      sendControl({ type: "disconnect", reason: "Hermes container not found" });
       ws.close();
       return;
     }
 
-    // Phase 1: Non-interactive setup (create openclaw wrapper + shell rc)
+    // Phase 1: Non-interactive setup (configure shell rc for the Hermes container)
     try {
       const setupCmd = [
-        "rm -rf /tmp/openclaw /tmp/.ocrc",
-        "printf '#!/bin/sh\\nexec node /app/openclaw.mjs \"$@\"\\n' > /tmp/openclaw",
-        "chmod +x /tmp/openclaw",
-        "printf 'export PATH=\"/tmp:/app/node_modules/.bin:$PATH\"\\nexport TERM=xterm-256color\\n' > /tmp/.ocrc",
+        "printf 'export TERM=xterm-256color\\n' > /tmp/.ocrc",
       ].join(" && ");
 
       const setupExec = await dockerApiJson(
@@ -198,12 +195,12 @@ export function attachTerminalUpgrade(server: HttpServer): void {
         `/containers/${containerId}/exec`,
         "POST",
         {
-          Cmd: ["sh", "-c", 'export PATH="/tmp:/app/node_modules/.bin:$PATH" TERM=xterm-256color && exec sh -l'],
+          Cmd: ["sh", "-c", 'export TERM=xterm-256color && exec sh -l'],
           AttachStdin: true,
           AttachStdout: true,
           AttachStderr: true,
           Tty: true,
-          Env: ["TERM=xterm-256color", "PATH=/tmp:/app/node_modules/.bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"],
+          Env: ["TERM=xterm-256color"],
         },
       );
 
