@@ -11,29 +11,20 @@ import type { ServerResponse } from "node:http";
 // Mock helpers before any await import so learning.ts gets the stub.
 let lastDockerCall: { container: string; args: string[] } | null = null;
 let dockerExecReturn = "";
+// Import the REAL module and override only what we stub. Enumerating exports
+// by hand does not work: mock.module replaces the module for EVERY importer in
+// the graph, so any export used by an unrelated route (logs.ts wants
+// COMPOSE_DIR, others want HERMES_CMD) must still be present or that route
+// fails to link. Two CI runs were spent discovering this one export at a time.
+const realHelpers = await import("../src/api/helpers.js");
 mock.module("../src/api/helpers.js", {
   namedExports: {
+    ...realHelpers,
     dockerExec: async (container: string, args: string[]) => {
       lastDockerCall = { container, args };
       return dockerExecReturn;
     },
     dockerComposeCmd: async () => "",
-    ALFRED_CMD: ["alfred"],
-    // mock.module replaces the module for EVERY importer in the graph, not
-    // just learning.ts — so the stub must carry the whole export surface or
-    // an unrelated route fails to link with "does not provide an export
-    // named ...". That is what broke this file on first CI run.
-    HERMES_CMD: ["hermes"],
-    HERMES_CONTAINER: "hermes",
-    OPENCLAW_CMD: ["hermes"],
-    OPENCLAW_CONTAINER: "hermes",
-    execAsync: async () => ({ stdout: "", stderr: "" }),
-    hostExec: async () => "",
-    sudoExec: async () => "",
-    parseJsonLines: (raw: string) =>
-      raw.split("\n").filter(Boolean).map((l) => JSON.parse(l)),
-    getQuery: (url: string) => new URL(url, "http://x").searchParams,
-    validateServiceName: () => {},
   },
 });
 
