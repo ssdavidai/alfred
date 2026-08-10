@@ -140,8 +140,23 @@ jobs:
             else
               echo "changed=false" >> "$GITHUB_OUTPUT"
             fi
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            before="${{ github.event.before }}"
+            # before is all-zeros on a force-push or the very first commit on a
+            # branch; in that case there is no reliable base to diff against, so
+            # fall back to changed=true (run the suite rather than silently skip).
+            if printf '%s' "$before" | grep -qE '^0+$'; then
+              echo "changed=true" >> "$GITHUB_OUTPUT"
+            else
+              git fetch --depth=1 origin "$before" >/dev/null 2>&1 || true
+              if git diff --name-only "$before" HEAD 2>/dev/null | grep -q '^packages/voice-bridge/'; then
+                echo "changed=true" >> "$GITHUB_OUTPUT"
+              else
+                echo "changed=false" >> "$GITHUB_OUTPUT"
+              fi
+            fi
           else
-            # push to main / manual: always run the real test.
+            # workflow_dispatch or any other trigger: always run.
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
           echo "voice-bridge changed: $(grep changed= "$GITHUB_OUTPUT" || true)"
