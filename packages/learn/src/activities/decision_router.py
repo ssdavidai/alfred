@@ -472,6 +472,94 @@ async def _emit_recovery_audit(
 
 
 # ---------------------------------------------------------------------
+# Source-card-missing retirement helper (#414)
+# ---------------------------------------------------------------------
+
+
+async def _retire_source_card_missing(
+    client: Any,
+    *,
+    decision_id: str,
+    na_id: str,
+    intent: str,
+    existing_side_effects: dict[str, Any],
+) -> dict[str, Any]:
+    """Retire a decision whose needs_attention source card returned 404.
+
+    A deleted card is terminal — the ``{done,dispatch,skip}`` POST can
+    never succeed and Temporal must not retry forever. Mirror the #313
+    ``source_card_missing`` retire pattern (scheduled_dispatch.py:100)
+    and add an audit row so the retirement is searchable (#414 spec).
+
+    Returns the ``route_decision`` result dict so callers can ``return``
+    immediately after calling this helper.
+    """
+    now_iso = _now_iso()
+    retired_se = dict(existing_side_effects)
+    retired_se["decision_router"] = "source_card_missing"
+    retired_se["retired_at"] = now_iso
+    retired_se["retired_intent"] = intent
+    logger.warning(
+        "decision_router.route_decision: needs_attention/%s returned 404 "
+        "on %s — source card deleted; retiring decision=%s as completed "
+        "(side_effects.decision_router=source_card_missing)",
+        na_id, intent, decision_id,
+    )
+    try:
+        pr = await client.patch(
+            f"/api/v1/decisions/{decision_id}",
+            json={"state": "completed", "side_effects": retired_se},
+        )
+        pr.raise_for_status()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "decision_router.route_decision: retire PATCH failed "
+            "decision=%s err=%s — will retry next tick",
+            decision_id, exc,
+        )
+        # Return without raising: Temporal sees success, the decision
+        # stays open, and the next tick retries (ctrl-api blip path).
+    # Best-effort audit — failure must NOT roll back the PATCH.
+    try:
+        await client.post(
+            "/api/v1/state/audit",
+            json={
+                "action_type": "state-change",
+                "actor": "decision_router",
+                "source": "decision_router.source_card_missing",
+                "target_path": f"decision/{decision_id}.md",
+                "target_kind": "decision",
+                "summary": (
+                    f"source card needs_attention/{na_id} returned 404 "
+                    f"on intent={intent}; retired as completed "
+                    "(source_card_missing)"
+                ),
+                "changes": {
+                    "state": {"from": "open", "to": "completed"},
+                    "reason": "source_card_missing",
+                    "na_id": na_id,
+                    "intent": intent,
+                },
+                "mode": "live",
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "decision_router.route_decision: audit POST failed "
+            "decision=%s err=%s",
+            decision_id, exc,
+        )
+    return {
+        "id": decision_id,
+        "intent": intent,
+        "source": "needs_attention",
+        "next_state": "completed",
+        "actions": ["source_card_missing"],
+        "side_effects": retired_se,
+    }
+
+
+# ---------------------------------------------------------------------
 # Hours-proposal approval (#485)
 # ---------------------------------------------------------------------
 
@@ -695,11 +783,21 @@ async def route_decision(decision: dict[str, Any]) -> dict[str, Any]:
                 # second round-trip to avoid emitting a duplicate audit
                 # event.
                 if not synchronous_flip:
-                    resp = await client.post(
-                        f"/api/v1/admin/needs-attention/{na_id}/done",
-                        json={"note": note},
-                    )
-                    resp.raise_for_status()
+                    try:
+                        resp = await client.post(
+                            f"/api/v1/admin/needs-attention/{na_id}/done",
+                            json={"note": note},
+                        )
+                        resp.raise_for_status()
+                    except httpx.HTTPStatusError as exc:
+                        if exc.response.status_code == 404:
+                            # Card was deleted after the decision was minted.
+                            # Terminal — retrying cannot restore a deleted card.
+                            return await _retire_source_card_missing(
+                                client, decision_id=decision_id, na_id=na_id,
+                                intent=intent, existing_side_effects=side_effects,
+                            )
+                        raise  # 5xx / timeout → Temporal retries normally
                     actions_taken.append("needs_attention.done")
                     side_effects["needs_attention_audit"] = (
                         resp.json().get("audit_record_path")
@@ -826,11 +924,19 @@ async def route_decision(decision: dict[str, Any]) -> dict[str, Any]:
                         raise
 
                 if not synchronous_flip:
-                    resp = await client.post(
-                        f"/api/v1/admin/needs-attention/{na_id}/skip",
-                        json={"note": note},
-                    )
-                    resp.raise_for_status()
+                    try:
+                        resp = await client.post(
+                            f"/api/v1/admin/needs-attention/{na_id}/skip",
+                            json={"note": note},
+                        )
+                        resp.raise_for_status()
+                    except httpx.HTTPStatusError as exc:
+                        if exc.response.status_code == 404:
+                            return await _retire_source_card_missing(
+                                client, decision_id=decision_id, na_id=na_id,
+                                intent=intent, existing_side_effects=side_effects,
+                            )
+                        raise
                     actions_taken.append("needs_attention.skip")
                     side_effects["needs_attention_audit"] = (
                         resp.json().get("audit_record_path")
@@ -935,14 +1041,22 @@ async def route_decision(decision: dict[str, Any]) -> dict[str, Any]:
                         )
                         raise
 
-                    resp = await client.post(
-                        f"/api/v1/admin/needs-attention/{na_id}/dispatch",
-                        json={
-                            "note": note,
-                            "decision_origin": f"decision/{decision_id}.md",
-                        },
-                    )
-                    resp.raise_for_status()
+                    try:
+                        resp = await client.post(
+                            f"/api/v1/admin/needs-attention/{na_id}/dispatch",
+                            json={
+                                "note": note,
+                                "decision_origin": f"decision/{decision_id}.md",
+                            },
+                        )
+                        resp.raise_for_status()
+                    except httpx.HTTPStatusError as exc:
+                        if exc.response.status_code == 404:
+                            return await _retire_source_card_missing(
+                                client, decision_id=decision_id, na_id=na_id,
+                                intent=intent, existing_side_effects=side_effects,
+                            )
+                        raise
                     actions_taken.append("needs_attention.dispatch")
                     if not synchronous_flip:
                         side_effects["needs_attention_audit"] = (
