@@ -1,15 +1,18 @@
 """Tests for `send_chore_notification` — per-chore destination routing (#498).
 
 Covers:
-  - Chore with ``notify_channel`` in frontmatter → ``channel`` key in POST body
-  - Chore without ``notify_channel`` → ``channel`` key absent from POST body
+  - Chore with ``notify_channel: slack:<id>`` → ``channel="slack", to="<id>"``
+    (NOT ``channel="<id>"``, which would fall to the default case in
+    alfredDeliver.ts:deliverByChannel and produce a no-delivery error)
+  - Chore without ``notify_channel`` → both ``channel`` and ``to`` absent
+  - Bare value with no ``platform:`` separator → treated as unset (falls through)
+  - Unknown platform → treated as unset
   - Resolved destination recorded in chore body (run notes)
   - HTTP error raises so Temporal can retry (no longer swallowed)
   - Explicit 4th positional arg overrides frontmatter value
 
 All tests run through ``ActivityEnvironment`` and mock httpx + VaultClient
-so no network or filesystem calls are made.  Pattern follows the rest of
-the learn test suite: ``asyncio.run(env.run(fn, *args))``.
+so no network or filesystem calls are made.
 """
 from __future__ import annotations
 
@@ -69,29 +72,58 @@ def _run(fn: Any, *args: Any) -> Any:
     return asyncio.run(env.run(fn, *args))
 
 
+def _posted_body(http_mock: MagicMock) -> dict:
+    return http_mock.post.call_args.kwargs.get("json", {})
+
+
 # ---------------------------------------------------------------------------
-# 1. Explicit channel from chore frontmatter is forwarded to ctrl-api
+# 1. notify_channel with valid platform:id → correct field split in POST body
 # ---------------------------------------------------------------------------
 
-class TestExplicitChannelInFrontmatter:
-    def test_notify_channel_forwarded_in_post_body(self) -> None:
-        """When the chore record has notify_channel, it appears as ``channel``."""
-        vc_factory, vc = _vault_factory(notify_channel="slack-home-123")
+class TestValidChannelFieldSplit:
+    def test_slack_channel_splits_into_channel_and_to(self) -> None:
+        """slack:C0123456789 → channel='slack', to='C0123456789' (not channel=id)."""
+        vc_factory, _ = _vault_factory(notify_channel="slack:C0123456789")
         http_cls, http_mock = _make_http_mock(200)
 
         with patch("src.activities.chore_actions.VaultClient", vc_factory):
             with patch("httpx.AsyncClient", http_cls):
                 result = _run(send_chore_notification, "test-chore", "session", "msg")
 
-        call_kwargs = http_mock.post.call_args
-        body = call_kwargs.kwargs.get("json", {})
-        assert body.get("channel") == "slack-home-123"
+        body = _posted_body(http_mock)
+        assert body.get("channel") == "slack"
+        assert body.get("to") == "C0123456789"
         assert result["delivered"] is True
-        assert result["destination"] == "slack-home-123"
-        assert result["http_status"] == 200
-        assert result["error"] is None
+        assert result["destination"] == "slack:C0123456789"
 
-    def test_session_id_not_forwarded_in_post_body(self) -> None:
+    def test_telegram_channel_splits_correctly(self) -> None:
+        """telegram:-1001234567 → channel='telegram', to='-1001234567'."""
+        vc_factory, _ = _vault_factory(notify_channel="telegram:-1001234567")
+        http_cls, http_mock = _make_http_mock(200)
+
+        with patch("src.activities.chore_actions.VaultClient", vc_factory):
+            with patch("httpx.AsyncClient", http_cls):
+                result = _run(send_chore_notification, "test-chore", "session", "msg")
+
+        body = _posted_body(http_mock)
+        assert body.get("channel") == "telegram"
+        assert body.get("to") == "-1001234567"
+        assert result["destination"] == "telegram:-1001234567"
+
+    def test_email_channel_splits_correctly(self) -> None:
+        """email:user@example.com → channel='email', to='user@example.com'."""
+        vc_factory, _ = _vault_factory(notify_channel="email:user@example.com")
+        http_cls, http_mock = _make_http_mock(200)
+
+        with patch("src.activities.chore_actions.VaultClient", vc_factory):
+            with patch("httpx.AsyncClient", http_cls):
+                result = _run(send_chore_notification, "test-chore", "session", "msg")
+
+        body = _posted_body(http_mock)
+        assert body.get("channel") == "email"
+        assert body.get("to") == "user@example.com"
+
+    def test_session_id_never_forwarded(self) -> None:
         """The dead session_id param must NOT appear in the POST body."""
         vc_factory, _ = _vault_factory(notify_channel=None)
         http_cls, http_mock = _make_http_mock(200)
@@ -100,18 +132,17 @@ class TestExplicitChannelInFrontmatter:
             with patch("httpx.AsyncClient", http_cls):
                 _run(send_chore_notification, "test-chore", "main", "msg")
 
-        call_kwargs = http_mock.post.call_args
-        body = call_kwargs.kwargs.get("json", {})
+        body = _posted_body(http_mock)
         assert "session_id" not in body
 
 
 # ---------------------------------------------------------------------------
-# 2. Chore without notify_channel — channel key absent from POST body
+# 2. No notify_channel → both channel and to absent (ctrl-api decides)
 # ---------------------------------------------------------------------------
 
 class TestNoChannelConfigured:
-    def test_channel_key_absent_when_no_notify_channel(self) -> None:
-        """ctrl-api home-channel default is not overridden when no channel declared."""
+    def test_channel_and_to_absent_when_no_notify_channel(self) -> None:
+        """When the chore has no notify_channel, ctrl-api home default is used."""
         vc_factory, _ = _vault_factory(notify_channel=None)
         http_cls, http_mock = _make_http_mock(200)
 
@@ -119,14 +150,14 @@ class TestNoChannelConfigured:
             with patch("httpx.AsyncClient", http_cls):
                 result = _run(send_chore_notification, "test-chore", "main", "msg")
 
-        call_kwargs = http_mock.post.call_args
-        body = call_kwargs.kwargs.get("json", {})
+        body = _posted_body(http_mock)
         assert "channel" not in body
+        assert "to" not in body
         assert result["destination"] == "auto"
         assert result["delivered"] is True
 
     def test_vault_read_error_falls_back_to_auto(self) -> None:
-        """If the vault read fails, we proceed without a channel (auto)."""
+        """Vault read failure → proceed without channel (auto)."""
         failing_vc = MagicMock()
         failing_vc.read_record = AsyncMock(side_effect=Exception("vault down"))
         failing_vc.close = AsyncMock(return_value=None)
@@ -136,20 +167,58 @@ class TestNoChannelConfigured:
             with patch("httpx.AsyncClient", http_cls):
                 result = _run(send_chore_notification, "test-chore", "main", "msg")
 
-        call_kwargs = http_mock.post.call_args
-        body = call_kwargs.kwargs.get("json", {})
+        body = _posted_body(http_mock)
         assert "channel" not in body
+        assert "to" not in body
         assert result["destination"] == "auto"
 
 
 # ---------------------------------------------------------------------------
-# 3. Destination recorded in chore body (run notes)
+# 3. Bare values (no separator) are treated as unset — never guessed
+# ---------------------------------------------------------------------------
+
+class TestBareValueFallsThrough:
+    def test_bare_id_no_platform_treated_as_unset(self) -> None:
+        """A raw id with no 'platform:' prefix falls through to auto.
+
+        Guessing the platform from an id's shape would send a Telegram id to
+        Slack or vice versa.  Treat as unset instead.
+        """
+        vc_factory, _ = _vault_factory(notify_channel="C0123456789")  # no prefix
+        http_cls, http_mock = _make_http_mock(200)
+
+        with patch("src.activities.chore_actions.VaultClient", vc_factory):
+            with patch("httpx.AsyncClient", http_cls):
+                result = _run(send_chore_notification, "test-chore", "main", "msg")
+
+        body = _posted_body(http_mock)
+        assert "channel" not in body
+        assert "to" not in body
+        assert result["destination"] == "auto"
+
+    def test_unknown_platform_treated_as_unset(self) -> None:
+        """An unrecognised platform name is not forwarded."""
+        vc_factory, _ = _vault_factory(notify_channel="discord:some-id")
+        http_cls, http_mock = _make_http_mock(200)
+
+        with patch("src.activities.chore_actions.VaultClient", vc_factory):
+            with patch("httpx.AsyncClient", http_cls):
+                result = _run(send_chore_notification, "test-chore", "main", "msg")
+
+        body = _posted_body(http_mock)
+        assert "channel" not in body
+        assert "to" not in body
+        assert result["destination"] == "auto"
+
+
+# ---------------------------------------------------------------------------
+# 4. Destination recorded in chore body (run notes)
 # ---------------------------------------------------------------------------
 
 class TestDestinationAuditTrail:
-    def test_destination_appended_to_chore_body_with_channel(self) -> None:
-        """Run log appends 'destination=<channel>' when notify_channel is set."""
-        vc_factory, vc = _vault_factory(notify_channel="slack-home-123")
+    def test_destination_appended_when_channel_set(self) -> None:
+        """Run log appends 'destination=slack:C0123456789' when channel set."""
+        vc_factory, vc = _vault_factory(notify_channel="slack:C0123456789")
         http_cls, _ = _make_http_mock(200)
 
         with patch("src.activities.chore_actions.VaultClient", vc_factory):
@@ -157,9 +226,9 @@ class TestDestinationAuditTrail:
                 _run(send_chore_notification, "test-chore", "main", "msg")
 
         update_calls = " ".join(str(c) for c in vc.update_record.call_args_list)
-        assert "destination=slack-home-123" in update_calls
+        assert "destination=slack:C0123456789" in update_calls
 
-    def test_destination_appended_to_chore_body_when_auto(self) -> None:
+    def test_destination_appended_as_auto_when_no_channel(self) -> None:
         """Run log appends 'destination=auto' when no notify_channel."""
         vc_factory, vc = _vault_factory(notify_channel=None)
         http_cls, _ = _make_http_mock(200)
@@ -173,12 +242,12 @@ class TestDestinationAuditTrail:
 
 
 # ---------------------------------------------------------------------------
-# 4. HTTP errors raise so Temporal can retry (no longer swallowed)
+# 5. HTTP errors raise so Temporal can retry (no longer swallowed)
 # ---------------------------------------------------------------------------
 
 class TestHttpErrorPropagation:
     def test_http_4xx_raises(self) -> None:
-        """Non-2xx from ctrl-api must raise httpx.HTTPStatusError."""
+        """Non-2xx from ctrl-api raises httpx.HTTPStatusError (Temporal retries)."""
         vc_factory, _ = _vault_factory(notify_channel=None)
         http_cls, _ = _make_http_mock(424)
 
@@ -189,14 +258,14 @@ class TestHttpErrorPropagation:
 
 
 # ---------------------------------------------------------------------------
-# 5. Explicit 4th positional arg overrides frontmatter
+# 6. Explicit 4th positional arg overrides frontmatter
 # ---------------------------------------------------------------------------
 
 class TestExplicitChannelArgOverridesFrontmatter:
     def test_4th_arg_wins_over_frontmatter(self) -> None:
         """When notify_channel is passed as 4th positional arg, it takes precedence."""
-        # Frontmatter says "frontmatter-ch" but arg should win
-        vc_factory, vc = _vault_factory(notify_channel="frontmatter-ch")
+        # Frontmatter says "slack:FRONTMATTER" but arg should win
+        vc_factory, vc = _vault_factory(notify_channel="slack:FRONTMATTER")
         http_cls, http_mock = _make_http_mock(200)
 
         with patch("src.activities.chore_actions.VaultClient", vc_factory):
@@ -206,12 +275,12 @@ class TestExplicitChannelArgOverridesFrontmatter:
                     "test-chore",
                     "ignored-session",
                     "hello",
-                    "caller-override-ch",
+                    "telegram:-9999",
                 )
 
-        call_kwargs = http_mock.post.call_args
-        body = call_kwargs.kwargs.get("json", {})
-        assert body.get("channel") == "caller-override-ch"
-        assert result["destination"] == "caller-override-ch"
+        body = _posted_body(http_mock)
+        assert body.get("channel") == "telegram"
+        assert body.get("to") == "-9999"
+        assert result["destination"] == "telegram:-9999"
         # Frontmatter read is skipped when 4th arg is provided
         vc.read_record.assert_not_called()

@@ -334,13 +334,35 @@ async def send_chore_notification(
     """Send a notification via the tenant notification route.
 
     POSTs to ctrl-api /api/v1/notifications.  When the chore record carries a
-    ``notify_channel`` frontmatter field (or the caller passes ``notify_channel``
-    directly), it is forwarded as the ``channel`` parameter so ctrl-api routes
-    to that specific Slack/Telegram destination.  When absent, ``channel`` is
-    omitted and ctrl-api applies its home-channel default
-    (SLACK_HOME_CHANNEL / TELEGRAM_HOME_CHANNEL).  If neither resolves there,
-    ctrl-api returns 424 and this activity raises, allowing Temporal to retry
-    and surface the misconfiguration visibly.
+    ``notify_channel`` frontmatter field (or the caller passes it as the 4th
+    positional arg), the value is parsed as ``platform:destination`` and
+    forwarded to ctrl-api as separate ``channel`` (platform enum) and ``to``
+    (chat/channel id) fields, matching the alfredDeliver.ts body contract::
+
+        body: { message, channel?: "auto"|"telegram"|"slack"|"email", to?: str }
+
+    ``channel`` selects the adapter; ``to`` is the recipient id.  They are
+    separate fields and a destination id in ``channel`` falls to the default
+    case in ``deliverByChannel()`` (``channel=<id> has no delivery adapter``).
+
+    **notify_channel format** (the same convention as commitment_register's
+    ``projection`` field in CLAUDE.md §6.1)::
+
+        slack:C0123456789        → channel="slack",    to="C0123456789"
+        telegram:-1001234567     → channel="telegram",  to="-1001234567"
+        email:user@example.com   → channel="email",     to="user@example.com"
+
+    **Bare values with no ``:`` separator are treated as unset** and the
+    notification falls through to ctrl-api's home-channel default
+    (SLACK_HOME_CHANNEL / TELEGRAM_HOME_CHANNEL).  Guessing the platform from
+    an id's shape is how you get a Telegram id posted to Slack — treat
+    unparseable values as unset rather than guessing.  Invalid platform names
+    (anything not in ``slack|telegram|email``) are likewise treated as unset.
+
+    When absent or unparseable, ``channel`` and ``to`` are both omitted and
+    ctrl-api applies its home-channel default.  If neither a home channel nor
+    an explicit destination resolves, ctrl-api returns 424 and this activity
+    raises, surfacing the misconfiguration visibly for Temporal retry.
 
     The ``session_id`` positional parameter is kept for backward compatibility
     with in-flight generated chore workflows that call this activity with
@@ -361,7 +383,7 @@ async def send_chore_notification(
 
         {
             "delivered": bool,
-            "destination": str,    # resolved channel value or "auto"
+            "destination": str,    # "platform:id" or "auto"
             "http_status": int,
             "error": str | None,
         }
@@ -369,38 +391,59 @@ async def send_chore_notification(
     Raises ``httpx.HTTPStatusError`` on non-2xx so Temporal can retry on
     transient failures.  Transport errors propagate as-is.
     """
+    _VALID_PLATFORMS = frozenset({"slack", "telegram", "email"})
+
+    def _parse_notify_channel(raw: str) -> tuple[str, str] | None:
+        """Parse 'platform:destination' → (platform, destination) or None.
+
+        Returns None when the value has no colon, uses an unrecognised platform,
+        or produces an empty destination.  None causes the caller to omit
+        channel + to entirely, falling through to ctrl-api's home default.
+        """
+        if ":" not in raw:
+            return None
+        platform, _, dest = raw.partition(":")
+        platform = platform.strip().lower()
+        dest = dest.strip()
+        if platform not in _VALID_PLATFORMS or not dest:
+            return None
+        return platform, dest
+
     config = load_config()
     api_key = os.environ.get("AAS_API_KEY", "")
 
     # 1. Resolve destination: kwarg → chore frontmatter → omit (ctrl-api decides).
-    # Priority: explicit kwarg wins (allows in-repo workflows to pass it
-    # directly after loading ctx); else read from the chore record itself so
+    # Priority: explicit kwarg wins; else read from the chore record so
     # generated chores on live tenants benefit without any code change.
-    resolved_channel = notify_channel
-    if resolved_channel is None:
+    resolved_raw = notify_channel
+    if resolved_raw is None:
         try:
             ch_client = VaultClient(config)
             try:
                 record = await ch_client.read_record(f"chore/{chore_slug}.md")
                 ch = (record.get("frontmatter") or {}).get("notify_channel")
                 if ch and isinstance(ch, str) and ch.strip():
-                    resolved_channel = ch.strip()
+                    resolved_raw = ch.strip()
             finally:
                 await ch_client.close()
         except Exception:
             pass  # treat as no channel — ctrl-api home default applies
 
-    # 2. Build POST body; include channel only when explicitly resolved so that
-    #    ctrl-api's home-channel default (SLACK_HOME_CHANNEL / TELEGRAM_HOME_CHANNEL)
-    #    is the sole fallback, not any ambient session.
+    # 2. Parse platform:destination. Unparseable → fall through to ctrl-api auto.
+    parsed = _parse_notify_channel(resolved_raw) if resolved_raw else None
+    destination = f"{parsed[0]}:{parsed[1]}" if parsed else "auto"
+
+    # 3. Build POST body; split channel (platform enum) and to (recipient id)
+    #    per alfredDeliver.ts:35.  Omit both when no explicit destination so
+    #    ctrl-api's home-channel default is the sole fallback.
     body: dict[str, Any] = {
         "message": f"[Chore: {chore_slug}]\n\n{message}",
         "urgency": "normal",
     }
-    if resolved_channel:
-        body["channel"] = resolved_channel
+    if parsed:
+        body["channel"] = parsed[0]  # platform enum: "slack"|"telegram"|"email"
+        body["to"] = parsed[1]       # recipient id
 
-    destination = resolved_channel or "auto"
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
     async with httpx.AsyncClient(timeout=30.0) as http:
