@@ -59,7 +59,7 @@ export const ALL_HERMES_TOOLS: ToolDef[] = [
         .string()
         .optional()
         .describe(
-          "Override the profile's default model (e.g. `claude-opus-4-5` for research; `claude-haiku-4-5` for cheap routing). Omit to use the profile's configured default.",
+          "Override the profile's configured default model. All profiles run openai-codex models: the workers default is `gpt-5.6-luna`; use `gpt-5.6-sol` when the task is heavy research or complex reasoning. Omit in the vast majority of cases — the profile default is the right choice.",
         ),
       return_via: z
         .object({
