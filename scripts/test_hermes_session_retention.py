@@ -228,5 +228,121 @@ class TestVacuum(unittest.TestCase):
         self.assertIn("error", r)
 
 
+class TestLargeIdList(unittest.TestCase):
+    """Defect 1 regression: _msg_count() built one SQL placeholder per session id.
+    On stores with >32 k eligible sessions this exceeded SQLite_MAX_VARIABLE_NUMBER
+    (32766 on modern builds) and hung indefinitely.  dry_run must return correct
+    counts using predicate-based queries that do NOT scale with id count."""
+
+    N_OLD = 35_000  # deliberately > SQLITE_MAX_VARIABLE_NUMBER
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        pd = Path(self.tmp.name) / "profiles" / "workers"
+        pd.mkdir(parents=True)
+        self.db = pd / "state.db"
+        _make_db(self.db)
+        t_old = NOW - 40 * DAY
+        con = sqlite3.connect(str(self.db))
+        # executemany is faster than N individual _ins() calls (no per-row commit)
+        con.executemany(
+            "INSERT INTO sessions VALUES(?,?,?,?)",
+            [(f"s{i}", "t", t_old, t_old + DAY) for i in range(self.N_OLD)],
+        )
+        con.executemany(
+            "INSERT INTO messages(session_id,timestamp,content) VALUES(?,?,?)",
+            [(f"s{i}", t_old + 60, f"m{i}") for i in range(self.N_OLD)],
+        )
+        # One session inside the window — must not be counted as eligible
+        t_new = NOW - 5 * DAY
+        con.execute("INSERT INTO sessions VALUES(?,?,?,?)", ("keep", "t", t_new, t_new + DAY))
+        con.execute("INSERT INTO messages(session_id,timestamp,content) VALUES(?,?,?)",
+                    ("keep", t_new + 60, "keep-msg"))
+        con.commit(); con.close()
+
+    def tearDown(self): self.tmp.cleanup()
+
+    def test_dry_run_completes_and_counts_correctly(self):
+        """Must return exact counts without building a >32k-placeholder SQL statement.
+        If the old _msg_count() approach is used, this call hangs; the predicate
+        JOIN returns in milliseconds."""
+        r = dry_run(self.db, "workers", 30)
+        self.assertNotIn("error", r, r)
+        self.assertEqual(r["eligible_sessions"], self.N_OLD,
+                         f"expected {self.N_OLD} eligible sessions; got {r['eligible_sessions']}")
+        self.assertEqual(r["eligible_messages"], self.N_OLD,
+                         f"expected {self.N_OLD} eligible messages; got {r['eligible_messages']}")
+
+
+class TestDeletedCountAccuracy(unittest.TestCase):
+    """Defect 2 regression: con.total_changes is cumulative for the entire connection
+    lifetime, not per-statement.  Summing it once per batch produces quadratically
+    inflated deleted_messages across batches.  Counters must equal rows actually removed."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db = Path(self.tmp.name) / "state.db"
+        _make_db(self.db)
+        con = sqlite3.connect(str(self.db)); con.row_factory = sqlite3.Row
+        # 12 old sessions (forces 3 batches at BATCH_SIZE=5), each with 1 message
+        for i in range(12):
+            _ins(con, f"old-{i}", 40 + i)
+        _ins(con, "keep", 5)
+        con.close()
+
+    def tearDown(self): self.tmp.cleanup()
+
+    def test_deleted_counts_are_exact(self):
+        """deleted_sessions and deleted_messages must equal actual rows removed."""
+        orig_batch = _mod.BATCH_SIZE
+        _mod.BATCH_SIZE = 5  # forces 3 batches (5+5+2); old total_changes bug triples the count
+        try:
+            r = apply(self.db, "workers", 30, verbose=False)
+        finally:
+            _mod.BATCH_SIZE = orig_batch
+        self.assertNotIn("error", r, r)
+        self.assertEqual(r["deleted_sessions"], 12,
+                         "deleted_sessions must equal sessions actually removed")
+        self.assertEqual(r["deleted_messages"], 12,
+                         "deleted_messages wrong — likely total_changes accumulation bug "
+                         "(each batch adds the cumulative total, not the per-statement rowcount)")
+
+
+class TestCheckpointStandalone(unittest.TestCase):
+    """Defect 3 regression: --checkpoint was inside the per-profile loop that always
+    ran dry_run() first, so a checkpoint-only invocation paid the full (hanging) scan
+    cost before checkpointing anything.  Without --apply, checkpoint/vacuum must skip
+    the eligibility scan entirely."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.profiles = Path(self.tmp.name) / "profiles"
+        for p in ("workers", "main", "heavy"):
+            d = self.profiles / p; d.mkdir(parents=True)
+            _make_db(d / "state.db")
+
+    def tearDown(self): self.tmp.cleanup()
+
+    def test_checkpoint_standalone_skips_eligibility(self):
+        """main(--checkpoint) without --apply must not invoke _eligible() at all."""
+        import sys, io, contextlib
+        calls = []
+        orig = _mod._eligible
+        _mod._eligible = lambda *a, **kw: calls.append("_eligible") or orig(*a, **kw)
+        orig_argv = sys.argv
+        sys.argv = ["prog", "--hermes-home", str(self.tmp.name), "--checkpoint"]
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                _mod.main()
+        except SystemExit:
+            pass
+        finally:
+            sys.argv = orig_argv
+            _mod._eligible = orig
+        self.assertEqual(calls, [],
+            "--checkpoint without --apply must not call _eligible(); "
+            "the eligibility scan should be skipped entirely")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -75,12 +75,6 @@ def _eligible(con: sqlite3.Connection, cutoff_ts: float) -> list[str]:
     ).fetchall()
     return [r["id"] for r in rows]
 
-def _msg_count(con: sqlite3.Connection, ids: list[str]) -> int:
-    if not ids:
-        return 0
-    ph = ",".join("?" * len(ids))
-    return con.execute(f"SELECT COUNT(*) FROM messages WHERE session_id IN ({ph})", ids).fetchone()[0]
-
 def _db_bytes(con: sqlite3.Connection) -> int:
     ps = con.execute("PRAGMA page_size").fetchone()[0]
     pc = con.execute("PRAGMA page_count").fetchone()[0]
@@ -138,19 +132,40 @@ def dry_run(db_path: Path, profile: str, days: int) -> dict:
         con.close()
         return {"error": "integrity_check failed"}
     cut = _cutoff(days)
-    ids = _eligible(con, cut)
-    msgs = _msg_count(con, ids)
+    now = time.time()
+    # Predicate-based counts — never materialise the session id list.
+    # The old _msg_count() built one SQL placeholder per id; on stores with
+    # >32 k eligible sessions this exceeded SQLite_MAX_VARIABLE_NUMBER (32766)
+    # and hung.  A single predicate-join query runs in <1 s on 678 k messages.
+    n_sess = con.execute(
+        "SELECT COUNT(*) FROM sessions"
+        " WHERE ended_at IS NOT NULL AND started_at < ?"
+        " AND id NOT IN (SELECT session_id FROM compression_locks WHERE expires_at > ?)",
+        (cut, now),
+    ).fetchone()[0]
+    n_msgs = con.execute(
+        "SELECT COUNT(*) FROM messages m"
+        " JOIN sessions s ON m.session_id = s.id"
+        " WHERE s.ended_at IS NOT NULL AND s.started_at < ?"
+        " AND s.id NOT IN (SELECT session_id FROM compression_locks WHERE expires_at > ?)",
+        (cut, now),
+    ).fetchone()[0]
     size_b = _db_bytes(con)
     oldest = newest = None
-    if ids:
-        row = con.execute(f"SELECT MIN(started_at), MAX(started_at) FROM sessions WHERE id IN ({','.join('?'*len(ids))})", ids).fetchone()
+    if n_sess:
+        row = con.execute(
+            "SELECT MIN(started_at), MAX(started_at) FROM sessions"
+            " WHERE ended_at IS NOT NULL AND started_at < ?"
+            " AND id NOT IN (SELECT session_id FROM compression_locks WHERE expires_at > ?)",
+            (cut, now),
+        ).fetchone()
         ts2d = lambda ts: datetime.fromtimestamp(ts, tz=timezone.utc).date().isoformat() if ts else None
         oldest, newest = ts2d(row[0]), ts2d(row[1])
     con.close()
     return {
         "profile": profile, "window_days": days, "db": str(db_path),
-        "db_bytes": size_b, "eligible_sessions": len(ids),
-        "eligible_messages": msgs, "oldest": oldest, "newest": newest,
+        "db_bytes": size_b, "eligible_sessions": n_sess,
+        "eligible_messages": n_msgs, "oldest": oldest, "newest": newest,
     }
 
 
@@ -162,26 +177,50 @@ def apply(db_path: Path, profile: str, days: int, verbose: bool) -> dict:
         con.close()
         return {"error": "integrity_check failed"}
     cut = _cutoff(days)
-    ids = _eligible(con, cut)
-    if not ids:
+    now = time.time()
+    # Count without materialising the id list (same predicate as the LIMIT loop).
+    total = con.execute(
+        "SELECT COUNT(*) FROM sessions"
+        " WHERE ended_at IS NOT NULL AND started_at < ?"
+        " AND id NOT IN (SELECT session_id FROM compression_locks WHERE expires_at > ?)",
+        (cut, now),
+    ).fetchone()[0]
+    if not total:
         con.close()
         return {"profile": profile, "deleted_sessions": 0, "deleted_messages": 0}
     size_before = _db_bytes(con)
     has_triggers = _has_fts_triggers(con)
     del_msgs = del_sess = 0
-    for batch in _batches(ids, BATCH_SIZE):
+    # Batched LIMIT loop — avoids loading 100k+ ids into memory and remains
+    # resumable: each committed batch is gone, so the next SELECT picks up
+    # exactly the remaining sessions without any offset arithmetic.
+    while True:
+        rows = con.execute(
+            "SELECT id FROM sessions"
+            " WHERE ended_at IS NOT NULL AND started_at < ?"
+            " AND id NOT IN (SELECT session_id FROM compression_locks WHERE expires_at > ?)"
+            " LIMIT ?",
+            (cut, now, BATCH_SIZE),
+        ).fetchall()
+        if not rows:
+            break
+        batch = [r[0] for r in rows]
         ph = ",".join("?" * len(batch))
         if not has_triggers:
             # No triggers: plain FTS5 owns its data — delete by rowid.
             # Do NOT call 'rebuild'; on a plain FTS5 table that wipes the index.
-            con.execute(f"DELETE FROM messages_fts WHERE rowid IN (SELECT id FROM messages WHERE session_id IN ({ph}))", batch)
-        con.execute(f"DELETE FROM messages WHERE session_id IN ({ph})", batch)
-        del_msgs += con.total_changes
-        con.execute(f"DELETE FROM sessions WHERE id IN ({ph})", batch)
-        del_sess += len(batch)
+            con.execute(
+                f"DELETE FROM messages_fts WHERE rowid IN"
+                f" (SELECT id FROM messages WHERE session_id IN ({ph}))",
+                batch,
+            )
+        cur = con.execute(f"DELETE FROM messages WHERE session_id IN ({ph})", batch)
+        del_msgs += cur.rowcount   # rowcount = rows affected by THIS statement
+        cur2 = con.execute(f"DELETE FROM sessions WHERE id IN ({ph})", batch)
+        del_sess += cur2.rowcount  # not total_changes (cumulative) or len(batch) (assumed)
         con.commit()
         if verbose:
-            print(f"  [{profile}] {del_sess}/{len(ids)} sessions deleted", flush=True)
+            print(f"  [{profile}] {del_sess}/{total} sessions deleted", flush=True)
     size_after = _db_bytes(con)
     con.close()
     return {
@@ -218,22 +257,27 @@ def main():
     for profile, days in windows.items():
         db_path = profiles_root / profile / "state.db"
         print(f"\n=== {profile} (window: {days}d) ===")
-        if args.apply:
-            r = apply(db_path, profile, days, args.verbose)
-            if "error" in r:
-                print(f"  ERROR: {r['error']}")
+        # Skip the eligibility scan when only maintenance ops are requested.
+        # --checkpoint and --vacuum need no eligibility information; the scan
+        # was the bottleneck that made "checkpoint-only" runs hang for 20+ min.
+        do_scan = args.apply or (not args.checkpoint and not args.vacuum)
+        if do_scan:
+            if args.apply:
+                r = apply(db_path, profile, days, args.verbose)
+                if "error" in r:
+                    print(f"  ERROR: {r['error']}")
+                else:
+                    freed = r.get("freed_bytes", 0)
+                    print(f"  Deleted: {r['deleted_sessions']} sessions, {r['deleted_messages']} messages")
+                    print(f"  Freed: {freed // (1024**3):.1f} GB ({freed:,} bytes) [pre-VACUUM estimate]")
             else:
-                freed = r.get("freed_bytes", 0)
-                print(f"  Deleted: {r['deleted_sessions']} sessions, {r['deleted_messages']} messages")
-                print(f"  Freed: {freed // (1024**3):.1f} GB ({freed:,} bytes) [pre-VACUUM estimate]")
-        else:
-            r = dry_run(db_path, profile, days)
-            if "error" in r:
-                print(f"  ERROR: {r['error']}")
-            else:
-                print(f"  DB: {r['db_bytes'] / (1024**3):.2f} GB | "
-                      f"Eligible: {r['eligible_sessions']:,} sessions {r['eligible_messages']:,} msgs | "
-                      f"Range: {r['oldest']} → {r['newest']}")
+                r = dry_run(db_path, profile, days)
+                if "error" in r:
+                    print(f"  ERROR: {r['error']}")
+                else:
+                    print(f"  DB: {r['db_bytes'] / (1024**3):.2f} GB | "
+                          f"Eligible: {r['eligible_sessions']:,} sessions {r['eligible_messages']:,} msgs | "
+                          f"Range: {r['oldest']} → {r['newest']}")
         if args.checkpoint:
             cr = checkpoint(db_path, args.verbose)
             if "error" in cr:
