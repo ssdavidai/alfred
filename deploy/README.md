@@ -22,10 +22,10 @@ These are hard-coded in two places that must stay in sync:
 - `.github/workflows/deploy-compose.yml` (matrix)
 - `Makefile` (`FLEET` variable, `sync-compose-fleet` target)
 
-When a tenant is added or retired, update both. A future refactor will pull
-this from the SaaS Plane app's tenant directory; for now we keep it explicit
-because the cost of a stale list is "a tenant silently misses a deploy" —
-exactly the failure mode this directory exists to prevent.
+When a tenant is added or retired, update both. There is no tenant directory
+to pull this from, so it stays explicit — and the cost of a stale list is "a
+tenant silently misses a deploy", exactly the failure mode this directory
+exists to prevent.
 
 ## What CI deploys vs. what it does NOT
 
@@ -37,7 +37,6 @@ files that compose loads at boot:
 
 - `docker-compose.yaml` — the service definitions
 - `caddy/Caddyfile` — public ingress + Let's Encrypt
-- `caddy/plane-proxy.Caddyfile`
 - `.env.example` — operator reference (never overwrites a tenant's `.env`)
 
 It runs automatically on every push to `main` that touches one of those

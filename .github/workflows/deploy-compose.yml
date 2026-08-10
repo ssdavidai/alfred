@@ -8,7 +8,6 @@
 #
 #   * /opt/alfred/docker-compose.yaml — services, profiles, mounts
 #   * /opt/alfred/caddy/Caddyfile     — public ingress
-#   * /opt/alfred/caddy/plane-proxy.Caddyfile
 #   * /opt/alfred/.env.example        — operator reference (does NOT touch .env)
 #
 # Consequence: any PR that adds a new service (e.g. #121, which added the
@@ -23,8 +22,9 @@
 # back up the old copy as `.bak-<sha>`, and `docker compose up -d` to apply.
 # Compose is idempotent — only services whose definition changed restart.
 #
-# Tenant list is hard-coded for now (5 known hosts). When the SaaS Plane app
-# exposes a tenant directory we can pull this from a single source of truth.
+# Tenant list is hard-coded for now. There is no tenant directory to pull it
+# from: the SaaS control surface an earlier version of this comment promised
+# does not exist in alfred-black.
 name: deploy-compose
 
 on:
@@ -33,7 +33,6 @@ on:
     paths:
       - "docker-compose.yaml"
       - "caddy/Caddyfile"
-      - "caddy/plane-proxy.Caddyfile"
       - ".env.example"
       - ".github/workflows/deploy-compose.yml"
   workflow_dispatch:
@@ -126,19 +125,18 @@ jobs:
           ssh "${host}" "
             set -e
             ts=\$(date -u +%Y%m%dT%H%M%SZ)
-            for f in docker-compose.yaml caddy/Caddyfile caddy/plane-proxy.Caddyfile .env.example; do
+            for f in docker-compose.yaml caddy/Caddyfile .env.example; do
               if [ -f /opt/alfred/\${f} ]; then
                 cp -a /opt/alfred/\${f} /opt/alfred/\${f}.bak-${short_sha}-\${ts}
               fi
             done
           "
 
-          # 2. scp the four tracked files. Use -p to preserve mtime so the
+          # 2. scp the three tracked files. Use -p to preserve mtime so the
           #    operator can see when the file was actually changed in the
           #    repo, not when CI ran.
           scp -p docker-compose.yaml "${host}:/opt/alfred/docker-compose.yaml"
           scp -p caddy/Caddyfile "${host}:/opt/alfred/caddy/Caddyfile"
-          scp -p caddy/plane-proxy.Caddyfile "${host}:/opt/alfred/caddy/plane-proxy.Caddyfile"
           scp -p .env.example "${host}:/opt/alfred/.env.example"
 
       - name: Apply (docker compose up -d)

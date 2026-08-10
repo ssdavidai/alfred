@@ -42,7 +42,6 @@ The current compose file defines these named volumes.
 | `mcp_server_data` | MCP server local state. | Medium | Include to preserve connector-local state. |
 | `temporal_data` | Temporal workflow history. | High | Workflows can often be restarted, but history aids recovery. |
 | `ollama_data` | Downloaded embedding/model blobs. | Low | Re-downloadable; backup only to reduce rebuild time. |
-| `plane_pgdata`, `plane_redis`, `plane_rabbitmq`, `plane_uploads` | Plane issue tracker data and artifacts. | High | Include if Plane is used as operational issue memory. |
 | `sure_pgdata`, `sure_redis` | Sure finance database/cache. | Critical | Finance data; backup encrypted and test restore. |
 | `paperclip_data` | Paperclip company/issues/agent state. | High | Include where Paperclip manages operations. |
 | `vexa_redis`, `vexa_postgres`, `vexa_minio`, `vexa_recordings` | Optional Vexa transcript stack. | Medium/High | Include when `--profile vexa` is enabled and recordings/transcripts matter. |
