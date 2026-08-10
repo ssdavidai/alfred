@@ -16,14 +16,34 @@
 # (created_at, updated_at) and no balance-specific date. Measured fleet-wide
 # against live data:
 #
-#   stale accounts (lunchflow_accounts.current_balance IS NULL):   6
-#   of those, max(balances.date) was today-or-yesterday:           4
+#   provider-backed accounts (linked via account_providers):         13
+#   of those, has_provider_anchor = false (current_balance IS NULL): 12
+#   of those, max(balances.date) was today-or-yesterday:              9
 #
-# Two-thirds of stale accounts would report as fresh via max(balances.date)
-# because Sure's cached-fallback write path is itself a write that advances
-# that date. Reporting confident freshness on stale data is worse than
-# reporting nothing — it replaces silent staleness with a confident lie.
-# The only accurate signal is lunchflow_accounts.current_balance IS NULL.
+# Nine of twelve genuinely stale accounts would report as fresh via
+# max(balances.date) because Sure's cached-fallback write path is itself a
+# write that advances that date. Reporting confident freshness on stale data
+# is worse than reporting nothing — it replaces silent staleness with a
+# confident lie. The only accurate signal is lunchflow_accounts.current_balance
+# IS NULL.
+#
+# ACCOUNT LINKAGE
+# ---------------
+# lunchflow_accounts.account_id is the provider's external id (5 chars on the
+# measured tenant), NOT Sure's accounts.id UUID (36 chars). They cannot be
+# joined directly. The correct traversal is via account_providers:
+#
+#   LunchflowAccount
+#     has_one :account_provider, as: :provider  (provider_type = 'LunchflowAccount')
+#     has_one :account, through: :account_provider
+#
+# In SQL: account_providers ap ON ap.provider_id = la.id AND
+#         ap.provider_type = 'LunchflowAccount' JOIN accounts a ON a.id = ap.account_id
+#
+# Measured: 13 of 16 lunchflow rows resolve to a Sure account via this path.
+# The 3 unlinked rows are omitted from accounts[] — do not guess a match for
+# them. An unlinked provider row is not an account. They are counted separately
+# under unlinked_provider_accounts.
 #
 # THE PATCH
 # ---------
@@ -33,11 +53,12 @@
 #
 # Response shape:
 #   { "accounts": [
-#       { "account_id": "…",
+#       { "account_id": "<36-char UUID matching accounts.id>",
 #         "has_provider_anchor": true|false|null,
 #         "provider_status": "…"|null,
 #         "provider_observed_at": "ISO8601"|null }
 #     ],
+#     "unlinked_provider_accounts": <integer>,
 #     "generated_at": "ISO8601" }
 #
 # has_provider_anchor semantics:
@@ -47,6 +68,11 @@
 #
 # Authentication: X-Api-Key header — the same SURE_API_KEY credential used by
 # every other Sure API endpoint. No new credential introduced.
+#
+# VERIFY: account_id values in accounts[] must be 36-char UUIDs matching
+# accounts.id. If any returned id is shorter (e.g. 5 chars), the association
+# traversal is broken and the results must not be used for freshness attribution.
+# Check: curl … | jq '.accounts[].account_id | length' — all must be 36.
 #
 # WHY AN INITIALIZER, NOT A FILE OVERLAY
 # ----------------------------------------
@@ -74,29 +100,55 @@ Rails.application.config.to_prepare do
         return
       end
 
+      linked, unlinked_count = anchor_state_partition
       render json: {
-        accounts: anchor_state_rows,
+        accounts: linked,
+        unlinked_provider_accounts: unlinked_count,
         generated_at: Time.now.utc.iso8601
       }
     end
 
     private
 
-    def anchor_state_rows
+    # Partition all LunchflowAccount rows into linked (have a Sure accounts.id)
+    # and unlinked (no account_providers row). Returns [linked_rows, unlinked_count].
+    # Unlinked rows are NOT included in accounts[] — never invent a match.
+    def anchor_state_partition
       unless defined?(::LunchflowAccount)
         Rails.logger.warn("#{ALFRED_TAG} LunchflowAccount not defined — returning empty anchor state")
-        return []
+        return [[], 0]
       end
 
-      ::LunchflowAccount.all.map { |acct| anchor_row(acct) }
+      linked = []
+      unlinked = 0
+      ::LunchflowAccount.all.each do |acct|
+        sure_id = resolve_sure_account_id(acct)
+        if sure_id.nil?
+          unlinked += 1
+          next
+        end
+        linked << anchor_row(sure_id, acct)
+      end
+      [linked, unlinked]
     rescue => e
       Rails.logger.error("#{ALFRED_TAG} error reading lunchflow_accounts: #{e.message}")
-      []
+      [[], 0]
     end
 
-    def anchor_row(acct)
+    # Traverse lunchflow_account → account_provider (polymorphic) → account.id.
+    # Returns the 36-char Sure accounts.id UUID, or nil for unlinked rows.
+    # Never returns lunchflow_accounts.account_id (the provider's external short id).
+    def resolve_sure_account_id(acct)
+      return nil unless acct.respond_to?(:account)
+      acct.account&.id
+    rescue => e
+      Rails.logger.warn("#{ALFRED_TAG} account association error for provider row #{acct.try(:id)}: #{e.message}")
+      nil
+    end
+
+    def anchor_row(sure_account_id, acct)
       {
-        account_id:           safe_attr(acct, :account_id),
+        account_id:           sure_account_id,
         has_provider_anchor:  anchor_flag(acct),
         provider_status:      provider_status(acct),
         provider_observed_at: safe_iso8601(acct, :updated_at)
@@ -110,7 +162,7 @@ Rails.application.config.to_prepare do
       return nil unless acct.respond_to?(:current_balance)
       !acct.current_balance.nil?
     rescue => e
-      Rails.logger.warn("#{ALFRED_TAG} anchor_flag error for #{acct.try(:account_id)}: #{e.message}")
+      Rails.logger.warn("#{ALFRED_TAG} anchor_flag error for #{acct.try(:id)}: #{e.message}")
       nil
     end
 
@@ -120,13 +172,7 @@ Rails.application.config.to_prepare do
       return nil unless payload.is_a?(Hash)
       payload["status"]
     rescue => e
-      Rails.logger.warn("#{ALFRED_TAG} provider_status error for #{acct.try(:account_id)}: #{e.message}")
-      nil
-    end
-
-    def safe_attr(acct, attr)
-      acct.respond_to?(attr) ? acct.public_send(attr) : nil
-    rescue
+      Rails.logger.warn("#{ALFRED_TAG} provider_status error for #{acct.try(:id)}: #{e.message}")
       nil
     end
 

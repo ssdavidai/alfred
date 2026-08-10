@@ -20,18 +20,19 @@ Response:
 {
   "accounts": [
     {
-      "account_id": "<lunchflow account identifier>",
+      "account_id": "550e8400-e29b-41d4-a716-446655440000",
       "has_provider_anchor": true,
       "provider_status": "active",
       "provider_observed_at": "2026-08-10T09:14:00Z"
     },
     {
-      "account_id": "<another account>",
+      "account_id": "550e8400-e29b-41d4-a716-446655440001",
       "has_provider_anchor": false,
       "provider_status": "token_expired",
       "provider_observed_at": "2026-08-01T18:00:00Z"
     }
   ],
+  "unlinked_provider_accounts": 3,
   "generated_at": "2026-08-10T10:00:00Z"
 }
 ```
@@ -40,11 +41,13 @@ Field semantics:
 
 | Field | Type | Meaning |
 |-------|------|---------|
+| `account_id` | 36-char UUID | `accounts.id` — Sure's internal account identifier, **not** the provider's external short id |
 | `has_provider_anchor` | `true` | `current_balance IS NOT NULL` — provider delivered data this sync cycle |
 | `has_provider_anchor` | `false` | `current_balance IS NULL` — Sure is falling back to a cached balance |
 | `has_provider_anchor` | `null` | Column absent or unreadable — consumer must treat as **unknown**, never as fresh |
 | `provider_status` | string | `raw_payload->>'status'` from the lunchflow_accounts row; `null` if column absent |
 | `provider_observed_at` | ISO8601 | `lunchflow_accounts.updated_at` — when Sure last wrote this row |
+| `unlinked_provider_accounts` | integer | Lunchflow provider rows with no linked Sure account — omitted from `accounts[]` |
 
 ## Why REST-visible timestamps were insufficient
 
@@ -59,15 +62,33 @@ signals were measured against live fleet data:
 Measurement result:
 
 ```
-stale accounts (lunchflow_accounts.current_balance IS NULL):   6
-of those, max(balances.date) was today-or-yesterday:           4
+provider-backed accounts (linked via account_providers):         13
+of those, has_provider_anchor = false (current_balance IS NULL): 12
+of those, max(balances.date) was today-or-yesterday:              9
 ```
 
-Four out of six genuinely stale accounts would have reported as fresh.
+Nine of twelve genuinely stale accounts would have reported as fresh.
 For a feature whose purpose is trust about financial data, a confident lie is
 worse than reporting nothing. The only accurate signal is
 `lunchflow_accounts.current_balance IS NULL`, which lives exclusively in the
 vendor-internal table this endpoint surfaces.
+
+## Account linkage
+
+`lunchflow_accounts.account_id` is the **provider's external id** (5 chars
+on the measured tenant), not Sure's `accounts.id` UUID (36 chars). The
+endpoint traverses the polymorphic `account_providers` table:
+
+```
+LunchflowAccount
+  → account_providers (provider_type = 'LunchflowAccount', provider_id = lunchflow_accounts.id)
+  → accounts.id  (the 36-char UUID)
+```
+
+Of 16 lunchflow rows on the measured tenant, 13 resolved to a Sure account.
+The 3 unlinked rows appear in `unlinked_provider_accounts` and are omitted
+from `accounts[]`. Do not attempt to match them by name — an unlinked provider
+row is not an account.
 
 ## Verifying on a tenant
 
@@ -85,8 +106,15 @@ docker exec sure-web \
   http://127.0.0.1:3000/api/v1/alfred/balance_anchor_state
 ```
 
-Expected: JSON with `accounts` array and `generated_at`. An empty `accounts`
-array means no Lunchflow accounts are linked yet (not an error).
+**UUID validation check** — all returned `account_id` values must be 36-char
+UUIDs. If any are shorter, the association traversal is broken:
+
+```bash
+curl -s -H "X-Api-Key: <SURE_API_KEY>" \
+  https://sure.<DOMAIN>/api/v1/alfred/balance_anchor_state \
+  | jq '.accounts[].account_id | length'
+# Every line must print 36.
+```
 
 To confirm the patch loaded, check sure-web logs at startup for:
 
@@ -94,14 +122,12 @@ To confirm the patch loaded, check sure-web logs at startup for:
 [alfred #318] ...
 ```
 
-If `LunchflowAccount` is not defined (tenant with no Lunchflow integration),
-the endpoint returns `{"accounts":[],"generated_at":"..."}` and logs a warning.
-
 ## Degradation modes
 
 | Condition | Behaviour |
 |-----------|-----------|
-| `LunchflowAccount` model absent | `accounts: []`, logs warning, no crash |
+| `LunchflowAccount` model absent | `accounts: []`, `unlinked_provider_accounts: 0`, logs warning, no crash |
+| `account` association absent | `has_provider_anchor` resolved, account omitted from `accounts[]`, counted in `unlinked_provider_accounts` |
 | `current_balance` column absent | `has_provider_anchor: null` for affected rows |
 | `raw_payload` column absent | `provider_status: null` for affected rows |
 | `lunchflow_accounts` table missing | `accounts: []`, logs error, no crash |
