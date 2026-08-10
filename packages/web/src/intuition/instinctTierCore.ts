@@ -115,6 +115,32 @@ export function nextTier(stage: Stage): Stage | null {
   return i >= 0 && i < STAGES.length - 1 ? STAGES[i + 1] : null;
 }
 
+// --- pending Acting promotion (#452 / #459) ------------------------------------
+// `pending_promotion: Acting` is NOT the tier — the instinct stays at its
+// current rung until Sir approves via `resolve_instinct_promotion` (Lane I).
+
+/** Whether this instinct has a pending promotion to Acting (#459).
+ *  CRITICAL: true does NOT mean the instinct is Acting — readTier disagrees. */
+export function hasPendingPromotion(instinct: any): boolean {
+  const raw =
+    instinct?.frontmatter?.pending_promotion ?? instinct?.pending_promotion;
+  return typeof raw === "string" && raw.trim() === "Acting";
+}
+
+/** The tier the instinct is being promoted FROM. Fails closed to "Asking". */
+export function pendingPromotionFrom(instinct: any): Stage {
+  const raw =
+    instinct?.frontmatter?.pending_promotion_from ??
+    instinct?.pending_promotion_from;
+  if (typeof raw !== "string") return "Asking";
+  const trimmed = raw.trim();
+  const normalized =
+    trimmed.charAt(0).toUpperCase() + trimmed.slice(1).toLowerCase();
+  return (STAGES as string[]).includes(normalized)
+    ? (normalized as Stage)
+    : "Asking";
+}
+
 /**
  * How the evidence line should read. Promotion is Reflection-driven, so
  * this deliberately promises nothing about when it will happen.

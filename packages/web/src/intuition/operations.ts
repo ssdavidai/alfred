@@ -9,6 +9,7 @@ import type {
   EnableIntuition,
   DisableIntuition,
   UpdateInstinct,
+  ResolveInstinctPromotion,
 } from "wasp/server/operations";
 import { getUserInstance, proxyToTenant } from "../server/tenantProxy";
 
@@ -74,5 +75,21 @@ export const updateInstinct: UpdateInstinct<{ path: string; set: { discretion_th
     method: "PATCH",
     path: `/api/v1/vault/records/${args.path}`,
     body: { set: args.set },
+  });
+};
+
+// Approve or decline a pending Acting promotion (#452 / #459).
+// Lane I ctrl-api endpoint: POST /api/v1/learning/instincts/:slug/promotion
+// Body: { approved: boolean }  Response: { tier, pending_promotion }
+export const resolveInstinctPromotion: ResolveInstinctPromotion<
+  { path: string; approved: boolean },
+  any
+> = async (args, context) => {
+  const instance = await getUserInstance(context);
+  const slug = args.path.split("/").pop() ?? args.path;
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: `/api/v1/learning/instincts/${encodeURIComponent(slug)}/promotion`,
+    body: { approved: args.approved },
   });
 };

@@ -36,6 +36,7 @@ import {
   enableIntuition,
   disableIntuition,
   updateInstinct,
+  resolveInstinctPromotion,
 } from "wasp/client/operations";
 import { Frame } from "../client/components/ab/Frame";
 import { Markdown } from "../client/components/ab/Markdown";
@@ -44,6 +45,7 @@ import {
   STAGES,
   autonomyStatement,
   effectiveThreshold,
+  hasPendingPromotion,
   progressNote,
   readTier,
   tierCaption,
@@ -250,6 +252,7 @@ export default function InstinctsPage() {
   const [open, setOpen] = useState<string | null>(null);
   const [toggling, setToggling] = useState(false);
   const [forgetting, setForgetting] = useState<string | null>(null);
+  const [resolving, setResolving] = useState<string | null>(null);
 
   async function toggleEnabled() {
     setToggling(true);
@@ -274,6 +277,22 @@ export default function InstinctsPage() {
       console.error("forget failed", e);
     } finally {
       setForgetting(null);
+    }
+  }
+
+  // Approve or decline a pending Acting promotion (#459).
+  async function resolvePromotion(instinct: any, approved: boolean) {
+    const instPath = String(instinct?.path ?? "");
+    if (!instPath) return;
+    setResolving(instPath);
+    try {
+      await resolveInstinctPromotion({ path: instPath, approved });
+      await refetchInstincts();
+      setOpen(null); // collapse so Sir sees the updated list
+    } catch (e) {
+      console.error("resolve promotion failed", e);
+    } finally {
+      setResolving(null);
     }
   }
 
@@ -400,6 +419,15 @@ export default function InstinctsPage() {
                       style={{ color: "var(--brass)" }}
                     >
                       {stage}
+                      {/* #459 — pending is NOT the tier; show it separately */}
+                      {hasPendingPromotion(p) && (
+                        <span
+                          className="ml-2 font-normal text-[9px] normal-case tracking-normal"
+                          style={{ color: "var(--marginalia)" }}
+                        >
+                          · approval pending
+                        </span>
+                      )}
                     </span>
                     <span style={{ color: "var(--brass)" }}>
                       {isOpen ? "▾" : "▸"}
@@ -407,6 +435,73 @@ export default function InstinctsPage() {
                   </button>
                   {isOpen && (
                     <div className="pb-10 pr-4 max-w-[760px]">
+                      {/* Pending Acting promotion banner (#459) — above the
+                          ladder. This instinct is NOT yet Acting; the tier
+                          is shown correctly below. */}
+                      {hasPendingPromotion(p) && (() => {
+                        const fmRule = String(p?.frontmatter?.rule ?? "").trim();
+                        return (
+                          <div
+                            className="mb-6 p-4 border-l-4"
+                            style={{ borderColor: "var(--brass)" }}
+                          >
+                            <div
+                              className="font-mono text-[10px] uppercase tracking-[0.28em] mb-2"
+                              style={{ color: "var(--brass)" }}
+                            >
+                              Approval required
+                            </div>
+                            <p className="font-body text-[15px] leading-[1.5] mb-2">
+                              I'm proposing to reach{" "}
+                              <strong>Acting</strong> for this pattern.
+                              That means I will handle matches{" "}
+                              <strong>on your behalf, without asking you first</strong>.
+                              Currently I'm at{" "}
+                              <strong>{stage}</strong> — I'll bring things
+                              to you until you approve.
+                            </p>
+                            {fmRule && (
+                              <p
+                                className="font-body italic text-[14px] mb-4 leading-[1.45]"
+                                style={{ color: "var(--marginalia)" }}
+                              >
+                                "{fmRule}"
+                              </p>
+                            )}
+                            <div className="flex gap-3 mt-4">
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  resolvePromotion(p, true);
+                                }}
+                                disabled={resolving === path}
+                                className="font-mono text-[11px] uppercase tracking-[0.18em] px-4 py-1.5 border"
+                                style={{
+                                  borderColor: "var(--brass)",
+                                  color: "var(--brass)",
+                                }}
+                              >
+                                {resolving === path ? "…" : "Approve"}
+                              </button>
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  resolvePromotion(p, false);
+                                }}
+                                disabled={resolving === path}
+                                className="font-mono text-[11px] uppercase tracking-[0.18em] px-4 py-1.5 border"
+                                style={{
+                                  borderColor: "var(--marginalia)",
+                                  color: "var(--marginalia)",
+                                }}
+                              >
+                                Not yet
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })()}
+
                       {/* Stage progress — single full-width band */}
                       <div className="mb-6">
                         <div className="flex gap-1.5 mb-2">

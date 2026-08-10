@@ -1892,6 +1892,13 @@ action updateInstinct {
   entities: []
 }
 
+// Approve or decline a pending Acting promotion (#452 / #459).
+// Calls the Lane I endpoint POST /api/v1/learning/instincts/:slug/promotion.
+action resolveInstinctPromotion {
+  fn: import { resolveInstinctPromotion } from "@src/intuition/operations",
+  entities: []
+}
+
 // ============================================================
 // Streams
 // ============================================================

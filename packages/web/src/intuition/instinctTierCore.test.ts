@@ -13,7 +13,9 @@ import {
   autonomyStatement,
   discretionThreshold,
   effectiveThreshold,
+  hasPendingPromotion,
   nextTier,
+  pendingPromotionFrom,
   progressNote,
   readTier,
   tierCaption,
@@ -134,4 +136,35 @@ test("progressNote pluralises and never promises promotion", () => {
   assert.match(progressNote("Asking", 0), /^0 observations recorded/);
   assert.match(progressNote("Asking", 3), /proposes Confirming/);
   assert.match(progressNote("Acting", 30), /highest tier/);
+});
+
+// --- pending Acting promotion (#452 / #459) ---
+
+test("hasPendingPromotion detects pending Acting promotion only", () => {
+  assert.equal(hasPendingPromotion(inst("Confirming", { pending_promotion: "Acting" })), true);
+  assert.equal(hasPendingPromotion(inst("Asking", { pending_promotion: "Confirming" })), false);
+  assert.equal(hasPendingPromotion(inst("Confirming")), false);
+  assert.equal(hasPendingPromotion(null), false);
+  assert.equal(hasPendingPromotion(undefined), false);
+});
+
+test("hasPendingPromotion never conflates pending with the live tier", () => {
+  // tier=Confirming + pending_promotion=Acting is still Confirming
+  const rec = inst("Confirming", { pending_promotion: "Acting" });
+  assert.equal(readTier(rec), "Confirming");
+  assert.equal(hasPendingPromotion(rec), true);
+  assert.equal(actsUnattended(rec), false);
+});
+
+test("hasPendingPromotion false when already Acting with no pending field", () => {
+  const rec = inst("Acting");
+  assert.equal(readTier(rec), "Acting");
+  assert.equal(hasPendingPromotion(rec), false);
+});
+
+test("pendingPromotionFrom reads the from-tier safely", () => {
+  const rec = inst("Confirming", { pending_promotion: "Acting", pending_promotion_from: "Confirming" });
+  assert.equal(pendingPromotionFrom(rec), "Confirming");
+  assert.equal(pendingPromotionFrom(inst("Asking", { pending_promotion: "Acting" })), "Asking");
+  assert.equal(pendingPromotionFrom(inst("Asking", { pending_promotion_from: "InvalidTier" })), "Asking");
 });
