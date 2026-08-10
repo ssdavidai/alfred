@@ -1004,7 +1004,7 @@ services:
     mem_limit: 256m
     pids_limit: 256
 
-  # ── Plane — self-hosted project management ──────────────────────────
+  # ── Sure — self-hosted personal finance ─────────────────────────────
   sure-db:
     logging: *default-logging
     image: postgres:16-alpine
@@ -1140,7 +1140,7 @@ services:
   # at https://paperclip.${DOMAIN}.
   #
   # Embedded Postgres: Paperclip ships PG inside the same container, so
-  # — unlike Sure/Plane — there is NO separate paperclip-db sidecar.
+  # — unlike Sure — there is NO separate paperclip-db sidecar.
   # All state lives in the paperclip_data volume.
   #
   # Healthcheck: Paperclip's docs do not document /api/health and the web

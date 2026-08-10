@@ -10,7 +10,7 @@
 # restarts will hit Let's Encrypt rate limits.
 #
 # DNS: before `docker compose up -d`, point these A-records at the VM's
-# public IP — `@` (apex), `plane`, `sure`, `vault`, `mcp`, `sms`, `voice`,
+# public IP — `@` (apex), `sure`, `vault`, `mcp`, `sms`, `voice`,
 # `paperclip`.
 # Caddy self-heals ACME on retry, so a stale record only delays the
 # first cert.
@@ -42,8 +42,8 @@ import /tailscale-snippets/*.caddy
 # ambiguity between client routes and server endpoints.
 #
 # EXCEPT: a small set of PUBLIC ctrl-api webhook paths must be reachable
-# on the apex domain because third-party services (OMI, Plane,
-# Paperclip, arbitrary stream webhooks) compose their callback URLs from
+# on the apex domain because third-party services (OMI, Paperclip,
+# arbitrary stream webhooks) compose their callback URLs from
 # TENANT_BASE_URL which is the apex (e.g. https://home.alfred.black).
 # Without this path-level handler, those requests would land on the SPA
 # nginx and get a 405 (POST on a static-file server). These paths are

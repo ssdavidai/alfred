@@ -137,14 +137,13 @@ sync-compose-fleet:
 		ssh $$SSH_OPTS "root@$${host}" "\
 			set -e; \
 			ts=\$$(date -u +%Y%m%dT%H%M%SZ); \
-			for f in docker-compose.yaml caddy/Caddyfile caddy/plane-proxy.Caddyfile .env.example; do \
+			for f in docker-compose.yaml caddy/Caddyfile .env.example; do \
 				if [ -f /opt/alfred/\$${f} ]; then \
 					cp -a /opt/alfred/\$${f} /opt/alfred/\$${f}.bak-$${SHA}-\$${ts}; \
 				fi; \
 			done"; \
 		scp -p $$SSH_OPTS docker-compose.yaml "root@$${host}:/opt/alfred/docker-compose.yaml"; \
 		scp -p $$SSH_OPTS caddy/Caddyfile "root@$${host}:/opt/alfred/caddy/Caddyfile"; \
-		scp -p $$SSH_OPTS caddy/plane-proxy.Caddyfile "root@$${host}:/opt/alfred/caddy/plane-proxy.Caddyfile"; \
 		scp -p $$SSH_OPTS .env.example "root@$${host}:/opt/alfred/.env.example"; \
 		ssh $$SSH_OPTS "root@$${host}" 'cd /opt/alfred && docker compose -p alfred-black config --quiet && docker compose -p alfred-black up -d'; \
 		ssh $$SSH_OPTS "root@$${host}" 'cd /opt/alfred && (docker compose -p alfred-black exec -T caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile 2>/dev/null || docker compose -p alfred-black restart caddy)'; \

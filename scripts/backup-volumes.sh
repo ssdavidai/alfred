@@ -20,10 +20,6 @@ VOLUMES=(
   web_db_data
   temporal_data
   mcp_server_data
-  plane_pgdata
-  plane_redis
-  plane_rabbitmq
-  plane_uploads
   sure_pgdata
   sure_redis
   paperclip_data
