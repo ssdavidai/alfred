@@ -1754,7 +1754,7 @@ async def extract_signal_from_event(
             # CRITICAL: raise instead of returning None. Returning None
             # is the workflow's signal for "LLM classified as noise" —
             # which would mark the event permanently processed. When the
-            # LLM provider is down (OpenRouter timeout, MiniMax outage,
+            # LLM provider is down (gateway timeout or upstream outage,
             # rate-limit) we want Temporal to retry the activity on the
             # next chunk OR the next tick, NOT bury the event as noise.
             # The workflow's per-event try/except catches this as

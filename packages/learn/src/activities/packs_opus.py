@@ -20,8 +20,8 @@ Design:
 
 Env flags:
 - ``ALFRED_OPUS_PACKS_ENABLED`` — default ``"true"``. Set to ``"false"``
-  to force the rule-based fallback for every pack (useful if OpenRouter
-  is flaky or budget-constrained).
+  to force the rule-based fallback for every pack (useful if the Hermes
+  gateway is unavailable or during testing).
 """
 from __future__ import annotations
 

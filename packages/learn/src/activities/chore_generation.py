@@ -10,8 +10,8 @@ source as a string. Static validation (S4-5), smoke testing (S4-6), and
 deployment (S4-7) are separate activities that consume the output.
 
 Design contract:
-  - Uses _call_llm direct OpenRouter (claude-opus-4-6, lower temperature
-    than the brief generator since we want less creativity)
+  - Uses _call_llm via the Hermes heavy profile (model is Hermes-config-owned,
+    lower temperature than the brief generator since we want less creativity)
   - Up to 3 attempts with retry-feedback prompts on failure
   - Hard total timeout enforced via _call_llm's asyncio.wait_for budget
   - Returns {module_name, workflow_class_name, python_source, ...metadata}

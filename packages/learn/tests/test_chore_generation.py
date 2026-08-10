@@ -1,8 +1,8 @@
 """Tests for the chore code generation activity (Step 4, S4-4).
 
 Most coverage is on the helpers (envelope validator, profile slicer, JSON
-parser) since the actual `_call_llm` invocation requires OpenRouter and is
-exercised end-to-end in the smoke test on the owner tenant.
+parser) since the actual `_call_llm` invocation reaches the Hermes heavy
+gateway and is exercised end-to-end in the smoke test on the owner tenant.
 """
 from __future__ import annotations
 

@@ -28,7 +28,7 @@ logger = logging.getLogger("alfred-learn")
 # (Erste/makerspace cases) without blowing a single event's cost.
 MAX_BODY_CHARS_PER_EVENT = 20_000
 
-# Size-based batch target. Clerk (fast-tier OpenRouter models) comfortably
+# Size-based batch target. Clerk (workers-profile Hermes gateway) comfortably
 # takes 128k tokens of context; we want to leave room for output (entities
 # + action_items JSON can run 5-10k tokens for a busy batch). 40k chars of
 # input gives ~10-13k tokens under the ~3 chars/token rule — leaving

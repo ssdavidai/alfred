@@ -570,7 +570,7 @@ _CLERK_COMPLETION_BUDGET_SECONDS = 900.0
 
 # F35 — priced-ceiling cap. Hermes' ``POST /v1/responses`` otherwise asks
 # the model for its full output window (65536 on the heavy/clerk models),
-# and OpenRouter prices the request against that ceiling — so a call 402s
+# and the gateway prices the request against that ceiling — so a call 402s
 # ("requested up to 65536 tokens, can only afford 31301") even when the
 # actual reply is short. Forwarding a bounded ``max_output_tokens`` shrinks
 # the priced ceiling below the affordable budget. 31000 sits just under the

@@ -2,8 +2,8 @@
 
 Replaces the 101-sequential-Clerk-call pipeline with 4 heavy-reasoning
 LLM calls. As of #118 those run through the HEAVY Hermes profile
-(``POST /v1/responses`` on :18791), not a direct OpenRouter call — the
-model is owned by the Hermes profile config. Full email corpus as context.
+(``POST /v1/responses`` on :18791) — the model is owned by the Hermes
+profile config. Full email corpus as context.
 
 Steps:
 1. Fetch metadata + snippets for all emails (30-60s)
@@ -68,9 +68,8 @@ async def _call_llm(
 ) -> str:
     """Run the heavy-reasoning agent via Hermes. Returns raw text response.
 
-    #118: this no longer POSTs OpenRouter ``chat/completions`` with an
-    ``OPENROUTER_API_KEY`` and a hardcoded ``anthropic/claude-opus-4-6``
-    model. It now mirrors ``clerk._call_clerk``: a single synchronous
+    #118: migrated off direct provider calls. Now mirrors
+    ``clerk._call_clerk``: a single synchronous
     ``POST /v1/responses`` (the OpenAI Responses API) against the HEAVY
     Hermes profile (:18791). Hermes runs the agent to completion
     server-side and returns the final ``output`` in the HTTP response. The
@@ -80,8 +79,8 @@ async def _call_llm(
 
     ``max_tokens`` is forwarded as ``max_output_tokens`` (F35), clamped to
     ``_MAX_OUTPUT_TOKENS_CAP``. Without it, Hermes asks the model for its
-    full output window (65536) and OpenRouter prices the call against that
-    ceiling — so a request 402s even when the reply is short. The clamp
+    full output window (65536) and the gateway prices the request against
+    that ceiling — so a request 402s even when the reply is short. The clamp
     keeps the priced ceiling under the affordable budget.
 
     ``response_format`` (kw-only) is the OpenAI Responses API's

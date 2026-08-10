@@ -271,21 +271,20 @@ writes to the vault during onboarding, traced from the workflow.
 
 ---
 
-## Direct-OpenRouter callers (Hermes bypass check)
+## Direct provider-API callers (Hermes bypass check)
 
-`grep -rn 'openrouter\\|OPENROUTER\\|api\\.openai\\|api\\.anthropic\\.com'
+`grep -rn 'api\\.openai\\|api\\.anthropic\\.com\\|openrouter\\.ai'
 src/`:
 
-| File:Line | What | Status |
-|-----------|------|--------|
-| `src/activities/onboarding_v3.py:48` | Comment explaining the #118 migration off OpenRouter onto Hermes | **NOT a bypass** — historical doc only |
-| `src/profiler/transaction_clustering.py:139` | Regex `\\bopenrouter\\b` to classify a "OpenRouter, Inc" receipt as a Subscription | **NOT a bypass** — text-matching a merchant |
-
-**Conclusion:** zero direct-OpenRouter (or direct-Anthropic / direct-OpenAI)
+No matches. Zero direct-provider (OpenAI, Anthropic, or gateway-bypass)
 callers remain in `packages/learn/src/`. Every LLM call routes through
-`_call_clerk` (`src/activities/clerk.py`, main/workers Hermes profiles)
-or `_call_llm` (`src/activities/onboarding_v3.py:39`, heavy Hermes
-profile :18791). Lane-II is Hermes-clean.
+`_call_clerk` (`src/activities/clerk.py`, workers Hermes profile :18790)
+or `_call_llm` (`src/activities/onboarding_v3.py`, heavy Hermes
+profile :18791). Lane-II is Hermes/Codex-only.
+
+Note: `src/profiler/transaction_clustering.py` contains the regex
+`\\bopenrouter\\b` to classify "OpenRouter, Inc" payment receipts as
+Subscriptions — this is text matching on merchant names, not an API call.
 
 ---
 

@@ -458,7 +458,7 @@ class TestGenerateMatterPackOpus:
 
         fallback_mock = AsyncMock(return_value={"created": 1, "skipped_existing": 0})
         with patch("src.activities.packs_opus._call_llm",
-                   new=AsyncMock(side_effect=RuntimeError("openrouter 503"))), \
+                   new=AsyncMock(side_effect=RuntimeError("gateway 503"))), \
              patch("src.activities.packs.generate_matter_pack", new=fallback_mock):
             result = _run_activity(lambda: generate_matter_pack_opus(onboard))
 

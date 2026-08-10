@@ -1,7 +1,7 @@
 """F35 — the clerk/brief LLM request must cap ``max_output_tokens``.
 
 Live symptom: every Hermes ``POST /v1/responses`` asked for the model's
-full output ceiling (65536), and OpenRouter prices the request against
+full output ceiling (65536), and the gateway prices the request against
 that ceiling, so calls 402'd ("requested up to 65536 tokens, can only
 afford 31301") even when the actual response was small.
 

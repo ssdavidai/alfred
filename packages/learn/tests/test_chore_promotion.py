@@ -8,7 +8,7 @@ Covers:
   - `_parse_promotion_response` malformed / missing / fenced inputs
 
 Filesystem and LLM I/O are mocked via tmp_path + monkeypatch so
-nothing touches the real /alfred-data directory or OpenRouter.
+nothing touches the real /alfred-data directory or the Hermes gateway.
 """
 from __future__ import annotations
 
@@ -278,7 +278,7 @@ class TestDraftPromotionProposal:
         candidate = self._candidate()
         with patch(
             "src.activities.chore_promotion._call_llm",
-            new=AsyncMock(side_effect=RuntimeError("openrouter 503")),
+            new=AsyncMock(side_effect=RuntimeError("gateway 503")),
         ):
             result = _run(draft_promotion_proposal, candidate)
         assert result["ok"] is False
