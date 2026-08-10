@@ -22,6 +22,8 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError, NotFoundError } from "../errors.js";
+import { getIngestDb } from "../../db/ingest.js";
+import { ulid } from "../../db/ulid.js";
 
 const VAULT_ROOT = process.env.VAULT_PATH ?? "/vault";
 const WEBHOOK_ENDPOINT_DIR = path.join(VAULT_ROOT, "webhook_endpoint");
@@ -225,8 +227,17 @@ export function registerInboundWebhookRoutes(): void {
   // Token-authenticated by the existence of the matching webhook_endpoint
   // vault record. No additional auth header expected — the token IS the
   // authenticator.
+  //
+  // Write order (#465):
+  //  1. ingest.db INSERT — PRIMARY, blocking. A failure here returns a
+  //     retryable 5xx so the sender knows to retry. The UNIQUE(stream,
+  //     external_id) constraint makes re-delivery idempotent.
+  //  2. vault stream_event markdown — SECONDARY, best-effort. A failure
+  //     here is logged but does NOT abort the request; ingest.db is the
+  //     canonical source the pipeline consumes.
+  //  3. webhook_endpoint counter bump — TERTIARY, best-effort.
   // ---------------------------------------------------------------------------
-  addRoute("POST", "/api/v1/webhooks/in/:token", async ({ res, body, params }) => {
+  addRoute("POST", "/api/v1/webhooks/in/:token", async ({ req, res, body, params }) => {
     const token = params.token || "";
     if (!isValidToken(token)) throw new NotFoundError("webhook not found");
     const fm = readWebhookRecord(token);
@@ -250,28 +261,75 @@ export function registerInboundWebhookRoutes(): void {
 
     const sourceType = `webhook:${fm.label}`;
     const sourceRef = `${token}:${shortUuid}`;
-    const eventFm = emitFrontmatter({
-      type: "stream_event",
+
+    // ── 1. BLOCKING: ingest.db insert (Store 4) ──────────────────────────
+    // Compute a stable per-delivery idempotency key: prefer a sender-supplied
+    // delivery header, fall back to a SHA-256 of token+payload so re-sends of
+    // the same body dedup correctly (UNIQUE(stream, external_id) constraint).
+    const deliveryHeader =
+      String(req.headers["x-webhook-delivery"] ?? req.headers["x-delivery-id"] ?? "").trim() || null;
+    const externalId: string = deliveryHeader
+      ? `${token}:${deliveryHeader}`
+      : `${token}:${crypto.createHash("sha256").update(`${token}:${payloadText}`).digest("hex").slice(0, 32)}`;
+
+    const payloadJson = JSON.stringify({
       source_type: sourceType,
-      received_at: iso,
       source_ref: sourceRef,
-      processed: false,
+      received_at: iso,
+      payload: body ?? null,
     });
-    const eventBody =
-      eventFm +
-      `\n# Inbound webhook payload\n\n` +
-      `Label: ${fm.label}\n` +
-      `Received: ${iso}\n\n` +
-      "```json\n" +
-      payloadText +
-      "\n```\n";
 
-    const eventFilename = `webhook-${safeIdent(token).slice(0, 12)}-${ts}-${shortUuid}.md`;
-    const eventPath = path.join(STREAM_EVENT_DIR, eventFilename);
-    fs.writeFileSync(eventPath, eventBody, "utf-8");
+    try {
+      getIngestDb()
+        .prepare(
+          `INSERT INTO stream_event
+             (id, ts, stream, channel, external_id, kind, payload_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(ulid(), iso, "webhook", sourceType, externalId, "webhook", payloadJson);
+    } catch (err) {
+      // UNIQUE(stream, external_id) → re-delivery of the same event; already
+      // enqueued — treat as idempotent success and return 202 normally.
+      if (String(err).includes("UNIQUE")) {
+        sendJson(res, 202, { status: "accepted", idempotent: true });
+        return;
+      }
+      // Any other failure means the event never landed in ingest.db — the
+      // only path the signal pipeline consumes. Surface as 5xx so the sender
+      // retries rather than treating the event as successfully delivered.
+      console.error(
+        `[webhooks] ingest.db insert failed for ${token}/${externalId}: ${String(err).slice(0, 200)}`,
+      );
+      throw err;
+    }
 
-    // Bump counters on the webhook_endpoint record. Best-effort — a failure
-    // here MUST NOT lose the stream_event we just wrote, so we swallow.
+    // ── 2. BEST-EFFORT: vault markdown copy (legacy audit trail) ─────────
+    // Kept for operator visibility and as a compatibility shim. A failure here
+    // MUST NOT fail the request — ingest.db is now authoritative.
+    try {
+      const eventFm = emitFrontmatter({
+        type: "stream_event",
+        source_type: sourceType,
+        received_at: iso,
+        source_ref: sourceRef,
+        processed: false,
+      });
+      const eventBody =
+        eventFm +
+        `\n# Inbound webhook payload\n\n` +
+        `Label: ${fm.label}\n` +
+        `Received: ${iso}\n\n` +
+        "```json\n" +
+        payloadText +
+        "\n```\n";
+      const eventFilename = `webhook-${safeIdent(token).slice(0, 12)}-${ts}-${shortUuid}.md`;
+      const eventPath = path.join(STREAM_EVENT_DIR, eventFilename);
+      fs.writeFileSync(eventPath, eventBody, "utf-8");
+    } catch (err) {
+      console.error(`[webhooks] vault markdown write failed (non-fatal): ${String(err).slice(0, 200)}`);
+    }
+
+    // ── 3. BEST-EFFORT: webhook_endpoint counter bump ────────────────────
     try {
       writeWebhookRecord({
         ...fm,
