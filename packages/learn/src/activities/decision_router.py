@@ -501,14 +501,14 @@ async def _retire_source_card_missing(
     retired_se["retired_intent"] = intent
     logger.warning(
         "decision_router.route_decision: needs_attention/%s returned 404 "
-        "on %s — source card deleted; retiring decision=%s as completed "
+        "on %s — source card deleted; retiring decision=%s as failed "
         "(side_effects.decision_router=source_card_missing)",
         na_id, intent, decision_id,
     )
     try:
         pr = await client.patch(
             f"/api/v1/decisions/{decision_id}",
-            json={"state": "completed", "side_effects": retired_se},
+            json={"state": "failed", "side_effects": retired_se},
         )
         pr.raise_for_status()
     except Exception as exc:  # noqa: BLE001
@@ -531,11 +531,11 @@ async def _retire_source_card_missing(
                 "target_kind": "decision",
                 "summary": (
                     f"source card needs_attention/{na_id} returned 404 "
-                    f"on intent={intent}; retired as completed "
+                    f"on intent={intent}; retired as failed "
                     "(source_card_missing)"
                 ),
                 "changes": {
-                    "state": {"from": "open", "to": "completed"},
+                    "state": {"from": "open", "to": "failed"},
                     "reason": "source_card_missing",
                     "na_id": na_id,
                     "intent": intent,
@@ -553,7 +553,7 @@ async def _retire_source_card_missing(
         "id": decision_id,
         "intent": intent,
         "source": "needs_attention",
-        "next_state": "completed",
+        "next_state": "failed",
         "actions": ["source_card_missing"],
         "side_effects": retired_se,
     }

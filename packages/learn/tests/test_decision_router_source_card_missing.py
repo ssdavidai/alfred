@@ -94,7 +94,7 @@ class _FakeClient:
         return _Resp(200)
 
     def retire_patches(self) -> list[dict[str, Any]]:
-        return [p for p in self.patches if p.get("state") == "completed"]
+        return [p for p in self.patches if p.get("state") == "failed"]
 
     def action_calls(self) -> list[str]:
         return [url for (m, url) in self.calls if m == "POST" and
@@ -149,7 +149,7 @@ def test_404_retires_decision_and_does_not_raise(monkeypatch, intent):
     result = asyncio.run(dr.route_decision(_decision(intent)))
 
     # Activity must return cleanly — no exception.
-    assert result["next_state"] == "completed"
+    assert result["next_state"] == "failed"
     assert result["actions"] == ["source_card_missing"]
     assert result["side_effects"]["decision_router"] == "source_card_missing"
     assert "retired_at" in result["side_effects"]
@@ -157,7 +157,7 @@ def test_404_retires_decision_and_does_not_raise(monkeypatch, intent):
     # The retire PATCH must have fired.
     assert len(fake.retire_patches()) == 1
     rp = fake.retire_patches()[0]
-    assert rp["state"] == "completed"
+    assert rp["state"] == "failed"
     assert rp["side_effects"]["decision_router"] == "source_card_missing"
 
 
