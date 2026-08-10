@@ -44,8 +44,22 @@ Expected time: under 30 seconds for stores totalling ~43 GB (copy, not compress)
 python3 scripts/hermes-session-retention.py
 ```
 
+Dry-run runs no preflight integrity check — it is read-only and cannot
+corrupt anything.  It returns in seconds regardless of store size.
+
 Review the output.  If `eligible_sessions` is unexpectedly high (e.g. the
 window was 0 days on a misconfigured clone), stop here.
+
+If `eligible_sessions` is 0, the script reports the age of the oldest session
+so you can tell "nothing old enough yet" from "store is truly clean":
+
+```
+  Eligible: 0 sessions 0 msgs | Range: None → None
+  (nothing old enough yet — oldest is 79.2d old; window is 90d)
+```
+
+This is expected for `main` and `heavy` profiles on a store younger than the
+window.  The windows will start catching sessions in the coming weeks.
 
 ### Step 3 — WAL checkpoint  (fast — run before apply)
 
@@ -83,8 +97,26 @@ python3 scripts/hermes-session-retention.py --apply --backup-ok --verbose
 `--backup-ok` is a required attestation flag; omitting it aborts with an
 error before touching any data.
 
-Expected times:
-- workers (~29 k eligible sessions, 14d window): 5–10 min
+**Preflight check on `--apply`**: before deleting anything the script runs
+`PRAGMA quick_check` on each store and prints a warning before it starts:
+
+```
+  PRAGMA quick_check on state.db (may take ~6.5 min on a 13 GB store — normal, not wedged)...
+```
+
+Do not kill the process during this phase — it is not wedged.  On a 13 GB
+workers store `quick_check` takes roughly 6.5 minutes.  If you are re-running
+in the same maintenance window and the store was clean on the first pass, use
+`--skip-integrity` to bypass it:
+
+```bash
+nohup python3 scripts/hermes-session-retention.py \
+  --apply --backup-ok --skip-integrity --verbose \
+  > /tmp/hermes-retention-retry.log 2>&1 &
+```
+
+Expected times (after the preflight completes):
+- workers (~138 k eligible sessions at 14d window): 5–10 min deletion
 - main (90d window, low session count): under 1 min
 - heavy (90d window, very low volume): under 1 min
 
@@ -146,10 +178,32 @@ No restore needed.
 --backup-ok            Required with --apply; attests backup was taken
 --checkpoint           WAL checkpoint (TRUNCATE) each profile store
 --vacuum               VACUUM each profile store (pre-checks free disk)
+--skip-integrity       Skip quick_check preflight on --apply; safe when
+                       re-running in the same maintenance window
 --profile NAME:DAYS    Override window for one profile (repeatable)
 --hermes-home PATH     Override HERMES_HOME (default: /hermes-state)
 --verbose              Print per-batch and per-operation progress
 ```
+
+## Preflight behaviour by mode
+
+| Mode | Preflight | Cost |
+|------|-----------|------|
+| dry-run (default) | None — read-only cannot corrupt | < 1 s |
+| `--apply` | `PRAGMA quick_check` — structural check | ~6.5 min on 13 GB |
+| `--apply --skip-integrity` | None | 0 s |
+
+`PRAGMA integrity_check` (page-by-page full verification) is never run by
+this script.  On a 13 GB store it takes substantially longer than
+`quick_check` and was the root cause of every earlier apply timeout.
+
+## Liveness predicate
+
+A session is eligible when `COALESCE(ended_at, started_at) < cutoff` and
+no live compression lock covers it.  Background agents never write
+`ended_at`; keying on `COALESCE` means an old open session is pruned (a
+14-day-old background run no longer exists), while a session started inside
+the window is protected whether or not it ended.
 
 ## Scheduling
 
