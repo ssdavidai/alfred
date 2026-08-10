@@ -1076,6 +1076,10 @@ services:
       # copied model file would silently revert them. Remove when Lunchflow
       # sends a currency or Sure stops defaulting.
       - ./scripts/sure-patches/preserve_lunchflow_currency.rb:/rails/config/initializers/zz_alfred_preserve_lunchflow_currency.rb:ro
+      # #318 — expose per-account Lunchflow anchor state so ctrl-api can report
+      # balance freshness honestly. REST-visible timestamps are insufficient (see
+      # docs/operators/sure-anchor-state.md). Remove when Sure exposes this natively.
+      - ./scripts/sure-patches/expose_balance_anchor_state.rb:/rails/config/initializers/zz_alfred_expose_balance_anchor_state.rb:ro
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:3000/up >/dev/null 2>&1 || exit 1"]
       interval: 15s
