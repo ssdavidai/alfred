@@ -70,12 +70,12 @@ surveyor:
     base_url: "http://localhost:11434"
     model: "nomic-embed-text"
     embedding_dims: 768
-    # api_key: "${OPENROUTER_API_KEY}"  # If set, uses OpenAI-compatible /v1/embeddings endpoint
-    # When using OpenRouter for embeddings, set:
-    #   base_url: "https://openrouter.ai/api/v1"
-    #   model: "openai/text-embedding-3-small"
+    # api_key: "${EMBED_API_KEY}"  # If set, uses OpenAI-compatible /v1/embeddings endpoint
+    # When using a cloud embedding provider, also set:
+    #   base_url: "https://your-embedding-provider.example.com/v1"
+    #   model: "text-embedding-3-small"
     #   embedding_dims: 1536
-    #   api_key: "${OPENROUTER_API_KEY}"
+    #   api_key: "${EMBED_API_KEY}"
   milvus:
     uri: "./data/milvus_lite.db"
     collection_name: "vault_embeddings"
@@ -85,10 +85,8 @@ surveyor:
       min_samples: 2
     leiden:
       resolution: 1.0
-  openrouter:
-    api_key: "${OPENROUTER_API_KEY}"
-    base_url: "https://openrouter.ai/api/v1"
-    model: "x-ai/grok-4.1-fast"
+  labeler_gateway:
+    hermes_gateway_url: "${SURVEYOR_HERMES_GATEWAY_URL}"
     temperature: 0.3
   labeler:
     max_files_per_cluster_context: 20

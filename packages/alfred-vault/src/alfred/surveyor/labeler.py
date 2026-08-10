@@ -1,4 +1,4 @@
-"""Stage 4: OpenRouter LLM labeling — cluster tags + relationship suggestions."""
+"""Stage 4: Hermes gateway LLM labeling — cluster tags + relationship suggestions."""
 
 from __future__ import annotations
 
@@ -9,9 +9,8 @@ from typing import Any
 
 import httpx
 import structlog
-from openai import AsyncOpenAI
 
-from .config import LabelerConfig, OpenRouterConfig
+from .config import LabelerConfig, LabelerGatewayConfig
 from .parser import VaultRecord
 
 log = structlog.get_logger()
@@ -177,18 +176,13 @@ RETRY_BASE_DELAY = 2.0
 
 
 class Labeler:
-    def __init__(self, openrouter_cfg: OpenRouterConfig, labeler_cfg: LabelerConfig) -> None:
-        self.client = AsyncOpenAI(
-            api_key=openrouter_cfg.api_key,
-            base_url=openrouter_cfg.base_url,
-        )
-        self.model = openrouter_cfg.model
-        self.temperature = openrouter_cfg.temperature
-        # Dual transport. When a Hermes gateway url is configured (platform
-        # mode), _llm_call routes through Hermes /v1/responses instead of the
-        # direct AsyncOpenAI client above. Empty url = standalone direct mode.
-        self.hermes_gateway_url = openrouter_cfg.hermes_gateway_url.rstrip("/")
-        self.hermes_gateway_token = openrouter_cfg.resolved_gateway_token()
+    def __init__(self, gateway_cfg: LabelerGatewayConfig, labeler_cfg: LabelerConfig) -> None:
+        # All LLM calls route through the Hermes WORKERS gateway.
+        # An empty hermes_gateway_url is a misconfiguration — the labeler
+        # will raise RuntimeError at the first call rather than falling back
+        # to any third-party provider.
+        self.hermes_gateway_url = gateway_cfg.hermes_gateway_url.rstrip("/")
+        self.hermes_gateway_token = gateway_cfg.resolved_gateway_token()
         self.max_files = labeler_cfg.max_files_per_cluster_context
         self.body_preview_chars = labeler_cfg.body_preview_chars
         self.min_cluster_size = labeler_cfg.min_cluster_size_to_label
@@ -349,48 +343,18 @@ class Labeler:
         return "\n".join(lines)
 
     async def _llm_call(self, prompt: str) -> str | None:
-        """Make an LLM call with rate limiting and retry.
+        """Make a Hermes WORKERS gateway call with rate limiting and retry.
 
-        Dual transport, selected once per instance from config:
-          * Hermes gateway url configured (platform mode) → route through the
-            WORKERS-profile Hermes gateway via ``POST /v1/responses``.
-          * empty gateway url (standalone / PyPI mode) → the original
-            AsyncOpenAI direct path against OpenRouter, unchanged.
-        Signature and return contract (``str | None``) are identical in both.
+        Raises ``RuntimeError`` if the gateway URL is not configured —
+        there is no fallback to any third-party provider.
         """
-        if self.hermes_gateway_url:
-            return await self._llm_call_hermes(prompt)
-        return await self._llm_call_direct(prompt)
-
-    async def _llm_call_direct(self, prompt: str) -> str | None:
-        """Standalone direct path — OpenRouter via AsyncOpenAI (unchanged)."""
-        for attempt in range(MAX_RETRIES):
-            try:
-                resp = await self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=self.temperature,
-                )
-                if resp.usage:
-                    log.info(
-                        "labeler.usage",
-                        total_tokens=resp.usage.total_tokens,
-                        prompt_tokens=resp.usage.prompt_tokens,
-                        completion_tokens=resp.usage.completion_tokens,
-                    )
-                await asyncio.sleep(API_CALL_DELAY)
-                return resp.choices[0].message.content
-            except Exception as e:
-                error_str = str(e)
-                if "429" in error_str:
-                    delay = RETRY_BASE_DELAY * (2 ** attempt)
-                    log.warning("labeler.rate_limited", attempt=attempt + 1, delay=delay)
-                    await asyncio.sleep(delay)
-                else:
-                    log.error("labeler.llm_error", error=error_str)
-                    return None
-        log.error("labeler.llm_failed", max_retries=MAX_RETRIES)
-        return None
+        if not self.hermes_gateway_url:
+            raise RuntimeError(
+                "Labeler: SURVEYOR_HERMES_GATEWAY_URL is not set. "
+                "The surveyor labeler requires the Hermes WORKERS gateway. "
+                "Set SURVEYOR_HERMES_GATEWAY_URL=http://hermes:18790 in the environment."
+            )
+        return await self._llm_call_hermes(prompt)
 
     async def _llm_call_hermes(self, prompt: str) -> str | None:
         """Platform path — Hermes WORKERS gateway via ``POST /v1/responses``.

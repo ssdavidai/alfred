@@ -104,7 +104,7 @@ class Embedder:
     ) -> None:
         self.api_key = ollama_cfg.api_key
         if self.api_key:
-            # OpenAI-compatible endpoint (e.g. OpenRouter)
+            # OpenAI-compatible cloud embedding endpoint
             self.embed_url = f"{ollama_cfg.base_url}/embeddings"
         else:
             # Native Ollama endpoint

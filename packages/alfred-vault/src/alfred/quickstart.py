@@ -196,8 +196,7 @@ def run_quickstart() -> None:
             print("  [!!] `openclaw` not found on PATH")
 
     # 5. Surveyor
-    enable_surveyor = _prompt("\nEnable surveyor? (requires Ollama + OpenRouter) [y/N]", "n").lower() in ("y", "yes")
-    openrouter_api_key = ""
+    enable_surveyor = _prompt("\nEnable surveyor? (requires Ollama + Hermes gateway) [y/N]", "n").lower() in ("y", "yes")
 
     if enable_surveyor:
         # Install surveyor dependencies
@@ -222,9 +221,8 @@ def run_quickstart() -> None:
             print("  [!!] Ollama still not reachable at localhost:11434")
             print("       Install manually: https://ollama.com/download")
 
-        openrouter_api_key = _prompt("  Enter your OPENROUTER_API_KEY")
-        if not openrouter_api_key:
-            print("  [!!] No API key -- you'll need to set OPENROUTER_API_KEY in .env")
+        print("  Note: LLM labeling routes through the Hermes WORKERS gateway.")
+        print("        Set SURVEYOR_HERMES_GATEWAY_URL=http://hermes:18790 in your environment.")
 
     # 6. Write files
     print(f"\n--- Setting up ---")
@@ -313,10 +311,8 @@ def run_quickstart() -> None:
                 "hdbscan": {"min_cluster_size": 3, "min_samples": 2},
                 "leiden": {"resolution": 1.0},
             },
-            "openrouter": {
-                "api_key": "${OPENROUTER_API_KEY}",
-                "base_url": "https://openrouter.ai/api/v1",
-                "model": "x-ai/grok-4.1-fast",
+            "labeler_gateway": {
+                "hermes_gateway_url": "${SURVEYOR_HERMES_GATEWAY_URL}",
                 "temperature": 0.3,
             },
             "labeler": {
@@ -335,8 +331,6 @@ def run_quickstart() -> None:
     env_lines = ["# Alfred environment variables"]
     if zo_api_key:
         env_lines.append(f"ZO_API_KEY={zo_api_key}")
-    if openrouter_api_key:
-        env_lines.append(f"OPENROUTER_API_KEY={openrouter_api_key}")
     env_lines.append("")
 
     with open(".env", "w", encoding="utf-8") as f:

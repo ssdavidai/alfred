@@ -37,7 +37,7 @@ class Daemon:
         self.watcher = VaultWatcher(cfg.vault, cfg.watcher)
         self.embedder = Embedder(cfg.ollama, cfg.milvus, cfg.vault.path, self.state)
         self.clusterer = Clusterer(cfg.clustering, self.state)
-        self.labeler = Labeler(cfg.openrouter, cfg.labeler)
+        self.labeler = Labeler(cfg.labeler_gateway, cfg.labeler)
         self.writer = VaultWriter(cfg.vault.path, self.state)
 
     def request_shutdown(self) -> None:

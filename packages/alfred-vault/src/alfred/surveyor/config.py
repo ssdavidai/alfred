@@ -54,40 +54,41 @@ class ClusteringConfig:
 
 
 @dataclass
-class OpenRouterConfig:
-    api_key: str = ""
-    base_url: str = "https://openrouter.ai/api/v1"
-    model: str = "x-ai/grok-4.1-fast"
+class LabelerGatewayConfig:
+    """Hermes WORKERS gateway config for the surveyor labeler.
+
+    All LLM calls from the surveyor labeler route through the Hermes
+    WORKERS gateway (``/v1/responses``).  A missing or empty
+    ``hermes_gateway_url`` is a hard misconfiguration — the labeler raises
+    ``RuntimeError`` at call time rather than silently falling back to any
+    third-party provider.
+
+    Platform sets ``SURVEYOR_HERMES_GATEWAY_URL=http://hermes:18790``.
+    Gateway bearer token is read from ``HERMES_GATEWAY_TOKEN`` (env var)
+    or from the token file written by the platform at boot.
+    """
+
     temperature: float = 0.3
-    # Dual transport. alfred-vault ships BOTH as the platform surveyor worker
-    # AND as the public `pip install alfred-vault` package. When running inside
-    # the Alfred platform the labeler routes its LLM calls through the Hermes
-    # WORKERS gateway (cheap profile) instead of hitting OpenRouter directly;
-    # the platform sets ``SURVEYOR_HERMES_GATEWAY_URL=http://hermes:18790``.
-    # An empty url (the default, and the standalone PyPI case) keeps the
-    # existing AsyncOpenAI direct path — Hermes is a platform-only dependency.
     hermes_gateway_url: str = field(
         default_factory=lambda: os.environ.get("SURVEYOR_HERMES_GATEWAY_URL", "")
     )
-    # Gateway bearer token. Matches how alfred-learn reads it: env var first,
-    # else the shared token file written into the data dir by the platform.
-    # In standalone mode neither is set and the token stays empty (unused).
+    # Gateway bearer token. Env var wins; else read from the token file that
+    # the platform writes at boot (shared across all alfred-vault workers).
     hermes_gateway_token: str = field(
         default_factory=lambda: os.environ.get("HERMES_GATEWAY_TOKEN", "")
     )
-    # Path to the gateway token file, read when ``hermes_gateway_token`` is
-    # empty (the platform writes the token here rather than into the env).
+    # Path to the token file — overridable via env for custom deployments.
     hermes_gateway_token_file: str = field(
         default_factory=lambda: os.environ.get(
-            "OPENCLAW_GATEWAY_TOKEN_FILE", "/alfred-data/.gateway-token"
+            "HERMES_GATEWAY_TOKEN_FILE", "/alfred-data/.gateway-token"
         )
     )
 
     def resolved_gateway_token(self) -> str:
         """Bearer token for Hermes — env var wins, else the token file.
 
-        Returns "" when neither is available (standalone mode, where the
-        token is never consulted because ``hermes_gateway_url`` is empty).
+        Returns "" when neither source is available (token will be rejected
+        by the gateway with a 401, which the labeler surfaces as an error).
         """
         if self.hermes_gateway_token:
             return self.hermes_gateway_token
@@ -105,9 +106,9 @@ class LabelerConfig:
     min_cluster_size_to_label: int = 2
     # Max LLM calls in flight during the cluster-labeling pass. Each cluster
     # fires 2 sequential calls (label_cluster + suggest_relationships), and
-    # we fan out across clusters. 8 keeps well under OpenRouter's default
-    # rate limits for the fast-tier models while shortening full-vault
-    # labeling from tens of minutes to single digits.
+    # we fan out across clusters. 8 keeps the Hermes WORKERS gateway well
+    # within concurrency limits while shortening full-vault labeling from
+    # tens of minutes to single digits.
     max_concurrent: int = 8
 
 
@@ -146,7 +147,7 @@ class PipelineConfig:
     ollama: OllamaConfig
     milvus: MilvusConfig
     clustering: ClusteringConfig
-    openrouter: OpenRouterConfig
+    labeler_gateway: LabelerGatewayConfig
     labeler: LabelerConfig
     state: StateConfig
     logging: LoggingConfig
@@ -217,7 +218,7 @@ def load_config(config_path: str | Path) -> PipelineConfig:
         ollama=_build_dataclass(OllamaConfig, raw.get("ollama")),
         milvus=_build_dataclass(MilvusConfig, raw.get("milvus")),
         clustering=_build_dataclass(ClusteringConfig, raw.get("clustering")),
-        openrouter=_build_dataclass(OpenRouterConfig, raw.get("openrouter")),
+        labeler_gateway=_build_dataclass(LabelerGatewayConfig, raw.get("labeler_gateway")),
         labeler=_build_dataclass(LabelerConfig, raw.get("labeler")),
         state=_build_dataclass(StateConfig, raw.get("state")),
         logging=_build_dataclass(LoggingConfig, raw.get("logging")),
@@ -235,7 +236,7 @@ def load_from_unified(raw: dict) -> PipelineConfig:
         ollama=_build_dataclass(OllamaConfig, tool.get("ollama")),
         milvus=_build_dataclass(MilvusConfig, tool.get("milvus")),
         clustering=_build_dataclass(ClusteringConfig, tool.get("clustering")),
-        openrouter=_build_dataclass(OpenRouterConfig, tool.get("openrouter")),
+        labeler_gateway=_build_dataclass(LabelerGatewayConfig, tool.get("labeler_gateway")),
         labeler=_build_dataclass(LabelerConfig, tool.get("labeler")),
         state=_build_dataclass(StateConfig, tool.get("state")),
         logging=_build_dataclass(LoggingConfig, raw.get("logging")),

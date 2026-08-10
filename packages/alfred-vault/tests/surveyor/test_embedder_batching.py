@@ -15,7 +15,7 @@ def _stub_embedder(api_key: str | None = "sk-test") -> Embedder:
     e.api_key = api_key
     e.model = "openai/text-embedding-3-small"
     e.embedding_dims = 1536
-    e.embed_url = "https://openrouter.ai/api/v1/embeddings"
+    e.embed_url = "https://api.example.com/v1/embeddings"
     e._http = None
     return e
 

@@ -4,14 +4,11 @@
 has no "matter". If that path fired it would write `related_matters` links
 pointing at a type the rest of the system rejects (dead/poison code).
 
-NOTE on import strategy: `alfred.surveyor.labeler` imports `structlog` and the
-`openai` SDK at module top — neither is in the worktree-local venv (they are
-the heavy/runtime surveyor deps). We therefore can't import ENTITY_RECORD_TYPES
-directly. Per the lane instructions we encode the *expected* post-fix value of
-the constant here and assert it against the authoritative KNOWN_TYPES from
-schema.py (a light module). The labeler edit itself is additionally guarded by
-`python3 -m py_compile`. If labeler.py ever sheds its heavy top-level imports,
-this test should be switched to import ENTITY_RECORD_TYPES directly.
+NOTE on import strategy: `alfred.surveyor.labeler` imports `structlog` at
+module top — a heavy runtime dep that may not be in a minimal test env. We
+therefore read ENTITY_RECORD_TYPES via AST rather than a live import, and
+assert it against the authoritative KNOWN_TYPES from schema.py (a light
+module). The labeler edit is additionally guarded by `python3 -m py_compile`.
 """
 
 from __future__ import annotations
