@@ -86,6 +86,13 @@
 # Check on upgrade: if GET /api/v1/accounts includes a freshness or anchor
 # field, this patch is redundant. Remove the initializer and its mount.
 
+# Partial mitigation: filter the key from Rails' own controller/params logs.
+# NOTE: this does NOT cover Sure's middleware-level header dump (headers_json
+# in docker logs). That requires configuring Sure's request logger or adding a
+# header-stripping Rack middleware — outside the scope of this initializer.
+# See docs/operators/sure-anchor-state.md for the full note.
+Rails.application.config.filter_parameters |= %w[HTTP_X_API_KEY X_Api_Key]
+
 Rails.application.config.to_prepare do
   next if defined?(::AlfredBalanceAnchorStateController)
 
@@ -184,9 +191,15 @@ Rails.application.config.to_prepare do
       nil
     end
   end
+
+  Rails.logger.info("[alfred #318] balance anchor state patch loaded — GET /api/v1/alfred/balance_anchor_state")
 end
 
-Rails.application.routes.draw do
+# Use `append` (not `draw`) so the route is registered AFTER config/routes.rb
+# is evaluated. `draw` from an initializer runs before the main routes file,
+# so the app's route set replaces it and the endpoint 404s silently.
+Rails.application.routes.append do
   get "/api/v1/alfred/balance_anchor_state",
-      to: "alfred_balance_anchor_state#show"
+      to: "alfred_balance_anchor_state#show",
+      defaults: { format: :json }
 end

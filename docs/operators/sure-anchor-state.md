@@ -92,15 +92,29 @@ row is not an account.
 
 ## Verifying on a tenant
 
+**Step 1 — confirm the route exists.** A missing route and "not deployed" are
+indistinguishable from a 404; check the route table first:
+
 ```bash
-# From any host with curl and the tenant's SURE_API_KEY:
-curl -s -H "X-Api-Key: <SURE_API_KEY>" \
-  https://sure.<DOMAIN>/api/v1/alfred/balance_anchor_state | jq .
+docker exec sure-web bin/rails routes | grep anchor
+# Must print one line containing balance_anchor_state
 ```
 
-From inside the compose stack (e.g. for local smoke):
+**Step 2 — confirm the patch loaded.** Look for the boot log line:
 
 ```bash
+docker logs sure-web 2>&1 | grep "alfred #318"
+# Expected: [alfred #318] balance anchor state patch loaded — GET /api/v1/alfred/balance_anchor_state
+```
+
+**Step 3 — exercise the endpoint:**
+
+```bash
+# From any host with the tenant's SURE_API_KEY:
+curl -s -H "X-Api-Key: <SURE_API_KEY>" \
+  https://sure.<DOMAIN>/api/v1/alfred/balance_anchor_state | jq .
+
+# From inside the compose stack:
 docker exec sure-web \
   curl -s -H "X-Api-Key: ${SURE_API_KEY}" \
   http://127.0.0.1:3000/api/v1/alfred/balance_anchor_state
@@ -116,11 +130,22 @@ curl -s -H "X-Api-Key: <SURE_API_KEY>" \
 # Every line must print 36.
 ```
 
-To confirm the patch loaded, check sure-web logs at startup for:
+## The API key appears in sure-web logs
 
-```
-[alfred #318] ...
-```
+Sure's request logger writes full request headers — including `X-Api-Key` — to
+stdout on every request. This means `SURE_API_KEY` will appear in
+`docker logs sure-web` on every poll of this endpoint.
+
+The initializer adds `HTTP_X_API_KEY` and `X_Api_Key` to Rails'
+`filter_parameters`, which redacts the key from Rails' own controller-level
+param logs. It does **not** cover Sure's middleware-level header dump
+(`headers_json`), which runs before Rails' filter machinery.
+
+A structural fix would require either configuring Sure's own request logger to
+redact authentication headers, or adding a header-stripping Rack middleware
+before Sure's logger — both of which are outside the scope of an initializer
+patch. Anyone reading `docker logs sure-web` should know the log stream
+contains a credential. Rotation of the key is Sir's call.
 
 ## Degradation modes
 
