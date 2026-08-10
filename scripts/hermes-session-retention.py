@@ -20,6 +20,7 @@ FTS5 table — it wipes the index.  WAL/VACUUM: see hermes-retention-maintenance
 
 import argparse
 import os
+import shutil
 import sqlite3
 import sys
 import time
@@ -90,6 +91,45 @@ def _batches(lst: list, n: int):
         yield lst[i : i + n]
 
 
+def checkpoint(db_path: Path, verbose: bool) -> dict:
+    """WAL checkpoint (TRUNCATE mode).  Safe at any time; no data-loss risk."""
+    if not db_path.exists():
+        return {"error": f"missing: {db_path}"}
+    con = _open(db_path, readonly=False)
+    busy, log_pg, ckpt_pg = con.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+    con.close()
+    if verbose:
+        print(f"  checkpoint: busy={busy} log_pages={log_pg} moved={ckpt_pg}", flush=True)
+    return {"busy": bool(busy), "log_pages": log_pg, "ckpt_pages": ckpt_pg}
+
+
+def vacuum_db(db_path: Path, verbose: bool, _free_override: int = -1) -> dict:
+    """VACUUM in-place.  Requires ~2x file size in free disk; aborts if disk is tight.
+
+    _free_override: inject a fake free-bytes value for tests (>=0 to activate).
+    WAL truncation and a full-file rewrite differ from session deletion in disk
+    requirement, risk, and timing — that is why they are opt-in flags rather
+    than steps in --apply.
+    """
+    if not db_path.exists():
+        return {"error": f"missing: {db_path}"}
+    con = _open(db_path, readonly=False)
+    db_bytes = _db_bytes(con)
+    con.close()
+    free = _free_override if _free_override >= 0 else shutil.disk_usage(db_path.parent).free
+    needed = db_bytes * 2
+    if free < needed:
+        return {"error": f"need ~{needed//(1024**3):.1f} GB free, have {free//(1024**3):.1f} GB",
+                "db_bytes": db_bytes, "free_bytes": free}
+    con = _open(db_path, readonly=False)
+    if verbose:
+        print(f"  VACUUM {db_path} ({db_bytes//(1024**3):.1f} GB) ...", flush=True)
+    con.execute("VACUUM")
+    size_after = _db_bytes(con)
+    con.close()
+    return {"bytes_before": db_bytes, "bytes_after": size_after, "freed_bytes": db_bytes - size_after}
+
+
 def dry_run(db_path: Path, profile: str, days: int) -> dict:
     if not db_path.exists():
         return {"error": f"missing: {db_path}"}
@@ -158,6 +198,8 @@ def main():
     p.add_argument("--backup-ok", action="store_true", help="Attest backup taken; required for --apply")
     p.add_argument("--profile", action="append", metavar="NAME:DAYS", default=[])
     p.add_argument("--hermes-home", default=HERMES_HOME)
+    p.add_argument("--checkpoint", action="store_true", help="WAL checkpoint (TRUNCATE) each profile store")
+    p.add_argument("--vacuum", action="store_true", help="VACUUM each profile store (needs ~2x file size free)")
     p.add_argument("--verbose", action="store_true")
     args = p.parse_args()
 
@@ -192,6 +234,19 @@ def main():
                 print(f"  DB: {r['db_bytes'] / (1024**3):.2f} GB | "
                       f"Eligible: {r['eligible_sessions']:,} sessions {r['eligible_messages']:,} msgs | "
                       f"Range: {r['oldest']} → {r['newest']}")
+        if args.checkpoint:
+            cr = checkpoint(db_path, args.verbose)
+            if "error" in cr:
+                print(f"  checkpoint ERROR: {cr['error']}")
+            else:
+                print(f"  WAL checkpoint: busy={cr['busy']} log={cr['log_pages']} moved={cr['ckpt_pages']}")
+        if args.vacuum:
+            vr = vacuum_db(db_path, args.verbose)
+            if "error" in vr:
+                print(f"  VACUUM ERROR: {vr['error']}")
+            else:
+                freed = vr.get("freed_bytes", 0)
+                print(f"  VACUUM freed {freed//(1024**3):.1f} GB ({freed:,} bytes)")
     if not args.apply:
         print("\n[DRY RUN — re-run with --apply --backup-ok to prune]\n")
 

@@ -20,6 +20,7 @@ s.loader.exec_module(_mod)  # type: ignore[union-attr]
 PROFILE_RETENTION = _mod.PROFILE_RETENTION
 _cutoff = _mod._cutoff; _eligible = _mod._eligible; _has_fts_triggers = _mod._has_fts_triggers
 _open = _mod._open; apply = _mod.apply; dry_run = _mod.dry_run
+checkpoint = _mod.checkpoint; vacuum_db = _mod.vacuum_db
 
 NOW = time.time(); DAY = 86400
 
@@ -178,6 +179,53 @@ class TestFts(unittest.TestCase):
                          "delete trigger must have cleared messages_fts")
         self.assertEqual(con2.execute("SELECT COUNT(*) FROM messages_fts_trigram").fetchone()[0], 0)
         con2.close()
+
+
+class TestCheckpoint(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db = Path(self.tmp.name) / "state.db"; _make_db(self.db)
+
+    def tearDown(self): self.tmp.cleanup()
+
+    def test_checkpoint_returns_stats(self):
+        """Checkpoint on a newly created WAL db returns log_pages and is not busy."""
+        r = checkpoint(self.db, verbose=False)
+        self.assertNotIn("error", r, r)
+        self.assertIn("log_pages", r)
+        self.assertIn("ckpt_pages", r)
+
+    def test_checkpoint_missing_db(self):
+        r = checkpoint(Path("/nonexistent/state.db"), verbose=False)
+        self.assertIn("error", r)
+
+
+class TestVacuum(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db = Path(self.tmp.name) / "state.db"; _make_db(self.db)
+        con = sqlite3.connect(str(self.db)); con.row_factory = sqlite3.Row
+        for i in range(5): _ins(con, f"s{i}", 10 + i)
+        con.close()
+
+    def tearDown(self): self.tmp.cleanup()
+
+    def test_vacuum_ok(self):
+        r = vacuum_db(self.db, verbose=False)
+        self.assertNotIn("error", r, r)
+        self.assertIn("bytes_before", r)
+        self.assertIn("bytes_after", r)
+
+    def test_vacuum_insufficient_disk_aborts(self):
+        """_free_override=0 simulates a full disk; tool must refuse, not fill disk."""
+        r = vacuum_db(self.db, verbose=False, _free_override=0)
+        self.assertIn("error", r)
+        self.assertIn("need", r["error"])
+        self.assertIn("db_bytes", r)
+
+    def test_vacuum_missing_db(self):
+        r = vacuum_db(Path("/nonexistent/state.db"), verbose=False)
+        self.assertIn("error", r)
 
 
 if __name__ == "__main__":
