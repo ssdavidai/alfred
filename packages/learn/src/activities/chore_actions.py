@@ -325,33 +325,116 @@ async def save_digest_to_vault(matter_slug: str, digest: str) -> None:
 # ---------------------------------------------------------------------------
 
 @activity.defn
-async def send_chore_notification(chore_slug: str, session_id: str, message: str) -> None:
-    """Send a notification via the existing tenant notification route.
+async def send_chore_notification(
+    chore_slug: str,
+    session_id: str,  # kept for Temporal backward compat; dead param since 2026-05-25
+    message: str,
+    notify_channel: str | None = None,
+) -> dict:
+    """Send a notification via the tenant notification route.
 
-    POSTs to ctrl-api /api/v1/notifications, which forwards to the OpenClaw
-    gateway via the sessions_send tool. The session_id determines which
-    Alfred session (and therefore which delivery channel) receives the
-    message.
+    POSTs to ctrl-api /api/v1/notifications.  When the chore record carries a
+    ``notify_channel`` frontmatter field (or the caller passes ``notify_channel``
+    directly), it is forwarded as the ``channel`` parameter so ctrl-api routes
+    to that specific Slack/Telegram destination.  When absent, ``channel`` is
+    omitted and ctrl-api applies its home-channel default
+    (SLACK_HOME_CHANNEL / TELEGRAM_HOME_CHANNEL).  If neither resolves there,
+    ctrl-api returns 424 and this activity raises, allowing Temporal to retry
+    and surface the misconfiguration visibly.
+
+    The ``session_id`` positional parameter is kept for backward compatibility
+    with in-flight generated chore workflows that call this activity with
+    positional ``args=[slug, session_id, msg]``.  It has been a no-op since
+    the 2026-05-25 "one-Alfred" hard switch: ctrl-api's notifications route
+    never forwarded it downstream.
+
+    Temporal replay safety: ``notify_channel`` is a regular optional positional
+    parameter with a default of ``None``.  Existing callers that dispatch via
+    ``args=[slug, session_id, msg]`` (three positional args) keep working
+    unchanged — Python fills the fourth arg from its default.  The activity
+    name is unchanged, so Temporal's history lookup still resolves.  No
+    workflow code needs to change for the activity contract to stay valid.
+    (Temporal's SDK rejects keyword-only ``*`` args entirely; see
+    temporalio/activity.py:601.)
+
+    Returns structured delivery evidence::
+
+        {
+            "delivered": bool,
+            "destination": str,    # resolved channel value or "auto"
+            "http_status": int,
+            "error": str | None,
+        }
+
+    Raises ``httpx.HTTPStatusError`` on non-2xx so Temporal can retry on
+    transient failures.  Transport errors propagate as-is.
     """
     config = load_config()
     api_key = os.environ.get("AAS_API_KEY", "")
-    url = f"{config.alfred_ctrl_url}/api/v1/notifications"
-    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-    async with httpx.AsyncClient(timeout=30.0) as http:
+
+    # 1. Resolve destination: kwarg → chore frontmatter → omit (ctrl-api decides).
+    # Priority: explicit kwarg wins (allows in-repo workflows to pass it
+    # directly after loading ctx); else read from the chore record itself so
+    # generated chores on live tenants benefit without any code change.
+    resolved_channel = notify_channel
+    if resolved_channel is None:
         try:
-            await http.post(
-                url,
-                json={
-                    "message": f"[Chore: {chore_slug}]\n\n{message}",
-                    "urgency": "normal",
-                    "session_id": session_id,
-                },
-                headers=headers,
-            )
+            ch_client = VaultClient(config)
+            try:
+                record = await ch_client.read_record(f"chore/{chore_slug}.md")
+                ch = (record.get("frontmatter") or {}).get("notify_channel")
+                if ch and isinstance(ch, str) and ch.strip():
+                    resolved_channel = ch.strip()
+            finally:
+                await ch_client.close()
         except Exception:
-            # Best-effort: don't fail the whole chore run because notification
-            # delivery flaked.
-            pass
+            pass  # treat as no channel — ctrl-api home default applies
+
+    # 2. Build POST body; include channel only when explicitly resolved so that
+    #    ctrl-api's home-channel default (SLACK_HOME_CHANNEL / TELEGRAM_HOME_CHANNEL)
+    #    is the sole fallback, not any ambient session.
+    body: dict[str, Any] = {
+        "message": f"[Chore: {chore_slug}]\n\n{message}",
+        "urgency": "normal",
+    }
+    if resolved_channel:
+        body["channel"] = resolved_channel
+
+    destination = resolved_channel or "auto"
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+
+    async with httpx.AsyncClient(timeout=30.0) as http:
+        resp = await http.post(
+            f"{config.alfred_ctrl_url}/api/v1/notifications",
+            json=body,
+            headers=headers,
+        )
+        resp.raise_for_status()
+
+    # 3. Best-effort: append a delivery audit line to the chore body so the
+    #    resolved destination is auditable even when the calling workflow's
+    #    record_chore_run summary omits it.  Generated chore workflows that do
+    #    not capture the return value of this activity still get the destination
+    #    recorded in the vault run log.
+    ts_iso = datetime.now(timezone.utc).isoformat()
+    try:
+        audit_client = VaultClient(config)
+        try:
+            await audit_client.update_record(
+                f"chore/{chore_slug}.md",
+                f"\n- {ts_iso}: notification sent → destination={destination}",
+            )
+        finally:
+            await audit_client.close()
+    except Exception:
+        pass  # best-effort; vault offline must not block delivery evidence
+
+    return {
+        "delivered": True,
+        "destination": destination,
+        "http_status": resp.status_code,
+        "error": None,
+    }
 
 
 # ---------------------------------------------------------------------------
