@@ -24,15 +24,23 @@ overridable at the command line.  Never collapse them into one number.
 Liveness predicate — a session is protected if ANY holds:
   1. ended_at IS NULL            — session is in progress
   2. started_at > cutoff         — newer than the retention window
-  3. id in compression_locks     — compression in flight; deleting now
-     where released_at IS NULL     would corrupt the session
+  3. id in compression_locks     — LCM compression in flight; lock uses
+     where expires_at > now()      expiry-time semantics, not released_at
 
 FTS5 note:
-  The script inspects sqlite_master at runtime to detect whether UPDATE/
-  DELETE triggers maintain messages_fts automatically.  If no such
-  triggers are found, it deletes from messages_fts explicitly (matching
-  on rowid = messages.id) before deleting from messages.  Never assume —
-  always verify from the live schema.
+  The script inspects sqlite_master at runtime to detect whether DELETE
+  triggers on `messages` maintain messages_fts automatically.  On the
+  live store, six triggers exist (messages_fts_{insert,delete,update} and
+  messages_fts_trigram_{insert,delete,update}) — deleting from `messages`
+  already removes both FTS index tables.  If a future schema has no such
+  triggers the script falls back to explicit rowid DELETE on messages_fts.
+  Never assume trigger presence — always verify from the live schema.
+
+  IMPORTANT — do NOT call `INSERT INTO messages_fts(messages_fts)
+  VALUES('rebuild')` on a plain (non-content) FTS5 table.  On a plain
+  table rebuild repopulates from a non-existent content table and wipes
+  the entire index.  Rebuild is only valid for external-content FTS5
+  tables, and the live store uses a plain table.
 
 VACUUM warning:
   VACUUM rewrites the entire database file and requires ~2x the current
@@ -78,30 +86,18 @@ def _integrity(con: sqlite3.Connection) -> bool:
 
 
 def _has_fts_triggers(con: sqlite3.Connection) -> bool:
-    """Return True if DELETE triggers on `messages` maintain `messages_fts`."""
+    """Return True if DELETE triggers on `messages` maintain FTS indexes.
+
+    On the live store there are six triggers:
+      messages_fts_{insert,delete,update}
+      messages_fts_trigram_{insert,delete,update}
+    When these exist, deleting from `messages` already removes FTS rows from
+    both indexes.  No explicit FTS cleanup is needed in that case.
+    """
     rows = con.execute(
         "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='messages'"
     ).fetchall()
     return any("fts" in (r["name"] or "").lower() for r in rows)
-
-
-def _fts_is_content_table(con: sqlite3.Connection) -> bool:
-    """Return True if messages_fts is an FTS5 *content* table (content='messages').
-
-    A content table delegates storage to an external table; its shadow tables
-    hold only the index, not a copy of the data.  Rows cannot be deleted from
-    a content FTS directly by rowid — that path raises "database disk image is
-    malformed".  Cleanup requires 'rebuild' after the source rows are gone.
-
-    Detection: read the CREATE VIRTUAL TABLE DDL from sqlite_master.  An FTS5
-    content table always has a content=... option in its definition.
-    """
-    row = con.execute(
-        "SELECT sql FROM sqlite_master WHERE name='messages_fts'"
-    ).fetchone()
-    if not row or not row[0]:
-        return False
-    return "content=" in row[0].lower()
 
 
 def _cutoff(days: int) -> float:
@@ -109,17 +105,23 @@ def _cutoff(days: int) -> float:
 
 
 def _eligible(con: sqlite3.Connection, cutoff_ts: float) -> list[str]:
-    """Session IDs eligible for deletion (outside window, ended, not in compression_locks)."""
+    """Session IDs eligible for deletion (outside window, ended, not in compression_locks).
+
+    compression_locks uses expiry-time semantics: a lock is still held when
+    expires_at > now.  There is no released_at column — that column does not
+    exist in the live schema and referencing it raises OperationalError.
+    """
+    now = time.time()
     rows = con.execute(
         """
         SELECT s.id FROM sessions s
         WHERE s.ended_at IS NOT NULL
           AND s.started_at < ?
           AND s.id NOT IN (
-              SELECT session_id FROM compression_locks WHERE released_at IS NULL
+              SELECT session_id FROM compression_locks WHERE expires_at > ?
           )
         """,
-        (cutoff_ts,),
+        (cutoff_ts, now),
     ).fetchall()
     return [r["id"] for r in rows]
 
@@ -187,13 +189,21 @@ def apply(db_path: Path, profile: str, days: int, verbose: bool) -> dict:
         return {"profile": profile, "deleted_sessions": 0, "deleted_messages": 0}
     size_before = _page_size(con) * _page_count(con)
     has_triggers = _has_fts_triggers(con)
-    is_content_fts = _fts_is_content_table(con)
     del_msgs = del_sess = 0
     for batch in _batches(ids, BATCH_SIZE):
         ph = ",".join("?" * len(batch))
-        if not has_triggers and not is_content_fts:
-            # Standalone FTS5 (own data copy, no triggers) — delete by rowid directly
-            con.execute(f"DELETE FROM messages_fts WHERE rowid IN (SELECT id FROM messages WHERE session_id IN ({ph}))", batch)
+        if not has_triggers:
+            # No triggers: messages_fts is a standalone FTS5 table storing its own
+            # copy — delete the FTS rows explicitly by rowid before removing the
+            # source rows.  On the live store this path does not run (six triggers
+            # maintain both messages_fts and messages_fts_trigram automatically).
+            # NEVER call 'rebuild' here — on a plain FTS5 table rebuild repopulates
+            # from a non-existent content table and wipes the entire index.
+            con.execute(
+                f"DELETE FROM messages_fts WHERE rowid IN "
+                f"(SELECT id FROM messages WHERE session_id IN ({ph}))",
+                batch,
+            )
         con.execute(f"DELETE FROM messages WHERE session_id IN ({ph})", batch)
         del_msgs += con.total_changes
         con.execute(f"DELETE FROM sessions WHERE id IN ({ph})", batch)
@@ -201,11 +211,6 @@ def apply(db_path: Path, profile: str, days: int, verbose: bool) -> dict:
         con.commit()
         if verbose:
             print(f"  [{profile}] batch done: {del_sess}/{len(ids)} sessions", flush=True)
-    if not has_triggers and is_content_fts:
-        # Content table FTS5 (content='messages') — rebuild index from remaining rows.
-        # This is the only safe cleanup path; rowid DELETE raises "malformed" on content tables.
-        con.execute("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')")
-        con.commit()
     size_after = _page_size(con) * _page_count(con)
     con.close()
     return {
