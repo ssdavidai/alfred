@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import yaml from "js-yaml";
 import { addRoute } from "../server.js";
-import { sendJson, ValidationError, NotFoundError } from "../errors.js";
+import { ApiError, sendJson, ValidationError, NotFoundError, ConflictError } from "../errors.js";
 import { dockerComposeCmd, dockerExec, ALFRED_CMD } from "../helpers.js";
 import { getInstinctCounts } from "../instinctCounts.js";
 
@@ -884,5 +884,62 @@ export function registerLearningRoutes(): void {
     const records = readVaultRecords(dir);
     records.sort((a, b) => (b.created || "").localeCompare(a.created || ""));
     sendJson(res, 200, { items: records, total: records.length });
+  });
+
+  // POST /api/v1/learning/instincts/:slug/promotion (#452/#459)
+  // Body: { approved: boolean }  Response: { tier, pending_promotion: null }
+  // Must go through resolve_instinct_promotion (learn layer) — NOT a direct
+  // frontmatter PATCH — so the instinct_tier_event audit row is emitted (#442).
+  addRoute("POST", "/api/v1/learning/instincts/:slug/promotion", async ({ res, body, params }) => {
+    const b = body as Record<string, unknown> | undefined;
+    if (!b || typeof b.approved !== "boolean") {
+      throw new ValidationError('"approved" (boolean) is required');
+    }
+    const slug = sanitizeId(params.slug);
+
+    // Canonical path first, legacy fallback.
+    const candidates = [
+      { rel: `instinct/${slug}.md`, abs: path.join(VAULT_PATH, "instinct", `${slug}.md`) },
+      { rel: `intuition/instincts/${slug}.md`, abs: path.join(VAULT_PATH, "intuition", "instincts", `${slug}.md`) },
+    ];
+    let vaultRelPath: string | null = null;
+    let fileContent: string | null = null;
+    for (const c of candidates) {
+      try { fileContent = fs.readFileSync(c.abs, "utf-8"); vaultRelPath = c.rel; break; } catch { /* next */ }
+    }
+    if (!vaultRelPath || fileContent === null) throw new NotFoundError(`Instinct not found: ${slug}`);
+
+    // 409 when there is nothing to approve — approving nothing must not grant autonomy.
+    const { frontmatter } = parseFrontmatter(fileContent);
+    if (!String(frontmatter.pending_promotion ?? "").trim()) {
+      throw new ConflictError(`Instinct '${slug}' has no pending promotion request`);
+    }
+
+    // Delegate to the learn layer via the alfred-learn container (same pattern
+    // as chores.ts:445 and integrations.ts:1400 — dockerExec alfred-learn python3).
+    const approved = b.approved as boolean;
+    const script = [
+      "import asyncio, json",
+      "from src.activities.vault import resolve_instinct_promotion",
+      `result = asyncio.run(resolve_instinct_promotion(${JSON.stringify(vaultRelPath)}, ${approved ? "True" : "False"}, "sir"))`,
+      "print(json.dumps(result))",
+    ].join("\n");
+    let rawOut: string;
+    try {
+      rawOut = await dockerExec("alfred-learn", ["python3", "-c", script]);
+    } catch (err) {
+      throw new ApiError(502, "LEARN_INVOKE_ERROR", `resolve_instinct_promotion failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    let result: { tier?: string; applied?: boolean; reason?: string };
+    try {
+      result = JSON.parse(rawOut.trim());
+    } catch {
+      throw new ApiError(502, "LEARN_BAD_RESPONSE", `Unexpected output: ${rawOut.slice(0, 200)}`);
+    }
+    // Race guard: pending_promotion was cleared between our read and the Python call.
+    if (result.reason === "no_pending_request") {
+      throw new ConflictError(`Instinct '${slug}' promotion was already resolved`);
+    }
+    sendJson(res, 200, { tier: result.tier ?? "", pending_promotion: null });
   });
 }
