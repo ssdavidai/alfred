@@ -40,7 +40,7 @@ const balanceSheetTools: ToolDef[] = [
   {
     name: "get_balance_sheet",
     description:
-      "Returns Sir's net worth in one call: family currency, total net worth, total assets, total liabilities, and the breakdown by classification. Use this when Sir asks 'what's my net worth?' or 'where do I stand?'. Cheap, idempotent, no pagination — call it freely. Backing: REST.",
+      "Returns Sir's net worth in one call: family currency, total net worth, total assets, total liabilities, and the breakdown by classification. The response also carries a data_quality rollup ({fresh_accounts, stale_accounts, unknown_accounts, partial: boolean}); if partial is true the net-worth total includes stale or unknown balances — call get_sync_health to see which accounts are affected before stating the figure as current fact. Use this when Sir asks 'what's my net worth?' or 'where do I stand?'. Cheap, idempotent, no pagination — call it freely. Backing: REST.",
     inputSchema: z.object({}),
     buildRequest: () => ({ method: "GET", path: "/api/v1/sure/balance_sheet" }),
   },
@@ -1068,6 +1068,18 @@ const pipelineTools: ToolDef[] = [
   },
 ];
 
+// ─── sync health ─────────────────────────────────────────────────────────────
+
+const syncHealthTools: ToolDef[] = [
+  {
+    name: "get_sync_health",
+    description:
+      "Returns the sync-health status of every account: freshness (\"fresh\" | \"stale\" | \"unknown\"), last-sync anchor timestamp, and a remediation_hint (string or null). Call this before reporting any balance or net-worth figure to Sir whenever the freshness of the figure matters. If data_quality.partial is true in any balance-sheet or account response, the aggregate total includes stale or unknown balances — do not state that figure as current fact; instead qualify it with the staleness detail from each account's freshness field and remediation_hint. Backing: REST (GET /api/v1/sure/sync-health).",
+    inputSchema: z.object({}),
+    buildRequest: () => ({ method: "GET", path: "/api/v1/sure/sync-health" }),
+  },
+];
+
 // ─── usage ──────────────────────────────────────────────────────────────────
 
 const usageTools: ToolDef[] = [
@@ -1123,6 +1135,7 @@ export const ALL_TOOLS: ToolDef[] = [
   ...settingsTools,
   ...chatTools,
   ...pipelineTools,
+  ...syncHealthTools,
   ...usageTools,
   ...nuclearTools,
 ];
