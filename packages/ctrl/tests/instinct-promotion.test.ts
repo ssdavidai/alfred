@@ -19,6 +19,21 @@ mock.module("../src/api/helpers.js", {
     },
     dockerComposeCmd: async () => "",
     ALFRED_CMD: ["alfred"],
+    // mock.module replaces the module for EVERY importer in the graph, not
+    // just learning.ts — so the stub must carry the whole export surface or
+    // an unrelated route fails to link with "does not provide an export
+    // named ...". That is what broke this file on first CI run.
+    HERMES_CMD: ["hermes"],
+    HERMES_CONTAINER: "hermes",
+    OPENCLAW_CMD: ["hermes"],
+    OPENCLAW_CONTAINER: "hermes",
+    execAsync: async () => ({ stdout: "", stderr: "" }),
+    hostExec: async () => "",
+    sudoExec: async () => "",
+    parseJsonLines: (raw: string) =>
+      raw.split("\n").filter(Boolean).map((l) => JSON.parse(l)),
+    getQuery: (url: string) => new URL(url, "http://x").searchParams,
+    validateServiceName: () => {},
   },
 });
 
