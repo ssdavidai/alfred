@@ -5,7 +5,7 @@ import yaml from "js-yaml";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError } from "../errors.js";
 import { execAsync, dockerExec, dockerComposeCmd, HERMES_CMD, HERMES_CONTAINER } from "../helpers.js";
-import { resolveDeliveryTarget } from "../hermes-sessions.js";
+import { resolveDeliveryTarget, resolveHomeChannelTarget } from "../hermes-sessions.js";
 import { getStateDb } from "../../db/state.js";
 import {
   ANNOUNCE_DEDUP_WINDOW_MS,
@@ -578,23 +578,37 @@ export function registerAgentRoutes(): void {
     let toTarget: string | undefined = typeof b.to === "string" && (b.to as string).length > 0
       ? (b.to as string)
       : undefined;
-    // resolveDeliveryTarget enumerates the most-recent session on the
-    // requested channel (or any delivery-capable channel when channel is
-    // "last") and returns its native chat_id. When the caller asked for
-    // "last" and we landed on a concrete channel, re-infer effectiveChannel
-    // so the cron job passes both --channel and --to concretely.
+    // When the caller asked for "last" and we land on a concrete channel,
+    // re-infer effectiveChannel so the cron job passes both --channel + --to.
     let effectiveChannel = channel;
     if (announce && !toTarget) {
-      try {
-        const resolved = resolveDeliveryTarget(channel);
-        if (resolved) {
-          toTarget = resolved.to;
-          if (channel === "last") {
-            effectiveChannel = resolved.channel;
-          }
+      // Home channel first (#498): fail closed when channel="last" and no
+      // home channel is declared. resolveDeliveryTarget("last") is unsafe —
+      // it picks any channel, including client group channels. Explicit
+      // channel values fall through to the session lookup as before.
+      let resolved: { to: string; channel: string } | undefined;
+      if (channel === "last") {
+        resolved = resolveHomeChannelTarget();
+        if (!resolved) {
+          sendJson(res, 424, {
+            ok: false,
+            error:
+              "announce:true with channel=last requires a configured home channel — " +
+              "set SLACK_HOME_CHANNEL or TELEGRAM_HOME_CHANNEL in the hermes main profile .env " +
+              "(via /channels in the dashboard), or pass body.to and body.channel explicitly",
+          });
+          return;
         }
-      } catch {
-        /* fall through — hermes cron will error and we'll surface it */
+      } else {
+        try {
+          resolved = resolveDeliveryTarget(channel);
+        } catch {
+          /* fall through — hermes cron will error and we'll surface it */
+        }
+      }
+      if (resolved) {
+        toTarget = resolved.to;
+        effectiveChannel = resolved.channel;
       }
     }
 

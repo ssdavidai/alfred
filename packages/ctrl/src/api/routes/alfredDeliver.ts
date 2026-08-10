@@ -61,14 +61,19 @@ import {
   resolvePrincipal,
 } from "../../db/alfredJournal.js";
 import { resolveProfileContextForChannel } from "../../db/agentProfiles.js";
-import { resolveDeliveryTarget } from "../hermes-sessions.js";
+import { resolveDeliveryTarget, resolveHomeChannelTarget } from "../hermes-sessions.js";
 import { dockerExec } from "../helpers.js";
 import { slackPostMessage } from "./slack.js";
 
-// ── Channel resolution (mirrors notifications.ts auto-target) ─────────────
+// ── Channel resolution ─────────────────────────────────────────────────────
+//
+// channel=auto → resolveAutoTarget() → resolveHomeChannelTarget() (#498).
+// resolveDeliveryTarget("last") is NOT safe as a fallback: it picks the
+// most-recently-active Hermes session, which may be a group channel in a
+// client workspace. Fail closed (424) when no home channel is declared.
 
 function resolveAutoTarget(): { to: string; channel: string } | undefined {
-  return resolveDeliveryTarget("last");
+  return resolveHomeChannelTarget();
 }
 function resolveRecipient(channel: string): string | undefined {
   return resolveDeliveryTarget(channel)?.to;
@@ -304,7 +309,9 @@ export function registerAlfredDeliverRoutes(): void {
         sendJson(res, 424, {
           ok: false,
           error:
-            "channel=auto could not resolve a deliverable channel — no inbound session on record. Pass channel + to explicitly, or have Sir send one message first.",
+            "channel=auto requires a configured home channel — set SLACK_HOME_CHANNEL or " +
+            "TELEGRAM_HOME_CHANNEL in the hermes main profile .env (via /channels in the dashboard), " +
+            "or pass channel + to explicitly.",
         });
         return;
       }

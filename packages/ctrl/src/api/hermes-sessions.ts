@@ -127,6 +127,60 @@ export function listHermesSessions(profile: string = "main"): HermesSession[] {
 }
 
 /**
+ * Read SLACK_HOME_CHANNEL and TELEGRAM_HOME_CHANNEL from the Hermes profile
+ * `.env` file (same hermes_data volume mount used to read sessions.json).
+ *
+ * Fails soft: returns null values when the file is absent or unreadable.
+ */
+function readHomeChannelsFromProfileEnv(profile: string = "main"): {
+  slack: string | null;
+  telegram: string | null;
+} {
+  const envPath = path.join(HERMES_CONFIG_DIR, profile, ".env");
+  let raw: string;
+  try {
+    raw = fs.readFileSync(envPath, "utf-8");
+  } catch {
+    return { slack: null, telegram: null };
+  }
+  let slack: string | null = null;
+  let telegram: string | null = null;
+  for (const line of raw.split("\n")) {
+    const t = line.replace(/^﻿/, "").trim();
+    if (!t || t.startsWith("#")) continue;
+    const eq = t.indexOf("=");
+    if (eq <= 0) continue;
+    const k = t.slice(0, eq).trim();
+    let v = t.slice(eq + 1);
+    if (v.endsWith("\r")) v = v.slice(0, -1);
+    if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
+      v = v.slice(1, -1);
+    }
+    if (k === "SLACK_HOME_CHANNEL" && v) slack = v;
+    if (k === "TELEGRAM_HOME_CHANNEL" && v) telegram = v;
+  }
+  return { slack, telegram };
+}
+
+/**
+ * Resolve the principal's declared home channel for proactive background
+ * delivery (chore digests, briefing pushes, spawn_alfred_task announces).
+ *
+ * Returns SLACK_HOME_CHANNEL or TELEGRAM_HOME_CHANNEL (Slack preferred) from
+ * the hermes main profile .env, or undefined if neither is configured. Use
+ * this instead of resolveDeliveryTarget("last") — "last" picks the most-recent
+ * session regardless of chat type and can land in a client group channel (#498).
+ */
+export function resolveHomeChannelTarget(
+  profile: string = "main",
+): { to: string; channel: string } | undefined {
+  const { slack, telegram } = readHomeChannelsFromProfileEnv(profile);
+  if (slack) return { to: slack, channel: "slack" };
+  if (telegram) return { to: telegram, channel: "telegram" };
+  return undefined;
+}
+
+/**
  * Resolve the delivery recipient for an agent-initiated message.
  *
  * Picks the most-recently-active Hermes session whose channel matches, and
