@@ -18,9 +18,19 @@
  * Apply inserts:
  *   node packages/ctrl/scripts/backfill-webhook-legacy.mjs --execute
  *
- * Run from inside the ctrl-api container where ingest.db is live:
- *   docker exec alfred-ctrl node /app/scripts/backfill-webhook-legacy.mjs
- *   docker exec alfred-ctrl node /app/scripts/backfill-webhook-legacy.mjs --execute
+ * Running it on a tenant: the ctrl-api image copies only `dist/api.mjs` into
+ * /app, so this file is NOT present in the container and cannot be exec'd from
+ * a path there. Copy it in first, run it, then remove it. (Do not add scripts/
+ * to the image for this — it is a one-shot recovery, not a recurring job.)
+ *
+ *   CTRL=alfred-black-ctrl-api-1
+ *   docker cp packages/ctrl/scripts/backfill-webhook-legacy.mjs $CTRL:/tmp/bf.mjs
+ *   docker exec $CTRL node /tmp/bf.mjs              # dry run — writes nothing
+ *   docker exec $CTRL node /tmp/bf.mjs --execute    # apply
+ *   docker exec $CTRL rm -f /tmp/bf.mjs
+ *
+ * A `docker cp` overlay does not survive `docker compose up -d --force-recreate`,
+ * which is fine here — the inserted ingest.db rows are what persists.
  *
  * Environment (same defaults as ctrl-api):
  *   VAULT_PATH     (default: /vault)
