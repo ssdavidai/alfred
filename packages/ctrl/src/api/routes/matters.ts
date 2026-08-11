@@ -40,6 +40,7 @@ import { addRoute } from "../server.js";
 import { sendJson, NotFoundError } from "../errors.js";
 import { VAULT_PATH, walkMd, readRecord } from "./vault.js";
 import { getStateDb } from "../../db/state.js";
+import { classifyNarrativeProvenance, type NarrativeProvenance } from "../lib/matter_freshness.js";
 
 const IGNORE_DIRS = new Set([".git", ".obsidian", "node_modules", ".trash"]);
 
@@ -60,6 +61,10 @@ interface MatterIndexRow {
   counts: MatterCounts;
   state: "done" | "active" | "waiting";
   current_state: string | null;
+  /** Provenance of the narrative layer (current_state / as_of).
+   *  Written by NightlyNarrativeWorkflow; stamped here so consumers know
+   *  whether the narrative is current or stale without an extra fetch. */
+  narrative_provenance: NarrativeProvenance;
 }
 
 interface VaultLink {
@@ -148,6 +153,8 @@ interface MatterTask {
    *    - `external`       signal-sourced but no resolvable sender
    *    - `unknown`        pre-stamp grandfather / unrouted */
   owner: string | null;
+  /** Provenance of the task narrative layer (current_state / as_of). */
+  narrative_provenance: NarrativeProvenance;
 }
 
 interface MatterDetail extends Omit<MatterIndexRow, "state"> {
@@ -592,6 +599,7 @@ function buildMatterIndex(): MatterIndexResult {
       key_entities: buildKeyEntities(rec.fm, entityIndex),
       current_state: currentState,
       as_of: asOf,
+      narrative_provenance: classifyNarrativeProvenance(asOf),
       signal_count_24h: signalCount24h,
       timeline: [...stateChangeEntries],
       tasks: [],
@@ -778,6 +786,9 @@ function buildMatterIndex(): MatterIndexResult {
             : null,
         as_of:
           typeof asOfRaw === "string" && asOfRaw.trim() ? asOfRaw : null,
+        narrative_provenance: classifyNarrativeProvenance(
+          typeof asOfRaw === "string" && asOfRaw.trim() ? asOfRaw : null,
+        ),
         decision_origin:
           typeof decisionOriginRaw === "string" && decisionOriginRaw.trim() && decisionOriginRaw !== "null"
             ? decisionOriginRaw
@@ -1114,6 +1125,7 @@ export function registerMatterRoutes(): void {
       counts: m.counts,
       state: m.state,
       current_state: m.current_state,
+      narrative_provenance: m.narrative_provenance,
     }));
     // `?fields=a,b` — return only the named keys plus the identity triple
     // (id, path, name). Omitting `?fields=` returns the full shape unchanged.
@@ -1167,3 +1179,4 @@ export const _internal = {
   deriveMatterState,
   firstSentence,
 };
+export type { NarrativeProvenance };
