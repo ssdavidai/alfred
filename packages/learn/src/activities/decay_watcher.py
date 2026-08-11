@@ -58,6 +58,7 @@ import httpx
 from temporalio import activity
 
 from src.config import load_config
+from src.utils.retry_policy import raise_if_permanent
 from src.utils.decay import (
     AUTO_FLIP_THRESHOLD,
     band_for,
@@ -387,6 +388,7 @@ async def adjust_matter_surface_class_v2(
                     "matter_path": canonical,
                     "status": "no_change",
                 }
+            raise_if_permanent(exc, context="adjust_matter_surface_class_v2")
             raise
         fm = record.get("frontmatter") if isinstance(record, dict) else None
         if not isinstance(fm, dict):

@@ -27,6 +27,7 @@ import httpx
 from temporalio import activity
 
 from src.config import load_config
+from src.utils.retry_policy import raise_if_permanent
 from src.utils.vault_client import VaultClient
 
 logger = logging.getLogger("alfred-learn")
@@ -359,6 +360,7 @@ async def read_target(path: str) -> dict[str, Any]:
         except httpx.HTTPStatusError as exc:
             if exc.response is not None and exc.response.status_code == 404:
                 return {"frontmatter": {}, "body": "", "as_of": None}
+            raise_if_permanent(exc, context="read_target")
             raise
         fm = record.get("frontmatter") or {}
         if not isinstance(fm, dict):

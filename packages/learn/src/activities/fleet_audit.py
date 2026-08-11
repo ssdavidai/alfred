@@ -304,10 +304,12 @@ async def write_fleet_audit_observation(report: dict[str, Any]) -> str:
     """
     # Late-bound imports so the Temporal sandbox never sees httpx at
     # workflow-import time. (Matches the pattern in other activities.)
+    import httpx
     from datetime import datetime, timezone
 
     from src.activities.vault import vault_record_path
     from src.config import load_config
+    from src.utils.retry_policy import raise_if_permanent
     from src.utils.vault_client import VaultClient
 
     config = load_config()
@@ -413,7 +415,16 @@ fleet_audit:
 
         raw_name = f"fleet-audit-{severity}-{date_str}"
         name = vault_record_path("observation", raw_name, created=now)
-        path = await client.write_record("observation", name, content)
+        try:
+            path = await client.write_record("observation", name, content)
+        except httpx.HTTPStatusError as exc:
+            # A 422 from ctrl-api means the promotion contract rejected the
+            # write (observation is a demoted type; the vault rejects it).
+            # The payload is structural — retrying the same request can never
+            # succeed, so surface it immediately as a non-retryable error
+            # instead of burning all three retry slots (#539).
+            raise_if_permanent(exc, context="write_fleet_audit_observation")
+            raise
         logger.info(
             "fleet_audit: wrote observation %s (severity=%s)",
             path, severity,
