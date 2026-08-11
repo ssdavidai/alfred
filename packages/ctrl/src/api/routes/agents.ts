@@ -312,6 +312,52 @@ async function probeWorkersGateway(): Promise<string | null> {
   }
 }
 
+/** Check whether the workers gateway is saturated before committing a
+ *  delegation budget (#540 — slice of #297).
+ *
+ *  Hermes 0.19.0+ exposes GET /health/detailed (requires the workers API
+ *  key).  The response includes `gateway_busy` — Hermes' own saturation
+ *  judgment — and `active_agents`, the raw in-flight count.  We refuse on
+ *  `gateway_busy === true` rather than a hard threshold on `active_agents`
+ *  because Hermes knows its own concurrency cap; we do not.
+ *
+ *  Verified live against Hermes 0.19.0:
+ *    {"status":"ok","active_agents":0,"gateway_busy":false,
+ *     "readiness":{"checks":{"background_queues":{
+ *       "active_api_runs":0,"active_delegations":0,...}},...}}
+ *
+ *  Fail-open design: any probe failure (timeout, 404, parse error) is NOT
+ *  a refusal.  The liveness probe (`probeWorkersGateway`) already surfaces
+ *  hard unavailability.  A flaky /health/detailed must never block a
+ *  delegation that would have succeeded.
+ *
+ *  Returns null when healthy (or when the signal is unavailable), else a
+ *  short human reason — presence means emit HERMES_WORKERS_SATURATED.
+ */
+async function probeSaturation(apiKey: string): Promise<string | null> {
+  if (DELEGATE_PROBE_TIMEOUT_MS === 0) return null; // probing disabled
+  try {
+    const resp = await fetch(
+      `${HERMES_WORKERS_GATEWAY_URL}/health/detailed`,
+      {
+        headers: { Authorization: `Bearer ${apiKey}` },
+        signal: AbortSignal.timeout(DELEGATE_PROBE_TIMEOUT_MS),
+      },
+    );
+    if (!resp.ok) return null; // /health/detailed unavailable — proceed
+    const body = (await resp.json()) as Record<string, unknown>;
+    if (body.gateway_busy === true) {
+      const active =
+        typeof body.active_agents === "number" ? body.active_agents : "?";
+      return `workers gateway is saturated (active_agents=${active}, gateway_busy=true)`;
+    }
+    return null;
+  } catch {
+    // Saturation probe failure is non-blocking — see JSDoc above.
+    return null;
+  }
+}
+
 /** Read API_SERVER_KEY for the workers profile out of its rendered .env.
  *
  *  Same key-resolution pattern as channels_paperclip.ts /
@@ -837,6 +883,24 @@ export function registerAgentRoutes(): void {
         ok: false,
         error: "HERMES_WORKERS_UNAVAILABLE",
         detail: `${unready}. Refused before dispatch — no delegation budget was spent and nothing was started on the gateway.`,
+        session_key: sessionKey,
+        probe_timeout_ms: DELEGATE_PROBE_TIMEOUT_MS,
+        retryable: true,
+      });
+      return;
+    }
+
+    // #540 — liveness is necessary but not sufficient: a gateway that is up
+    // but hopelessly backed up looks identical to an idle one until the
+    // delegation times out 300s later.  Hermes 0.19.0+ exposes
+    // /health/detailed with gateway_busy — check it and refuse immediately
+    // with a distinct code so callers know to retry rather than wait.
+    const saturated = await probeSaturation(workersKey);
+    if (saturated) {
+      sendJson(res, 503, {
+        ok: false,
+        error: "HERMES_WORKERS_SATURATED",
+        detail: `${saturated}. Refused before dispatch — no delegation budget was spent.`,
         session_key: sessionKey,
         probe_timeout_ms: DELEGATE_PROBE_TIMEOUT_MS,
         retryable: true,

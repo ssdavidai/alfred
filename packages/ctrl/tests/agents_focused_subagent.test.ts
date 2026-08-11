@@ -53,9 +53,26 @@ let nextFetchResponse: { status: number; body: string } = {
 // returns" — otherwise a test simulating a failed dispatch is intercepted by
 // the probe and never reaches the code under test. `lastFetchCall` also stays
 // the dispatch, so every existing assertion below is unaffected.
+//
+// #540 added a saturation probe (GET <gateway>/health/detailed) between the
+// liveness probe and the dispatch.  Stub it too — defaults to "not saturated"
+// so existing tests are unaffected.
 let nextProbeStatus = 200;
+let nextDetailedProbeStatus = 200;
+let nextDetailedProbeBody: Record<string, unknown> = {
+  status: "ok",
+  active_agents: 0,
+  gateway_busy: false,
+  gateway_drainable: true,
+};
 globalThis.fetch = (async (url: any, init?: any) => {
   const target = String(url);
+  if (target.endsWith("/health/detailed")) {
+    return new Response(JSON.stringify(nextDetailedProbeBody), {
+      status: nextDetailedProbeStatus,
+      headers: { "content-type": "application/json" },
+    });
+  }
   if (target.endsWith("/health")) {
     return new Response("{}", {
       status: nextProbeStatus,
@@ -311,5 +328,61 @@ describe("POST /api/v1/agents/focused-subagent — happy path", () => {
       status: 200,
       body: JSON.stringify({ output: [{ content: [{ text: "ok" }] }] }),
     };
+  });
+
+  // ── #540 — saturation probe ──────────────────────────────────────────────
+  //
+  // Hermes 0.19.0+ exposes /health/detailed with gateway_busy.  When the
+  // gateway is up but saturated we should refuse immediately with a distinct
+  // error code, not burn the 300s delegation budget and then time out.
+
+  it("refuses with HERMES_WORKERS_SATURATED when gateway_busy is true", async () => {
+    nextDetailedProbeStatus = 200;
+    nextDetailedProbeBody = { status: "ok", active_agents: 3, gateway_busy: true };
+    lastFetchCall = null;
+
+    const r = await invokeRoute("POST", "/api/v1/agents/focused-subagent", {
+      body: { task: "task", domain: "sure" },
+    });
+
+    assert.equal(r.status, 503);
+    assert.equal(r.payload.ok, false);
+    assert.equal(r.payload.error, "HERMES_WORKERS_SATURATED");
+    assert.equal(r.payload.retryable, true);
+    assert.ok(
+      String(r.payload.detail).includes("saturated"),
+      "detail must mention saturation",
+    );
+    assert.equal(lastFetchCall, null, "must not dispatch when saturated");
+
+    nextDetailedProbeBody = { status: "ok", active_agents: 0, gateway_busy: false };
+  });
+
+  it("proceeds normally when gateway_busy is false", async () => {
+    nextDetailedProbeStatus = 200;
+    nextDetailedProbeBody = { status: "ok", active_agents: 0, gateway_busy: false };
+    lastFetchCall = null;
+
+    const r = await invokeRoute("POST", "/api/v1/agents/focused-subagent", {
+      body: { task: "task", domain: "sure" },
+    });
+
+    assert.equal(r.status, 200);
+    assert.ok(lastFetchCall, "dispatch must proceed when gateway is not busy");
+  });
+
+  it("proceeds normally when /health/detailed is unavailable (fail-open)", async () => {
+    nextDetailedProbeStatus = 404;
+    lastFetchCall = null;
+
+    const r = await invokeRoute("POST", "/api/v1/agents/focused-subagent", {
+      body: { task: "task", domain: "sure" },
+    });
+
+    assert.equal(r.status, 200);
+    assert.ok(lastFetchCall, "dispatch must proceed when /health/detailed is absent");
+
+    nextDetailedProbeStatus = 200;
+    nextDetailedProbeBody = { status: "ok", active_agents: 0, gateway_busy: false };
   });
 });
