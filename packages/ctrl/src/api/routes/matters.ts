@@ -1102,7 +1102,7 @@ function buildMatterIndex(): MatterIndexResult {
 }
 
 export function registerMatterRoutes(): void {
-  addRoute("GET", "/api/v1/matters", async ({ res }) => {
+  addRoute("GET", "/api/v1/matters", async ({ res, query }) => {
     const { ordered } = buildMatterIndex();
     const matters: MatterIndexRow[] = ordered.map((m) => ({
       id: m.id,
@@ -1115,6 +1115,29 @@ export function registerMatterRoutes(): void {
       state: m.state,
       current_state: m.current_state,
     }));
+    // `?fields=a,b` — return only the named keys plus the identity triple
+    // (id, path, name). Omitting `?fields=` returns the full shape unchanged.
+    // Unknown field names are silently ignored so callers don't break when
+    // they ask for a field that only some record types carry.
+    const fieldsParam = (query.get("fields") ?? "").trim();
+    if (fieldsParam) {
+      const wanted = new Set(
+        fieldsParam.split(",").map((f) => f.trim()).filter(Boolean),
+      );
+      sendJson(res, 200, {
+        matters: matters.map((m) => {
+          const row: Record<string, unknown> = { id: m.id, path: m.path, name: m.name };
+          for (const k of wanted) {
+            if (k in (m as Record<string, unknown>)) {
+              row[k] = (m as Record<string, unknown>)[k];
+            }
+          }
+          return row;
+        }),
+        count: matters.length,
+      });
+      return;
+    }
     sendJson(res, 200, { matters, count: matters.length });
   });
 

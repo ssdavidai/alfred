@@ -755,8 +755,30 @@ export function registerDecisionRoutes(): void {
         ...fm,
       });
     }
+    // `?fields=a,b` — return only the named frontmatter keys plus the
+    // identity pair (id, path). Omitting `?fields=` returns the full shape
+    // unchanged so no existing caller is affected. Unknown field names are
+    // silently ignored.
+    const fieldsParam = (url.searchParams.get("fields") ?? "").trim();
+    const sliced = records.slice(0, limit);
+    if (fieldsParam) {
+      const wanted = new Set(
+        fieldsParam.split(",").map((f) => f.trim()).filter(Boolean),
+      );
+      sendJson(res, 200, {
+        decisions: sliced.map((r) => {
+          const row: Record<string, unknown> = { id: r.id, path: r.path };
+          for (const k of wanted) {
+            if (k in r) row[k] = r[k];
+          }
+          return row;
+        }),
+        count: records.length,
+      });
+      return;
+    }
     sendJson(res, 200, {
-      decisions: records.slice(0, limit),
+      decisions: sliced,
       count: records.length,
     });
   });
