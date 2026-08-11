@@ -5,6 +5,186 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the `alfred-vault` package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-08-11]
+
+47 commits since `v2026.08.07`, across 24 closed issues. One theme, and it is
+not a feature: **the system stopped claiming things that were not true.**
+
+Nearly every fix in this release is the same shape. A write path worked and a
+read path did not know about it. A check passed and the thing it checked never
+happened. A record said an instruction was carried out when nothing had been.
+None of these failed loudly. Several had been quietly wrong for weeks.
+
+---
+
+### Finance surfaces stopped presenting stale balances as current (#318)
+
+The principal looked at his net worth and said the numbers were wrong. They
+were nine days old: the provider token had expired and Sure was serving cached
+balances with nothing on any surface indicating it.
+
+Six changes across three lanes now make staleness visible:
+
+- **Sure exposes ground truth** (#527, #528) — a read-only Rails initializer
+  reporting per-account provider anchor state, because nothing in Sure's REST
+  API can answer the question.
+- **ctrl-api stamps provenance** (#529) — per-account `balance_provenance`
+  with `source`, `observed_at`, `freshness`, `fallback_reason`.
+- **Aggregates carry quality** (#536) — `data_quality` on the balance sheet
+  plus `GET /api/v1/sure/sync-health` with per-account remediation hints.
+- **Alfred can see it** (#537) — a `get_sync_health` MCP tool whose description
+  tells the model what `partial: true` obliges.
+
+Live on the dev tenant: 1 fresh, 12 stale, 7 unknown, `partial: true`.
+
+The design nearly shipped a lie. Deriving freshness from Sure's REST fields
+would have marked **nine of twelve stale accounts as fresh**, because both
+candidate timestamps only record that *a write occurred* and the cached-fallback
+path is itself a write. For a trust feature that is worse than shipping nothing.
+Hence the vendor-side patch.
+
+Two rules held throughout: `unknown` never renders as `fresh` (an unverifiable
+value is not a current one), and `observed_at` is never `now()` (that records
+when we asked, not when the fact was seen).
+
+### Foreign-currency balances stopped resetting to USD (#340)
+
+The Lunchflow adapter defaulted absent currencies to USD and re-stamped it on
+every sync, so foreign accounts computed to zero and reverted after any manual
+correction. A mounted Rails initializer now preserves a known currency when the
+payload omits one. Verified against a real sync: the corrected currencies
+survived it, with zero rows disagreeing between the two tables.
+
+### Webhook deliveries stopped vanishing (#465)
+
+Fathom deliveries were written to a vault directory nothing reads, and returned
+202. Four layers had to be fixed, each correct in itself and each hiding the
+next:
+
+1. The route never enqueued the event (#508).
+2. `_infer_source_type` did not recognise `webhook:` (#520).
+3. The ingest adapter read `row.kind` before `payload.source_type`, collapsing
+   the label to the bare word `webhook` so fix 2 could not match (#522).
+4. The same adapter built the body from composio-shaped keys only, so the body
+   was empty and every event was dropped as too short (#523).
+
+Plus recovery: an idempotent backfill (#512) and a `requeue` route that can now
+re-flow events **consumed** under a bug, not only failed ones (#525).
+
+End result — a delivery becomes a routed signal on the Desk, salience 0.8,
+linked to a matter. First time that path has ever completed.
+
+Four of those five had passing tests over broken code, because each fixture
+began downstream of the defect or invented the shape it was meant to verify.
+
+### Decisions stopped retrying forever, and stopped lying about it (#414)
+
+`route_decision`'s `done`/`dispatch`/`skip` branches raised on a 404 from a
+deleted source card, so Temporal retried every tick, indefinitely. A deleted
+card is not transient.
+
+Now terminal — as **`failed`**, not `completed`. `completed` means "no async
+work was needed, or the outcome arrived"; neither is true when the card is gone
+and the principal's instruction was never applied. Recording it as completed
+would assert the system did something it did not. Only 404 is terminal; 5xx and
+timeouts still retry.
+
+### Notifications go where they are meant to (#498, #288, #304)
+
+Chores can declare `notify_channel` as `platform:destination`, parsed into the
+two fields ctrl-api actually takes. Absent or unparseable falls back to the home
+channel — inferring a platform from an id's shape is how a Telegram id ends up
+in Slack. The resolved destination is recorded in the run notes, so a
+misdelivery is auditable after the fact.
+
+Zero active crons now resolve delivery by "wherever the principal last spoke".
+
+### Progressive autonomy got its approval gate (#452, #459)
+
+Reflection may propose an `Acting` promotion; it can no longer grant one.
+`resolve_instinct_promotion` is the sole tier writer, reached through a new
+ctrl-api endpoint and an Approve/Decline surface on `/instincts`. The invariant
+is pinned as a test: tier `Confirming` with `pending_promotion: Acting` reads as
+`Confirming`, shows as pending, and does not act unattended.
+
+### Hermes session stores: 242 GB reclaimed
+
+A retention tool with per-profile windows, dry-run by default, batched resumable
+deletes, and checkpoint/vacuum as separate opt-in steps (#515, #516, #517).
+
+Running it against the real store found four defects the fixtures could not
+(#518, #521), including one that made the whole feature a no-op: the eligibility
+predicate keyed on `ended_at`, which **100% of that profile's sessions never
+write**. It would have pruned 188 sessions out of 141,443 and reported success.
+
+Live result: 138,064 sessions and 637,673 messages deleted, the store 14.05 GB →
+6.18 GB. Combined with a dangling-image prune, the dev tenant went from 85% disk
+to 29%.
+
+Also learned: VACUUM in WAL mode writes through the WAL, so a checkpoint must run
+**after** the vacuum, not only before.
+
+### Deploys stopped going further than intended
+
+`deploy-fleet` resolved its targets as `vars.ALFRED_FLEET_HOSTS || <every
+tenant>`. The variable was unset, so six merges rolled fleet-wide against a
+dev-tenant-only instruction. The default is now the dev tenant; widening is a
+deliberate act (#519).
+
+And `deploy-compose` now ships the host-side files the compose file bind-mounts
+(#544). It did not, so a tenant received a compose referencing paths it lacked,
+Docker created them as directories, and Rails crash-looped loading a directory
+as an initializer — four minutes of downtime on the finance app, and it would
+have hit every remaining tenant on the next rollout.
+
+### Codex-only, enforced where the model reads (#436, #437, #438, #535)
+
+OpenRouter relics removed from `alfred-vault`, `ctrl` and `learn`. Separately,
+the `run` tool advertised `claude-opus-4-5` and `claude-haiku-4-5` as example
+models — a recommendation, in the one place the model looks, to do the single
+forbidden thing. Replaced with the real Codex IDs.
+
+### Stale descriptions corrected (#533)
+
+Tool descriptions are what the model reads when choosing arguments, so a stale
+one is a live defect. `delegate_to_focused_agent` still advertised the 60s
+timeout five months after it became 300s. Three descriptions promised Plane sync
+for a service removed fleet-wide in #279.
+
+Most consequentially, `create_vault_record` omitted `commitment` from its Zod
+enum — so Alfred **could not create the record type this project shipped in the
+previous release**. Written, migrated, documented, and unreachable through the
+tool that matters.
+
+### Smaller, and worth naming
+
+- `promote_triage_to_task` emitted `status: queued`, which the validator rejects
+  with HTTP 500; the same bad value sat in the Obsidian task template (#534).
+- `healthcheck.sh` had **never been tracked in this repo** — imported from the
+  SaaS era where cloud-init provisioned it per VM, so admin health had reported
+  `degraded` on every healthy stack since the cutover (#531). It now ships in the
+  image with a build-time assertion, and reported 86% disk on its first day.
+- `delegate_to_focused_agent`'s untested fetch-throws branch — the one deciding
+  timeout versus unreachable — got coverage (#532).
+- `?fields=` projection on vault list, after a 372 KB response broke a job three
+  runs running (#496).
+
+---
+
+### Three that were already fixed
+
+#310, #312 and #325 were verified fixed and closed. Half the bugs examined this
+cycle were already resolved and simply never closed. Check before building.
+
+### The backlog
+
+37 issues closed, 46 → 17. Thirteen of the 2026-07-17 platform block closed as
+superseded or unfounded; six narrow, evidence-backed slices filed in their place.
+Each of those thirteen carried ~30 machine-generated `## Alfred Code spec`
+comments — roughly 380 across the block — which had buried their real status.
+
+---
+
 ## [2026-08-07]
 
 10 commits since `v2026.08.06`, across 8 issues. One theme: **commitments
