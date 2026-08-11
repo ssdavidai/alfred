@@ -555,6 +555,9 @@ class TestEmptyExtractionShortCircuit:
 
 class TestSummariserFailure:
     def test_summariser_failure_stamps_error(self):
+        # Legacy code: ExtractionError("summariser_failed", ...) is still in
+        # _VALID_CODE_HEADS for rows written before the #538 split.  The
+        # workflow passes it through unchanged.
         recorder: list[dict[str, Any]] = []
         stubs = _make_stubs(
             summary_raises=ExtractionError("summariser_failed", "boom"),
@@ -565,6 +568,54 @@ class TestSummariserFailure:
         assert d["extraction_error"] == "summariser_failed"
         assert d["alfred_read_at"] is None
         assert recorder[0]["extraction_error"] == "summariser_failed"
+
+    def test_gateway_error_stamps_summariser_gateway_error(self):
+        # New code path (#538): workers gateway threw (HTTP 5xx / timeout /
+        # billing).  The activity raises ExtractionError("summariser_gateway_error")
+        # and the workflow stamps that code.
+        recorder: list[dict[str, Any]] = []
+        stubs = _make_stubs(
+            summary_raises=ExtractionError(
+                "summariser_gateway_error", "HTTP 503 overloaded",
+            ),
+            stamp_recorder=recorder,
+        )
+        result = asyncio.run(_run_workflow(stubs))
+        d = _to_dict(result)
+        assert d["extraction_error"] == "summariser_gateway_error"
+        assert d["alfred_read_at"] is None
+        assert recorder[0]["extraction_error"] == "summariser_gateway_error"
+
+    def test_no_output_stamps_summariser_no_output(self):
+        # New code path (#538): gateway ran OK but returned JSON without a
+        # "summary" key.  Structural — not a transient gateway failure.
+        recorder: list[dict[str, Any]] = []
+        stubs = _make_stubs(
+            summary_raises=ExtractionError(
+                "summariser_no_output", "no summary key in response",
+            ),
+            stamp_recorder=recorder,
+        )
+        result = asyncio.run(_run_workflow(stubs))
+        d = _to_dict(result)
+        assert d["extraction_error"] == "summariser_no_output"
+        assert d["alfred_read_at"] is None
+        assert recorder[0]["extraction_error"] == "summariser_no_output"
+
+    def test_unexpected_exception_stamps_summariser_gateway_error(self):
+        # A raw RuntimeError (not an ExtractionError) from the summarise stub
+        # is treated as a transient gateway failure — the fallback code path
+        # in the workflow's except clause.
+        recorder: list[dict[str, Any]] = []
+        stubs = _make_stubs(
+            summary_raises=RuntimeError("connection refused"),
+            stamp_recorder=recorder,
+        )
+        result = asyncio.run(_run_workflow(stubs))
+        d = _to_dict(result)
+        assert d["extraction_error"] == "summariser_gateway_error"
+        assert d["alfred_read_at"] is None
+        assert recorder[0]["extraction_error"] == "summariser_gateway_error"
 
 
 class TestStampFailureIsRecorded:

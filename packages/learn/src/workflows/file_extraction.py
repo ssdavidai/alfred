@@ -162,7 +162,14 @@ _VALID_CODE_HEADS = (
     "empty_docx",
     "empty_xlsx",
     "empty_extraction",
+    # summariser_failed is the legacy single-bucket code (pre-#538).  Kept in
+    # the valid set so the split-code logic still correctly passes it through
+    # for rows written before this fix.
     "summariser_failed",
+    # Replaces summariser_failed for new runs — split by root cause so
+    # operators can distinguish transient gateway problems from prompt failures:
+    "summariser_gateway_error",  # workers gateway threw (network/5xx/timeout)
+    "summariser_no_output",      # gateway ran but returned no "summary" key
     "stamp_failed",
     "metadata_fetch_failed",
     "missing_path",
@@ -295,7 +302,10 @@ class FileExtractionWorkflow:
             code = (
                 _extraction_error_code(exc)
                 if _is_extraction_error(exc)
-                else "summariser_failed"
+                # Non-ExtractionError from the summarise step = gateway or
+                # network exception.  Use the transient-error code so
+                # operators know a retry is worth attempting.
+                else "summariser_gateway_error"
             )
             workflow.logger.info(
                 "file_extraction: summarise failed for %s (code=%s): %s",

@@ -487,8 +487,12 @@ async def summarise_extracted_text(
     try:
         result = await _call_clerk(prompt, agent_id=f"file-extract-{file_id}")
     except Exception as exc:  # noqa: BLE001
+        # Workers gateway threw — network error, HTTP 5xx, timeout, billing.
+        # These are transient; the file should be re-tried when the gateway
+        # recovers.  Use a distinct code so operators can tell this apart from
+        # a structural failure where the model returned the wrong shape.
         raise ExtractionError(
-            "summariser_failed", f"workers gateway raised: {exc}",
+            "summariser_gateway_error", f"workers gateway raised: {exc}",
         ) from exc
     summary: Any = None
     if isinstance(result, dict):
@@ -496,8 +500,12 @@ async def summarise_extracted_text(
     elif isinstance(result, str):
         summary = result
     if not isinstance(summary, str) or not summary.strip():
+        # Gateway ran successfully but the model returned JSON without a
+        # "summary" key (or with an empty value).  This is more likely a
+        # prompt-shape issue than a transient availability problem — kept
+        # separate so it can be investigated independently.
         raise ExtractionError(
-            "summariser_failed", "workers gateway returned no summary text",
+            "summariser_no_output", "workers gateway returned no summary text",
         )
     # Hard cap (the ctrl-api PATCH route caps at 4 KiB; we trim earlier
     # so a chatty model never breaches it).
