@@ -139,6 +139,16 @@ jobs:
           scp -p caddy/Caddyfile "${host}:/opt/alfred/caddy/Caddyfile"
           scp -p .env.example "${host}:/opt/alfred/.env.example"
 
+          # 3. Host-side files the compose file BIND-MOUNTS must ship with it.
+          #    If compose references a path the tenant does not have, Docker
+          #    creates the missing source as a DIRECTORY, Rails then tries to
+          #    load a directory as an initializer, and sure-web crash-loops.
+          #    That happened on the dev tenant on 2026-08-10 (~4 min outage);
+          #    rolling the same compose to the fleet would have repeated it
+          #    five times. Any new bind-mount of a repo path must be added here.
+          ssh "${host}" "mkdir -p /opt/alfred/scripts/sure-patches"
+          scp -p scripts/sure-patches/*.rb "${host}:/opt/alfred/scripts/sure-patches/"
+
       - name: Apply (docker compose up -d)
         if: steps.preflight.outputs.reachable == 'true'
         run: |
