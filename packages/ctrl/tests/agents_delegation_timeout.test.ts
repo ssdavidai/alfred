@@ -54,6 +54,17 @@ let nextFetchResponse: { status: number; body: string } = {
 };
 
 globalThis.fetch = (async (url: any, _init?: any) => {
+  // Saturation probe (#540) — always reports an idle gateway so dispatch
+  // proceeds and this file keeps testing the dispatch path. Must be matched
+  // BEFORE the /health arm: "/health/detailed" does not end with "/health",
+  // so without this it fell through to the dispatch arm and consumed the
+  // injected error, which the probe then swallowed by design (fail-open).
+  if (String(url).endsWith("/health/detailed")) {
+    return new Response(
+      JSON.stringify({ status: "ok", gateway_busy: false, active_agents: 0 }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  }
   // Health probe — always healthy so we can isolate dispatch errors.
   if (String(url).endsWith("/health")) {
     return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
