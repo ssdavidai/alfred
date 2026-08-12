@@ -6,10 +6,13 @@ owner Composio user_id leak. These tests cover:
 * owner-email resolution from env vs onboard.json vs nothing
 * the streams scanner: empty file, owner-only, mismatch, malformed JSON
 * the top-level activity: skip-without-owner, empty dir, mismatch found
+* write_fleet_audit_observation: posts to state.db (not the vault),
+  skips write when the flag is off, uses kind="system"
 """
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import pytest
 from temporalio.testing import ActivityEnvironment
@@ -20,7 +23,47 @@ from src.activities.fleet_audit import (
     _scan_jsonl_file,
     audit_streams_for_owner_mismatch,
     fleet_audit_is_enabled,
+    write_fleet_audit_observation,
 )
+
+
+# ---------------------------------------------------------------------------
+# Shared fakes for write_fleet_audit_observation tests
+# ---------------------------------------------------------------------------
+
+class _FakeStateClient:
+    """In-memory stand-in for StateClient — records create_observation calls."""
+
+    calls: list[dict[str, Any]] = []
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def __aenter__(self) -> "_FakeStateClient":
+        return self
+
+    async def __aexit__(self, *args) -> bool:
+        return False
+
+    async def create_observation(self, **kwargs: Any) -> str:
+        _FakeStateClient.calls.append(kwargs)
+        return "01FAKE_ULID"
+
+
+class _FakeVaultClient:
+    """Vault client stub — must never be touched by write_fleet_audit_observation."""
+
+    touched: list = []
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def write_record(self, *args, **kwargs):
+        _FakeVaultClient.touched.append(("write_record", args, kwargs))
+        return "vault/observation/should-not-reach.md"
+
+    async def close(self):
+        pass
 
 
 async def _run_audit(streams_dir: str) -> dict:
@@ -384,13 +427,18 @@ class TestAuditStreamsActivity:
 # ---------------------------------------------------------------------------
 
 class TestFeatureFlag:
-    async def test_defaults_to_true(self, monkeypatch):
+    async def test_defaults_to_false(self, monkeypatch):
+        """Fail-closed: absent var must not start the audit on a client tenant."""
         monkeypatch.delenv("FLEET_AUDIT_ENABLED", raising=False)
-        assert await _run_flag() is True
+        assert await _run_flag() is False
 
     async def test_respects_explicit_false(self, monkeypatch):
         monkeypatch.setenv("FLEET_AUDIT_ENABLED", "false")
         assert await _run_flag() is False
+
+    async def test_respects_explicit_true(self, monkeypatch):
+        monkeypatch.setenv("FLEET_AUDIT_ENABLED", "true")
+        assert await _run_flag() is True
 
     async def test_case_insensitive_true(self, monkeypatch):
         monkeypatch.setenv("FLEET_AUDIT_ENABLED", "TrUe")
@@ -399,3 +447,108 @@ class TestFeatureFlag:
     async def test_whitespace_handled(self, monkeypatch):
         monkeypatch.setenv("FLEET_AUDIT_ENABLED", "  false  ")
         assert await _run_flag() is False
+
+
+# ---------------------------------------------------------------------------
+# write_fleet_audit_observation — store routing
+# ---------------------------------------------------------------------------
+
+class TestWriteFleetAuditObservation:
+    """Verify observations go to state.db (not the vault) and use kind=system."""
+
+    async def test_posts_to_state_endpoint_not_vault(self, monkeypatch):
+        """observation must reach StateClient.create_observation, not VaultClient."""
+        _FakeStateClient.calls = []
+        _FakeVaultClient.touched = []
+        # StateClient is imported inside the function body (late-bound for
+        # Temporal sandbox safety), so we patch the source module.
+        monkeypatch.setattr(
+            "src.utils.signal_state.StateClient", _FakeStateClient
+        )
+        monkeypatch.setattr(
+            "src.utils.vault_client.VaultClient", _FakeVaultClient
+        )
+
+        env = ActivityEnvironment()
+        report = {
+            "status": "ok",
+            "owner_email": "owner@example.com",
+            "owner_source": "env",
+            "streams_dir": "/alfred-data/streams",
+            "files_scanned": 3,
+            "events_scanned": 5,
+            "total_mismatches": 0,
+            "mismatches_by_file": {},
+        }
+        result = await env.run(write_fleet_audit_observation, report)
+
+        # Must return the ULID from StateClient, not a vault path.
+        assert result == "01FAKE_ULID"
+        assert len(_FakeStateClient.calls) == 1
+        call = _FakeStateClient.calls[0]
+        assert call["kind"] == "system"
+        assert call["subject"] == "system"
+        assert "green" in call["summary"]
+        # The vault must not have been touched.
+        assert _FakeVaultClient.touched == [], "vault must not be written"
+
+    async def test_uses_kind_system(self, monkeypatch):
+        """kind must be 'system' — not 'decision' or 'signal'."""
+        _FakeStateClient.calls = []
+        monkeypatch.setattr(
+            "src.utils.signal_state.StateClient", _FakeStateClient
+        )
+
+        env = ActivityEnvironment()
+        report = {
+            "status": "ok",
+            "owner_email": "owner@example.com",
+            "owner_source": "env",
+            "streams_dir": "/alfred-data/streams",
+            "files_scanned": 1,
+            "events_scanned": 2,
+            "total_mismatches": 1,
+            "mismatches_by_file": {
+                "composio-calendar.jsonl": [
+                    {
+                        "event_id": "evt-1",
+                        "date": "2026-04-15T10:00:00Z",
+                        "self_email": "other@example.com",
+                        "expected_email": "owner@example.com",
+                        "line": 1,
+                    }
+                ]
+            },
+        }
+        await env.run(write_fleet_audit_observation, report)
+        assert _FakeStateClient.calls[0]["kind"] == "system"
+        assert "WRONG-TENANT" in _FakeStateClient.calls[0]["summary"]
+        assert _FakeStateClient.calls[0]["payload"]["severity"] == "incident"
+
+    async def test_write_failure_returns_empty_string(self, monkeypatch):
+        """A StateClient error must not propagate — return '' and log."""
+
+        class _BoomClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def create_observation(self, **kw):
+                raise RuntimeError("simulated HTTP 503")
+
+        monkeypatch.setattr(
+            "src.utils.signal_state.StateClient", _BoomClient
+        )
+
+        env = ActivityEnvironment()
+        report = {
+            "status": "ok",
+            "owner_email": "owner@example.com",
+            "owner_source": "env",
+            "streams_dir": "/alfred-data/streams",
+            "files_scanned": 0,
+            "events_scanned": 0,
+            "total_mismatches": 0,
+            "mismatches_by_file": {},
+        }
+        result = await env.run(write_fleet_audit_observation, report)
+        assert result == ""

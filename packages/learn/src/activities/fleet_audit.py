@@ -46,14 +46,18 @@ STREAMS_GLOB = "composio-*.jsonl"
 
 @activity.defn
 async def fleet_audit_is_enabled() -> bool:
-    """Feature flag — defaults to true.
+    """Feature flag — defaults to false (operator opt-in).
 
     Separate activity so the workflow's flag check is deterministic from
     Temporal's perspective (env reads happen inside an activity, not the
     workflow body). Mirrors the Plane sync pattern.
+
+    Fail-closed: a new tenant provisioned without an explicit
+    ``FLEET_AUDIT_ENABLED=true`` in its ``.env`` must NOT silently run
+    an operator diagnostic. The dev tenant carries that var explicitly.
     """
     return os.environ.get(
-        "FLEET_AUDIT_ENABLED", "true",
+        "FLEET_AUDIT_ENABLED", "false",
     ).strip().lower() == "true"
 
 
@@ -292,143 +296,110 @@ async def audit_streams_for_owner_mismatch(
 
 @activity.defn
 async def write_fleet_audit_observation(report: dict[str, Any]) -> str:
-    """Persist the audit report as an observation in the vault.
+    """Persist the audit report to ``state.db`` via POST /api/v1/state/observations.
 
-    Writes a single observation record per run (green or red) under
-    ``observation/fleet-audit-<date>.md``. The reflection pipeline
-    picks these up and Alfred surfaces any red entries in the next
-    morning briefing.
+    ``observation`` is a demoted type (CLAUDE.md §5.1 — never a vault record).
+    The vault correctly rejects it with 422; this activity now routes directly
+    to the state endpoint via ``StateClient.create_observation``.
 
-    Returns the vault path written, or empty string if nothing was
-    written (e.g. no-owner-email case — we still want a breadcrumb).
+    ``kind="system"`` is used because this is an automated operator diagnostic,
+    not a human decision (``kind="decision"``) or an inbound stream event
+    (``kind="signal"``). The kind is free-form in state.db and queryable.
+
+    Returns the observation ULID on success, or empty string if the write
+    fails (logged as a warning; the caller treats empty-string as a soft error).
     """
-    # Late-bound imports so the Temporal sandbox never sees httpx at
-    # workflow-import time. (Matches the pattern in other activities.)
-    import httpx
+    # Late-bound imports — keeps httpx out of the Temporal sandbox at
+    # workflow-import time (matches the pattern in other activities).
     from datetime import datetime, timezone
 
-    from src.activities.vault import vault_record_path
     from src.config import load_config
-    from src.utils.retry_policy import raise_if_permanent
-    from src.utils.vault_client import VaultClient
+    from src.utils.signal_state import StateClient
 
-    config = load_config()
-    client = VaultClient(config)
+    now = datetime.now(timezone.utc)
+    date_str = now.strftime("%Y-%m-%d")
+    status = report.get("status", "unknown")
+    owner_email = report.get("owner_email", "")
+    total = int(report.get("total_mismatches", 0) or 0)
+    files_scanned = int(report.get("files_scanned", 0) or 0)
+
+    if status == "no_owner_email_configured":
+        severity = "not_audited"
+        summary = (
+            f"Fleet audit {date_str}: not audited — no owner email configured"
+        )
+        detail = (
+            "OWNER_EMAIL env is unset and onboard.json has no usable email. "
+            "Audit skipped. Set OWNER_EMAIL on the tenant to enable "
+            "wrong-tenant stream detection."
+        )
+    elif total == 0:
+        severity = "green"
+        summary = (
+            f"Fleet audit {date_str}: green — "
+            f"{files_scanned} file(s) scanned, no mismatches"
+        )
+        detail = (
+            f"Scanned {files_scanned} composio stream file(s) against "
+            f"owner {owner_email}. No wrong-tenant events detected."
+        )
+    else:
+        severity = "incident"
+        n_files = len(report.get("mismatches_by_file") or {})
+        summary = (
+            f"Fleet audit {date_str}: {total} WRONG-TENANT event(s) "
+            f"across {n_files} file(s)"
+        )
+        detail = (
+            f"Stream contamination detected: {total} events have a self:true "
+            f"attendee whose email does not match the tenant owner "
+            f"({owner_email}). This is the signature of a cross-tenant "
+            f"Composio account leak. Review the mismatches_by_file payload "
+            f"and the Composio user_id configuration. Full event list is in "
+            f"Temporal history."
+        )
+
+    # Cap per-file detail to avoid oversized payloads; full data is in
+    # Temporal workflow history regardless.
+    mismatches_by_file = report.get("mismatches_by_file") or {}
+    payload: dict[str, Any] = {
+        "source": "fleet_audit",
+        "severity": severity,
+        "fleet_audit": {
+            "status": status,
+            "owner_email": owner_email,
+            "owner_source": report.get("owner_source") or "",
+            "streams_dir": report.get("streams_dir") or "",
+            "files_scanned": files_scanned,
+            "total_mismatches": total,
+        },
+        "mismatches_by_file": {
+            fname: entries[:25]
+            for fname, entries in mismatches_by_file.items()
+        },
+    }
+
+    cfg = load_config()
     try:
-        now = datetime.now(timezone.utc)
-        date_str = now.strftime("%Y-%m-%d")
-        status = report.get("status", "unknown")
-        owner_email = report.get("owner_email", "")
-        total = int(report.get("total_mismatches", 0) or 0)
-        files_scanned = int(report.get("files_scanned", 0) or 0)
-
-        if status == "no_owner_email_configured":
-            severity = "not_audited"
-            title = f"Fleet audit {date_str}: not audited (no owner email)"
-            summary = (
-                "OWNER_EMAIL env is unset and onboard.json has no usable "
-                "email — audit skipped. Set OWNER_EMAIL on the tenant to "
-                "enable wrong-tenant stream detection."
+        async with StateClient(cfg) as sc:
+            observation_id = await sc.create_observation(
+                subject="system",
+                kind="system",
+                summary=summary,
+                detail=detail,
+                ts=now.isoformat(),
+                confidence=1.0,
+                status="open",
+                payload=payload,
             )
-        elif total == 0:
-            severity = "green"
-            title = f"Fleet audit {date_str}: green ({files_scanned} files)"
-            summary = (
-                f"Scanned {files_scanned} composio stream file(s) against "
-                f"owner {owner_email}. No wrong-tenant events detected."
-            )
-        else:
-            severity = "incident"
-            title = (
-                f"Fleet audit {date_str}: {total} WRONG-TENANT events "
-                f"across {len(report.get('mismatches_by_file', {}))} files"
-            )
-            summary = (
-                f"Stream contamination detected: {total} events have a "
-                f"self:true attendee whose email does not match the tenant "
-                f"owner ({owner_email}). This is the signature of a "
-                f"cross-tenant Composio account leak. Review the files "
-                f"listed below and the Composio user_id configuration."
-            )
-
-        # Build a readable body with the file-by-file breakdown.
-        body_parts: list[str] = [f"# {title}", "", summary, ""]
-        body_parts.append(f"- **Severity**: {severity}")
-        body_parts.append(f"- **Owner email**: {owner_email or '(unresolved)'}")
-        body_parts.append(
-            f"- **Owner source**: {report.get('owner_source', '') or '(n/a)'}"
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "fleet_audit: state.db write failed: %s", exc,
         )
-        body_parts.append(
-            f"- **Streams dir**: {report.get('streams_dir', '') or '(n/a)'}"
-        )
-        body_parts.append(f"- **Files scanned**: {files_scanned}")
-        body_parts.append(f"- **Total mismatches**: {total}")
-        body_parts.append("")
+        return ""
 
-        mismatches_by_file = report.get("mismatches_by_file") or {}
-        if mismatches_by_file:
-            body_parts.append("## Mismatches by file")
-            body_parts.append("")
-            for fname, entries in sorted(mismatches_by_file.items()):
-                body_parts.append(f"### `{fname}` — {len(entries)} events")
-                body_parts.append("")
-                # Cap per-file detail to keep the observation readable;
-                # the full report still lives in Temporal history.
-                for entry in entries[:25]:
-                    body_parts.append(
-                        f"- line {entry.get('line', '?')} · "
-                        f"{entry.get('date', '?')} · "
-                        f"self=`{entry.get('self_email', '')}` "
-                        f"(expected `{entry.get('expected_email', '')}`) · "
-                        f"event_id=`{entry.get('event_id', '')}`"
-                    )
-                if len(entries) > 25:
-                    body_parts.append(
-                        f"- ...and {len(entries) - 25} more. "
-                        f"See Temporal history for the full list."
-                    )
-                body_parts.append("")
-
-        frontmatter_tags = ["fleet-audit", severity]
-        if severity == "incident":
-            frontmatter_tags.append("wrong-tenant")
-
-        content = f"""---
-type: observation
-created: {now.isoformat()}
-status: unprocessed
-input_type: system
-input_source: fleet_audit
-confidence: high
-routed_by: fleet_audit
-source: fleet_audit
-severity: {severity}
-tags: {frontmatter_tags}
-fleet_audit:
-  status: "{status}"
-  owner_email: "{owner_email}"
-  files_scanned: {files_scanned}
-  total_mismatches: {total}
----
-
-""" + "\n".join(body_parts)
-
-        raw_name = f"fleet-audit-{severity}-{date_str}"
-        name = vault_record_path("observation", raw_name, created=now)
-        try:
-            path = await client.write_record("observation", name, content)
-        except httpx.HTTPStatusError as exc:
-            # A 422 from ctrl-api means the promotion contract rejected the
-            # write (observation is a demoted type; the vault rejects it).
-            # The payload is structural — retrying the same request can never
-            # succeed, so surface it immediately as a non-retryable error
-            # instead of burning all three retry slots (#539).
-            raise_if_permanent(exc, context="write_fleet_audit_observation")
-            raise
-        logger.info(
-            "fleet_audit: wrote observation %s (severity=%s)",
-            path, severity,
-        )
-        return path
-    finally:
-        await client.close()
+    logger.info(
+        "fleet_audit: wrote observation %s (severity=%s)",
+        observation_id, severity,
+    )
+    return observation_id

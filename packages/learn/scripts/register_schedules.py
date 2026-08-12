@@ -692,13 +692,14 @@ async def register_plane_reconciliation(client: Client, task_queue: str) -> None
 
 
 def _fleet_audit_enabled() -> bool:
-    """Feature flag for the daily fleet audit. Defaults to ``true``.
+    """Feature flag for the daily fleet audit. Defaults to ``false`` (opt-in).
 
-    Unlike the Plane flags, this one's opt-OUT — we want wrong-tenant
-    detection on every tenant by default.
+    The audit is an operator diagnostic — it must not run on client tenants
+    by default. The dev tenant carries an explicit ``FLEET_AUDIT_ENABLED=true``
+    in its ``.env``; all others stay off unless the operator sets it.
     """
     return os.environ.get(
-        "FLEET_AUDIT_ENABLED", "true",
+        "FLEET_AUDIT_ENABLED", "false",
     ).strip().lower() == "true"
 
 

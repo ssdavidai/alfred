@@ -38,37 +38,52 @@ _MINIMAL_REPORT = {
 
 
 class TestFleetAuditObservationRetry:
-    async def test_422_becomes_non_retryable(self, monkeypatch):
+    """write_fleet_audit_observation now routes to StateClient (state.db), not
+    the vault.  The old 422-permanent / 503-propagate contract applied to the
+    vault path; the new contract is: any StateClient error is caught and an
+    empty string is returned (soft error), because the full audit report is
+    already in Temporal history and a write failure should not abort the run.
+    """
+
+    async def test_state_client_error_returns_empty_string(self, monkeypatch):
+        """Any StateClient failure must be caught and return ''."""
+        from src.activities.fleet_audit import write_fleet_audit_observation
+
+        class _BoomStateClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def create_observation(self, **kw):
+                raise _http_error(422)
+
+        monkeypatch.setattr("src.utils.signal_state.StateClient", _BoomStateClient)
+
+        result = await write_fleet_audit_observation(_MINIMAL_REPORT)
+        assert result == ""
+
+    async def test_vault_never_reached(self, monkeypatch):
+        """VaultClient.write_record must never be called by this activity."""
         from src.activities.fleet_audit import write_fleet_audit_observation
         from src.utils.vault_client import VaultClient
 
-        async def _bad_write(self, record_type, name, content):  # noqa: ANN001
-            raise _http_error(422)
+        vault_calls: list = []
 
-        monkeypatch.setattr(VaultClient, "write_record", _bad_write)
+        async def _spy_write(self, *a, **kw):  # noqa: ANN001
+            vault_calls.append(a)
+            return "vault/observation/should-not-happen.md"
 
-        with pytest.raises(ApplicationError) as exc_info:
-            await write_fleet_audit_observation(_MINIMAL_REPORT)
+        monkeypatch.setattr(VaultClient, "write_record", _spy_write)
 
-        err = exc_info.value
-        assert err.non_retryable is True
-        assert err.type == "PermanentHttpError"
-        assert "422" in str(err)
-        assert "write_fleet_audit_observation" in str(err)
+        class _OkStateClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def create_observation(self, **kw): return "01ULID"
 
-    async def test_503_still_retries(self, monkeypatch):
-        from src.activities.fleet_audit import write_fleet_audit_observation
-        from src.utils.vault_client import VaultClient
+        monkeypatch.setattr("src.utils.signal_state.StateClient", _OkStateClient)
 
-        async def _bad_write(self, record_type, name, content):  # noqa: ANN001
-            raise _http_error(503)
-
-        monkeypatch.setattr(VaultClient, "write_record", _bad_write)
-
-        with pytest.raises(httpx.HTTPStatusError) as exc_info:
-            await write_fleet_audit_observation(_MINIMAL_REPORT)
-
-        assert exc_info.value.response.status_code == 503
+        await write_fleet_audit_observation(_MINIMAL_REPORT)
+        assert vault_calls == [], "vault must not be written"
 
 
 # ---------------------------------------------------------------------------
