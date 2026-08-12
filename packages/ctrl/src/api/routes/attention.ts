@@ -785,6 +785,7 @@ export function registerAttentionRoutes(): void {
         would_apply: toApply.length, would_skip: skipped.length, skipped,
         noise_warning: intent !== "noise" ? null :
           `Marking ${toApply.length} card(s) noise trains suppression. This batch is ONE act — suppression still applies.`,
+        reversal_note: "Batch decisions are not reversible yet: DecisionRouter support for source_records does not exist. Undoing requires patching each card's frontmatter manually.",
         note: note || null });
     }
     if (!toApply.length)
@@ -806,14 +807,15 @@ export function registerAttentionRoutes(): void {
     if (!fs.existsSync(decisionDir)) fs.mkdirSync(decisionDir, { recursive: true });
     const sideEffects = { bulk: true, count: appliedIds.length, synchronous_flip: true,
       source_records: appliedIds.map((id) => `needs_attention/${id}.md`),
-      actions: [`needs_attention.${naStatus}`] };
+      actions: [`needs_attention.${naStatus}`],
+      reversal_note: "is_reversible=false until DecisionRouter source_records support lands (Lane II queued)" };
     const front = [
       `type: "decision"`, `created: ${JSON.stringify(nowIso)}`, `principal: "principal"`,
       `source: "needs_attention"`, `source_record: "needs_attention/bulk"`,
       `source_headline: ${JSON.stringify(`Bulk ${intent}: ${appliedIds.length} cards`)}`,
       `intent: ${JSON.stringify(intent)}`, `note: ${note ? JSON.stringify(note) : "null"}`,
       `matter_ref: null`, `task_ref: null`, `state: "open"`, `outcome_record: null`,
-      `time_to_decision_ms: null`, `reversed_at: null`, `is_reversible: true`,
+      `time_to_decision_ms: null`, `reversed_at: null`, `is_reversible: false`,
       `completed_at: null`, `decision_origin: "bulk_triage"`,
       yaml.dump({ side_effects: sideEffects }, { lineWidth: 200 }).trimEnd(),
     ].join("\n");

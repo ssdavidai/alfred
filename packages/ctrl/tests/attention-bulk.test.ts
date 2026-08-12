@@ -85,6 +85,9 @@ describe("bulk needs-attention", () => {
     assert.strictEqual(decCount(), 1, "exactly one decision record");
     assert.ok(p.decision_path?.startsWith("decision/"));
     assert.ok(typeof p.audit_id === "string" && p.audit_id.length > 0);
+    // is_reversible must be false until DecisionRouter source_records support lands.
+    const decRaw = fs.readFileSync(path.join(DEC, fs.readdirSync(DEC)[0]), "utf-8");
+    assert.ok(/^is_reversible: false$/m.test(decRaw));
   });
 
   it("skips unknown ids and already-resolved ids; batch still completes over valid subset", async () => {
