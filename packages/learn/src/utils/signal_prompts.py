@@ -62,7 +62,56 @@ calibrated to "how clear is the signal in JUST the quote?".
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
+
+_logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Body chunking for large-payload extraction (#524)
+# ---------------------------------------------------------------------------
+#
+# Webhook/transcript events can be 50–242 KB.  _truncate_body(body, 2000)
+# inside the prompt builder clips them to the first 2 KB, so the model only
+# saw the opening ~2 minutes of a 2-hour meeting.  This section adds the
+# helpers that let the extractors split the body and run one LLM call per
+# chunk, then merge results.
+#
+# Thresholds: ordinary email (≤ 4 KB) stays on the existing single-call path
+# (requirement 1: no added round-trip for normal events).  The ceiling
+# SIGNAL_MAX_CHUNKS × SIGNAL_BODY_CHUNK_SIZE = 16 000 chars = MAX_CLERK_BODY_CHARS,
+# so the total coverage matches the existing in-memory cap.
+
+SIGNAL_BODY_CHUNK_SIZE: int = 2000       # chars per chunk — matches _truncate_body default
+SIGNAL_BODY_CHUNK_THRESHOLD: int = 4000  # bodies ≤ this → single call, unchanged behaviour
+SIGNAL_MAX_CHUNKS: int = 8               # ceiling: 8 × 2 000 = 16 000 chars max fan-out
+
+
+def chunk_body_for_signal_extraction(body: str) -> tuple[list[str], bool]:
+    """Split an event body into extraction-sized chunks.
+
+    Returns ``(chunks, tail_dropped)``.
+
+    Fast-path: ``([body], False)`` when ``len(body) <= SIGNAL_BODY_CHUNK_THRESHOLD``.
+    The caller's single LLM call and the prompt builder's ``_truncate_body``
+    then apply as before — zero behaviour change for ordinary email.
+
+    Large bodies: contiguous slices of ``SIGNAL_BODY_CHUNK_SIZE`` chars each,
+    capped at ``SIGNAL_MAX_CHUNKS``.  ``tail_dropped=True`` signals that content
+    beyond ``SIGNAL_MAX_CHUNKS × SIGNAL_BODY_CHUNK_SIZE`` was discarded; the
+    caller should log this so a shallow extraction is visible rather than silent.
+    """
+    if not isinstance(body, str):
+        return ([""], False)
+    body = body.strip()
+    if len(body) <= SIGNAL_BODY_CHUNK_THRESHOLD:
+        return ([body], False)
+    chunks: list[str] = []
+    pos = 0
+    while pos < len(body) and len(chunks) < SIGNAL_MAX_CHUNKS:
+        chunks.append(body[pos : pos + SIGNAL_BODY_CHUNK_SIZE])
+        pos += SIGNAL_BODY_CHUNK_SIZE
+    return (chunks or [""], pos < len(body))
 
 
 # ---------------------------------------------------------------------------
