@@ -2249,6 +2249,7 @@ async def extract_signals_from_event(
     """
     from src.utils.signal_prompts import (
         build_signal_extraction_prompt_multi,
+        chunk_body_for_signal_extraction,
     )
     from src.activities.clerk import _call_clerk
 
@@ -2388,20 +2389,35 @@ async def extract_signals_from_event(
         # bullet rules in Section 4.5.
         soul_md = await _load_soul_md(cfg)
 
-        prompt = build_signal_extraction_prompt_multi(
-            source_type=source_type,
-            event_frontmatter=event.get("frontmatter") or {},
-            event_body=_cap_at_word_boundary(_event_body(event), MAX_CLERK_BODY_CHARS),
-            raw_quote=event_level_raw_quote,
-            soul_md=soul_md,
-        )
+        # Body chunking (#524) — same fix as extract_signal_from_event.
+        # Meeting transcripts (50–242 KB) were silently truncated to 2 KB.
+        # We chunk and run one LLM call per chunk; results are merged and
+        # deduped by (effect, target_hint) before target resolution.
+        raw_body = _event_body(event)
+        body_len = len(raw_body) if isinstance(raw_body, str) else 0
+        body_chunks, tail_dropped = chunk_body_for_signal_extraction(raw_body)
+        n_chunks = len(body_chunks)
+        if n_chunks > 1:
+            logger.info(
+                "signals.extract_signals_from_event: body_len=%d "
+                "chunked n_chunks=%d tail_dropped=%s path=%s",
+                body_len, n_chunks, tail_dropped, stream_event_path,
+            )
+            if tail_dropped:
+                logger.warning(
+                    "signals.extract_signals_from_event: body_len=%d "
+                    "exceeded SIGNAL_MAX_CHUNKS ceiling; tail dropped path=%s",
+                    body_len, stream_event_path,
+                )
+        elif body_len > 2000:
+            logger.info(
+                "signals.extract_signals_from_event: body_len=%d "
+                "single-call (chars beyond 2000 excluded by prompt builder) path=%s",
+                body_len, stream_event_path,
+            )
 
         # Rate-guard check BEFORE the LLM call (mirrors steward + the
-        # single-signal extractor). Holds off every per-event extraction
-        # while a provider-429 backoff is active so the openai-codex
-        # usage-cap can't be re-pinned tick after tick. Blocked → raise so
-        # the workflow defers the event (does NOT mark it processed) and
-        # retries once the backoff clears.
+        # single-signal extractor). Checked once per event, before the chunk loop.
         from src.activities.rate_guard import (
             get_rate_guard,
             parse_retry_after_from_exc,
@@ -2432,55 +2448,92 @@ async def extract_signals_from_event(
 
         import asyncio as _asyncio
         retry_delays = (3.0, 8.0, 20.0)
-        llm_raw: Any = None
-        last_exc: Exception | None = None
-        for attempt, delay in enumerate([0.0] + list(retry_delays)):
-            if delay:
-                await _asyncio.sleep(delay)
-            try:
-                llm_raw = await _call_clerk(prompt, raw=False)
-                last_exc = None
+        _session_needles_m = (
+            "max active children",
+            "Could not get session key",
+            "sessions_spawn has reached",
+        )
+        all_raw_classifications: list[dict[str, Any]] = []
+        _provider_429_m = False
+        for _ci, _body_chunk in enumerate(body_chunks):
+            _chunk_prompt = build_signal_extraction_prompt_multi(
+                source_type=source_type,
+                event_frontmatter=event.get("frontmatter") or {},
+                event_body=_body_chunk,
+                raw_quote=event_level_raw_quote,
+                soul_md=soul_md,
+            )
+            llm_raw: Any = None
+            last_exc: Exception | None = None
+            for attempt, delay in enumerate([0.0] + list(retry_delays)):
+                if delay:
+                    await _asyncio.sleep(delay)
+                try:
+                    llm_raw = await _call_clerk(_chunk_prompt, raw=False)
+                    last_exc = None
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    last_exc = exc
+                    err_text = str(exc)
+                    retry_after = parse_retry_after_from_exc(exc)
+                    if retry_after is not None:
+                        await rate_guard.record_429(retry_after or 60)
+                        logger.warning(
+                            "signals.extract_signals_from_event: 429 chunk %d/%d "
+                            "path=%s — backoff registered (retry_after=%ds)",
+                            _ci + 1, n_chunks, stream_event_path, retry_after or 60,
+                        )
+                        _provider_429_m = True
+                        break
+                    if not any(needle in err_text for needle in _session_needles_m):
+                        break
+                    logger.info(
+                        "signals.extract_signals_from_event: clerk rate-limited "
+                        "chunk %d/%d path=%s attempt=%d",
+                        _ci + 1, n_chunks, stream_event_path, attempt + 1,
+                    )
+            if _provider_429_m:
                 break
-            except Exception as exc:  # noqa: BLE001
-                last_exc = exc
-                err_text = str(exc)
-                # Provider 429 (incl. openai-codex usage-cap) → register
-                # the reset-aware backoff and stop retrying.
-                retry_after = parse_retry_after_from_exc(exc)
-                if retry_after is not None:
-                    await rate_guard.record_429(retry_after or 60)
+            if last_exc is not None:
+                if n_chunks == 1:
                     logger.warning(
-                        "signals.extract_signals_from_event: 429 from provider "
-                        "path=%s — backoff registered (retry_after=%ds)",
-                        stream_event_path, retry_after or 60,
+                        "signals.extract_signals_from_event: clerk call failed "
+                        "path=%s err=%s", stream_event_path, last_exc,
                     )
-                    break
-                if not any(
-                    needle in err_text for needle in (
-                        "max active children",
-                        "Could not get session key",
-                        "sessions_spawn has reached",
+                    raise RuntimeError(
+                        f"clerk call failed for {stream_event_path}: {last_exc}"
                     )
-                ):
-                    break
-                logger.info(
-                    "signals.extract_signals_from_event: clerk rate-limited "
-                    "path=%s attempt=%d", stream_event_path, attempt + 1,
+                logger.warning(
+                    "signals.extract_signals_from_event: chunk %d/%d clerk failed "
+                    "path=%s err=%s", _ci + 1, n_chunks, stream_event_path, last_exc,
                 )
+                continue
+            _chunk_classified = _validate_signals_envelope(llm_raw)
+            if _chunk_classified:
+                all_raw_classifications.extend(_chunk_classified)
 
-        if last_exc is not None:
-            # Same critical contract as the single-signal extractor:
-            # raise so Temporal retries the activity rather than the
-            # workflow burying the event as noise.
-            logger.warning(
-                "signals.extract_signals_from_event: clerk call failed "
-                "path=%s err=%s", stream_event_path, last_exc,
-            )
+        if _provider_429_m and not all_raw_classifications:
             raise RuntimeError(
-                f"clerk call failed for {stream_event_path}: {last_exc}"
+                f"provider 429 aborted signal extraction for {stream_event_path}"
             )
 
-        validated_signals = _validate_signals_envelope(llm_raw)
+        # Dedupe across chunks by (effect, target_hint).  The same commitment
+        # mentioned in two transcript chunks (e.g. the middle and end of a
+        # meeting) produces one signal, not two.  First occurrence wins so
+        # chunk order is preserved; the caller's target resolution and
+        # confidence priors then apply to each deduplicated signal.
+        _seen_dk: set[str] = set()
+        validated_signals: list[dict[str, Any]] = []
+        for _sig in all_raw_classifications:
+            _dk = (
+                str(_sig.get("effect") or "").lower()
+                + "|"
+                + (_sig.get("target_hint") or "").lower().strip()
+            )
+            if _dk not in _seen_dk:
+                _seen_dk.add(_dk)
+                validated_signals.append(_sig)
+
         if not validated_signals:
             logger.info(
                 "signals.extract_signals_from_event: 0 signals path=%s "
