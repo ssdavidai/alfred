@@ -759,7 +759,9 @@ export function registerAttentionRoutes(): void {
 
   // POST /api/v1/admin/needs-attention/bulk — bulk done|defer|noise over pending cards.
   // dry_run=true: preview, no writes. Apply: ONE audit row + ONE decision for the batch.
-  // delegate excluded. Unknown/resolved ids skipped. Decision is reversible via /reverse.
+  // delegate excluded. Unknown/resolved ids skipped. The batch decision is NOT
+  // reversible yet (is_reversible: false) — DecisionRouter support for
+  // side_effects.source_records does not exist. See reversal_note.
   addRoute("POST", "/api/v1/admin/needs-attention/bulk", async ({ res, body }) => {
     const b = (body ?? {}) as Record<string, unknown>;
     const intent = String(b.intent ?? "").trim().toLowerCase();
