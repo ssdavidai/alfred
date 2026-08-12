@@ -30,6 +30,7 @@ import {
   type Direction,
   type Status,
 } from "../../db/alfredJournal.js";
+import { reconcileCronOutbounds } from "../../db/hermesCronJournal.js";
 
 const VALID_DIRECTIONS: ReadonlySet<Direction> = new Set([
   "outbound",
@@ -166,6 +167,18 @@ export function registerAlfredJournalRoutes(): void {
         ...(profileParam !== null ? { profile: profileParam } : {}),
       },
     });
+  });
+
+  // POST /api/v1/alfred-journal/reconcile-cron — mirror recent Hermes cron
+  // outbounds into alfred_journal (GH #418 read-side reconciler).
+  // Body: { profile?: string }  — defaults to "main".
+  // Returns: { ok, journaled, skipped, window_hours, batch_cap }
+  addRoute("POST", "/api/v1/alfred-journal/reconcile-cron", async ({ res, body }) => {
+    const b = (body ?? {}) as Record<string, unknown>;
+    const profile = typeof b.profile === "string" && b.profile ? b.profile : "main";
+    const db = getStateDb();
+    const r = reconcileCronOutbounds(db, undefined, profile);
+    sendJson(res, 200, { ok: true, ...r });
   });
 
   // POST /api/v1/alfred-journal/principal/bind — idempotent (channel, chat_id) → principal_id.
