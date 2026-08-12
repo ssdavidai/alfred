@@ -756,4 +756,83 @@ export function registerAttentionRoutes(): void {
       audit_record_path: `event/${auditId}.md`,
     });
   });
+
+  // POST /api/v1/admin/needs-attention/bulk — bulk done|defer|noise over pending cards.
+  // dry_run=true: preview, no writes. Apply: ONE audit row + ONE decision for the batch.
+  // delegate excluded. Unknown/resolved ids skipped. Decision is reversible via /reverse.
+  addRoute("POST", "/api/v1/admin/needs-attention/bulk", async ({ res, body }) => {
+    const b = (body ?? {}) as Record<string, unknown>;
+    const intent = String(b.intent ?? "").trim().toLowerCase();
+    const note = typeof b.note === "string" ? b.note.trim() : "";
+    const dryRun = b.dry_run === true || String(b.dry_run) === "true";
+    if (!["done", "defer", "noise"].includes(intent))
+      throw new ValidationError("intent must be one of done | defer | noise (delegate excluded — fires agents)");
+    if (!Array.isArray(b.ids) || !(b.ids as unknown[]).length)
+      throw new ValidationError("ids must be a non-empty array");
+
+    const toApply: NeedsAttentionRecord[] = [];
+    const skipped: Array<{ id: string; reason: string }> = [];
+    for (const rawId of b.ids as unknown[]) {
+      const id = String(rawId ?? "").trim();
+      const rec = readNeedsAttention(id);
+      if (!rec) { skipped.push({ id, reason: "not_found" }); continue; }
+      const st = String(rec.frontmatter.status ?? "pending");
+      if (st !== "pending") { skipped.push({ id, reason: `already_resolved:${st}` }); continue; }
+      toApply.push(rec);
+    }
+    if (dryRun) {
+      return sendJson(res, 200, { dry_run: true, intent,
+        would_apply: toApply.length, would_skip: skipped.length, skipped,
+        noise_warning: intent !== "noise" ? null :
+          `Marking ${toApply.length} card(s) noise trains suppression. This batch is ONE act — suppression still applies.`,
+        note: note || null });
+    }
+    if (!toApply.length)
+      return sendJson(res, 200, { ok: true, applied: 0, skipped, decision_path: null, audit_id: null });
+
+    const nowIso = new Date().toISOString();
+    const naStatus = intent === "defer" ? "skipped" : intent; // defer→skipped on the card
+    const appliedIds: string[] = [];
+    for (const rec of toApply) {
+      writeFrontmatterPatch(rec, { status: naStatus, resolved_at: nowIso, resolution_note: note || `bulk ${intent}` });
+      appliedIds.push(rec.id);
+    }
+
+    // ONE decision record — hand-written YAML (avoids the attention↔decisions import cycle).
+    const nowTs = nowIso.replace(/:/g, "-").replace(/\..*$/, "Z");
+    const shortId = crypto.createHash("sha256").update(`bulk\x00${intent}\x00${nowIso}`).digest("hex").slice(0, 8);
+    const decisionId = `${nowTs}-${shortId}`;
+    const decisionDir = path.join(VAULT_PATH, "decision");
+    if (!fs.existsSync(decisionDir)) fs.mkdirSync(decisionDir, { recursive: true });
+    const sideEffects = { bulk: true, count: appliedIds.length, synchronous_flip: true,
+      source_records: appliedIds.map((id) => `needs_attention/${id}.md`),
+      actions: [`needs_attention.${naStatus}`] };
+    const front = [
+      `type: "decision"`, `created: ${JSON.stringify(nowIso)}`, `principal: "principal"`,
+      `source: "needs_attention"`, `source_record: "needs_attention/bulk"`,
+      `source_headline: ${JSON.stringify(`Bulk ${intent}: ${appliedIds.length} cards`)}`,
+      `intent: ${JSON.stringify(intent)}`, `note: ${note ? JSON.stringify(note) : "null"}`,
+      `matter_ref: null`, `task_ref: null`, `state: "open"`, `outcome_record: null`,
+      `time_to_decision_ms: null`, `reversed_at: null`, `is_reversible: true`,
+      `completed_at: null`, `decision_origin: "bulk_triage"`,
+      yaml.dump({ side_effects: sideEffects }, { lineWidth: 200 }).trimEnd(),
+    ].join("\n");
+    const bodyTxt = [
+      `# Decision: bulk ${intent} on needs_attention (${appliedIds.length} cards)`, "",
+      `Principal bulk-${intent} on ${appliedIds.length} cards at ${nowIso}.`,
+      ...(note ? [`Note: ${note}`] : []),
+    ].join("\n");
+    fs.writeFileSync(path.join(decisionDir, `${decisionId}.md`), `---\n${front}\n---\n\n${bodyTxt}\n`, "utf-8");
+    indexVaultWrite(`decision/${decisionId}.md`);
+
+    // ONE audit row for the entire batch — NOT one per card.
+    const auditId = appendAudit({ ts: nowIso, action_type: "decision", actor: "principal",
+      source: "needs_attention", target_path: `decision/${decisionId}.md`, target_kind: "decision",
+      summary: `bulk ${intent}: ${appliedIds.length} cards`,
+      changes: { intent, state: "open", count: appliedIds.length, note: note || null },
+      payload: { decision_origin: "bulk_triage", bulk: true, ids: appliedIds, skipped } });
+
+    sendJson(res, 200, { ok: true, applied: appliedIds.length, skipped,
+      decision_path: `decision/${decisionId}.md`, audit_id: auditId });
+  });
 }
