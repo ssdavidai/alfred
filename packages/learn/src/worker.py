@@ -62,6 +62,7 @@ from src.workflows.reversal_calibration import ReversalCalibrationWorkflow
 from src.workflows.briefing import BriefingWorkflow
 from src.workflows.recall_dispatcher import RecallDispatcherWorkflow
 from src.workflows.ha_bootstrap import HaBootstrapWorkflow
+from src.workflows.cron_journal import CronJournalReconcileWorkflow
 
 # Chore template workflows (static + dynamic)
 from src.workflows.chores import ALL_CHORE_TEMPLATES
@@ -718,6 +719,12 @@ from src.activities.ha_gap_detection import (
     generate_ha_proposals,
 )
 
+# Cron-journal reconciler (#418) — activities back CronJournalReconcileWorkflow.
+from src.activities.cron_journal import (
+    cron_journal_reconcile_is_enabled,
+    reconcile_cron_journal,
+)
+
 # Validators used as activities
 from src.validators.frontmatter import validate_classification
 
@@ -832,6 +839,11 @@ _STATIC_WORKFLOWS = [
     # register_schedules.py; also triggered on demand by the HaCard
     # "Refresh registry" CTA via ctrl-api's /registry/refresh route.
     HaBootstrapWorkflow,
+    # Cron-journal reconciler (#418) — every 6h calls
+    # POST /api/v1/alfred-journal/reconcile-cron to journal Hermes cron
+    # outbounds that carry a ``deliver`` field into alfred_journal.
+    # Gated on CRON_JOURNAL_RECONCILE_ENABLED (default OFF).
+    CronJournalReconcileWorkflow,
     *ALL_CHORE_TEMPLATES,
 ]
 
@@ -1258,6 +1270,9 @@ ALL_ACTIVITIES = [
     # run inside the same HaBootstrapWorkflow after Phase A's write.
     detect_ha_gaps,
     generate_ha_proposals,
+    # Cron-journal reconciler (#418) — backs CronJournalReconcileWorkflow.
+    cron_journal_reconcile_is_enabled,
+    reconcile_cron_journal,
 ]
 
 

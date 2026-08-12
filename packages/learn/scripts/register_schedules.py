@@ -156,6 +156,21 @@ REVERSAL_CALIBRATION_SCHEDULE_ID = "al-reversal-calibration"
 REVERSAL_CALIBRATION_WORKFLOW = "ReversalCalibrationWorkflow"
 REVERSAL_CALIBRATION_INTERVAL = timedelta(minutes=10)
 
+# Cron-journal reconciler (#418 / GH #556) — call
+# POST /api/v1/alfred-journal/reconcile-cron every 6 h.
+#
+# Interval arithmetic: window=48 h, cap=50 sessions/call.
+# Hermes cron jobs with ``deliver`` are outbound-delivery chores (daily
+# briefings, weekly digests, etc.) — a busy tenant has at most ~5 such
+# jobs.  At 6-hour intervals that is ~1.25 sessions/interval, far under
+# the 50-session cap.  A session missed just after one run waits at most
+# 6 h, leaving 42 h of the 48-hour window intact.  Default OFF (lesson
+# from FLEET_AUDIT_ENABLED defaulting ON and silently running on five
+# client tenants for weeks as an operator diagnostic).
+CRON_JOURNAL_RECONCILE_SCHEDULE_ID = "al-cron-journal-reconcile"
+CRON_JOURNAL_RECONCILE_WORKFLOW = "CronJournalReconcileWorkflow"
+CRON_JOURNAL_RECONCILE_INTERVAL = timedelta(hours=6)
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("register-schedules")
 
@@ -860,6 +875,20 @@ def _stream_event_purge_enabled() -> bool:
     ).strip().lower() in ("true", "1", "yes")
 
 
+def _cron_journal_reconcile_enabled() -> bool:
+    """Feature flag for the cron-journal reconciler (#418). Default OFF.
+
+    Tenants opt in by setting ``CRON_JOURNAL_RECONCILE_ENABLED=true``.
+    Defaults OFF — lesson from FLEET_AUDIT_ENABLED defaulting ON and
+    silently running as an operator diagnostic on client tenants.
+    The activity re-checks at invocation time so flipping the flag off
+    without a redeploy immediately stops new runs.
+    """
+    return os.environ.get(
+        "CRON_JOURNAL_RECONCILE_ENABLED", "",
+    ).strip().lower() in ("true", "1", "yes")
+
+
 async def _register_or_delete_singleton_schedule(
     client: Client,
     schedule_id: str,
@@ -1053,6 +1082,25 @@ async def register_reversal_calibration(
         REVERSAL_CALIBRATION_INTERVAL,
         _reversal_calibration_enabled(),
         label="reversal_calibration",
+    )
+
+
+async def register_cron_journal_reconcile(
+    client: Client, task_queue: str,
+) -> None:
+    """Create-or-delete ``al-cron-journal-reconcile`` based on the flag.
+
+    Gate: ``CRON_JOURNAL_RECONCILE_ENABLED=true``.  Default OFF.
+    Interval: 6 h.  See the constant block above for the arithmetic.
+    """
+    await _register_or_delete_singleton_schedule(
+        client,
+        CRON_JOURNAL_RECONCILE_SCHEDULE_ID,
+        CRON_JOURNAL_RECONCILE_WORKFLOW,
+        task_queue,
+        CRON_JOURNAL_RECONCILE_INTERVAL,
+        _cron_journal_reconcile_enabled(),
+        label="cron_journal_reconcile",
     )
 
 
@@ -1872,6 +1920,10 @@ async def register_all() -> None:
     # soak, fleet rollout once the per-source-type confidence shifts
     # have been observed to track real reversal patterns.
     await register_reversal_calibration(client, config.task_queue)
+    # Cron-journal reconciler (#418 / GH #556) — 6-hourly call to
+    # POST /api/v1/alfred-journal/reconcile-cron to journal Hermes cron
+    # outbounds.  Gated on CRON_JOURNAL_RECONCILE_ENABLED (default OFF).
+    await register_cron_journal_reconcile(client, config.task_queue)
     try:  # F33c — sweep the brief-duplicate chore (brief is a built-in now).
         await delete_duplicate_briefing_chore(client)
     except Exception as exc:  # noqa: BLE001
