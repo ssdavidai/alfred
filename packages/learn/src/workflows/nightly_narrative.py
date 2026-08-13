@@ -27,10 +27,11 @@ Per matter the flow is:
   5. ``generate_matter_narrative`` — single clerk call.
   6. ``patch_matter_narrative`` — atomic vault PATCH.
 
-Idempotency: if signals AND transitions are both empty the workflow
-short-circuits — no LLM call, no patch. The previous narrative stays
-in place because re-drafting "nothing happened" would just stamp a
-new as_of without changing anything meaningful.
+Idempotency: if signals AND transitions are both empty AND the matter
+already has a ``current_state`` the workflow short-circuits — no LLM
+call, no patch. Cold-start exception (#564): if ``current_state`` is
+absent the LLM runs so the matter gets a first narrative;
+subsequent runs then short-circuit normally.
 
 Concurrency: matters process sequentially. The clerk is rate-limited
 and a typical matter takes a few seconds; fanning out via
@@ -227,11 +228,11 @@ class NightlyNarrativeWorkflow:
                     retry_policy=retry,
                 )
 
-                # Idempotency gate — skip the LLM AND the patch entirely
-                # when nothing happened. The previous narrative stays
-                # authoritative because re-drafting "nothing changed"
-                # would just bump as_of without producing better text.
-                if not signals and not transitions:
+                # Idempotency gate (#564): short-circuit only when a
+                # prior narrative exists AND the window is empty.
+                # summary was loaded above — no new activity call.
+                prior_state = str((summary or {}).get("current_state") or "").strip()
+                if not signals and not transitions and prior_state:
                     result.matters_skipped_no_activity += 1
                     workflow.logger.info(
                         "nightly_narrative.run: matter=%s no activity — skipped",

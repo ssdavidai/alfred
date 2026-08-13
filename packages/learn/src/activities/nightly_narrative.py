@@ -14,9 +14,10 @@ can read it directly instead of re-walking the same events.
 
 Idempotency:
   * If the matter saw zero signals AND zero task transitions in the
-    last 24h, the workflow skips the LLM entirely. ``current_state``
-    and ``as_of`` are left untouched — the narrative from the previous
-    refresh is still the freshest available description.
+    last 24h AND already has a ``current_state``, the workflow skips
+    the LLM entirely. Cold-start exception (#564): if
+    ``current_state`` is absent the LLM runs to write the first
+    narrative; subsequent runs then short-circuit normally.
 
 All vault writes go through the ctrl-api VaultClient — never direct
 filesystem writes. All LLM calls go through the OpenClaw gateway via
@@ -696,14 +697,14 @@ def _build_propose_prompt(
     signals: list[dict[str, Any]],
     transitions: list[dict[str, Any]],
     events: list[dict[str, Any]],
+    *,
+    cold_start: bool = False,
 ) -> str:
-    """Compose the propose-side prompt asking the clerk whether the
-    narrative should move given the signals + transitions since
-    ``prior_as_of``.
+    """Compose the propose-side prompt.
 
-    Reuses the same voice instructions as ``_build_narrative_prompt``
-    but with an explicit "no change" escape hatch for matters whose
-    activity does not warrant a rewrite.
+    ``cold_start=True`` suppresses the NO_CHANGE escape hatch so the
+    clerk always writes a first narrative for a matter with no prior
+    ``current_state``.
     """
     matter_name = str(matter_summary.get("name") or matter_summary.get("path") or "").strip()
     prior_state = str(matter_summary.get("current_state") or "").strip()
@@ -727,9 +728,19 @@ def _build_propose_prompt(
         "SOURCE EVENTS (back-pointer expanded):",
         json.dumps(events, indent=2, default=str)[:2000],
         "",
-        "Decide: given what you knew at PRIOR as_of, and what arrived",
-        "since, should the narrative change? If nothing material has",
-        "happened, respond with the single token NO_CHANGE.",
+    ])
+    if cold_start:
+        lines.extend([
+            "No prior narrative exists (cold start). Write an initial",
+            "paragraph. If nothing has happened yet, say so plainly.",
+            "NO_CHANGE is not an option for a first draft.",
+        ])
+    else:
+        lines.extend([
+            "Decide: should the narrative change? If nothing material has",
+            "happened, respond with the single token NO_CHANGE.",
+        ])
+    lines.extend([
         "",
         "If the narrative should change, respond with JSON of the shape:",
         '  {"narrative": "<paragraph>", "confidence": 0.0-1.0}',
@@ -762,16 +773,13 @@ async def propose_matter_narrative(
     24h window walks live outside).
 
     Logic:
-      * Both signals + transitions empty → return None (idempotent gate).
-      * Build clerk prompt with prior_state + observed events.
-      * Parse response: NO_CHANGE / JSON {narrative, confidence} / bare
-        paragraph.
-      * On no-change → return None (no PATCH, no audit).
-      * On narrative → build ``ProposedMutation`` with
-        ``fields={"current_state": ..., "as_of": observed.end iso}``
-        and clerk-self-reported confidence (default
-        ``DEFAULT_NARRATIVE_CONFIDENCE`` = 0.85 when the clerk doesn't
-        return one).
+      * Both signals + transitions empty AND a prior narrative exists →
+        return None (idempotency — re-drafting "nothing changed" adds
+        no value). Cold-start exception (#564): if ``current_state``
+        is absent, proceed so the matter gets a first narrative.
+      * Build clerk prompt → parse NO_CHANGE / JSON / bare paragraph.
+      * On no-change → None (no PATCH, no audit).
+      * On narrative → ProposedMutation with clerk confidence.
     """
     signals = args.get("signals") or []
     transitions = args.get("transitions") or []
@@ -785,18 +793,22 @@ async def propose_matter_narrative(
     if not isinstance(events, list):
         events = []
 
-    # Idempotency gate — nothing happened in the window → no rewrite.
-    if not signals and not transitions:
+    target_fm = target.get("frontmatter") if isinstance(target, dict) else None
+    if not isinstance(target_fm, dict):
+        target_fm = {}
+    prior_current_state = str(target_fm.get("current_state") or "").strip()
+    cold_start = not prior_current_state
+
+    # Idempotency gate — short-circuit only when a narrative already
+    # exists AND the observation window is empty.  A cold-start matter
+    # (no prior current_state) must run the clerk regardless.
+    if not signals and not transitions and not cold_start:
         logger.info(
             "nightly_narrative.propose: matter=%s no signals/transitions — no change",
             matter_path,
         )
         return None
 
-    target_fm = target.get("frontmatter") if isinstance(target, dict) else None
-    if not isinstance(target_fm, dict):
-        target_fm = {}
-    prior_current_state = str(target_fm.get("current_state") or "").strip()
     prior_as_of = target.get("as_of") if isinstance(target, dict) else None
     matter_name = str(args.get("matter_name") or target_fm.get("name") or matter_path)
 
@@ -812,6 +824,7 @@ async def propose_matter_narrative(
         signals,
         transitions,
         events,
+        cold_start=cold_start,
     )
 
     result = await _call_clerk(prompt, raw=True)
@@ -930,9 +943,10 @@ async def apply_matter_narrative_v2(
             error_message=f"load_failed: {exc}"[:300],
         ).__dict__
 
-    # Idempotency gate — same as legacy path. Avoid even the v2
-    # round-trip when there's nothing to reason over.
-    if not signals and not transitions:
+    # Idempotency gate (#564): skip only when prior narrative exists AND
+    # the observation window is empty (cold-start must proceed).
+    prior_state = str((summary or {}).get("current_state") or "").strip()
+    if not signals and not transitions and prior_state:
         logger.info(
             "nightly_narrative.apply_matter_narrative_v2: matter=%s no activity — no change",
             canonical,
