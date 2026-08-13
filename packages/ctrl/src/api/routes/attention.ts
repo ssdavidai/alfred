@@ -36,7 +36,6 @@ import { attentionCache, invalidateVaultCachesForType } from "../vaultCache.js";
 import { appendAudit } from "./state.js";
 import { getStateDb } from "../../db/state.js";
 import { indexVaultWrite } from "../../db/vaultIndex.js";
-import { registerAttentionStatementRoutes } from "./attentionStatement.js";
 
 // A ULID is 26 chars of Crockford base32 (uppercase, no I/L/O/U). Signals were
 // demoted out of the vault's signal/ directory into the `state.db signal`
@@ -841,7 +840,4 @@ export function registerAttentionRoutes(): void {
     sendJson(res, 200, { ok: true, applied: appliedIds.length, skipped,
       decision_path: `decision/${decisionId}.md`, audit_id: auditId });
   });
-
-  // NAR statement — wired here because server.ts is forbidden-zone.
-  registerAttentionStatementRoutes();
 }
