@@ -1,6 +1,6 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { deriveCodexViewState, isTerminal, shouldDispatchRestart } from "./codexAuthCore.ts";
+import { deriveCodexViewState, isTerminal, shouldDispatchRestart } from "./codexAuthCore";
 
 describe("deriveCodexViewState", () => {
   test("null/undefined/not_started → idle", () => {
