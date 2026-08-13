@@ -1481,6 +1481,101 @@ async def reverse_decision(decision: dict[str, Any]) -> dict[str, Any]:
     source_record = str(decision.get("source_record") or "")
     side_effects = decision.get("side_effects") or {}
 
+    # ----------------------------------------------------------------
+    # Batch reversal path — bulk_triage decisions (#554 forward pass)
+    # ----------------------------------------------------------------
+    # A bulk decision carries side_effects.source_records: the list of
+    # all individual card paths resolved in the forward pass. Re-open
+    # each card; skip deleted ones rather than aborting the batch.
+    # Writes exactly one audit row. Returns early so the single-card
+    # path below runs unchanged.
+    _batch_records: list[Any] | None = None
+    if isinstance(side_effects, dict):
+        _cand = side_effects.get("source_records")
+        if isinstance(_cand, list) and _cand:
+            _batch_records = _cand
+
+    if _batch_records is not None:
+        async with _http() as client:
+            _reopened: list[str] = []
+            _skipped: list[dict[str, Any]] = []
+            for _path in _batch_records:
+                if not isinstance(_path, str) or not _path.startswith("needs_attention/"):
+                    _skipped.append({"path": str(_path), "reason": "unrecognised_path"})
+                    continue
+                _na_id = _path.removeprefix("needs_attention/").removesuffix(".md")
+                try:
+                    _pr = await client.patch(
+                        f"/api/v1/vault/records/needs_attention/{_na_id}.md",
+                        json={"set": {"status": "pending", "resolved_at": "", "resolution_note": ""}},
+                    )
+                    if _pr.status_code == 404:
+                        _skipped.append({"path": _path, "reason": "not_found"})
+                    elif _pr.status_code < 400:
+                        _reopened.append(_path)
+                    else:
+                        _skipped.append({"path": _path, "reason": f"http_{_pr.status_code}"})
+                except Exception as _exc:  # noqa: BLE001
+                    _skipped.append({"path": _path, "reason": str(_exc)[:200]})
+
+            # One audit row for the whole batch — best-effort.
+            try:
+                await client.post(
+                    "/api/v1/state/audit",
+                    json={
+                        "action_type": "state-change",
+                        "actor": "decision_router",
+                        "source": "decision_router.batch_reversal",
+                        "target_path": f"decision/{decision_id}.md",
+                        "target_kind": "decision",
+                        "summary": (
+                            f"batch reversal: reopened {len(_reopened)} of "
+                            f"{len(_batch_records)} cards, skipped {len(_skipped)}"
+                        ),
+                        "changes": {
+                            "total": len(_batch_records),
+                            "reopened": len(_reopened),
+                            "skipped": len(_skipped),
+                            "skipped_details": _skipped[:20],
+                        },
+                        "mode": "live",
+                    },
+                )
+            except Exception as _exc:  # noqa: BLE001
+                logger.warning(
+                    "decision_router.reverse_decision: batch audit POST failed "
+                    "decision=%s err=%s",
+                    decision_id, _exc,
+                )
+
+            # Stamp reversal_processed so the workflow skips this decision
+            # on subsequent ticks (idempotency at the workflow level).
+            _bse = dict(side_effects)
+            _bse["reversal_processed"] = True
+            _bse["reversal_undone"] = [f"batch.reopened_{len(_reopened)}"]
+            _bse["batch_reversal_reopened"] = len(_reopened)
+            _bse["batch_reversal_skipped"] = len(_skipped)
+            if _skipped:
+                _bse["batch_reversal_skipped_details"] = _skipped[:20]
+            await client.patch(
+                f"/api/v1/decisions/{decision_id}",
+                json={"side_effects": _bse},
+            )
+
+        logger.info(
+            "decision_router: batch reversal decision=%s reopened=%d skipped=%d",
+            decision_id, len(_reopened), len(_skipped),
+        )
+        return {
+            "id": decision_id,
+            "actions_undone": [f"batch.reopened_{len(_reopened)}"],
+            "batch_reversal": {
+                "total": len(_batch_records),
+                "reopened": len(_reopened),
+                "skipped": len(_skipped),
+            },
+        }
+
     actions_undone: list[str] = []
     async with _http() as client:
         # needs_attention reversal: PATCH the source record's status
