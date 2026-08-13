@@ -20,6 +20,10 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import schema from "../src/db/schema.sql";
 import { runMigrations } from "../src/db/migrate.js";
+import { readdirSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import {
   appendJournal,
   bindPrincipalChannel,
@@ -32,6 +36,20 @@ function makeDb(): DatabaseSync {
   db.exec(schema);
   runMigrations(db);
   return db;
+}
+
+// Latest migration version, derived from the migrations directory rather than
+// hardcoded. A hardcoded number means every new migration breaks an unrelated
+// test and the fix is a bump, which teaches nobody anything. Derived, this
+// still catches a real failure — the runner not reaching the latest registered
+// version — because expected and actual come from independent sources.
+function latestMigrationVersion(): number {
+  const dir = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "db", "migrations");
+  const nums = readdirSync(dir)
+    .filter((f) => f.endsWith(".sql"))
+    .map((f) => Number(f.slice(0, 4)))
+    .filter((n) => Number.isFinite(n));
+  return Math.max(...nums);
 }
 
 function userVersion(db: DatabaseSync): number {
@@ -51,18 +69,10 @@ function tableNames(db: DatabaseSync): string[] {
 
 describe("alfred_journal migration", () => {
   it("bumps user_version to the latest migration", () => {
-    // The runner applies every migration > current version, so the value
-    // naturally tracks the highest registered version. Today: 18
-    // (0001 fix_pack + 0002 alfred_journal + 0003 tailscale_connection
-    // + 0004 channel_tokens + 0005 ha_channel + 0006 files_table
-    // + 0007 recall + 0008 ha_event_subscription
-    // + 0009 ha_registry_vanished + 0010 files_cold_archive
-    // + 0011 ha_tier4 + 0012 ha_integration_ref_removed_at
-    // + 0013 recall_realtime + 0014 tool_disposition
-    // + 0015 composio_user_defaults + 0016 files_extraction
-    // + 0017 agent_profiles + 0018 channel_identity).
+    // Derived from the migrations directory, not hardcoded — see
+    // latestMigrationVersion() above.
     const db = makeDb();
-    assert.equal(userVersion(db), 18);
+    assert.equal(userVersion(db), latestMigrationVersion());
     db.close();
   });
 
