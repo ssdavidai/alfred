@@ -1,0 +1,43 @@
+-- 0019_journal_solicited — mark which outbound journal entries Alfred
+-- initiated, versus which were replies to something the principal started.
+-- Item 2 of the NAR sequence (#563).
+--
+-- Why a new column rather than reusing source_kind.
+--
+-- 0002 declared source_kind as 'delegate' | 'instinct' | 'reply' | 'init' |
+-- 'system'. That vocabulary is not what production holds. A live tenant
+-- carries 'ha-conversation-reply', 'ha-conversation-turn', 'cron',
+-- 'voice-call-transcript', 'omi-audio-transcript' and NULL — transport
+-- labels, not provenance. The declared enum and the stored values have
+-- diverged, so encoding a second meaning into the same field would compound
+-- an existing inaccuracy rather than fix it.
+--
+-- The distinction matters because Alfred-caused interruption is a
+-- subtraction term in Net Attention Returned. On the dev tenant, solicited
+-- replies outnumber unsolicited deliveries by roughly 100:1 — counting them
+-- together would swamp the term and flatter the number. It has to be
+-- recorded by the writer, which knows, rather than re-derived by every
+-- reader from a field that does not reliably carry it.
+--
+-- Semantics.
+--
+--   NULL  unknown. Every row written before this migration, and any row
+--         whose writer cannot honestly determine the answer.
+--   1     solicited — a reply to a turn the principal initiated.
+--   0     unsolicited — Alfred started this exchange (cron, proactive
+--         notification, instinct fire).
+--
+-- Only meaningful for direction='outbound'; inbound rows stay NULL.
+--
+-- Deliberately NOT backfilled. Some historical rows could be classified
+-- from source_kind with reasonable confidence, but "reasonable confidence"
+-- applied in bulk is how a measurement acquires a bias it cannot later
+-- explain. The epic's own rule is: no baseline, no claim. Unknown rows
+-- report as unknown, and the population starts from the first row written
+-- after this lands.
+--
+-- No index. The table holds ~3k rows on the busiest tenant; a scan is
+-- cheaper than the write cost of maintaining one. Add a partial index on
+-- (solicited, ts) WHERE direction='outbound' if that stops being true.
+
+ALTER TABLE alfred_journal ADD COLUMN solicited INTEGER;
