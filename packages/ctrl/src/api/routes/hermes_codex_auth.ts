@@ -1,4 +1,4 @@
-// Codex OAuth ceremony from the dashboard (issue #300).
+// Codex OAuth ceremony from the dashboard (issue #565).
 //
 // Hermes uses a standard OAuth2 device-authorization flow to authenticate with
 // OpenAI Codex. The flow is entirely non-interactive — no TTY reads, no browser
@@ -35,7 +35,9 @@ const COMPOSE_FILE =
 const HERMES_SVC = "hermes";
 const CODEX_VERIFY_URI = "https://auth.openai.com/codex/device";
 const CEREMONY_TTL_MS = 15 * 60 * 1_000; // matches hermes CLI's own window
-const TERMINAL_REUSE_MS = 60_000;
+let _terminalReuseMs = 60_000;
+
+export function _setTerminalReuseMs(ms: number): void { _terminalReuseMs = ms; } // test-only
 
 type Status = "not_started" | "awaiting_approval" | "complete" | "failed" | "timeout";
 
@@ -112,7 +114,7 @@ async function handleStart({ res }: ApiRequest): Promise<void> {
     return;
   }
   // Terminal state within the reuse window: return it without re-spawning.
-  if (_s.status !== "not_started" && Date.now() - _s.startedAt < TERMINAL_REUSE_MS) {
+  if (_s.status !== "not_started" && Date.now() - _s.startedAt < _terminalReuseMs) {
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({ status: _s.status, ...(_s.error && { error: _s.error }) }));
     return;
