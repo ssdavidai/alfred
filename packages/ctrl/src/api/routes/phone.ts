@@ -1246,6 +1246,11 @@ export function registerPhoneRoutes(): void {
           duration_seconds: durationSeconds(startedAt, endedAt),
           turn_count: transcript.length,
         },
+        // This endpoint receives transcripts for both inbound calls (Sir called
+        // Alfred) and outbound calls (Alfred called Sir). The transcript body
+        // carries no direction marker that distinguishes the two cases, so we
+        // cannot honestly classify solicited/unsolicited at write time.
+        solicited: null,
       });
     } catch (err) {
       // Log and continue — the transcript is already in the stream log.

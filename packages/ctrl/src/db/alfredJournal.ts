@@ -35,6 +35,11 @@ export interface JournalEntry {
   status: Status;
   delivery_error: string | null;
   metadata: Record<string, unknown> | null;
+  /** NAR column (migration 0019). Only meaningful for direction='outbound'.
+   *  1 = solicited (reply to a principal-initiated turn).
+   *  0 = unsolicited (cron, proactive notification, instinct fire).
+   * null = unknown — writer could not determine provenance at write time. */
+  solicited: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -54,6 +59,7 @@ interface RawJournalRow {
   status: string;
   delivery_error: string | null;
   metadata: string | null;
+  solicited: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -83,6 +89,7 @@ function rowToEntry(r: RawJournalRow): JournalEntry {
     status: r.status as Status,
     delivery_error: r.delivery_error,
     metadata,
+    solicited: r.solicited ?? null,
     created_at: r.created_at,
     updated_at: r.updated_at,
   };
@@ -148,6 +155,11 @@ export function appendJournal(
     delivery_error?: string | null;
     metadata?: Record<string, unknown> | null;
     principal_id?: string | null;
+    /** NAR solicited flag (migration 0019). Only set for direction='outbound'.
+     *  1 = reply to a principal-initiated turn.
+     *  0 = Alfred-initiated (cron, proactive, instinct fire).
+     * null = writer cannot determine — the honest default. */
+    solicited?: number | null;
   },
 ): JournalEntry {
   const id = ulid();
@@ -155,13 +167,17 @@ export function appendJournal(
   const principalId =
     fields.principal_id ?? resolvePrincipal(db, fields.channel, fields.chat_id);
   const metadataJson = fields.metadata ? JSON.stringify(fields.metadata) : null;
+  // Normalise: only accept 0 or 1; anything else collapses to null so a
+  // stale caller passing a truthy string cannot silently inflate the term.
+  const solicited =
+    fields.solicited === 0 ? 0 : fields.solicited === 1 ? 1 : null;
 
   db.prepare(
     `INSERT INTO alfred_journal
        (id, ts, principal_id, channel, chat_id, direction, message,
         source_kind, source_ref, hermes_session_id, hermes_profile,
-        status, delivery_error, metadata, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        status, delivery_error, metadata, solicited, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     id,
     ts,
@@ -177,6 +193,7 @@ export function appendJournal(
     fields.status ?? "delivered",
     fields.delivery_error ?? null,
     metadataJson,
+    solicited,
     ts,
     ts,
   );

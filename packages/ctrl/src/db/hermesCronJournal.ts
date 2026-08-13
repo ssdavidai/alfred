@@ -102,6 +102,7 @@ export function reconcileCronOutbounds(
       source_kind: "cron", source_ref: job.name,
       hermes_session_id: sid, hermes_profile: profile,
       status: "delivered", metadata: { cron_job_id: jobId, cron_job_name: job.name },
+      solicited: 0, // cron-fired: Alfred initiated this exchange.
     });
     result.journaled++;
   }

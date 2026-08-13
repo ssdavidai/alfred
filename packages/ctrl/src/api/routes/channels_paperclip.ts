@@ -471,6 +471,10 @@ function journalOut(
       hermes_profile: ctx.journal_scope_key,
       status,
       delivery_error: deliveryError,
+      // Paperclip heartbeats originate from the Paperclip platform, not from
+      // the principal. Alfred is responding to the platform, not to Sir.
+      // NAR interruption requires a turn Sir initiated → null (not applicable).
+      solicited: null,
     });
   } catch (e) {
     console.warn(

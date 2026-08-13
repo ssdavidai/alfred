@@ -355,6 +355,13 @@ export function registerAlfredDeliverRoutes(): void {
     // profile's .env and journal entries scope to THAT profile.
     const profileCtx = resolveProfileContextForChannel(db, channel, to);
 
+    // solicited: the caller must pass 0 or 1 explicitly when it knows.
+    // Callers that cannot determine provenance omit the field → null (unknown).
+    // We only accept 0/1 integers to guard against truthy-string inflation.
+    const solicitedRaw = b.solicited;
+    const solicited =
+      solicitedRaw === 0 ? 0 : solicitedRaw === 1 ? 1 : null;
+
     const pending = appendJournal(db, {
       channel,
       chat_id: to,
@@ -364,6 +371,7 @@ export function registerAlfredDeliverRoutes(): void {
       source_kind: typeof b.source_kind === "string" ? b.source_kind : null,
       source_ref: typeof b.source_ref === "string" ? b.source_ref : null,
       hermes_profile: profileCtx.journal_scope_key,
+      solicited,
       metadata: {
         urgency,
         principal_note:
@@ -465,6 +473,10 @@ export function registerAlfredDeliverRoutes(): void {
       principal_note: principalNote,
       source_headline: sourceHeadline,
       summary,
+      // Delegate outcomes: Sir explicitly asked for a Sir-facing result when
+      // delegating (principal_note is set — the check above guards this path).
+      // The delivery is a reply to Sir's original delegation turn → solicited.
+      solicited: 1,
     };
     let resp: Response;
     try {

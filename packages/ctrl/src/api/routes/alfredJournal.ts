@@ -87,6 +87,12 @@ export function registerAlfredJournalRoutes(): void {
       metadata = b.metadata as Record<string, unknown>;
     }
 
+    // solicited: accept 0 or 1 from callers that know provenance.
+    // Any other value (including omitted) → null (honest unknown).
+    const solicitedRaw = b.solicited;
+    const solicited =
+      solicitedRaw === 0 ? 0 : solicitedRaw === 1 ? 1 : null;
+
     const db = getStateDb();
     const entry = appendJournal(db, {
       channel,
@@ -101,6 +107,7 @@ export function registerAlfredJournalRoutes(): void {
       delivery_error: asOptionalString(b.delivery_error),
       metadata,
       principal_id: asOptionalString(b.principal_id),
+      solicited,
     });
 
     sendJson(res, 201, entry);

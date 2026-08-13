@@ -327,6 +327,7 @@ function journalOut(
       status,
       delivery_error: deliveryError,
       metadata,
+      solicited: 1, // reply to a turn the principal initiated via HA.
     });
   } catch (e) {
     console.warn(
