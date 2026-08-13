@@ -127,7 +127,8 @@ succeeded), `recreate_missing_chore_schedules` (F34b).
 | `NightlyMaintenanceWorkflow` | `al-nightly-maintenance` daily 03:00 local | Janitor scan-and-fix + distiller batch. |
 | `FilesColdArchiveWorkflow` | `al-files-cold-archive` daily 03:00 local | Promote ≥90 d-unaccessed file blobs via ctrl-api `POST /api/v1/files/cold-promote/:file_id`. |
 | `ComposioReconnectCleanupWorkflow` | `al-composio-reconnect-cleanup` every 15 min | Safety-net reaper for ctrl-api's persistent reconnect ledger (#645). |
-| `FleetAuditWorkflow` | `al-fleet-audit` daily 02:00 **UTC** — gate `FLEET_AUDIT_ENABLED` (**default ON**) | Wrong-tenant stream contamination check. |
+| `FleetAuditWorkflow` | `al-fleet-audit` daily 02:00 **UTC** — gate `FLEET_AUDIT_ENABLED` (**default OFF**) | Wrong-tenant stream contamination check. Operator diagnostic: the dev tenant opts in explicitly; client tenants must never run it. Findings go to `alfred-state.db` via `POST /api/v1/state/observations` (they were written to the vault until 2026-08-12, which rejects `observation` with 422 — every one was discarded). |
+| `CronJournalReconcileWorkflow` | `al-cron-journal-reconcile` every 6h — gate `CRON_JOURNAL_RECONCILE_ENABLED` (**default OFF**) | Calls `POST /api/v1/alfred-journal/reconcile-cron` so Hermes-native cron outbounds land in `alfred_journal`. Read-side only; idempotent on `hermes_session_id`. |
 
 **#316 target (Lane II; not implemented at this phase-0 head).** Current
 `src/activities/maintenance.py` awaits a synchronous janitor scan, then awaits a
@@ -308,7 +309,8 @@ restart to re-run `register_schedules`)**:
 | `STEWARD_REVERSAL_CALIBRATION_ENABLED` | OFF | `al-reversal-calibration` (+ invocation-time re-check) |
 | `VEXA_ENABLED` | OFF | `al-meeting-capture`, `al-transcript-intake` |
 | `PLANE_SYNC_ENABLED` | OFF — **dormant, not deployed (PR #279)** | the three `al-plane-*` schedules |
-| `FLEET_AUDIT_ENABLED` | ON | `al-fleet-audit` |
+| `FLEET_AUDIT_ENABLED` | OFF | `al-fleet-audit` |
+| `CRON_JOURNAL_RECONCILE_ENABLED` | OFF | `al-cron-journal-reconcile` |
 
 **Mode overrides (invocation-time emergency env — see Invariants for
 precedence)**: `STEWARD_SIGNAL_ACTION_LIVE_MODE`, `STEWARD_LIVE_MODE`,

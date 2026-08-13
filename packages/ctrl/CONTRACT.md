@@ -70,7 +70,7 @@ One row per module in `src/api/routes/` (complete index = the `register*` import
 | `notifications.ts` | `/api/v1/notifications` | Outbound notify via the Hermes main gateway |
 | `context.ts` | `/api/v1/context/cross-channel` | Cross-channel context assembly |
 | `crossTenant.ts` | `/api/v1/cross-tenant/*` | Peer-tenant ask (Bearer = peer apiKey; no X-Tenant-ID) |
-| `alfredJournal.ts` | `/api/v1/alfred-journal*` | One-Alfred continuity journal + principal binding (migration `0002`) |
+| `alfredJournal.ts` | `/api/v1/alfred-journal*` | One-Alfred continuity journal + principal binding (migration `0002`). `POST /api/v1/alfred-journal/reconcile-cron` reads Hermes' session store **read-only** and journals cron-fired (`--deliver`) outbounds that never pass through ctrl; `source_kind='cron'`, idempotent on `hermes_session_id`, 48h window, 50 sessions/call, no backfill. |
 | `alfredDeliver.ts` | `/api/v1/alfred-deliver`, `/api/v1/delegate-outcomes` | Unified outbound delivery + delegate-outcome ingestion |
 | `email.ts` | `/api/v1/email/*` | AgentMail-backed email ops (send/reply/forward/thread/message/attachment) |
 | `channelsEmail.ts` | `/api/v1/channels/email/*` | Email channel card: status/provision/test + the AgentMail inbound webhook |
