@@ -239,7 +239,9 @@ export function registerDecisionRoutes(): void {
   //
   // Creates a new decision record. Required body fields: source,
   // source_record, intent. Optional: note, matter_ref, task_ref,
-  // source_headline, time_to_decision_ms.
+  // source_headline, time_to_decision_ms (client-reported card-shown →
+  // card-clicked span in ms; NOT engaged time — populated on ~8% of rows;
+  // the server never derives this value; see #563 for the correct approach).
   //
   // Returns the created record (id, path, frontmatter). The
   // DecisionRouterWorkflow will pick it up within ~60s and fan out the
@@ -296,6 +298,8 @@ export function registerDecisionRoutes(): void {
     let taskRef = typeof b.task_ref === "string" ? b.task_ref.trim() : "";
     const sourceHeadline =
       typeof b.source_headline === "string" ? b.source_headline.trim() : "";
+    // Client-reported span (card-shown → card-clicked), not engaged time.
+    // Populated on ~8% of decisions. Never server-computed. See #563.
     const ttd =
       typeof b.time_to_decision_ms === "number" ? b.time_to_decision_ms : null;
 
