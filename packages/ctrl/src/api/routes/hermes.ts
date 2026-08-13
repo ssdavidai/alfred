@@ -19,6 +19,7 @@ import yaml from "js-yaml";
 import { addRoute } from "../server.js";
 import { sendJson } from "../errors.js";
 import { dockerExec, dockerComposeCmd, HERMES_CMD, HERMES_CONTAINER } from "../helpers.js";
+import { registerCodexAuthRoutes } from "./hermes_codex_auth.js";
 
 // ---------------------------------------------------------------------------
 // Per-MCP-server live tool catalogue cache (issue #185).
@@ -831,6 +832,9 @@ export function registerHermesRoutes(): void {
       sendJson(res, 200, { profile, ok: true, output: stdout.trim() });
     },
   );
+
+  // ── Codex OAuth ceremony from the dashboard (#300) ────────────────────────
+  registerCodexAuthRoutes();
 }
 
 // -----------------------------------------------------------------------------
