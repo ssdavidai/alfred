@@ -56,11 +56,12 @@ export function computeNarStatement(
     principalTs, rates.gap_threshold_min * 60_000, rates.burst_floor_min * 60_000);
   const messBillMin = totalMs / 60_000, interruptionMin = interruptionCount * rates.interruption_min;
   const toH = (m: number) => +((m / 60).toFixed(1));
+  const dH = toH(displacedMin), mH = toH(messBillMin), iH = toH(interruptionMin);
   return {
     month,
-    displaced:    { total_hours: toH(displacedMin), counts: decisions },
-    mess_bill:    { total_hours: toH(messBillMin), burst_count: burstCount, event_count: principalTs.length },
-    interruption: { total_hours: toH(interruptionMin), count: interruptionCount },
-    nar: toH(displacedMin - messBillMin - interruptionMin), rates,
+    displaced:    { total_hours: dH, counts: decisions },
+    mess_bill:    { total_hours: mH, burst_count: burstCount, event_count: principalTs.length },
+    interruption: { total_hours: iH, count: interruptionCount },
+    nar: +(dH - mH - iH).toFixed(1), rates, // round-then-subtract: components on the page sum to the total
   };
 }

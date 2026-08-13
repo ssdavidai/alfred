@@ -90,4 +90,17 @@ describe("computeNarStatement", () => {
     assert.ok(s.nar < 0, `expected negative NAR, got ${s.nar}`);
     assert.strictEqual(s.mess_bill.burst_count, 1);
   });
+
+  it("self-consistent: displaced − mess_bill − interruption === nar exactly", () => {
+    // 6 done × 3 min = 18 min displaced → toH(18) = 0.3
+    // 2 events 3 min apart (above 2 min floor) → burst 3 min → toH(3) = 0.1
+    // 1 interruption × 3 min rate → toH(3) = 0.1
+    // Pre-fix bug: nar = toH(18-3-3) = toH(12) = 0.2; round-then-subtract: 0.3-0.1-0.1 = 0.1
+    const custom: RateTable = { ...DEFAULT_RATES, interruption_min: 3 };
+    const ts = [new Date("2026-07-01T10:00:00Z"), new Date("2026-07-01T10:03:00Z")];
+    const s = computeNarStatement("2026-07",
+      { noise: 0, done: 6, delegate: 0, defer: 0, take_mine: 0 }, ts, 1, custom);
+    const expected = +(s.displaced.total_hours - s.mess_bill.total_hours - s.interruption.total_hours).toFixed(1);
+    assert.strictEqual(s.nar, expected, "nar must equal displaced − mess_bill − interruption after rounding");
+  });
 });
