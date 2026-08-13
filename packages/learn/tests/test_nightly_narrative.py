@@ -410,7 +410,14 @@ async def _run_one_matter(
     clerk_response: str | Exception = "Carter is on track.",
     current_state: str = "",
 ) -> NightlyNarrativeResult:
-    """Mimic the workflow's per-matter loop with the activity helpers."""
+    """Mimic the workflow's per-matter loop with the activity helpers.
+
+    Re-implements the idempotency gate from ``NightlyNarrativeWorkflow.run``
+    for unit-test purposes. **Must be kept in sync** with that gate — if the
+    production gate changes (e.g. the cold-start check landed in #564), update
+    this helper too, or the tests below will pass on the helper's logic while
+    the workflow's gate goes untested.
+    """
     result = NightlyNarrativeResult(matters_scanned=1)
 
     # Short-circuit only when prior narrative exists (#564 fix).
@@ -587,6 +594,121 @@ async def test_propose_cold_start_no_signals_drafts_first_narrative():
     assert result is not None, "cold-start matter must produce a mutation"
     assert "current_state" in result.fields
     assert result.fields["current_state"].strip() != ""
+
+
+# ---------------------------------------------------------------------------
+# apply_matter_narrative_v2 cold-start gate — direct activity tests (#564)
+# ---------------------------------------------------------------------------
+# These call the activity as a plain async function (valid outside Temporal)
+# to prove the production gate in apply_matter_narrative_v2 itself, not just
+# the helper above. The prior-narrative skip direction is also covered by
+# test_phase_c_no_signals_returns_no_change_and_skips_post (Case 1).
+
+
+@pytest.mark.asyncio
+async def test_apply_matter_narrative_v2_cold_start_no_signals_generates(
+    install_state_mutator_transport, monkeypatch,
+):
+    """No prior current_state + empty window → gate does not fire, clerk runs.
+
+    The production gate:
+      prior_state = str((summary or {}).get("current_state") or "").strip()
+      if not signals and not transitions and prior_state:  # must NOT fire
+    This test proves it does not short-circuit when current_state is absent.
+    """
+    monkeypatch.setenv("STEWARD_LIVE_MODE", "live")
+    now = _now()
+    fake = FakeVaultClient(
+        list_records_map={"task": []},
+        read_records_map={
+            "matter/carter.md": _matter_v2_record(
+                path="matter/carter.md",
+                current_state="",
+                name="Carter",
+            ),
+        },
+    )
+    ctx_a = patch("src.activities.nightly_narrative.VaultClient", return_value=fake)
+    ctx_b = patch("src.activities.state_mutator.VaultClient", return_value=fake)
+    ctx_a.start()
+    ctx_b.start()
+
+    async def fake_clerk(prompt: str, raw: bool = False) -> str:  # noqa: ARG001
+        return _json.dumps({
+            "narrative": "No signals yet; the matter awaits its first development, sir.",
+            "confidence": 0.80,
+        })
+
+    clerk_patch = patch(
+        "src.activities.nightly_narrative._call_clerk", side_effect=fake_clerk
+    )
+    clerk_patch.start()
+    transport = install_state_mutator_transport(
+        httpx.Response(
+            200,
+            json={
+                "audit_record_path": "event/state-change-cold-start-carter.md",
+                "timeline_entry_id": "01HXYZCS",
+                "new_as_of": "2026-08-13T02:00:00Z",
+            },
+        ),
+    )
+    try:
+        outcome = await apply_matter_narrative_v2(
+            "matter/carter.md",
+            now.isoformat(timespec="seconds"),
+        )
+    finally:
+        ctx_a.stop()
+        ctx_b.stop()
+        clerk_patch.stop()
+
+    assert outcome["status"] == "mutated", (
+        "cold-start gate must not fire when current_state is absent"
+    )
+    assert outcome["audit_record_path"] == "event/state-change-cold-start-carter.md"
+    assert len(transport.requests) == 1
+    envelope = _json.loads(transport.requests[0].content.decode("utf-8"))
+    assert "No signals yet" in envelope["fields"]["current_state"]
+
+
+@pytest.mark.asyncio
+async def test_apply_matter_narrative_v2_has_prior_no_signals_skips(
+    install_state_mutator_transport,
+):
+    """Prior current_state + empty window → gate fires, no clerk, no POST.
+
+    Companion to test_apply_matter_narrative_v2_cold_start_no_signals_generates.
+    Protects the cost-optimisation short-circuit from being removed by mistake.
+    """
+    now = _now()
+    fake = FakeVaultClient(
+        list_records_map={"task": []},
+        read_records_map={
+            "matter/carter.md": _matter_v2_record(
+                path="matter/carter.md",
+                current_state="Carter sprint deck is in your inbox, sir.",
+                name="Carter",
+            ),
+        },
+    )
+    ctx_a = patch("src.activities.nightly_narrative.VaultClient", return_value=fake)
+    ctx_b = patch("src.activities.state_mutator.VaultClient", return_value=fake)
+    ctx_a.start()
+    ctx_b.start()
+    transport = install_state_mutator_transport()
+    try:
+        outcome = await apply_matter_narrative_v2(
+            "matter/carter.md",
+            now.isoformat(timespec="seconds"),
+        )
+    finally:
+        ctx_a.stop()
+        ctx_b.stop()
+
+    assert outcome["status"] == "no_change"
+    assert outcome["audit_record_path"] is None
+    assert transport.requests == []
 
 
 # ---------------------------------------------------------------------------
