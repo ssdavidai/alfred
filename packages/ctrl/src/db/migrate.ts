@@ -33,6 +33,7 @@ import m0016 from "./migrations/0016_files_extraction.sql";
 import m0017 from "./migrations/0017_agent_profiles.sql";
 import m0018 from "./migrations/0018_channel_identity.sql";
 import m0019 from "./migrations/0019_journal_solicited.sql";
+import m0020 from "./migrations/0020_nar_entry.sql";
 
 interface Migration {
   version: number;
@@ -61,6 +62,7 @@ const MIGRATIONS: Migration[] = [
   { version: 17, name: "agent_profiles",      sql: m0017 },
   { version: 18, name: "channel_identity",    sql: m0018 },
   { version: 19, name: "journal_solicited",   sql: m0019 },
+  { version: 20, name: "nar_entry",           sql: m0020 },
 ];
 
 /**
