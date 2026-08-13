@@ -2008,6 +2008,11 @@ action recordDecision {
   entities: []
 }
 
+action bulkTriageNeedsAttention {
+  fn: import { bulkTriageNeedsAttention } from "@src/dashboard/operations",
+  entities: []
+}
+
 query getRecentDecisions {
   fn: import { getRecentDecisions } from "@src/dashboard/operations",
   entities: []

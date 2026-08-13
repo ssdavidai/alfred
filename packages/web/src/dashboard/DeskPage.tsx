@@ -45,7 +45,12 @@ import {
   getBriefing,
   getLastDismissedBriefing,
   dismissBriefing,
+  bulkTriageNeedsAttention,
 } from "wasp/client/operations";
+import {
+  addToSelection, removeFromSelection, clearSelection, selectAll,
+  canSubmit, mapPreviewResponse, type BulkIntent, type BulkPreviewResult,
+} from "./deskBulkTriageCore";
 import { Frame } from "../client/components/ab/Frame";
 import { Seal } from "../client/components/ab/Seal";
 import { PageOverture } from "../client/components/ab/PageOverture";
@@ -327,6 +332,30 @@ function DeskContent() {
     !!latestBriefSlugDate && latestBriefSlugDate !== dismissedSlugDate;
   const dismissBriefingAction = useAction(dismissBriefing);
   const [briefExpanded, setBriefExpanded] = useState(false);
+
+  // Bulk triage (#542)
+  const bulkAction = useAction(bulkTriageNeedsAttention);
+  const [bulkSel, setBulkSel] = useState<ReadonlySet<string>>(new Set());
+  const [bulkIntent, setBulkIntent] = useState<BulkIntent | null>(null);
+  const [bulkPreview, setBulkPreview] = useState<BulkPreviewResult | null>(null);
+  const [bulkBusy, setBulkBusy] = useState(false);
+  async function runBulkPreview() {
+    if (!canSubmit(bulkSel) || !bulkIntent) return;
+    setBulkBusy(true);
+    try { setBulkPreview(mapPreviewResponse(await bulkAction({ ids: [...bulkSel], intent: bulkIntent, dry_run: true }))); }
+    catch (e) { toast({ title: "Preview failed", description: String((e as any)?.message ?? e) }); }
+    finally { setBulkBusy(false); }
+  }
+  async function runBulkApply() {
+    if (!bulkPreview || !bulkIntent || bulkBusy) return;
+    setBulkBusy(true);
+    try {
+      await bulkAction({ ids: [...bulkSel], intent: bulkIntent, dry_run: false });
+      setHandled((h: string[]) => [...h, ...[...bulkSel].map((id) => `na:${id}`)]);
+      setBulkSel(new Set()); setBulkIntent(null); setBulkPreview(null);
+    } catch (e) { toast({ title: "Bulk apply failed", description: String((e as any)?.message ?? e) }); }
+    finally { setBulkBusy(false); }
+  }
 
   const decisions: Decision[] = useMemo(() => {
     const out: Decision[] = [];
@@ -923,6 +952,61 @@ function DeskContent() {
           animate="show"
           variants={stagger(0.05, 0.08)}
         >
+          {/* Bulk triage panel (#542) — needs_attention items only. */}
+          {(() => {
+            const naItems = [...rest, ...restAging, ...restStale].filter(d => d.source === "needs_attention");
+            if (naItems.length === 0) return null;
+            const naIds = naItems.map(d => d.recordId);
+            const tog = (id: string) => setBulkSel(s => s.has(id) ? removeFromSelection(s, id) : addToSelection(s, id));
+            return (
+              <motion.div variants={fadeUp} className="mb-20 border border-rule p-6">
+                <div className="flex items-baseline justify-between mb-3">
+                  <span className="font-mono text-[11px] uppercase tracking-[0.28em]" style={{ color: "var(--brass)" }}>
+                    Bulk triage — {bulkSel.size} of {naItems.length} selected
+                  </span>
+                  <div className="flex gap-4">
+                    <button className="btn-link text-[12px]" onClick={() => { setBulkSel(selectAll(naIds)); setBulkPreview(null); }}>Select all</button>
+                    <button className="btn-link text-[12px]" onClick={() => { setBulkSel(clearSelection()); setBulkPreview(null); }}>Clear</button>
+                  </div>
+                </div>
+                <div className="space-y-1 mb-4 max-h-40 overflow-y-auto">
+                  {naItems.map(d => (
+                    <label key={d.id} className="flex items-center gap-3 py-1 cursor-pointer">
+                      <input type="checkbox" checked={bulkSel.has(d.recordId)} onChange={() => { tog(d.recordId); setBulkPreview(null); }} />
+                      <span className="font-body text-[14px]" style={{ color: "var(--ink)" }}>{d.headline}</span>
+                    </label>
+                  ))}
+                </div>
+                {canSubmit(bulkSel) && (<div>
+                  <div className="flex gap-4 items-baseline mb-3">
+                    {(["done", "defer", "noise"] as BulkIntent[]).map(v => (
+                      <button key={v} className={bulkIntent === v ? "btn-brass" : "btn-link"} style={{ fontSize: "0.9rem" }}
+                        onClick={() => { setBulkIntent(v); setBulkPreview(null); }}>
+                        {v === "done" ? "Done" : v === "defer" ? "Defer" : "Noise"}
+                      </button>
+                    ))}
+                  </div>
+                  {bulkIntent && !bulkPreview && <button onClick={runBulkPreview} disabled={bulkBusy} className="btn-brass">{bulkBusy ? "…" : "Preview batch"}</button>}
+                  {bulkPreview && (
+                    <div className="mt-3 border-t border-rule pt-3">
+                      <p className="font-mono text-[12px] mb-2">{bulkPreview.would_apply} will apply · {bulkPreview.would_skip} skipped</p>
+                      {bulkPreview.noise_warning && (
+                        <p className="font-body text-[14px] mb-2 p-2 border border-rule" style={{ color: "var(--brass)" }}>{bulkPreview.noise_warning}</p>
+                      )}
+                      {bulkPreview.reversal_note && (
+                        <p className="font-body italic text-[13px] mb-3" style={{ color: "var(--marginalia)" }}>{bulkPreview.reversal_note}</p>
+                      )}
+                      <div className="flex gap-4 items-baseline">
+                        <button onClick={runBulkApply} disabled={bulkBusy} className="btn-brass">{bulkBusy ? "…" : `Apply to ${bulkSel.size}`}</button>
+                        <button onClick={() => { setBulkPreview(null); setBulkIntent(null); }} className="btn-link" disabled={bulkBusy}>Cancel</button>
+                      </div>
+                    </div>
+                  )}
+                </div>)}
+              </motion.div>
+            );
+          })()}
+
           {rest.length > 0 && (
             <motion.div variants={fadeUp} className="mb-20">
               <SectionHead title="Also in the queue" />

@@ -4370,6 +4370,19 @@ export const deleteChannelIdentity = async (
 };
 
 
+// ── Bulk triage (#542) — POST /api/v1/admin/needs-attention/bulk ─────────
+// dry_run: true → preview; dry_run: false → apply. delegate = 400 server-side.
+export const bulkTriageNeedsAttention = async (
+  args: { ids: string[]; intent: "done" | "defer" | "noise"; note?: string; dry_run: boolean },
+  context: any,
+): Promise<any> => {
+  if (!Array.isArray(args?.ids) || args.ids.length === 0) throw new HttpError(400, "ids required");
+  if (!["done", "defer", "noise"].includes(args?.intent)) throw new HttpError(400, "invalid intent");
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, { method: "POST", path: "/api/v1/admin/needs-attention/bulk",
+    body: { ids: args.ids, intent: args.intent, note: args.note, dry_run: args.dry_run } });
+};
+
 // ── decision_ref minter ──────────────────────────────────────────────────
 //
 // Crockford base32, 26 chars — the ULID shape PR4's
