@@ -85,9 +85,11 @@ describe("bulk needs-attention", () => {
     assert.strictEqual(decCount(), 1, "exactly one decision record");
     assert.ok(p.decision_path?.startsWith("decision/"));
     assert.ok(typeof p.audit_id === "string" && p.audit_id.length > 0);
-    // is_reversible must be false until DecisionRouter source_records support lands.
+    // is_reversible is true now that DecisionRouter re-opens every card in
+    // side_effects.source_records on reverse (#559). The flag must track the
+    // actual capability — a true that does not reverse is worse than a false.
     const decRaw = fs.readFileSync(path.join(DEC, fs.readdirSync(DEC)[0]), "utf-8");
-    assert.ok(/^is_reversible: false$/m.test(decRaw));
+    assert.ok(/^is_reversible: true$/m.test(decRaw));
   });
 
   it("skips unknown ids and already-resolved ids; batch still completes over valid subset", async () => {

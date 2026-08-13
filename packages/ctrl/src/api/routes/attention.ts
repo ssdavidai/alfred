@@ -760,8 +760,9 @@ export function registerAttentionRoutes(): void {
   // POST /api/v1/admin/needs-attention/bulk — bulk done|defer|noise over pending cards.
   // dry_run=true: preview, no writes. Apply: ONE audit row + ONE decision for the batch.
   // delegate excluded. Unknown/resolved ids skipped. The batch decision is NOT
-  // reversible yet (is_reversible: false) — DecisionRouter support for
-  // side_effects.source_records does not exist. See reversal_note.
+  // reversible: the batch decision carries side_effects.source_records and
+  // DecisionRouter re-opens every listed card on reverse (#559), skipping any
+  // that have since been deleted rather than aborting the batch.
   addRoute("POST", "/api/v1/admin/needs-attention/bulk", async ({ res, body }) => {
     const b = (body ?? {}) as Record<string, unknown>;
     const intent = String(b.intent ?? "").trim().toLowerCase();
@@ -787,7 +788,7 @@ export function registerAttentionRoutes(): void {
         would_apply: toApply.length, would_skip: skipped.length, skipped,
         noise_warning: intent !== "noise" ? null :
           `Marking ${toApply.length} card(s) noise trains suppression. This batch is ONE act — suppression still applies.`,
-        reversal_note: "Batch decisions are not reversible yet: DecisionRouter support for source_records does not exist. Undoing requires patching each card's frontmatter manually.",
+        reversal_note: "Reversible: POST /api/v1/decisions/:id/reverse re-opens every card in this batch. Cards deleted since the batch was applied are skipped and reported.",
         note: note || null });
     }
     if (!toApply.length)
@@ -810,14 +811,14 @@ export function registerAttentionRoutes(): void {
     const sideEffects = { bulk: true, count: appliedIds.length, synchronous_flip: true,
       source_records: appliedIds.map((id) => `needs_attention/${id}.md`),
       actions: [`needs_attention.${naStatus}`],
-      reversal_note: "is_reversible=false until DecisionRouter source_records support lands (Lane II queued)" };
+      reversal_note: "reversible via POST /api/v1/decisions/:id/reverse (#559)" };
     const front = [
       `type: "decision"`, `created: ${JSON.stringify(nowIso)}`, `principal: "principal"`,
       `source: "needs_attention"`, `source_record: "needs_attention/bulk"`,
       `source_headline: ${JSON.stringify(`Bulk ${intent}: ${appliedIds.length} cards`)}`,
       `intent: ${JSON.stringify(intent)}`, `note: ${note ? JSON.stringify(note) : "null"}`,
       `matter_ref: null`, `task_ref: null`, `state: "open"`, `outcome_record: null`,
-      `time_to_decision_ms: null`, `reversed_at: null`, `is_reversible: false`,
+      `time_to_decision_ms: null`, `reversed_at: null`, `is_reversible: true`,
       `completed_at: null`, `decision_origin: "bulk_triage"`,
       yaml.dump({ side_effects: sideEffects }, { lineWidth: 200 }).trimEnd(),
     ].join("\n");
