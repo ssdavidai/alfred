@@ -289,6 +289,31 @@ RUN git clone https://github.com/stephenschoettler/hermes-lcm /opt/hermes-lcm \
     && rm -rf /opt/hermes-lcm/.git
 
 # =============================================================================
+# Patch: LCMEngine.__deepcopy__ for Hermes 0.19 per-agent engine copying
+# (upstream workaround, GH #424).
+#
+# Hermes 0.19 deep-copies the context engine into each delegated / spawned
+# agent. The default deepcopy fails because LCMEngine's three store objects
+# (MessageStore, SummaryDAG, LifecycleStateStore) each hold a live
+# sqlite3.Connection as self._conn; LCMEngine also holds a threading.RLock
+# and threading.local, which are equally unpicklable. Result: 331 WARNING
+# log lines in 7 days on home — every sub-agent silently fell back to the
+# built-in compressor instead of LCM. Main-profile conversation is unaffected.
+#
+# The patch adds __deepcopy__ to LCMEngine: it creates a fresh engine from
+# the same config (re-opening new connections to the shared WAL-mode lcm.db)
+# and copies only the mutable budget / counter scalars. Session-binding state
+# is intentionally NOT carried — the sub-agent starts its own session.
+#
+# Applies against HERMES_LCM_REF 2d108b759e33b72427350dffcb77281f7f61baf9
+# (tag v0.11.1). Re-verify NEEDLE in patch_lcm_deepcopy.py after bumping ref.
+# The durable fix is upstreaming __deepcopy__ to stephenschoettler/hermes-lcm.
+COPY packages/hermes/patch_lcm_deepcopy.py /tmp/patch_lcm_deepcopy.py
+RUN python3 /tmp/patch_lcm_deepcopy.py \
+ && grep -q "alfred-black: LCMEngine __deepcopy__" /opt/hermes-lcm/engine.py \
+ && rm /tmp/patch_lcm_deepcopy.py
+
+# =============================================================================
 # Bake the `one-alfred` plugin (the user-facing continuity layer).
 # =============================================================================
 # Sir's principle: the user must feel they are talking to ONE Alfred, always.
