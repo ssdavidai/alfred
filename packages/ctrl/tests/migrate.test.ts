@@ -9,12 +9,30 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import schema from "../src/db/schema.sql";
 import { runMigrations } from "../src/db/migrate.js";
+import { readdirSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
 
 function cols(db: DatabaseSync, table: string): string[] {
   return (db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map(
     (r) => r.name,
   );
 }
+// Latest migration version, derived from the migrations directory rather than
+// hardcoded. A hardcoded number means every new migration breaks an unrelated
+// test and the fix is a bump, which teaches nobody anything. Derived, this
+// still catches a real failure — the runner not reaching the latest registered
+// version — because expected and actual come from independent sources.
+function latestMigrationVersion(): number {
+  const dir = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "db", "migrations");
+  const nums = readdirSync(dir)
+    .filter((f) => f.endsWith(".sql"))
+    .map((f) => Number(f.slice(0, 4)))
+    .filter((n) => Number.isFinite(n));
+  return Math.max(...nums);
+}
+
 function userVersion(db: DatabaseSync): number {
   return (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
 }
@@ -45,8 +63,8 @@ describe("state.db migration runner", () => {
     // + 0013_recall_realtime + 0014_tool_disposition
     // + 0015_composio_user_defaults + 0016_files_extraction
     // + 0017_agent_profiles + 0018_channel_identity).
-    assert.equal(v, 18, "migrated to latest version");
-    assert.equal(userVersion(db), 18);
+    assert.equal(v, latestMigrationVersion(), "migrated to latest version");
+    assert.equal(userVersion(db), latestMigrationVersion());
     assert.ok(cols(db, "observation").includes("processed_at"), "0001: processed_at present after migrate");
     // 0002: alfred_journal + alfred_principal tables present.
     const tables = (
@@ -366,7 +384,7 @@ describe("state.db migration runner", () => {
     db.exec(schema);
     runMigrations(db);
     const v2 = runMigrations(db);
-    assert.equal(v2, 18);
+    assert.equal(v2, latestMigrationVersion());
     assert.equal(
       cols(db, "observation").filter((c) => c === "processed_at").length,
       1,
