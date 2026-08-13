@@ -5,7 +5,7 @@
 // reads ``progress.degraded_stages``, which Phase-4 ``_safe_stage_wrapper``
 // stamps on ``onboard.json`` whenever an Opus-tier activity raises AuthError.
 // Dismissal is per-session (sessionStorage) — on refresh, if auth is still
-// bad, the banner returns. No new endpoints, no Wasp SDK regen.
+// bad, the banner returns.
 //
 // Auth flow (#565): operator clicks "Connect from browser" → polls
 // getCodexAuthStatus every 2.5 s → shows user_code + link → on complete
@@ -23,6 +23,12 @@ import {
   restartHermes,
 } from "wasp/client/operations";
 import { deriveHermesHealthFromProgress } from "./hermesHealthCore";
+import {
+  deriveCodexViewState,
+  isTerminal,
+  shouldDispatchRestart,
+  type CodexStatusPayload,
+} from "./codexAuthCore";
 
 const DISMISS_KEY = "hermes_auth_banner_dismissed_v1";
 const POLL_MS = 30_000;
@@ -39,8 +45,6 @@ function writeDismissed(): void {
   try { window.sessionStorage.setItem(DISMISS_KEY, "1"); } catch { /* quota */ }
 }
 
-type CPhase = "idle"|"pending"|"show_code"|"restarting"|"done"|"failed"|"timeout";
-
 export default function HermesAuthBanner() {
   const { data: progress } = useQuery(getOnboardingProgress, undefined, {
     refetchInterval: POLL_MS,
@@ -49,35 +53,31 @@ export default function HermesAuthBanner() {
   const [dismissed, setDismissed] = useState<boolean>(() => readDismissed());
   useEffect(() => { setDismissed(readDismissed()); }, []);
 
-  const [phase, setPhase] = useState<CPhase>("idle");
-  const [userCode, setUserCode] = useState<string | null>(null);
-  const [verifyUri, setVerifyUri] = useState<string | null>(null);
+  // flowActive gates fast polling; goes false when a terminal status arrives.
+  const [flowActive, setFlowActive] = useState(false);
+  const [restarting, setRestarting] = useState(false);
   const [cErr, setCErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const sentRestart = useRef(false);
 
-  const polling = phase === "pending" || phase === "show_code";
   const { data: sData } = useQuery(getCodexAuthStatus, undefined, {
-    refetchInterval: polling ? 2_500 : 60_000,
+    refetchInterval: flowActive ? 2_500 : 60_000,
   });
 
+  const vs = deriveCodexViewState(sData as CodexStatusPayload, restarting);
+  // Before the first poll response arrives after start, show waiting_for_code.
+  const displayPhase = flowActive && vs.phase === "idle" ? "waiting_for_code" : vs.phase;
+
   useEffect(() => {
-    const s = (sData as any);
-    if (!s) return;
-    const st: string = s.status ?? "not_started";
-    if (st === "awaiting_approval") {
-      if (s.user_code && s.verification_uri) { setUserCode(s.user_code); setVerifyUri(s.verification_uri); setPhase("show_code"); }
-      else setPhase("pending");
-    } else if (st === "complete") {
-      if (!sentRestart.current) {
-        sentRestart.current = true;
-        setPhase("restarting");
-        (restartHermes as (a: Record<string, never>) => Promise<unknown>)({}).finally(() => setPhase("done"));
-      }
-    } else if (st === "failed") {
-      setCErr(s.error ?? "hermes auth exited non-zero"); setPhase("failed");
-    } else if (st === "timeout") {
-      setPhase("timeout");
+    const p = sData as CodexStatusPayload | null;
+    if (!p) return;
+    if (isTerminal(p.status)) setFlowActive(false);
+    if (p.status === "failed") setCErr(p.error ?? "authentication failed");
+    if (shouldDispatchRestart(p.status, sentRestart.current)) {
+      sentRestart.current = true;
+      setRestarting(true);
+      (restartHermes as (a: Record<string, never>) => Promise<unknown>)({})
+        .finally(() => setRestarting(false));
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sData]);
@@ -86,10 +86,10 @@ export default function HermesAuthBanner() {
   if (health.healthy || dismissed) return null;
 
   async function onConnect() {
-    setBusy(true); setCErr(null);
+    setBusy(true); setCErr(null); sentRestart.current = false;
     try {
       await (startCodexAuth as (a: Record<string, never>) => Promise<unknown>)({});
-      setPhase("pending");
+      setFlowActive(true);
     } catch (e: any) { setCErr(e?.message ?? "start failed"); }
     finally { setBusy(false); }
   }
@@ -102,7 +102,7 @@ export default function HermesAuthBanner() {
           <div className="mb-2 font-mono text-[11px] uppercase tracking-[0.22em] text-amber-300">
             Alfred can&apos;t reach the language model
           </div>
-          {phase === "idle" && <>
+          {displayPhase === "idle" && <>
             <div className="font-serif text-sm leading-relaxed">
               Deeper analysis finished with reduced fidelity{stages ? ` (${stages})` : ""}. Re-authenticate from this page, or from the host:
             </div>
@@ -114,17 +114,17 @@ export default function HermesAuthBanner() {
               {cErr && <span className="font-serif text-[13px] text-red-300">{cErr}</span>}
             </div>
           </>}
-          {phase === "pending" && <div className="font-serif text-sm text-amber-100">Waiting for device code…</div>}
-          {phase === "show_code" && userCode && <div className="font-serif text-sm leading-relaxed">
-            Visit <a href={verifyUri!} target="_blank" rel="noopener noreferrer" className="underline text-amber-200 hover:text-white">{verifyUri}</a> and enter:
-            <div className="mt-2 font-mono text-2xl tracking-[0.3em] text-white">{userCode}</div>
+          {displayPhase === "waiting_for_code" && <div className="font-serif text-sm text-amber-100">Waiting for device code…</div>}
+          {vs.phase === "show_code" && <div className="font-serif text-sm leading-relaxed">
+            Visit <a href={vs.verification_uri} target="_blank" rel="noopener noreferrer" className="underline text-amber-200 hover:text-white">{vs.verification_uri}</a> and enter:
+            <div className="mt-2 font-mono text-2xl tracking-[0.3em] text-white">{vs.user_code}</div>
             <div className="mt-1 font-mono text-[11px] uppercase tracking-[0.18em] text-amber-300/70">Waiting for approval…</div>
           </div>}
-          {phase === "restarting" && <div className="font-serif text-sm text-amber-100">Connected. Restarting Hermes to apply the credential — takes ~30 seconds.</div>}
-          {phase === "done" && <div className="font-serif text-sm text-amber-100">Hermes is back online. Dismiss this banner.</div>}
-          {phase === "failed" && <div className="font-serif text-sm">Authentication failed: {cErr}.{" "}
+          {displayPhase === "restarting" && <div className="font-serif text-sm text-amber-100">Connected. Restarting Hermes to apply the credential — takes ~30 seconds.</div>}
+          {displayPhase === "done" && <div className="font-serif text-sm text-amber-100">Hermes is back online. Dismiss this banner.</div>}
+          {vs.phase === "failed" && <div className="font-serif text-sm">Authentication failed: {vs.error}.{" "}
             <button type="button" onClick={onConnect} disabled={busy} className="underline hover:text-white">Retry</button></div>}
-          {phase === "timeout" && <div className="font-serif text-sm">The code expired.{" "}
+          {displayPhase === "timeout" && <div className="font-serif text-sm">The code expired.{" "}
             <button type="button" onClick={onConnect} disabled={busy} className="underline hover:text-white">Retry</button> to start a new ceremony.</div>}
           <div className="mt-2 font-serif text-[13px] text-amber-200/80">Then retry onboarding. Existing data is preserved.</div>
         </div>
