@@ -703,6 +703,40 @@ export const getTailscalePeers = async (_args: unknown, context: any) => {
 };
 
 // ============================================================
+// Codex OAuth ceremony (#565). Backed by the two ctrl-api routes
+// in packages/ctrl/src/api/routes/hermes_codex_auth.ts (PR #566).
+//   getCodexAuthStatus → GET  /api/v1/hermes/codex-auth/status
+//   startCodexAuth     → POST /api/v1/hermes/codex-auth/start
+//   restartHermes      → POST /api/v1/hermes/restart
+// ============================================================
+
+export const getCodexAuthStatus = async (_args: unknown, context: any) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    path: "/api/v1/hermes/codex-auth/status",
+    timeoutMs: 10_000,
+  });
+};
+
+export const startCodexAuth = async (_args: unknown, context: any) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/hermes/codex-auth/start",
+    timeoutMs: 15_000,
+  });
+};
+
+export const restartHermes = async (_args: unknown, context: any) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/hermes/restart",
+    timeoutMs: 45_000,
+  });
+};
+
+// ============================================================
 // Lane III — Recall.ai channel on /channels (#113 PR3).
 // ============================================================
 //

@@ -1034,6 +1034,23 @@ query getTailscalePeers {
   entities: []
 }
 
+// Codex OAuth ceremony (#565 / PR #566).
+// Three ops backed by hermes_codex_auth.ts (ctrl-api) + hermes.ts (restart).
+query getCodexAuthStatus {
+  fn: import { getCodexAuthStatus } from "@src/dashboard/operations",
+  entities: []
+}
+
+action startCodexAuth {
+  fn: import { startCodexAuth } from "@src/dashboard/operations",
+  entities: []
+}
+
+action restartHermes {
+  fn: import { restartHermes } from "@src/dashboard/operations",
+  entities: []
+}
+
 // Lane III (Recall.ai, #113 PR3) — operator-facing /channels card. Five ops
 // against the ctrl-api routes shipped in PR2 (#129). The composite
 // getRecallChannelStatus stitches /config + /usage + /bots/active into the
