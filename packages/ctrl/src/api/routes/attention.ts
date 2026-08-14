@@ -880,28 +880,45 @@ export function registerAttentionRoutes(): void {
     const autonomousItems: object[] = [];
     const unratedCounts = new Map<string, number>();
     let selfCorrections = 0;
+    // Allocation tracking (work / life / unallocated) — sums in minutes.
+    const allocDisplacedMin: Record<"work"|"life"|"unallocated", number> = { work: 0, life: 0, unallocated: 0 };
+    const allocEngagedMin:   Record<"work"|"life"|"unallocated", number> = { work: 0, life: 0, unallocated: 0 };
 
     for (const row of entries) {
       const notesData = row.notes ? (() => { try { return JSON.parse(row.notes!); } catch { return {}; } })() : {};
       if (notesData.outcome === "corrective") selfCorrections++;
       const mins = row.displaced_minutes ?? 0;
 
+      // Every entry contributes displaced minutes to exactly one allocation bucket.
+      const alloc: "work"|"life"|"unallocated" =
+        (notesData.allocation === "work" || notesData.allocation === "life")
+          ? (notesData.allocation as "work"|"life") : "unallocated";
+      allocDisplacedMin[alloc] += mins;
+
       if (row.evidence_kind === "session" && row.acceptance_path === "inferred") {
         // Inferred — conversational bucket work.
+        // engaged_minutes: only on conversational entries written by the recap (null otherwise).
+        // nar_minutes: null when engaged is null — unknown engagement is not the same as zero.
+        const engaged_minutes: number|null = notesData.engaged_minutes ?? null;
+        const nar_minutes: number|null = engaged_minutes !== null ? mins - engaged_minutes : null;
+        if (engaged_minutes !== null) allocEngagedMin[alloc] += engaged_minutes;
         inferredItems.push({
           label: row.summary, bucket: notesData.bucket ?? null, minutes: mins,
           turns: notesData.turns ?? null, tools: notesData.tools ?? null,
           evidence_kind: row.evidence_kind, evidence_ref: row.evidence_ref,
           outcome: notesData.outcome ?? null,
+          engaged_minutes, nar_minutes,
         });
       } else if (
         row.evidence_kind === "chore_run" ||
         (row.acceptance_path === "explicit" && row.evidence_kind !== "decision" && row.evidence_kind !== "audit")
       ) {
         // Autonomous — unattended artifact production.
+        // Chore runs carry no per-session engagement measurement (null deliberately).
         autonomousItems.push({
           label: row.summary, bucket: notesData.bucket ?? null, minutes: mins,
           evidence_kind: row.evidence_kind, evidence_ref: row.evidence_ref,
+          engaged_minutes: null, nar_minutes: null,
         });
       } else {
         // Explicit or unrated — rate-card actions.
@@ -1005,6 +1022,41 @@ export function registerAttentionRoutes(): void {
     const statsDenom      = engagedHours + interruptionHours;
     const statsRatio      = statsDenom === 0 ? 0 : Math.round((displacedHours / statsDenom) * 1000) / 1000;
 
+    // Allocation block — displaced / engaged / interruption per bucket.
+    // interruption is unattributed (comes from alfred_journal with no allocation),
+    // so the full day's interruption lands in unallocated; work and life carry zero.
+    const r3 = (v: number) => Math.round(v * 1000) / 1000;
+    const allocBlock = {
+      work: {
+        displaced_hours:    r3(allocDisplacedMin.work / 60),
+        engaged_hours:      r3(allocEngagedMin.work / 60),
+        interruption_hours: 0,
+        nar_hours:          r3((allocDisplacedMin.work - allocEngagedMin.work) / 60),
+      },
+      life: {
+        displaced_hours:    r3(allocDisplacedMin.life / 60),
+        engaged_hours:      r3(allocEngagedMin.life / 60),
+        interruption_hours: 0,
+        nar_hours:          r3((allocDisplacedMin.life - allocEngagedMin.life) / 60),
+      },
+      unallocated: {
+        displaced_hours:    r3(allocDisplacedMin.unallocated / 60),
+        engaged_hours:      r3(allocEngagedMin.unallocated / 60),
+        interruption_hours: r3(interruptionHours),
+        nar_hours:          r3((allocDisplacedMin.unallocated - allocEngagedMin.unallocated) / 60 - interruptionHours),
+      },
+    };
+    // Reconciliation: per-session engaged (summed from notes) vs day-level burst clustering.
+    // The two measures are correct measures of different scopes; do not force them to agree.
+    const attributedEngagedHours = r3(
+      (allocEngagedMin.work + allocEngagedMin.life + allocEngagedMin.unallocated) / 60,
+    );
+    const allocReconciliation = {
+      attributed_engaged_hours: attributedEngagedHours,
+      day_engaged_hours:        r3(engagedHours),
+      difference_hours:         r3(engagedHours - attributedEngagedHours),
+    };
+
     return {
       date: dateStr,
       nar_hours: Math.round(narHours * 1000) / 1000,
@@ -1025,6 +1077,8 @@ export function registerAttentionRoutes(): void {
         from_source_kind: interruptionFromSourceKind,
         rate_minutes: INTERRUPTION_RATE_MINUTES,
       },
+      allocation: allocBlock,
+      allocation_reconciliation: allocReconciliation,
       rates: {
         suppression_minutes_per_item: suppressionRate,
         bucket_minutes: BUCKET_MINUTES,
