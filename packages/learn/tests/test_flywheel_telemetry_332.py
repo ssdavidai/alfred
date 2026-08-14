@@ -51,7 +51,7 @@ class _VC:
                     {"frontmatter": {"as_of": "2026-06-01T00:00:00Z"}}]
         return [{"frontmatter": {"parent_matter": "matter/x.md"}},
                 {"frontmatter": {}}]
-    async def notify(self, path, summary):
+    async def notify(self, path, summary, **kwargs):
         self.notified = (path, summary)
     async def close(self): return None
 

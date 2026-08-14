@@ -430,18 +430,20 @@ class TestNotify:
     """POST /api/v1/notifications"""
 
     def test_calls_correct_endpoint(self, vc):
+        """notify() must target alfred-deliver directly; /notifications does not
+        forward solicited so using it would silently drop the NAR stamp (#580)."""
         client, http = vc
-        http.post.return_value = make_response(200, {"status": "sent"})
+        http.post.return_value = make_response(200, {"ok": True})
 
         asyncio.run(client.notify("observation/test.md", "New observation"))
 
         http.post.assert_called_once()
-        assert http.post.call_args.args[0] == "/api/v1/notifications"
+        assert http.post.call_args.args[0] == "/api/v1/alfred-deliver"
 
     def test_payload_has_required_message_field(self, vc):
         """ctrl validates that 'message' is present and is a string."""
         client, http = vc
-        http.post.return_value = make_response(200, {"status": "sent"})
+        http.post.return_value = make_response(200, {"ok": True})
 
         asyncio.run(client.notify("observation/test.md", "summary text"))
 
@@ -452,22 +454,26 @@ class TestNotify:
     def test_payload_has_urgency_field(self, vc):
         """ctrl accepts an 'urgency' field; VaultClient hardcodes 'normal'."""
         client, http = vc
-        http.post.return_value = make_response(200, {"status": "sent"})
+        http.post.return_value = make_response(200, {"ok": True})
 
         asyncio.run(client.notify("observation/test.md", "summary"))
 
         payload = http.post.call_args.kwargs["json"]
         assert payload.get("urgency") == "normal"
 
-    def test_payload_has_session_id_field(self, vc):
-        """ctrl routes to a session; VaultClient hardcodes 'main'."""
+    def test_payload_session_id_removed(self, vc):
+        """session_id was a dead parameter; it must NOT appear in the body.
+
+        alfred-deliver does not recognise session_id and the old notifications
+        route was its sole consumer. Sending it now would be noise (#580).
+        """
         client, http = vc
-        http.post.return_value = make_response(200, {"status": "sent"})
+        http.post.return_value = make_response(200, {"ok": True})
 
         asyncio.run(client.notify("observation/test.md", "summary"))
 
         payload = http.post.call_args.kwargs["json"]
-        assert payload.get("session_id") == "main"
+        assert "session_id" not in payload
 
     def test_message_contains_path_and_summary(self, vc):
         """The message body must embed both the vault path and the summary text."""

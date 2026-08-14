@@ -212,7 +212,7 @@ async def send_flywheel_digest() -> dict[str, Any]:
 
     client = VaultClient(config)
     try:
-        await client.notify("flywheel/weekly", text)
+        await client.notify("flywheel/weekly", text, solicited=0)
     finally:
         await client.close()
     return {"sent": True, "days": len(days), "flat_arms": flat_arms}

@@ -17,7 +17,7 @@ async def notify_digest_ready(path: str, summary: str) -> None:
     config = load_config()
     client = VaultClient(config)
     try:
-        await client.notify(path, summary)
+        await client.notify(path, summary, solicited=0)
     finally:
         await client.close()
 
@@ -71,6 +71,6 @@ async def escalate_to_user(
 
         summary = f"Needs your judgment: {title}.{score_info}"
         path = input_event.get("path", input_event.get("id", ""))
-        await client.notify(path, summary)
+        await client.notify(path, summary, solicited=0)
     finally:
         await client.close()
