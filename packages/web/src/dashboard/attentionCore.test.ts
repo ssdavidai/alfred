@@ -299,12 +299,19 @@ test("collapseAutonomousRows: null-safe → []", () => assert.deepEqual(collapse
 // deriveLedger consumes the NORMALISED view model, not the raw response —
 // normalizeAttentionDay has already run deriveInferredDisplay. Fixtures must
 // therefore be display items carrying display_minutes, not raw minutes.
-const mkInferred = (label: string, minutes: number, outcome?: string): InferredDisplayItem => {
+const mkInferred = (
+  label: string, minutes: number, outcome?: string, engaged: number | null = null,
+): InferredDisplayItem => {
   const failed = outcome !== undefined && outcome !== "delivered";
   return {
     label, bucket: "M", claimed_minutes: minutes, display_minutes: failed ? 0 : minutes,
     evidence_kind: "session", evidence_ref: "s", outcome: outcome ?? "delivered",
     is_blocked: failed, blocked_reason: failed ? `${outcome} — no displacement credit` : null,
+    // Default to unmeasured. NAR follows displayed displacement, so a failed
+    // session with measured engagement is correctly negative — it cost
+    // attention and returned none.
+    engaged_minutes: engaged,
+    nar_minutes: engaged === null ? null : (failed ? 0 : minutes) - engaged,
   };
 };
 

@@ -208,7 +208,7 @@ function DayView({ day, recomp, running }: { day: AttentionDayViewModel; recomp(
             </div>
             {[fh(bucket?.displaced_hours), fh(bucket?.engaged_hours),
               fh(bucket?.interruption_hours), fh(bucket?.nar_hours)].map((v, ci) => (
-              <span key={ci} className="font-mono text-[9px] tabular-nums text-right" style={{ opacity: bucket != null ? 0.75 : 0.35 }}>{v}</span>
+              <span key={ci} className="font-mono text-[14px] tabular-nums text-right" style={{ opacity: bucket != null ? 0.85 : 0.35 }}>{v}</span>
             ))}
           </div>
         );
@@ -290,7 +290,7 @@ function DayView({ day, recomp, running }: { day: AttentionDayViewModel; recomp(
       {/* Rate card — stay visible so every figure is recomputable by hand */}
       {day.rates != null && (
         <div className="mt-8 pt-4" style={{ borderTop: "1px solid var(--rule)" }}>
-          <p className="font-mono text-[9px] uppercase tracking-[0.22em] mb-1.5" style={{ color: "var(--marginalia)" }}>
+          <p className="font-mono text-[10px] uppercase tracking-[0.22em] mb-1.5" style={{ color: "var(--marginalia)" }}>
             Rate card in force
           </p>
           <div className="flex flex-wrap gap-x-6 gap-y-0.5 font-mono text-[10px]" style={{ color: "var(--marginalia)" }}>
@@ -303,10 +303,10 @@ function DayView({ day, recomp, running }: { day: AttentionDayViewModel; recomp(
 
       {/* FOOTER */}
       <div className="flex justify-between items-center mt-10 pt-2" style={{ borderTop: "1px solid var(--rule)" }}>
-        <span className="font-mono text-[9px] uppercase tracking-[0.22em]" style={{ color: "var(--marginalia)" }}>
+        <span className="font-mono text-[10px] uppercase tracking-[0.22em]" style={{ color: "var(--marginalia)" }}>
           Alfred Black · Attention Statement · {day.date}
         </span>
-        <span className="font-mono text-[9px] uppercase tracking-[0.22em]" style={{ color: "var(--marginalia)" }}>
+        <span className="font-mono text-[10px] uppercase tracking-[0.22em]" style={{ color: "var(--marginalia)" }}>
           Page 1 of 1
         </span>
       </div>
@@ -427,7 +427,7 @@ export default function AttentionPage() {
                 <img src={logoCurrentcolor} alt="" className="h-7 w-auto" />
                 <span className="font-mono text-[11px] uppercase tracking-[0.2em]" style={{ color: "var(--brass)" }}>Alfred Black</span>
               </div>
-              <span className="font-mono text-[9px] uppercase tracking-[0.2em]" style={{ color: "var(--marginalia)" }}>
+              <span className="font-mono text-[10px] uppercase tracking-[0.2em]" style={{ color: "var(--marginalia)" }}>
                 {formatHeaderDate(date)}
               </span>
             </div>
