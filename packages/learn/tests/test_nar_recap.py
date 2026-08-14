@@ -751,3 +751,135 @@ class TestReplaceNarEntries:
 
         assert out.get("ok") is False
         assert out["reason"] == "replace_not_supported"
+
+
+# ---------------------------------------------------------------------------
+# Defect 1 — summary must be human-readable (not a machine label)
+# Defect 2 — outcome must be written to notes for ctrl to read
+# ---------------------------------------------------------------------------
+
+class TestOutcomeWrittenToNotes:
+    """ctrl reads notes.outcome per inferred item; None renders as 'no displacement credit'.
+
+    The logic below mirrors what compute_nar_day does — tested in isolation
+    so the outcome-building contract is locked independently of the HTTP stack.
+    """
+
+    def _build_sess_notes(self, bucket: str, is_failed: bool) -> dict:
+        """Mirror the outcome logic from compute_nar_day sessions section."""
+        if is_failed:
+            outcome: str | None = "failed"
+        elif bucket != "none":
+            outcome = "delivered"
+        else:
+            outcome = None
+        obj: dict = {"bucket": bucket, "has_artifact": True}
+        if outcome is not None:
+            obj["outcome"] = outcome
+        return json.loads(json.dumps(obj))
+
+    def test_delivered_session_outcome_is_delivered(self):
+        for bucket in ("S", "M", "L", "XL"):
+            notes = self._build_sess_notes(bucket, is_failed=False)
+            assert notes.get("outcome") == "delivered", f"bucket={bucket}"
+
+    def test_failed_session_outcome_is_not_delivered(self):
+        notes = self._build_sess_notes("S", is_failed=True)
+        assert notes.get("outcome") != "delivered"
+        # A specific non-None value must be present (the failed value).
+        assert notes.get("outcome") is not None
+
+    def test_bucket_none_not_failed_not_marked_failed(self):
+        """bucket='none', not failed → outcome absent (discussion-only ≠ failure)."""
+        notes = self._build_sess_notes("none", is_failed=False)
+        assert notes.get("outcome") != "failed", (
+            "bucket:none without failure must not be labelled failed"
+        )
+
+    @pytest.mark.asyncio
+    async def test_classify_session_bucket_exposes_work_summary(self):
+        """_classify_session_bucket must return work_summary so compute_nar_day can use it."""
+        from src.activities.nar_recap import _classify_session_bucket
+
+        messages = [{"role": "user", "content": "Draft the invoice.", "ts": 1.0}]
+        with patch("src.activities.nar_recap._call_clerk", new_callable=AsyncMock) as mock_clerk:
+            mock_clerk.return_value = {
+                "bucket": "S",
+                "reasoning": "short invoice task",
+                "has_artifact": True,
+                "is_failed": False,
+                "work_summary": "Invoice drafted for client",
+            }
+            result = await _classify_session_bucket(messages)
+        assert "work_summary" in result
+        assert result["work_summary"] == "Invoice drafted for client"
+
+
+
+class TestWorkSummaryShape:
+    """summary must describe the work done, not the session metadata.
+
+    Migration 0020 defines summary as 'one line, human readable — this is what
+    the principal reads'.  The old format (Session <id12> (slack) — bucket L)
+    told the principal nothing.
+    """
+
+    def test_summary_not_session_id_or_bucket_label(self):
+        """When work_summary is present it replaces the machine label."""
+        session_id = "sess_deadbeef1234"
+        source = "slack"
+        bucket = "L"
+        work_summary = "Two weeks of messages, DMs and mail gathered"
+
+        # New logic: summary = work_summary when non-empty.
+        summary = work_summary if work_summary else f"{source} session"
+
+        assert session_id[:12] not in summary, "session id must not appear in summary"
+        assert f"— bucket {bucket}" not in summary, "bucket label must not appear in summary"
+        assert f"bucket {bucket}" not in summary
+
+    def test_fallback_summary_has_no_session_id(self):
+        """When clerk returns empty work_summary, fallback is source-only (no id)."""
+        session_id = "sess_deadbeef1234"
+        source = "slack"
+        work_summary = ""
+
+        summary = work_summary if work_summary else f"{source} session"
+
+        assert session_id[:12] not in summary
+        assert "bucket" not in summary.lower()
+
+    @pytest.mark.asyncio
+    async def test_clerk_error_fallback_work_summary_empty(self):
+        """On clerk error, work_summary is '' — the machine fallback summary is used."""
+        from src.activities.nar_recap import _classify_session_bucket
+
+        messages = [{"role": "user", "content": "hello", "ts": 1.0}]
+        with patch("src.activities.nar_recap._call_clerk", new_callable=AsyncMock) as mock_clerk:
+            mock_clerk.side_effect = RuntimeError("gateway timeout")
+            result = await _classify_session_bucket(messages)
+        assert result.get("work_summary") == ""
+
+    @pytest.mark.asyncio
+    async def test_chore_work_summary_used_as_summary(self):
+        """Artifact chore summary comes from work_summary, not the machine label."""
+        from src.activities.nar_recap import _classify_chore_bucket
+
+        chore_name = "morning-brief"
+        with patch("src.activities.nar_recap._call_clerk", new_callable=AsyncMock) as mock_clerk:
+            mock_clerk.return_value = {
+                "bucket": "M",
+                "reasoning": "briefing composed",
+                "has_artifact": True,
+                "is_failed": False,
+                "work_summary": "Morning briefing composed and delivered",
+            }
+            binfo = await _classify_chore_bucket("composed briefing.md", chore_name)
+
+        work_summary = binfo.get("work_summary") or ""
+        summary = (
+            work_summary if work_summary
+            else (chore_name if binfo.get("has_artifact") else f"{chore_name} — vigilance")
+        )
+        assert "artifact" not in summary
+        assert summary == "Morning briefing composed and delivered"

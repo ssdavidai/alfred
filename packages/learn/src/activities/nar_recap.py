@@ -76,9 +76,10 @@ Rules from the NAR method (apply them in order):
 
 Return a JSON object with exactly these keys:
   bucket: one of "S" | "M" | "L" | "XL" | "none"
-  reasoning: one sentence
+  reasoning: one sentence explaining the classification
   has_artifact: true | false
   is_failed: true | false (true only if session ended WITHOUT producing what was asked for)
+  work_summary: 4-10 words describing what was done (e.g. "Invoice drafted for client", "Two weeks of messages gathered") — no bucket letter, no session id; use an empty string when bucket is "none"
 
 Bucket meanings (minutes of principal time displaced if delivered):
   S  =   5 min — quick email, short memo, simple fact lookup
@@ -99,7 +100,7 @@ async def _classify_session_bucket(messages: list[dict[str, Any]]) -> dict[str, 
     long sessions.  Falls back to ``{"bucket": "none"}`` on any error.
     """
     if not messages:
-        return {"bucket": "none", "reasoning": "empty session", "has_artifact": False, "is_failed": False}
+        return {"bucket": "none", "reasoning": "empty session", "has_artifact": False, "is_failed": False, "work_summary": ""}
 
     ctx = _extract_session_context(messages)
     try:
@@ -117,10 +118,11 @@ async def _classify_session_bucket(messages: list[dict[str, Any]]) -> dict[str, 
             "reasoning": str(result.get("reasoning", "")),
             "has_artifact": bool(result.get("has_artifact", False)),
             "is_failed": bool(result.get("is_failed", False)),
+            "work_summary": str(result.get("work_summary", "")),
         }
     except Exception as exc:  # noqa: BLE001
         logger.warning("nar_recap: bucket classification failed: %s", exc)
-        return {"bucket": "none", "reasoning": f"clerk error: {str(exc)[:100]}", "has_artifact": False, "is_failed": False}
+        return {"bucket": "none", "reasoning": f"clerk error: {str(exc)[:100]}", "has_artifact": False, "is_failed": False, "work_summary": ""}
 
 
 # ---------------------------------------------------------------------------
@@ -142,9 +144,10 @@ Rules:
 
 Return a JSON object:
   bucket: one of "S" | "M" | "L" | "XL" | "none"
-  reasoning: one sentence
+  reasoning: one sentence explaining the classification
   has_artifact: true | false
   is_failed: true | false
+  work_summary: 4-10 words describing the artifact produced (e.g. "Morning briefing composed and sent") — use an empty string when bucket is "none"
 
 Bucket meanings (minutes of principal time the artifact would have taken by hand):
   S  =   5 min — short note, quick status, calendar entry
@@ -165,7 +168,7 @@ async def _classify_chore_bucket(detail: str, chore_name: str) -> dict[str, Any]
     Falls back to ``{"bucket": "none"}`` on any error.
     """
     if not detail:
-        return {"bucket": "none", "reasoning": "empty chore output", "has_artifact": False, "is_failed": False}
+        return {"bucket": "none", "reasoning": "empty chore output", "has_artifact": False, "is_failed": False, "work_summary": ""}
     try:
         # Build prompt inside try/except: detail may contain literal curly
         # braces (e.g. JSON chore output) which would crash str.format().
@@ -184,10 +187,11 @@ async def _classify_chore_bucket(detail: str, chore_name: str) -> dict[str, Any]
             "reasoning": str(result.get("reasoning", "")),
             "has_artifact": bool(result.get("has_artifact", False)),
             "is_failed": bool(result.get("is_failed", False)),
+            "work_summary": str(result.get("work_summary", "")),
         }
     except Exception as exc:  # noqa: BLE001
         logger.warning("nar_recap: chore bucket classification failed: %s", exc)
-        return {"bucket": "none", "reasoning": f"clerk error: {str(exc)[:100]}", "has_artifact": False, "is_failed": False}
+        return {"bucket": "none", "reasoning": f"clerk error: {str(exc)[:100]}", "has_artifact": False, "is_failed": False, "work_summary": ""}
 
 
 def _chore_is_vigilance_sweep(obs: dict[str, Any]) -> bool:
@@ -357,12 +361,26 @@ async def compute_nar_day(day_iso: str) -> dict[str, Any]:
             occurred_at = datetime.fromtimestamp(started_at, tz=timezone.utc).isoformat()
             dedup_key = f"nar:session:{sess['id']}:{day_iso}"
 
+            # outcome: ctrl reads notes.outcome to render credit per line.
+            # "delivered" when work was produced; "failed" when session ended without
+            # delivering; None for bucket:none (discussion-only — distinct from failed).
+            if bucket_info.get("is_failed"):
+                _sess_outcome: str | None = "failed"
+            elif bucket != "none":
+                _sess_outcome = "delivered"
+            else:
+                _sess_outcome = None
+            _sess_notes: dict[str, Any] = {"bucket": bucket, "has_artifact": bucket_info.get("has_artifact")}
+            if _sess_outcome is not None:
+                _sess_notes["outcome"] = _sess_outcome
+            _sess_work_summary = bucket_info.get("work_summary") or ""
+
             entry: dict[str, Any] = {
                 "id": str(uuid.uuid5(uuid.NAMESPACE_DNS, dedup_key)),
                 "dedup_key": dedup_key,
                 "occurred_at": occurred_at,
                 "action_class": "conversational",
-                "summary": f"Session {sess['id'][:12]} ({sess['source']}) — bucket {bucket}",
+                "summary": _sess_work_summary if _sess_work_summary else f"{sess['source']} session",
                 "evidence_kind": "session",
                 "evidence_ref": sess["id"],
                 "session_ref": sess["id"],
@@ -372,7 +390,7 @@ async def compute_nar_day(day_iso: str) -> dict[str, Any]:
                 "acceptance_path": acc_path,
                 "acceptance_basis": bucket_info.get("reasoning", ""),
                 "displaced_minutes": displaced,
-                "notes": json.dumps({"bucket": bucket, "has_artifact": bucket_info.get("has_artifact")}),
+                "notes": json.dumps(_sess_notes),
             }
             entries_list.append(entry)
             if displaced is not None:
@@ -455,6 +473,8 @@ async def compute_nar_day(day_iso: str) -> dict[str, Any]:
         detail = str(obs.get("detail") or obs.get("summary") or "")
         is_vigilance = _chore_is_vigilance_sweep(obs)
 
+        _chore_outcome: str | None = None
+        _chore_work_summary = ""
         if is_vigilance:
             # Method doc §1c: "a chore that ran, checked and found nothing →
             # suppression rate (vigilance)".  Vigilance sweeps must never reach
@@ -487,13 +507,25 @@ async def compute_nar_day(day_iso: str) -> dict[str, Any]:
                     cacc, cacc_path = "unknown", None
             cbasis = f"chore '{chore_name}' artifact — {binfo.get('reasoning', '')}"
             has_artifact = binfo.get("has_artifact", False)
+            if binfo.get("is_failed"):
+                _chore_outcome = "failed"
+            elif cbucket != "none":
+                _chore_outcome = "delivered"
+            _chore_work_summary = binfo.get("work_summary") or ""
 
+        _chore_notes: dict[str, Any] = {"has_artifact": has_artifact, "bucket": cbucket}
+        if _chore_outcome is not None:
+            _chore_notes["outcome"] = _chore_outcome
+        _chore_summary = (
+            _chore_work_summary if _chore_work_summary
+            else (chore_name if has_artifact else f"{chore_name} — vigilance")
+        )
         entry = {
             "id": str(uuid.uuid5(uuid.NAMESPACE_DNS, dedup_key)),
             "dedup_key": dedup_key,
             "occurred_at": ts_str,
             "action_class": "chore_run",
-            "summary": f"Chore {chore_name}: {'artifact' if has_artifact else 'vigilance'}",
+            "summary": _chore_summary,
             "evidence_kind": "chore_run",
             "evidence_ref": obs["id"],
             "session_ref": None,
@@ -503,7 +535,7 @@ async def compute_nar_day(day_iso: str) -> dict[str, Any]:
             "acceptance_path": cacc_path,
             "acceptance_basis": cbasis,
             "displaced_minutes": cdisp,
-            "notes": json.dumps({"has_artifact": has_artifact, "bucket": cbucket}),
+            "notes": json.dumps(_chore_notes),
         }
         entries_list.append(entry)
         if cdisp is not None:
