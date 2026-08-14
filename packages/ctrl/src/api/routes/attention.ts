@@ -36,6 +36,7 @@ import { attentionCache, invalidateVaultCachesForType } from "../vaultCache.js";
 import { appendAudit } from "./state.js";
 import { getStateDb } from "../../db/state.js";
 import { indexVaultWrite } from "../../db/vaultIndex.js";
+import { DatabaseSync } from "node:sqlite";
 import { clusterBursts } from "../../db/engagedTime.js";
 import { loadRateCard } from "./suppressionRateCard.js";
 import { dockerExec } from "../helpers.js";
@@ -844,7 +845,8 @@ export function registerAttentionRoutes(): void {
       decision_path: `decision/${decisionId}.md`, audit_id: auditId });
   });
 
-  // NAR statement/stats/recompute — read from nar_entry + alfred_journal; rates from docs/design/nar-method.md.
+  // NAR statement/stats/recompute — rates from docs/design/nar-method.md.
+  const HERMES_CONFIG_DIR = process.env.HERMES_CONFIG_DIR ?? "/hermes-state/profiles";
   const GAP_MS = 10 * 60 * 1000, FLOOR_MS = 2 * 60 * 1000;
   const BUCKET_MINUTES: Record<string, number> = { S: 5, M: 20, L: 60, XL: 120 };
   const INTERRUPTION_RATE_MINUTES = 2;
@@ -916,16 +918,31 @@ export function registerAttentionRoutes(): void {
       }
     }
 
-    // Engaged time: cluster alfred_journal inbound timestamps for the day.
-    const journalInbound = db.prepare(
-      `SELECT ts FROM alfred_journal
-        WHERE direction = 'inbound' AND ts >= ? AND ts <= ?`,
-    ).all(dayStart, dayEnd) as Array<{ ts: string }>;
+    // Human turns: Hermes main profile, allowlist sources only (not HA/audio).
+    // messages.timestamp is epoch seconds REAL. Degrades gracefully if store missing.
+    const hsDbPath = path.join(HERMES_CONFIG_DIR, "main", "state.db");
+    const dayStartEp = new Date(dayStart).getTime() / 1000;
+    const dayEndEp = new Date(dayEnd).getTime() / 1000;
+    let hermesTs: number[] = [];
+    if (fs.existsSync(hsDbPath)) {
+      let hsDb: any;
+      try {
+        hsDb = new DatabaseSync(`file:${hsDbPath}?mode=ro`);
+        hermesTs = (hsDb.prepare(
+          `SELECT m.timestamp FROM messages m JOIN sessions s ON m.session_id=s.id
+           WHERE m.role='user' AND s.source IN ('slack','cli','telegram')
+             AND m.timestamp>=? AND m.timestamp<=?`,
+        ).all(dayStartEp, dayEndEp) as Array<{ timestamp: number }>).map(r => r.timestamp);
+        hsDb.close();
+      } catch { try { (hsDb as any)?.close(); } catch { /**/ } }
+    }
+    // Desk decisions by the principal (actor='principal' excludes machine-authored rows).
     const decisionAudit = db.prepare(
-      `SELECT ts FROM audit WHERE action_type = 'decision' AND ts >= ? AND ts <= ?`,
+      `SELECT ts FROM audit WHERE action_type='decision' AND actor='principal'
+        AND ts>=? AND ts<=?`,
     ).all(dayStart, dayEnd) as Array<{ ts: string }>;
     const burstDates = [
-      ...journalInbound.map((r) => new Date(r.ts)),
+      ...hermesTs.map(t => new Date(t * 1000)),
       ...decisionAudit.map((r) => new Date(r.ts)),
     ];
     const { totalMs, burstCount } = clusterBursts(burstDates, GAP_MS, FLOOR_MS);
