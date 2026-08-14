@@ -30,6 +30,7 @@
 
 import { z } from "zod";
 import type { ToolDef } from "./types.js";
+import { ALL_ATTENTION_TOOLS } from "./attention.js";
 
 // ─── shared schema fragments ────────────────────────────────────────────────
 
@@ -769,4 +770,5 @@ export const ALL_ALFRED_TOOLS: ToolDef[] = [
   ...briefDecisionTools,
   ...dispositionTools,
   ...channelTools,
+  ...ALL_ATTENTION_TOOLS,
 ];
