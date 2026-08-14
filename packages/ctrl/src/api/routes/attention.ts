@@ -956,13 +956,29 @@ export function registerAttentionRoutes(): void {
     const { totalMs, burstCount } = clusterBursts(burstDates, GAP_MS, FLOOR_MS);
     const engagedHours = totalMs / (1000 * 60 * 60);
 
-    // Interruption: unsolicited outbound (solicited = 0).
-    const unsolicitedRow = db.prepare(
+    // Interruption: unsolicited outbound.
+    // Two sub-counts kept separate for disclosure in the response.
+    //   from_flag:        solicited = 0  (authoritative — the writer said so)
+    //   from_source_kind: solicited IS NULL AND source_kind IN ('cron','system')
+    //                     (historical fallback — both are machine-initiated by
+    //                      definition; safe to classify without guessing)
+    // solicited = 1 is never counted. NULL with any other source_kind stays
+    // unknown and is not counted.
+    const flagRow = db.prepare(
       `SELECT COUNT(*) AS n FROM alfred_journal
-        WHERE direction = 'outbound' AND solicited = 0 AND ts >= ? AND ts <= ?`,
+         WHERE direction = 'outbound' AND solicited = 0 AND ts >= ? AND ts <= ?`,
     ).get(dayStart, dayEnd) as { n: number };
-    const interruptionCount = unsolicitedRow.n;
-    const interruptionHours = (interruptionCount * INTERRUPTION_RATE_MINUTES) / 60;
+    const sourceKindRow = db.prepare(
+      `SELECT COUNT(*) AS n FROM alfred_journal
+         WHERE direction = 'outbound'
+           AND solicited IS NULL
+           AND source_kind IN ('cron', 'system')
+           AND ts >= ? AND ts <= ?`,
+    ).get(dayStart, dayEnd) as { n: number };
+    const interruptionFromFlag       = flagRow.n;
+    const interruptionFromSourceKind = sourceKindRow.n;
+    const interruptionCount          = interruptionFromFlag + interruptionFromSourceKind;
+    const interruptionHours          = (interruptionCount * INTERRUPTION_RATE_MINUTES) / 60;
 
     // Totals.
     const explicitItems = [...explicitBuckets.entries()].map(([action_class, v]) => ({
@@ -1005,6 +1021,8 @@ export function registerAttentionRoutes(): void {
       interruption: {
         hours: Math.round(interruptionHours * 1000) / 1000,
         count: interruptionCount,
+        from_flag:        interruptionFromFlag,
+        from_source_kind: interruptionFromSourceKind,
         rate_minutes: INTERRUPTION_RATE_MINUTES,
       },
       rates: {

@@ -434,3 +434,93 @@ describe("GET /api/v1/attention/statement — parent_session_id filter", () => {
     assert.strictEqual(p.engaged.hours, 0, "source not in allowlist excluded regardless of parentage");
   });
 });
+
+// ─── interruption fallback (#580) ────────────────────────────────────────────
+// The interruption count has two sub-terms:
+//   from_flag:        solicited = 0  (authoritative)
+//   from_source_kind: solicited IS NULL + source_kind IN ('cron','system')
+//                     (historical fallback — machine-initiated by definition)
+// These tests prove each inclusion and exclusion rule, and that the totals
+// add up (disclosure integrity).
+describe("GET /api/v1/attention/statement — interruption fallback (#580)", () => {
+  let jSeq = 0;
+  function insertJournal(params: {
+    ts: string; direction: string; source_kind?: string | null; solicited?: number | null;
+  }): void {
+    jSeq++;
+    db.prepare(
+      `INSERT INTO alfred_journal
+         (id, ts, channel, chat_id, direction, message, source_kind, solicited)
+       VALUES (?, ?, 'slack', 'C-INT-580', ?, 'test', ?, ?)`,
+    ).run(`01INT${String(jSeq).padStart(10, "0")}`, params.ts, params.direction,
+          params.source_kind ?? null, params.solicited ?? null);
+  }
+
+  beforeEach(() => {
+    db.prepare("DELETE FROM alfred_journal WHERE chat_id = 'C-INT-580'").run();
+  });
+
+  it("solicited=0 → counted in from_flag", async () => {
+    insertJournal({ ts: "2026-06-01T10:00:00Z", direction: "outbound", source_kind: "slack", solicited: 0 });
+    const { p } = await getStatement("date=2026-06-01");
+    assert.strictEqual(p.interruption.count, 1);
+    assert.strictEqual(p.interruption.from_flag, 1);
+    assert.strictEqual(p.interruption.from_source_kind, 0);
+  });
+
+  it("solicited=1 → never counted regardless of source_kind", async () => {
+    insertJournal({ ts: "2026-06-02T10:00:00Z", direction: "outbound", source_kind: "cron", solicited: 1 });
+    const { p } = await getStatement("date=2026-06-02");
+    assert.strictEqual(p.interruption.count, 0);
+    assert.strictEqual(p.interruption.from_flag, 0);
+    assert.strictEqual(p.interruption.from_source_kind, 0);
+  });
+
+  it("solicited IS NULL + source_kind='cron' → counted in from_source_kind", async () => {
+    insertJournal({ ts: "2026-06-03T10:00:00Z", direction: "outbound", source_kind: "cron", solicited: null });
+    const { p } = await getStatement("date=2026-06-03");
+    assert.strictEqual(p.interruption.count, 1);
+    assert.strictEqual(p.interruption.from_flag, 0);
+    assert.strictEqual(p.interruption.from_source_kind, 1);
+  });
+
+  it("solicited IS NULL + source_kind='system' → counted in from_source_kind", async () => {
+    insertJournal({ ts: "2026-06-04T10:00:00Z", direction: "outbound", source_kind: "system", solicited: null });
+    const { p } = await getStatement("date=2026-06-04");
+    assert.strictEqual(p.interruption.count, 1);
+    assert.strictEqual(p.interruption.from_flag, 0);
+    assert.strictEqual(p.interruption.from_source_kind, 1);
+  });
+
+  it("solicited IS NULL + source_kind='ha-conversation-reply' → NOT counted", async () => {
+    insertJournal({ ts: "2026-06-05T10:00:00Z", direction: "outbound", source_kind: "ha-conversation-reply", solicited: null });
+    const { p } = await getStatement("date=2026-06-05");
+    assert.strictEqual(p.interruption.count, 0, "ha-conversation-reply is solicited; must not count even when flag absent");
+    assert.strictEqual(p.interruption.from_source_kind, 0);
+  });
+
+  it("solicited IS NULL + source_kind IS NULL → NOT counted", async () => {
+    insertJournal({ ts: "2026-06-06T10:00:00Z", direction: "outbound", source_kind: null, solicited: null });
+    const { p } = await getStatement("date=2026-06-06");
+    assert.strictEqual(p.interruption.count, 0, "genuinely unknown provenance must not be counted");
+    assert.strictEqual(p.interruption.from_source_kind, 0);
+  });
+
+  it("from_flag + from_source_kind === count (disclosure adds up to total)", async () => {
+    // 2 via flag + 3 via source_kind, plus 2 that must be excluded.
+    insertJournal({ ts: "2026-06-07T08:00:00Z", direction: "outbound", source_kind: "slack",  solicited: 0 });
+    insertJournal({ ts: "2026-06-07T08:01:00Z", direction: "outbound", source_kind: "slack",  solicited: 0 });
+    insertJournal({ ts: "2026-06-07T09:00:00Z", direction: "outbound", source_kind: "cron",   solicited: null });
+    insertJournal({ ts: "2026-06-07T09:01:00Z", direction: "outbound", source_kind: "cron",   solicited: null });
+    insertJournal({ ts: "2026-06-07T09:02:00Z", direction: "outbound", source_kind: "system", solicited: null });
+    // Must NOT count: solicited=1 overrides cron classification, and NULL source.
+    insertJournal({ ts: "2026-06-07T10:00:00Z", direction: "outbound", source_kind: "cron",   solicited: 1 });
+    insertJournal({ ts: "2026-06-07T10:01:00Z", direction: "outbound", source_kind: null,     solicited: null });
+    const { p } = await getStatement("date=2026-06-07");
+    assert.strictEqual(p.interruption.from_flag, 2,       "two solicited=0 rows");
+    assert.strictEqual(p.interruption.from_source_kind, 3,"three NULL+cron/system rows");
+    assert.strictEqual(p.interruption.count, 5,           "total = 2 + 3");
+    assert.strictEqual(p.interruption.from_flag + p.interruption.from_source_kind,
+                       p.interruption.count, "disclosure sub-counts must sum to total");
+  });
+});
