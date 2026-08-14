@@ -689,3 +689,65 @@ class TestGetHumanSessionsParentage:
         ])
         results = _get_human_sessions(db, self._day())
         assert results == []
+
+
+# ---------------------------------------------------------------------------
+# _replace_nar_entries — batch replace writer (#584 stale-row fix)
+# ---------------------------------------------------------------------------
+
+class TestReplaceNarEntries:
+    """_replace_nar_entries posts mode='replace' + date; 400 is a replace failure."""
+
+    def _mock_http(self, status: int = 200):
+        """Return (mock_client_cls, mock_client, mock_resp) for httpx.AsyncClient."""
+        mc = AsyncMock()
+        mc.__aenter__ = AsyncMock(return_value=mc)
+        mc.__aexit__ = AsyncMock(return_value=False)
+        mr = MagicMock()
+        mr.status_code = status
+        mr.raise_for_status = MagicMock()
+        mr.json = MagicMock(return_value={"ok": True})
+        mc.post = AsyncMock(return_value=mr)
+        return MagicMock(return_value=mc), mc, mr
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("entries", [
+        [{"dedup_key": "nar:decision:01TEST", "occurred_at": "2026-07-15T10:00:00Z"}],
+        [],
+    ], ids=["with-entries", "empty"])
+    async def test_payload_carries_mode_replace_and_date(self, entries):
+        """POST body must carry mode='replace' and the ISO date; empty list included."""
+        from src.activities.nar_recap import _replace_nar_entries
+
+        config = MagicMock()
+        config.alfred_ctrl_url = "http://localhost:3100"
+        mock_cls, mock_client, _ = self._mock_http()
+
+        with patch("httpx.AsyncClient", mock_cls):
+            await _replace_nar_entries(config, "2026-07-15", entries)
+
+        body = mock_client.post.call_args.kwargs["json"]
+        assert body["mode"] == "replace"
+        assert body["date"] == "2026-07-15"
+        assert body["entries"] == entries
+
+    @pytest.mark.asyncio
+    async def test_400_is_replace_failure_not_success(self):
+        """400 from ctrl-api must surface as replace_not_supported, not success."""
+        from src.activities.nar_recap import _replace_nar_entries
+        import httpx
+
+        config = MagicMock()
+        config.alfred_ctrl_url = "http://localhost:3100"
+        mock_cls, _, mock_resp = self._mock_http(status=400)
+        mock_resp.raise_for_status = MagicMock(
+            side_effect=httpx.HTTPStatusError(
+                "Bad Request", request=MagicMock(), response=mock_resp
+            )
+        )
+
+        with patch("httpx.AsyncClient", mock_cls):
+            out = await _replace_nar_entries(config, "2026-07-15", [])
+
+        assert out.get("ok") is False
+        assert out["reason"] == "replace_not_supported"

@@ -233,6 +233,55 @@ async def _upsert_nar_entry(config: Any, entry: dict[str, Any]) -> dict[str, Any
             raise
 
 
+async def _replace_nar_entries(
+    config: Any, day_iso: str, entries: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """POST to /api/v1/state/nar-entries with mode='replace' for one calendar day.
+
+    Sends the complete entry set for ``day_iso`` in a single transaction.
+    ctrl-api deletes every existing nar_entry on that date whose dedup_key
+    is not in the submitted set, then upserts the submitted entries.  An
+    empty list is valid — a day with nothing must still clear any earlier
+    rows rather than silently keeping them.
+
+    Graceful degradation:
+      400 → older ctrl-api without mode support.  Logged clearly as a
+            replace failure; the day was NOT replaced.  Returns
+            ``{"ok": False, "reason": "replace_not_supported"}``.  The
+            caller must not treat this as success.
+      404/405 → endpoint not deployed at all.  Same log-and-continue
+                behaviour as before.
+    """
+    async with httpx.AsyncClient(
+        base_url=config.alfred_ctrl_url, timeout=30.0, headers=_ctrl_headers(),
+    ) as http:
+        try:
+            resp = await http.post(
+                "/api/v1/state/nar-entries",
+                json={"date": day_iso, "mode": "replace", "entries": entries},
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            if status == 400:
+                logger.warning(
+                    "nar_recap: replace mode rejected (400) for date=%s — "
+                    "ctrl-api may be running an older build without mode support; "
+                    "day was NOT replaced",
+                    day_iso,
+                )
+                return {"ok": False, "reason": "replace_not_supported", "date": day_iso}
+            if status in (404, 405):
+                logger.warning(
+                    "nar_recap: /api/v1/state/nar-entries not deployed — "
+                    "date=%s logged only",
+                    day_iso,
+                )
+                return {"ok": False, "reason": "endpoint_not_deployed", "date": day_iso}
+            raise
+
+
 # ---------------------------------------------------------------------------
 # Main activity.
 # ---------------------------------------------------------------------------
@@ -261,6 +310,7 @@ async def compute_nar_day(day_iso: str) -> dict[str, Any]:
     }
 
     all_timestamps_ms: list[float] = []
+    entries_list: list[dict[str, Any]] = []
 
     # ── 1. Conversational sessions ────────────────────────────────────
     db = _open_session_db("main")
@@ -324,11 +374,7 @@ async def compute_nar_day(day_iso: str) -> dict[str, Any]:
                 "displaced_minutes": displaced,
                 "notes": json.dumps({"bucket": bucket, "has_artifact": bucket_info.get("has_artifact")}),
             }
-            out = await _upsert_nar_entry(config, entry)
-            if out.get("reason") == "endpoint_not_deployed":
-                results["entries_skipped"] += 1
-            else:
-                results["entries_written"] += 1
+            entries_list.append(entry)
             if displaced is not None:
                 results["displaced_minutes"] += displaced
 
@@ -390,11 +436,7 @@ async def compute_nar_day(day_iso: str) -> dict[str, Any]:
             "displaced_minutes": disp,
             "notes": json.dumps({"intent": intent}),
         }
-        out = await _upsert_nar_entry(config, entry)
-        if out.get("reason") == "endpoint_not_deployed":
-            results["entries_skipped"] += 1
-        else:
-            results["entries_written"] += 1
+        entries_list.append(entry)
         if disp is not None:
             results["displaced_minutes"] += disp
 
@@ -463,13 +505,20 @@ async def compute_nar_day(day_iso: str) -> dict[str, Any]:
             "displaced_minutes": cdisp,
             "notes": json.dumps({"has_artifact": has_artifact, "bucket": cbucket}),
         }
-        out = await _upsert_nar_entry(config, entry)
-        if out.get("reason") == "endpoint_not_deployed":
-            results["entries_skipped"] += 1
-        else:
-            results["entries_written"] += 1
+        entries_list.append(entry)
         if cdisp is not None:
             results["displaced_minutes"] += cdisp
+
+    # ── 4. Write the day's entries atomically (replace mode) ─────────
+    # compute_nar_day produces a complete picture of a day and is
+    # authoritative for that date — every run is a full recomputation.
+    # mode=replace deletes stale rows (dedup_key not in the submitted set)
+    # before upserting; an empty list still clears any earlier debris.
+    out = await _replace_nar_entries(config, day_iso, entries_list)
+    if out.get("reason") in ("endpoint_not_deployed", "replace_not_supported"):
+        results["entries_skipped"] = len(entries_list)
+    else:
+        results["entries_written"] = len(entries_list)
 
     # ── Engaged time (validation figure, not written to nar_entry) ────
     results["engaged_ms"] = cluster_bursts(all_timestamps_ms, GAP_MS, FLOOR_MS)
