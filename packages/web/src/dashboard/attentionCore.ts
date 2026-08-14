@@ -283,29 +283,42 @@ export const ALLOCATION_UNAVAILABLE_NOTE = "Allocation (work / life split) is no
 // ── Section 01 bar geometry ───────────────────────────────────────────────────
 
 export interface BarGeometry {
-  /** DISPLACED — solid brass, typically the tallest bar. */
+  /** DISPLACED — solid brass, typically the tallest bar; sets the scale. */
   displaced: { value_hours: number; height_pct: number };
-  /** THE MESS — engaged + interruption; shown labelled as negative. */
-  mess: { value_hours: number; height_pct: number };
-  /** NET — NAR = displaced − mess; solid brass. */
+  /** THE MESS — hatched, floats between NET's top edge and DISPLACED's top edge.
+   *  y_offset_pct: percentage-units above baseline where the mess bar's BOTTOM sits
+   *  (equals net.height_pct). Invariant: y_offset_pct + height_pct == displaced.height_pct. */
+  mess: { value_hours: number; height_pct: number; y_offset_pct: number };
+  /** NET — NAR = displaced − mess; solid brass, grows from baseline. */
   net: { value_hours: number; height_pct: number };
 }
 
-/** Compute proportional bar heights (0–barHeight) for the three-bar SVG in section 01.
- *  All bars share a baseline and grow upward.
- *  mess.value_hours is the positive magnitude; the label renders it as negative. */
+/** Compute waterfall bar geometry for the three-bar SVG in section 01.
+ *  DISPLACED and NET share a baseline and grow upward.
+ *  THE MESS floats as a hatched slice between NET's top and DISPLACED's top —
+ *  it does not touch the baseline.
+ *  Invariants (enforced by algebra, tested separately):
+ *    mess.y_offset_pct + mess.height_pct == displaced.height_pct
+ *    net.height_pct    + mess.height_pct == displaced.height_pct
+ *  Negative NAR (mess > displaced) is handled by clamping net to 0, which keeps
+ *  all values non-negative while preserving net.value_hours for the label. */
 export function deriveBarGeometry(
   displaced_hours: number, engaged_hours: number, interruption_hours: number,
   barHeight = 100,
 ): BarGeometry {
-  const d    = displaced_hours ?? 0;
+  const d    = Math.max(displaced_hours ?? 0, 0);
   const mess = (engaged_hours ?? 0) + (interruption_hours ?? 0);
   const net  = d - mess;
-  const maxMag = Math.max(d, mess, Math.abs(net), 0.001);
+  // Scale: displaced is always the reference bar (tallest when NAR >= 0).
+  // When mess > displaced (negative NAR) use mess so bars stay inside [0, barHeight].
+  const maxMag  = Math.max(d, mess, 0.001);
+  const dispPct = (d / maxMag) * barHeight;
+  const netPct  = (Math.max(net, 0) / maxMag) * barHeight; // clamped — negative NAR → 0
+  const messPct = dispPct - netPct;                         // invariant holds by construction
   return {
-    displaced: { value_hours: d,    height_pct: (d / maxMag) * barHeight },
-    mess:      { value_hours: mess, height_pct: (mess / maxMag) * barHeight },
-    net:       { value_hours: net,  height_pct: (Math.abs(net) / maxMag) * barHeight },
+    displaced: { value_hours: d,    height_pct: dispPct },
+    mess:      { value_hours: mess, height_pct: messPct, y_offset_pct: netPct },
+    net:       { value_hours: net,  height_pct: netPct },
   };
 }
 

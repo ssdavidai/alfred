@@ -23,7 +23,7 @@ const sevenAgo = () => { const d = new Date(); d.setDate(d.getDate() - 6); retur
 function SL({ n, title }: { n: string; title: string }) {
   return (
     <div className="flex items-center gap-3" style={{ marginTop: 34, marginBottom: 18 }}>
-      <span className="font-mono text-[9px] uppercase tracking-[0.25em] shrink-0" style={{ color: "var(--brass)" }}>
+      <span className="font-mono text-[11px] uppercase tracking-[0.25em] shrink-0" style={{ color: "var(--brass)" }}>
         {n} · {title}
       </span>
       <div className="flex-1" style={{ borderTop: "1px solid var(--rule)", opacity: 0.35 }} />
@@ -50,19 +50,25 @@ function StatCell({ label, value }: { label: string; value: string }) {
   );
 }
 
-// ── Section 01 bar chart — hand-rolled SVG, no library ────────────────────────
-// Three bars sharing a baseline: DISPLACED (solid brass) · THE MESS (diagonal
-// hatch, shown as negative deduction) · NET (solid brass). Heights proportional
-// to magnitude (deriveBarGeometry). Labelled beneath in mono caps + hours value.
+// ── Section 01 bar chart — waterfall layout ───────────────────────────────────
+// DISPLACED and NET share a baseline and grow upward (solid brass).
+// THE MESS (hatched) floats in the vertical band between NET's top and
+// DISPLACED's top — it never touches the baseline.
+// Visual equation: DISPLACED = NET + THE MESS.
 
 function AccountBars({ geo }: { geo: BarGeometry }) {
-  const H = 110; const BAR_W = 72; const GAP = 24;
+  const H = 140; const BAR_W = 84; const GAP = 28;
   const W = 3 * BAR_W + 2 * GAP;
+  // Pixel heights from geometry percentages
+  const dispH = Math.max((geo.displaced.height_pct / 100) * H, 1);
+  const netH  = (geo.net.height_pct  / 100) * H;
+  const messH = (geo.mess.height_pct / 100) * H;
+  // Waterfall positions: MESS top aligns with DISPLACED top; MESS bottom = NET top.
   const bars = [
-    { label: "DISPLACED", valH: geo.displaced.value_hours, pct: geo.displaced.height_pct, hatch: false },
-    { label: "THE MESS",  valH: -geo.mess.value_hours,      pct: geo.mess.height_pct,      hatch: true  },
-    { label: "NET",       valH: geo.net.value_hours,        pct: geo.net.height_pct,       hatch: false },
-  ] as const;
+    { label: "DISPLACED", valH: geo.displaced.value_hours, y: H - dispH,        barH: dispH,                 hatch: false },
+    { label: "THE MESS",  valH: geo.mess.value_hours,      y: H - dispH,        barH: Math.max(messH, 0),    hatch: true  },
+    { label: "NET",       valH: geo.net.value_hours,       y: H - Math.max(netH, 1),  barH: Math.max(netH, 1), hatch: false },
+  ];
   return (
     <div className="flex flex-col items-start">
       <svg viewBox={`0 0 ${W} ${H}`} width={W} height={H} style={{ display: "block", overflow: "visible" }}>
@@ -73,9 +79,9 @@ function AccountBars({ geo }: { geo: BarGeometry }) {
         </defs>
         {bars.map((bar, i) => {
           const x = i * (BAR_W + GAP);
-          const barH = Math.max((bar.pct / 100) * H, 1);
+          if (bar.barH <= 0) return null;
           return (
-            <rect key={i} x={x} y={H - barH} width={BAR_W} height={barH}
+            <rect key={i} x={x} y={bar.y} width={BAR_W} height={bar.barH}
               fill={bar.hatch ? "url(#hatch-mess)" : "var(--brass)"}
               stroke={bar.hatch ? "var(--brass)" : "none"} strokeWidth={0.5}
               opacity={bar.hatch ? 0.8 : 0.82} />
@@ -83,13 +89,13 @@ function AccountBars({ geo }: { geo: BarGeometry }) {
         })}
         <line x1={0} y1={H} x2={W} y2={H} stroke="var(--rule)" strokeWidth={0.5} />
       </svg>
-      <div style={{ display: "flex", width: W, gap: GAP, marginTop: 6 }}>
+      <div style={{ display: "flex", width: W, gap: GAP, marginTop: 8 }}>
         {bars.map((bar, i) => (
           <div key={i} style={{ width: BAR_W, textAlign: "center", flexShrink: 0 }}>
-            <p className="font-mono uppercase tracking-wide" style={{ fontSize: 7, color: "var(--marginalia)", lineHeight: 1.3 }}>
+            <p className="font-mono uppercase tracking-wide" style={{ fontSize: 9, color: "var(--marginalia)", lineHeight: 1.3 }}>
               {bar.label}
             </p>
-            <p className="font-mono tabular-nums font-bold" style={{ fontSize: 8, color: "var(--brass)", marginTop: 2 }}>
+            <p className="font-mono tabular-nums font-bold" style={{ fontSize: 11, color: "var(--brass)", marginTop: 2 }}>
               {bar.valH < 0 ? "−" : ""}{formatHours(Math.abs(bar.valH))}
             </p>
           </div>
@@ -149,10 +155,10 @@ function DayView({ day, recomp, running }: { day: AttentionDayViewModel; recomp(
       <div className="grid mb-6" style={{ gridTemplateColumns: "55% 45%", gap: "0 24px", alignItems: "start" }}>
         {/* NAR hero — left; sits at top of section */}
         <div>
-          <div className="font-mono tabular-nums leading-none" style={{ fontSize: 64, color: "var(--brass)" }}>
-            {formatHours(day.nar_hours)}<span style={{ fontSize: 32, opacity: 0.5, marginLeft: 4 }}>h</span>
+          <div className="font-display tabular-nums leading-none" style={{ fontSize: 80, color: "var(--brass)" }}>
+            {formatHours(day.nar_hours)}<span style={{ fontSize: 40, opacity: 0.5, marginLeft: 5 }}>h</span>
           </div>
-          <p className="font-mono uppercase tracking-[0.28em] mt-2" style={{ fontSize: 8, color: "var(--brass)" }}>
+          <p className="font-mono uppercase tracking-[0.28em] mt-2" style={{ fontSize: 10, color: "var(--brass)" }}>
             NET ATTENTION RETURNED
           </p>
         </div>
@@ -168,7 +174,7 @@ function DayView({ day, recomp, running }: { day: AttentionDayViewModel; recomp(
         {ALLOCATION_UNAVAILABLE_NOTE}
       </p>
       {/* Column headers — bar track column header is blank */}
-      <div className="grid font-mono text-[9px] uppercase tracking-[0.18em] pb-1 mb-0"
+      <div className="grid font-mono text-[11px] uppercase tracking-[0.18em] pb-1 mb-0"
         style={{ gridTemplateColumns: "1fr minmax(160px,300px) repeat(4,78px)", color: "var(--marginalia)", borderBottom: "1px solid var(--rule)", opacity: 0.7 }}>
         <span />
         <span />
@@ -197,7 +203,7 @@ function DayView({ day, recomp, running }: { day: AttentionDayViewModel; recomp(
         {LEDGER_PER_ITEM_NOTE}
       </p>
       {/* Column headers */}
-      <div className="grid font-mono text-[9px] uppercase tracking-[0.18em] pb-1"
+      <div className="grid font-mono text-[11px] uppercase tracking-[0.18em] pb-1"
         style={{ gridTemplateColumns: "1fr repeat(3,68px)", color: "var(--marginalia)", borderBottom: "1px solid var(--rule)" }}>
         <span>WORK</span>
         {(["DISPLACED","ENGAGED","NAR"] as const).map(c => (
@@ -208,36 +214,36 @@ function DayView({ day, recomp, running }: { day: AttentionDayViewModel; recomp(
       {ledger.groups.map((grp) => (
         <div key={grp.name}>
           {/* Group header — brass ~8px mono caps; name + subtotals on same line */}
-          <div className="grid items-baseline" style={{ gridTemplateColumns: "1fr repeat(3,68px)", minHeight: 21, paddingTop: 3, paddingBottom: 3 }}>
-            <span className="font-mono text-[8px] uppercase tracking-[0.22em]" style={{ color: "var(--brass)" }}>{grp.name}</span>
-            <span className="font-mono text-[8px] tabular-nums text-right" style={{ color: "var(--brass)" }}>{formatWholeMinutes(grp.subtotal_displaced_min)}</span>
-            <span className="font-mono text-[8px] tabular-nums text-right" style={{ color: "var(--brass)" }}>{grp.engaged}</span>
-            <span className="font-mono text-[8px] tabular-nums text-right" style={{ color: "var(--brass)" }}>{grp.nar}</span>
+          <div className="grid items-baseline" style={{ gridTemplateColumns: "1fr repeat(3,68px)", minHeight: 24, paddingTop: 4, paddingBottom: 4 }}>
+            <span className="font-mono text-[11px] uppercase tracking-[0.22em]" style={{ color: "var(--brass)" }}>{grp.name}</span>
+            <span className="font-mono text-[11px] tabular-nums text-right" style={{ color: "var(--brass)" }}>{formatWholeMinutes(grp.subtotal_displaced_min)}</span>
+            <span className="font-mono text-[11px] tabular-nums text-right" style={{ color: "var(--brass)" }}>{grp.engaged}</span>
+            <span className="font-mono text-[11px] tabular-nums text-right" style={{ color: "var(--brass)" }}>{grp.nar}</span>
           </div>
-          {/* Item rows — ~11px serif label, ~11px mono numbers, ~21px row height */}
+          {/* Item rows — 14px serif label, 14px mono numbers */}
           {grp.rows.length === 0
-            ? <p className="font-mono text-[9px] opacity-35 pl-1 pb-1">None.</p>
+            ? <p className="font-mono text-[11px] opacity-35 pl-1 pb-1">None.</p>
             : grp.rows.map((row, i) => (
-                <div key={i} className="grid items-baseline" style={{ gridTemplateColumns: "1fr repeat(3,68px)", minHeight: 21, paddingTop: 2, paddingBottom: 2 }}>
-                  <span className="font-sans" style={{ fontSize: 11 }}>
+                <div key={i} className="grid items-baseline" style={{ gridTemplateColumns: "1fr repeat(3,68px)", minHeight: 24, paddingTop: 2, paddingBottom: 2 }}>
+                  <span className="font-sans" style={{ fontSize: 14 }}>
                     {row.label}
                     {(row.count ?? 1) > 1
-                      ? <span className="font-mono opacity-45 ml-1.5" style={{ fontSize: 9 }}>×{row.count}</span>
+                      ? <span className="font-mono opacity-45 ml-1.5" style={{ fontSize: 11 }}>×{row.count}</span>
                       : null}
                   </span>
-                  <span className="font-mono tabular-nums text-right" style={{ fontSize: 11 }}>{formatWholeMinutes(row.displaced_min)}</span>
-                  <span className="font-mono tabular-nums text-right opacity-35" style={{ fontSize: 11 }}>{row.engaged}</span>
-                  <span className="font-mono tabular-nums text-right opacity-35" style={{ fontSize: 11 }}>{row.nar}</span>
+                  <span className="font-mono tabular-nums text-right" style={{ fontSize: 14 }}>{formatWholeMinutes(row.displaced_min)}</span>
+                  <span className="font-mono tabular-nums text-right opacity-35" style={{ fontSize: 14 }}>{row.engaged}</span>
+                  <span className="font-mono tabular-nums text-right opacity-35" style={{ fontSize: 14 }}>{row.nar}</span>
                 </div>
               ))}
         </div>
       ))}
       {/* TOTAL row — brass, rule above */}
-      <div className="grid items-baseline mt-0.5" style={{ gridTemplateColumns: "1fr repeat(3,68px)", borderTop: "2px solid var(--rule)", minHeight: 21, paddingTop: 3, paddingBottom: 3 }}>
-        <span className="font-mono text-[8px] uppercase tracking-[0.22em]" style={{ color: "var(--brass)" }}>TOTAL</span>
-        <span className="font-mono text-[8px] tabular-nums text-right" style={{ color: "var(--brass)" }}>{formatWholeMinutes(ledger.total_displaced_min)}</span>
-        <span className="font-mono text-[8px] tabular-nums text-right" style={{ color: "var(--brass)" }}>{ledger.engaged}</span>
-        <span className="font-mono text-[8px] tabular-nums text-right" style={{ color: "var(--brass)" }}>{ledger.nar}</span>
+      <div className="grid items-baseline mt-0.5" style={{ gridTemplateColumns: "1fr repeat(3,68px)", borderTop: "2px solid var(--rule)", minHeight: 24, paddingTop: 4, paddingBottom: 4 }}>
+        <span className="font-mono text-[11px] uppercase tracking-[0.22em]" style={{ color: "var(--brass)" }}>TOTAL</span>
+        <span className="font-mono text-[11px] tabular-nums text-right" style={{ color: "var(--brass)" }}>{formatWholeMinutes(ledger.total_displaced_min)}</span>
+        <span className="font-mono text-[11px] tabular-nums text-right" style={{ color: "var(--brass)" }}>{ledger.engaged}</span>
+        <span className="font-mono text-[11px] tabular-nums text-right" style={{ color: "var(--brass)" }}>{ledger.nar}</span>
       </div>
 
       {/* Unrated action classes — zero contribution, must not be omitted */}
@@ -401,7 +407,7 @@ export default function AttentionPage() {
             </div>
             <div style={{ borderTop: "2px solid var(--brass)", marginTop: 6 }} />
             <div style={{ borderTop: "1px solid var(--rule)", marginTop: 4, opacity: 0.45 }} />
-            <h2 className="font-display tracking-[-0.01em] mb-8" style={{ fontSize: 30, marginTop: 28 }}>
+            <h2 className="font-display tracking-[-0.01em] mb-8" style={{ fontSize: 44, marginTop: 28 }}>
               Attention Statement.
             </h2>
           </>

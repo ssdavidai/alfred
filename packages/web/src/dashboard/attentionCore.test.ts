@@ -377,6 +377,36 @@ test("deriveBarGeometry: all-zero guard — no division by zero", () => {
   assert.ok(isFinite(bg.net.height_pct));
 });
 
+// 15b. deriveBarGeometry — waterfall geometry invariants
+test("deriveBarGeometry: mess.y_offset_pct + mess.height_pct == displaced.height_pct", () => {
+  // Reference values from the brief: displaced 12.03, mess 4.52, net 7.51
+  const bg = deriveBarGeometry(12.03, 3, 1.52, 100);
+  assert.ok(
+    Math.abs((bg.mess.y_offset_pct + bg.mess.height_pct) - bg.displaced.height_pct) < 0.0001,
+    `y_offset_pct(${bg.mess.y_offset_pct}) + height_pct(${bg.mess.height_pct}) should equal displaced(${bg.displaced.height_pct})`,
+  );
+});
+test("deriveBarGeometry: net.height_pct + mess.height_pct == displaced.height_pct", () => {
+  const bg = deriveBarGeometry(12.03, 3, 1.52, 100);
+  assert.ok(
+    Math.abs((bg.net.height_pct + bg.mess.height_pct) - bg.displaced.height_pct) < 0.0001,
+    `net(${bg.net.height_pct}) + mess(${bg.mess.height_pct}) should equal displaced(${bg.displaced.height_pct})`,
+  );
+});
+test("deriveBarGeometry: negative NAR (mess > displaced) produces non-negative geometry", () => {
+  // displaced=5h, mess=8h → NAR=-3h
+  const bg = deriveBarGeometry(5, 6, 2, 100);
+  assert.ok(bg.displaced.height_pct >= 0, "displaced height non-negative");
+  assert.ok(bg.mess.height_pct >= 0,      "mess height non-negative");
+  assert.ok(bg.mess.y_offset_pct >= 0,    "mess y_offset non-negative");
+  assert.ok(bg.net.height_pct >= 0,       "net height non-negative (clamped from negative NAR)");
+  assert.equal(bg.net.height_pct, 0,      "clamped net is 0 when NAR<0");
+  assert.ok(bg.net.value_hours < 0,       "but net.value_hours still carries the real (negative) NAR");
+  // waterfall invariants still hold with clamped net
+  assert.ok(Math.abs((bg.mess.y_offset_pct + bg.mess.height_pct) - bg.displaced.height_pct) < 0.0001);
+  assert.ok(Math.abs((bg.net.height_pct    + bg.mess.height_pct) - bg.displaced.height_pct) < 0.0001);
+});
+
 // Regression: deriveLedger consumed the RAW response shape while the component
 // passed the NORMALISED view model. deriveInferredDisplay ran twice, the second
 // pass read `it.minutes` (absent on InferredDisplayItem), and every
