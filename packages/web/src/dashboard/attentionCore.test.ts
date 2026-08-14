@@ -9,7 +9,10 @@ import {
   isEmptyDay, formatHours, formatMinutes,
   deriveChartBars, deriveChartScale, deriveRangeAggregates,
   normalizeAttentionDay, formatScaleSignal, formatItemLabel,
-  type AttentionDayResponse, type InferredItem, type SeriesPoint,
+  formatHeaderDate, formatWholeMinutes,
+  collapseAutonomousRows, deriveLedger, LEDGER_COL_NA,
+  deriveBarGeometry,
+  type AttentionDayResponse, type InferredItem, type SeriesPoint, type AutonomousItem,
 } from "./attentionCore";
 
 const I: InferredItem = { label: "x", bucket: "M", minutes: 20, turns: 10, tools: 5, evidence_kind: "session", evidence_ref: "s", outcome: "delivered" };
@@ -240,4 +243,125 @@ test("formatItemLabel: null label → falls back to evidence_kind", () => {
 test("formatItemLabel: neither label nor evidence_kind → honest placeholder", () => {
   assert.equal(formatItemLabel({ label: null, evidence_kind: null }), "—");
   assert.equal(formatItemLabel({}), "—");
+});
+
+// 11. formatHeaderDate
+test("formatHeaderDate: known date returns full uppercased day/month string", () => {
+  // 2026-08-14 is a Friday (UTC)
+  assert.equal(formatHeaderDate("2026-08-14"), "FRIDAY 14 AUGUST 2026");
+});
+test("formatHeaderDate: Monday", () => {
+  // 2026-08-10 is a Monday
+  assert.equal(formatHeaderDate("2026-08-10"), "MONDAY 10 AUGUST 2026");
+});
+test("formatHeaderDate: malformed input does not throw", () => {
+  const result = formatHeaderDate("not-a-date");
+  assert.ok(typeof result === "string" && result.length > 0);
+});
+
+// 12. formatWholeMinutes
+test("formatWholeMinutes: float rounds to nearest integer", () => {
+  assert.equal(formatWholeMinutes(120.4), "120");
+  assert.equal(formatWholeMinutes(119.6), "120");
+});
+test("formatWholeMinutes: zero", () => {
+  assert.equal(formatWholeMinutes(0), "0");
+});
+
+// 13. collapseAutonomousRows
+const mkAuto = (label: string, minutes: number, bucket = "S"): AutonomousItem => ({ label, bucket, minutes, evidence_kind: "chore_run", evidence_ref: "x" });
+
+test("collapseAutonomousRows: identical labels collapse into one with summed minutes", () => {
+  const items = [mkAuto("Vigilance", 0.01), mkAuto("Vigilance", 0.01), mkAuto("Vigilance", 0.01)];
+  const rows = collapseAutonomousRows(items);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].count, 3);
+  assert.ok(Math.abs(rows[0].total_minutes - 0.03) < 0.0001);
+});
+test("collapseAutonomousRows: distinct labels preserved separately", () => {
+  const items = [mkAuto("A", 5), mkAuto("B", 10), mkAuto("A", 5)];
+  const rows = collapseAutonomousRows(items);
+  assert.equal(rows.length, 2);
+  const a = rows.find(r => r.label === "A");
+  assert.ok(a && a.count === 2 && Math.abs(a.total_minutes - 10) < 0.0001);
+});
+test("collapseAutonomousRows: sum invariant — collapsed total == input total", () => {
+  const items = [mkAuto("X", 3), mkAuto("X", 7), mkAuto("Y", 4), mkAuto("Y", 1)];
+  const rows = collapseAutonomousRows(items);
+  const collapsedSum = rows.reduce((s, r) => s + r.total_minutes, 0);
+  const rawSum = items.reduce((s, i) => s + i.minutes, 0);
+  assert.ok(Math.abs(collapsedSum - rawSum) < 0.0001);
+});
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+test("collapseAutonomousRows: null-safe → []", () => assert.deepEqual(collapseAutonomousRows(null as any), []));
+
+// 14. deriveLedger
+const mkInferred = (label: string, minutes: number, outcome?: string): InferredItem => ({
+  label, bucket: "M", minutes, evidence_kind: "session", evidence_ref: "s", outcome: outcome ?? "delivered",
+});
+
+test("deriveLedger: group names are CONVERSATIONAL / EXPLICIT / AUTONOMOUS", () => {
+  const vm = deriveLedger(E.displaced);
+  const names = vm.groups.map(g => g.name);
+  assert.deepEqual(names, ["CONVERSATIONAL", "EXPLICIT", "AUTONOMOUS"]);
+});
+test("deriveLedger: group subtotals equal sum of row displaced_min", () => {
+  const displaced = {
+    total_hours: 3,
+    inferred: { hours: 1, items: [mkInferred("X", 30), mkInferred("Y", 30)] },
+    explicit: { hours: 0.5, items: [{ label: "A", count: 1, rate_minutes: 5, minutes: 30 }] },
+    autonomous: { hours: 0.5, items: [mkAuto("Z", 15), mkAuto("Z", 15)] },
+  };
+  const vm = deriveLedger(displaced);
+  for (const g of vm.groups) {
+    const rowSum = g.rows.reduce((s, r) => s + r.displaced_min, 0);
+    assert.ok(Math.abs(rowSum - g.subtotal_displaced_min) < 0.0001,
+      `${g.name}: rowSum=${rowSum} subtotal=${g.subtotal_displaced_min}`);
+  }
+});
+test("deriveLedger: total_displaced_min equals sum of group subtotals", () => {
+  const displaced = {
+    total_hours: 3,
+    inferred: { hours: 1, items: [mkInferred("X", 60)] },
+    explicit: { hours: 0.5, items: [{ label: "A", count: 2, rate_minutes: 5, minutes: 10 }] },
+    autonomous: { hours: 0.5, items: [mkAuto("Z", 20)] },
+  };
+  const vm = deriveLedger(displaced);
+  const groupTotal = vm.groups.reduce((s, g) => s + g.subtotal_displaced_min, 0);
+  assert.ok(Math.abs(groupTotal - vm.total_displaced_min) < 0.0001);
+});
+test("deriveLedger: autonomous rows with same label are collapsed (count > 1)", () => {
+  const displaced = {
+    total_hours: 0, inferred: { hours: 0, items: [] }, explicit: { hours: 0, items: [] },
+    autonomous: { hours: 0, items: [mkAuto("V", 0.01), mkAuto("V", 0.01), mkAuto("V", 0.01)] },
+  };
+  const vm = deriveLedger(displaced);
+  const autoGroup = vm.groups.find(g => g.name === "AUTONOMOUS")!;
+  assert.equal(autoGroup.rows.length, 1);
+  assert.equal(autoGroup.rows[0].count, 3);
+});
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+test("deriveLedger: null displaced → all groups empty, total=0", () => {
+  const vm = deriveLedger(null as any);
+  assert.equal(vm.total_displaced_min, 0);
+  for (const g of vm.groups) assert.equal(g.rows.length, 0);
+  assert.equal(vm.engaged, LEDGER_COL_NA);
+});
+
+// 15. deriveBarGeometry
+test("deriveBarGeometry: displaced is the tallest bar (height_pct=100) when it dominates", () => {
+  const bg = deriveBarGeometry(12, 3, 1.52, 100);
+  assert.equal(bg.displaced.height_pct, 100); // 12 is max
+  assert.ok(bg.mess.height_pct < 100);
+  assert.ok(bg.net.height_pct < 100);
+});
+test("deriveBarGeometry: net value equals displaced minus mess", () => {
+  const bg = deriveBarGeometry(12.03, 3, 1.52, 100);
+  assert.ok(Math.abs(bg.net.value_hours - (12.03 - 3 - 1.52)) < 0.0001);
+});
+test("deriveBarGeometry: all-zero guard — no division by zero", () => {
+  const bg = deriveBarGeometry(0, 0, 0, 100);
+  assert.ok(isFinite(bg.displaced.height_pct));
+  assert.ok(isFinite(bg.mess.height_pct));
+  assert.ok(isFinite(bg.net.height_pct));
 });

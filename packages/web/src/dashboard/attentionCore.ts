@@ -170,6 +170,141 @@ export function normalizeAttentionDay(raw: unknown): AttentionDayViewModel {
   };
 }
 
+// ── Header date format ────────────────────────────────────────────────────────
+
+const _DAYS = ["SUNDAY","MONDAY","TUESDAY","WEDNESDAY","THURSDAY","FRIDAY","SATURDAY"] as const;
+const _MONTHS = ["JANUARY","FEBRUARY","MARCH","APRIL","MAY","JUNE","JULY","AUGUST","SEPTEMBER","OCTOBER","NOVEMBER","DECEMBER"] as const;
+
+/** Format "2026-08-14" → "THURSDAY 14 AUGUST 2026" (uppercase, UTC-based day-of-week). */
+export function formatHeaderDate(dateStr: string): string {
+  const parts = (dateStr ?? "").split("-").map(Number);
+  if (parts.length < 3 || parts.some(isNaN)) return (dateStr ?? "").toUpperCase();
+  const [y, m, d] = parts;
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return `${_DAYS[dt.getUTCDay()]} ${d} ${_MONTHS[m - 1]} ${y}`;
+}
+
+// ── Whole-minute formatter (section 03 uses minutes, not hours) ───────────────
+
+/** Round to nearest whole minute and return as a plain string (no unit).
+ *  Section 03 ledger columns use whole minutes; section 01 uses hours. */
+export function formatWholeMinutes(minutes: number): string {
+  return String(Math.round(minutes ?? 0));
+}
+
+// ── Autonomous row collapsing ─────────────────────────────────────────────────
+
+export interface CollapsedAutonomousRow {
+  label: string; bucket: string; count: number; total_minutes: number;
+}
+
+/** Group AutonomousItems with identical labels into one collapsed row.
+ *  Preserves insertion order of first occurrence; adopts that occurrence's bucket.
+ *  Invariant: sum(result[i].total_minutes) == sum(items[i].minutes). */
+export function collapseAutonomousRows(items: AutonomousItem[]): CollapsedAutonomousRow[] {
+  const map = new Map<string, CollapsedAutonomousRow>();
+  for (const it of (items ?? [])) {
+    const row = map.get(it.label);
+    if (row) { row.count += 1; row.total_minutes += it.minutes; }
+    else map.set(it.label, { label: it.label, bucket: it.bucket, count: 1, total_minutes: it.minutes });
+  }
+  return Array.from(map.values());
+}
+
+// ── Ledger view model (section 03) ────────────────────────────────────────────
+
+/** Sentinel: the API does not yet provide per-item engaged or NAR. */
+export const LEDGER_COL_NA = "—" as const;
+export type LedgerColNA = typeof LEDGER_COL_NA;
+
+export interface LedgerItemRow {
+  label: string;
+  displaced_min: number;  // available: from API
+  engaged: LedgerColNA;   // not yet in API
+  nar: LedgerColNA;       // not yet in API
+  count?: number;         // present only on collapsed autonomous rows (count > 1)
+}
+
+export interface LedgerGroup {
+  name: "CONVERSATIONAL" | "EXPLICIT" | "AUTONOMOUS";
+  rows: LedgerItemRow[];
+  subtotal_displaced_min: number; // == sum(rows[i].displaced_min)
+  engaged: LedgerColNA;
+  nar: LedgerColNA;
+}
+
+export interface LedgerViewModel {
+  groups: LedgerGroup[];
+  total_displaced_min: number; // == sum(groups[i].subtotal_displaced_min)
+  engaged: LedgerColNA;
+  nar: LedgerColNA;
+}
+
+/** Build the three-group ledger from the API displaced block.
+ *  Groups: CONVERSATIONAL (inferred) · EXPLICIT (rate-card) · AUTONOMOUS (collapsed).
+ *  Invariants:
+ *    group.subtotal_displaced_min == sum(rows[i].displaced_min)
+ *    total_displaced_min         == sum(groups[i].subtotal_displaced_min) */
+export function deriveLedger(
+  displaced: AttentionDayResponse["displaced"] | null | undefined,
+): LedgerViewModel {
+  const convRows: LedgerItemRow[] = deriveInferredDisplay(displaced?.inferred?.items ?? []).map((it) => ({
+    label: formatItemLabel(it), displaced_min: it.display_minutes,
+    engaged: LEDGER_COL_NA, nar: LEDGER_COL_NA,
+  }));
+  const explRows: LedgerItemRow[] = (displaced?.explicit?.items ?? []).map((it) => ({
+    label: it.label, displaced_min: it.minutes,
+    engaged: LEDGER_COL_NA, nar: LEDGER_COL_NA,
+  }));
+  const autoRows: LedgerItemRow[] = collapseAutonomousRows(displaced?.autonomous?.items ?? []).map((it) => ({
+    label: it.label, displaced_min: it.total_minutes,
+    engaged: LEDGER_COL_NA, nar: LEDGER_COL_NA,
+    ...(it.count > 1 ? { count: it.count } : {}),
+  }));
+  const rowSum = (rows: LedgerItemRow[]) => rows.reduce((s, r) => s + r.displaced_min, 0);
+  const groups: LedgerGroup[] = [
+    { name: "CONVERSATIONAL", rows: convRows, subtotal_displaced_min: rowSum(convRows), engaged: LEDGER_COL_NA, nar: LEDGER_COL_NA },
+    { name: "EXPLICIT",       rows: explRows, subtotal_displaced_min: rowSum(explRows), engaged: LEDGER_COL_NA, nar: LEDGER_COL_NA },
+    { name: "AUTONOMOUS",     rows: autoRows, subtotal_displaced_min: rowSum(autoRows), engaged: LEDGER_COL_NA, nar: LEDGER_COL_NA },
+  ];
+  return { groups, total_displaced_min: groups.reduce((s, g) => s + g.subtotal_displaced_min, 0), engaged: LEDGER_COL_NA, nar: LEDGER_COL_NA };
+}
+
+/** Rendered once below section 03 column headers to explain the em-dash columns. */
+export const LEDGER_PER_ITEM_NOTE = "Per-session engaged and NAR attribution is not yet computed — columns show —." as const;
+
+/** Rendered once in section 02 to explain the em-dash allocation rows. */
+export const ALLOCATION_UNAVAILABLE_NOTE = "Allocation (work / life split) is not yet computed — all rows show —." as const;
+
+// ── Section 01 bar geometry ───────────────────────────────────────────────────
+
+export interface BarGeometry {
+  /** DISPLACED — solid brass, typically the tallest bar. */
+  displaced: { value_hours: number; height_pct: number };
+  /** THE MESS — engaged + interruption; shown labelled as negative. */
+  mess: { value_hours: number; height_pct: number };
+  /** NET — NAR = displaced − mess; solid brass. */
+  net: { value_hours: number; height_pct: number };
+}
+
+/** Compute proportional bar heights (0–barHeight) for the three-bar SVG in section 01.
+ *  All bars share a baseline and grow upward.
+ *  mess.value_hours is the positive magnitude; the label renders it as negative. */
+export function deriveBarGeometry(
+  displaced_hours: number, engaged_hours: number, interruption_hours: number,
+  barHeight = 100,
+): BarGeometry {
+  const d    = displaced_hours ?? 0;
+  const mess = (engaged_hours ?? 0) + (interruption_hours ?? 0);
+  const net  = d - mess;
+  const maxMag = Math.max(d, mess, Math.abs(net), 0.001);
+  return {
+    displaced: { value_hours: d,    height_pct: (d / maxMag) * barHeight },
+    mess:      { value_hours: mess, height_pct: (mess / maxMag) * barHeight },
+    net:       { value_hours: net,  height_pct: (Math.abs(net) / maxMag) * barHeight },
+  };
+}
+
 // ── Range view derivations ────────────────────────────────────────────────────
 
 export interface ChartBar {
