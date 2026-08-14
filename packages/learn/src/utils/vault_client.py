@@ -272,19 +272,24 @@ class VaultClient:
     async def notify(
         self, path: str, summary: str, *, solicited: int | None = None
     ) -> None:
-        """Send a proactive notification to Sir via the alfred-deliver surface.
+        """Send a notification to the main Alfred agent.
 
-        ``solicited`` must be 0 (Alfred-initiated, e.g. briefings, weekly
-        digests, escalations) or omitted (ambiguous — stays NULL in the DB).
-        Never pass 1 here; that value is for principal-reply paths only.
-        The column feeds the NAR interruption term (#580).
+        Pass ``solicited=0`` when Alfred is the initiator (briefings, digests,
+        escalations) so alfred_journal.solicited lands as 0 rather than NULL.
+        The column feeds the NAR interruption term (#580).  Omit the kwarg when
+        direction is unknown — NULL is the honest default.
+        Never pass 1; that value is for principal-reply paths only.
         """
         message = f"Alfred Learn: {summary}\nPath: {path}"
-        body: dict[str, Any] = {"message": message, "urgency": "normal"}
+        body: dict[str, Any] = {
+            "message": message,
+            "urgency": "normal",
+            "session_id": "main",
+        }
         # Only stamp 0; any other value is left out so it stays NULL.
         if solicited == 0:
             body["solicited"] = 0
-        resp = await self._client.post("/api/v1/alfred-deliver", json=body)
+        resp = await self._client.post("/api/v1/notifications", json=body)
         # Best-effort — don't raise on failure
         if resp.status_code >= 500:
             resp.raise_for_status()

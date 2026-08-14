@@ -450,7 +450,7 @@ async def send_chore_notification(
 
     async with httpx.AsyncClient(timeout=30.0) as http:
         resp = await http.post(
-            f"{config.alfred_ctrl_url}/api/v1/alfred-deliver",
+            f"{config.alfred_ctrl_url}/api/v1/notifications",
             json=body,
             headers=headers,
         )
@@ -1283,8 +1283,9 @@ Write the briefing now. Plain prose. Your output is the message Sir sees."""
         return {"mode": "preview", "path": path, "delivered": False, "briefing": briefing}
 
     # Live delivery: first render the briefing text via a workers subagent
-    # (same as preview mode), then POST the rendered text directly to
-    # /api/v1/alfred-deliver.  solicited=0: this is Alfred-initiated (#580).
+    # (same as preview mode), then POST the rendered text to ctrl-api's
+    # /api/v1/notifications, which pushes it outbound via openclaw's
+    # `message.send` tool → Slack/Telegram/etc.  solicited=0: Alfred-initiated (#580).
     briefing = await _workers_spawn_subagent(
         agent_id="learn-clerk",
         prompt=prompt,
@@ -1297,7 +1298,7 @@ Write the briefing now. Plain prose. Your output is the message Sir sees."""
     )
     config = load_config()
     api_key = os.environ.get("AAS_API_KEY", "")
-    url = f"{config.alfred_ctrl_url}/api/v1/alfred-deliver"
+    url = f"{config.alfred_ctrl_url}/api/v1/notifications"
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     async with httpx.AsyncClient(timeout=60.0) as http:
         resp = await http.post(
@@ -1305,6 +1306,7 @@ Write the briefing now. Plain prose. Your output is the message Sir sees."""
             json={
                 "message": briefing,
                 "urgency": "normal",
+                "session_id": session_id,
                 "solicited": 0,
             },
             headers=headers,

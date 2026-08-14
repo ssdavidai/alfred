@@ -35,7 +35,7 @@ def _mock_httpx_response(status_code: int = 200) -> MagicMock:
     resp = MagicMock(spec=httpx.Response)
     resp.status_code = status_code
     if status_code >= 400:
-        req = httpx.Request("POST", "http://ctrl-api/api/v1/alfred-deliver")
+        req = httpx.Request("POST", "http://ctrl-api/api/v1/notifications")
         resp.raise_for_status.side_effect = httpx.HTTPStatusError(
             f"HTTP {status_code}", request=req, response=resp
         )

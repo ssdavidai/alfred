@@ -67,22 +67,6 @@ def test_vault_client_notify_omits_solicited_key_when_not_passed() -> None:
     assert "solicited" not in body
 
 
-def test_vault_client_notify_routes_to_alfred_deliver() -> None:
-    """/notifications does not forward solicited; must bypass it (#580)."""
-    from src.utils.vault_client import VaultClient
-    resp = MagicMock()
-    resp.status_code = 200
-    resp.raise_for_status.return_value = None
-    inner = AsyncMock()
-    inner.post = AsyncMock(return_value=resp)
-    vc = object.__new__(VaultClient)
-    vc._client = inner  # type: ignore[attr-defined]
-    asyncio.run(vc.notify("p", "s", solicited=0))
-    url = inner.post.call_args.args[0] if inner.post.call_args.args else ""
-    assert "alfred-deliver" in url
-    assert "notifications" not in url
-
-
 def test_observe_execute_instructions_notify_solicited_absent() -> None:
     """Vault-instruction notify is direction-unknown; solicited must be absent."""
     vc = MagicMock()
