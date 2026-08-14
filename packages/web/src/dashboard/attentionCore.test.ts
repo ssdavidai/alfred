@@ -7,7 +7,8 @@ import assert from "node:assert/strict";
 import {
   deriveUnratedRows, deriveInferredDisplay, deriveDisplacementGroups,
   isEmptyDay, formatHours, formatMinutes,
-  type AttentionDayResponse, type InferredItem,
+  deriveChartBars, deriveChartScale, deriveRangeAggregates,
+  type AttentionDayResponse, type InferredItem, type SeriesPoint,
 } from "./attentionCore";
 
 const I: InferredItem = { label: "x", bucket: "M", minutes: 20, turns: 10, tools: 5, evidence_kind: "session", evidence_ref: "s", outcome: "delivered" };
@@ -70,3 +71,68 @@ test("deriveDisplacementGroups: null safe", () => { const g = deriveDisplacement
 // Formatters
 test("formatHours: 2dp", () => { assert.equal(formatHours(7.51), "7.51"); assert.equal(formatHours(0), "0.00"); });
 test("formatMinutes: 1dp", () => { assert.equal(formatMinutes(0.5), "0.5"); assert.equal(formatMinutes(120), "120.0"); });
+
+// 5. deriveChartBars
+const mkPt = (date: string, nar: number, disp = 0, eng = 0): SeriesPoint => ({ date, nar_hours: nar, displaced_hours: disp, engaged_hours: eng });
+test("chartBars: has_data true when displaced>0", () => {
+  const [b] = deriveChartBars([mkPt("2026-08-14", 1.5, 2, 0.5)]);
+  assert.equal(b.has_data, true); assert.equal(b.nar_hours, 1.5);
+});
+test("chartBars: has_data false when displaced=0 and nar=0", () => {
+  const [b] = deriveChartBars([mkPt("2026-08-14", 0, 0, 0)]);
+  assert.equal(b.has_data, false);
+});
+test("chartBars: has_data true when nar_hours non-zero (even if displaced=0)", () => {
+  const [b] = deriveChartBars([mkPt("2026-08-14", -0.5, 0, 0)]);
+  assert.equal(b.has_data, true);
+});
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+test("chartBars: null-safe → []", () => assert.deepEqual(deriveChartBars(null as any), []));
+
+// 6. deriveChartScale
+test("chartScale: all positive → baselineY at chartHeight", () => {
+  const bars = [{ date: "d", nar_hours: 5, displaced_hours: 5, engaged_hours: 0, has_data: true }];
+  const s = deriveChartScale(bars, 100);
+  assert.equal(s.baselineY, 100); // baseline at bottom
+});
+test("chartScale: all negative → baselineY at 0 (baseline at top)", () => {
+  const bars = [{ date: "d", nar_hours: -5, displaced_hours: 5, engaged_hours: 0, has_data: true }];
+  const s = deriveChartScale(bars, 100);
+  assert.equal(s.baselineY, 0);
+});
+test("chartScale: equal positive+negative → baseline at 50", () => {
+  const bars = [
+    { date: "a", nar_hours: 5, displaced_hours: 5, engaged_hours: 0, has_data: true },
+    { date: "b", nar_hours: -5, displaced_hours: 5, engaged_hours: 0, has_data: true },
+  ];
+  const s = deriveChartScale(bars, 100);
+  assert.equal(s.baselineY, 50);
+});
+test("chartScale: all-zero guard → pixelsPerHour uses total=1", () => {
+  const s = deriveChartScale([], 100);
+  assert.equal(s.pixelsPerHour, 100); // 100/1
+});
+
+// 7. deriveRangeAggregates
+test("rangeAgg: empty series → all zero, no best/worst", () => {
+  const agg = deriveRangeAggregates([]);
+  assert.equal(agg.total_nar, 0); assert.equal(agg.best_day, null); assert.equal(agg.days_with_data, 0);
+});
+test("rangeAgg: all empty days → days_with_data=0", () => {
+  const agg = deriveRangeAggregates([mkPt("a", 0), mkPt("b", 0)]);
+  assert.equal(agg.days_with_data, 0); assert.equal(agg.total_days, 2);
+});
+test("rangeAgg: picks correct best and worst day", () => {
+  const agg = deriveRangeAggregates([mkPt("a", 3, 3), mkPt("b", 7, 7), mkPt("c", 1, 1)]);
+  assert.equal(agg.best_day?.date, "b"); assert.equal(agg.worst_day?.date, "c");
+});
+test("rangeAgg: mean excludes days without data", () => {
+  const agg = deriveRangeAggregates([mkPt("a", 4, 4), mkPt("b", 0, 0), mkPt("c", 6, 6)]);
+  // only a and c have data → mean = 10 / 2 = 5
+  assert.equal(agg.days_with_data, 2); assert.equal(agg.total_days, 3);
+  assert.ok(Math.abs(agg.mean_nar - 5) < 0.001);
+});
+test("rangeAgg: negative NAR becomes worst_day correctly", () => {
+  const agg = deriveRangeAggregates([mkPt("a", 2, 5, 3), mkPt("b", -1, 1, 2)]);
+  assert.equal(agg.worst_day?.date, "b"); assert.equal(agg.best_day?.date, "a");
+});

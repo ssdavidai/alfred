@@ -21,7 +21,12 @@ export interface AttentionDayResponse {
 }
 
 export interface SeriesPoint { date: string; nar_hours: number; displaced_hours: number; engaged_hours: number }
-export interface AttentionStatsResponse { from: string; to: string; series: SeriesPoint[]; totals: { nar_hours: number; displaced_hours: number; engaged_hours: number } }
+export interface AttentionStatsResponse {
+  from: string; to: string;
+  series: SeriesPoint[];
+  totals: { nar_hours: number; displaced_hours: number; engaged_hours: number };
+  rate_changed?: boolean; // backend audits rate changes; absent means not detected
+}
 
 export interface UnratedRow { action_class: string; count: number; note: "no_rate_established" }
 export interface InferredDisplayItem {
@@ -65,3 +70,54 @@ export function deriveDisplacementGroups(displaced: AttentionDayResponse["displa
 
 export const formatHours = (h: number) => (h ?? 0).toFixed(2);
 export const formatMinutes = (m: number) => (m ?? 0).toFixed(1);
+
+// ── Range view derivations ────────────────────────────────────────────────────
+
+export interface ChartBar {
+  date: string; nar_hours: number; displaced_hours: number; engaged_hours: number;
+  has_data: boolean; // false → day has no activity (render as gap, not zero bar)
+}
+
+export interface ChartScaleResult {
+  baselineY: number;   // px from top to the zero axis
+  pixelsPerHour: number; // px per hour of NAR
+}
+
+export interface RangeAggregates {
+  total_nar: number; mean_nar: number;
+  best_day: { date: string; nar_hours: number } | null;
+  worst_day: { date: string; nar_hours: number } | null;
+  days_with_data: number; total_days: number;
+}
+
+export function deriveChartBars(series: SeriesPoint[]): ChartBar[] {
+  return (series ?? []).map((pt) => ({
+    date: pt.date, nar_hours: pt.nar_hours,
+    displaced_hours: pt.displaced_hours, engaged_hours: pt.engaged_hours,
+    has_data: pt.displaced_hours > 0 || pt.nar_hours !== 0,
+  }));
+}
+
+export function deriveChartScale(bars: ChartBar[], chartHeight = 100): ChartScaleResult {
+  const maxPos = bars.reduce((m, b) => Math.max(m, b.nar_hours), 0);
+  const maxNeg = bars.reduce((m, b) => Math.max(m, -b.nar_hours), 0);
+  const total = maxPos + maxNeg || 1;
+  return { baselineY: (maxPos / total) * chartHeight, pixelsPerHour: chartHeight / total };
+}
+
+export function deriveRangeAggregates(series: SeriesPoint[]): RangeAggregates {
+  const pts = series ?? [];
+  const withData = pts.filter((p) => p.displaced_hours > 0 || p.nar_hours !== 0);
+  if (withData.length === 0) {
+    return { total_nar: 0, mean_nar: 0, best_day: null, worst_day: null, days_with_data: 0, total_days: pts.length };
+  }
+  const total_nar = withData.reduce((s, p) => s + p.nar_hours, 0);
+  const best = withData.reduce((a, b) => (b.nar_hours > a.nar_hours ? b : a));
+  const worst = withData.reduce((a, b) => (b.nar_hours < a.nar_hours ? b : a));
+  return {
+    total_nar, mean_nar: total_nar / withData.length,
+    best_day: { date: best.date, nar_hours: best.nar_hours },
+    worst_day: { date: worst.date, nar_hours: worst.nar_hours },
+    days_with_data: withData.length, total_days: pts.length,
+  };
+}

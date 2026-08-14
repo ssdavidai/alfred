@@ -64,7 +64,8 @@ export default function App() {
       p === "/connect" ||
       p === "/channels" ||
       p === "/tools" ||
-      p === "/claude"
+      p === "/claude" ||
+      p === "/attention"
     ) return true;
     // Settings (formerly The Study, M6; renamed /study → /settings, F83).
     // /study is kept as a recognised surface for the brief redirect render.
