@@ -253,7 +253,15 @@ def _extract_session_context(messages: list[dict[str, Any]]) -> dict[str, Any]:
             failure_excerpt = str(msg.get("content", ""))[:300]
             break
 
-    failure_note = f"YES — excerpt: {failure_excerpt}" if failure_excerpt else "None detected."
+    # Phrase detected → informational signal only.  The clerk decides is_failed
+    # by reading the delivery — a concession followed by a delivered artifact
+    # is correction, not failure.
+    failure_note = (
+        f"Self-correction phrase detected (check delivery to determine outcome) "
+        f"— excerpt: {failure_excerpt}"
+        if failure_excerpt
+        else "None detected."
+    )
 
     return {
         "ask": ask,

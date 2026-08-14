@@ -60,14 +60,17 @@ What was asked (first user turn):
 What was delivered (last substantive assistant response):
 {delivery}
 
-Failure signal: {failure_note}
+Self-correction signal: {failure_note}
+(A concession phrase means check the delivery. If the session ultimately produced what was
+asked for, is_failed=false — a mid-session correction is not a failure.)
 
 Rules from the NAR method (apply them in order):
 1. A quantity NAMED in an artifact is NOT displacement. Crediting the figure inside inflates.
 2. Discussion with no artifact displaces NOTHING — return bucket "none".
-3. A failed or blocked session costs ZERO displacement. IMPORTANT: bucket and is_failed are
-   INDEPENDENT AXES. A session can be L-scale work that failed — set bucket=L AND is_failed=true.
-   Never collapse a failed session to bucket="none"; displacement is forced to zero by the caller.
+3. bucket and is_failed are INDEPENDENT AXES. is_failed=true ONLY when the session ended
+   WITHOUT producing what was asked for. A concession phrase followed by a delivered artifact
+   means correction occurred — set is_failed=false. A session that self-corrects and delivers
+   is not failed. A failed session that did substantial work before failing still gets a bucket.
 4. Scale signals matter: a 1-turn conversation cannot be XL; a 60-minute multi-step session
    with hundreds of tool calls is unlikely to be S.
 
@@ -75,7 +78,7 @@ Return a JSON object with exactly these keys:
   bucket: one of "S" | "M" | "L" | "XL" | "none"
   reasoning: one sentence
   has_artifact: true | false
-  is_failed: true | false (true if failure signal present, even if work was partially done)
+  is_failed: true | false (true only if session ended WITHOUT producing what was asked for)
 
 Bucket meanings (minutes of principal time displaced if delivered):
   S  =   5 min — quick email, short memo, simple fact lookup
