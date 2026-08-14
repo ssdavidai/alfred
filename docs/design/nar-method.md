@@ -163,9 +163,27 @@ development tenant within a stated tolerance:
 
 | day | engaged | displaced | NAR |
 |---|---|---|---|
-| A (light) | 2.03 h | 1.85 h | −0.18 h |
+| A (light) | 2.03 h | 2.93 h | +0.90 h |
 | B (heavy) | 4.19 h | 12.03 h | +7.51 h |
 
-Day B includes the autonomous contribution; both were computed by hand before
-any automation existed. An implementation that cannot land near these is
-wrong, however plausible its output looks.
+Both were computed by hand before any automation existed. An implementation
+that cannot land near these is wrong, however plausible its output looks.
+
+**Day A was corrected on first validation, and the correction is instructive.**
+It was originally recorded as 1.85 h displaced / −0.18 h NAR. That figure was
+computed with a draft bucket table (M=15, L=45) before the canonical sizes
+above were settled, and it omitted the autonomous contribution entirely —
+autonomous work was only added to the method while analysing day B. The first
+implementation reproduced 2.933 h, which is what a corrected manual pass
+gives:
+
+```
+sessions  10 + 20 + 60 + 20 + 5  = 115 min
+noise     42 x 0.5               =  21 min
+chores    morning M + evening M  =  40 min
+                                   176 min = 2.93 h
+```
+
+The lesson worth keeping: a reference figure computed before the method was
+settled is not a reference. When an implementation disagrees with a target,
+re-derive the target before touching the code.
