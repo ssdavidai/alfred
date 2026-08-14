@@ -1072,7 +1072,7 @@ export function registerAttentionRoutes(): void {
     let handle: string | null = wfId;
     try {
       const out = await dockerExec("temporal", [
-        "temporal","workflow","start","--type","NarRecapWorkflow",
+        "temporal","workflow","start","--type","NarDayRecapWorkflow",
         "--task-queue","alfred-learn","--workflow-id",wfId,"--input",input,"--output","json",
       ]);
       try { const p = JSON.parse(out.trim()); handle = p?.workflowId ?? p?.workflow_id ?? wfId; } catch { /**/ }
