@@ -93,12 +93,29 @@ minutes produced 2.91/4.19/5.47 h. Ten is chosen because tool-heavy work
 legitimately leaves >5 minute gaps while Alfred works, and a tighter gap
 fragments one work session into many, undercounting attention.
 
-**Human sources only.** `role='user'` does **not** mean a human typed it — on
-one observed month 66% of user-role messages were machine-authored (cron,
-subagent, api_server). Filter by an **allowlist** of human session sources,
-never a denylist: a new machine source added upstream must not silently start
-counting as human attention. `cli` is suspect and should be reviewed before
-being trusted as human.
+**Human sources only, and a human source is not enough.** Two independent
+filters are required, and both were learned the hard way.
+
+1. `role='user'` does **not** mean a human typed it — on one observed month
+   66% of user-role messages were machine-authored (cron, subagent,
+   api_server). Filter by an **allowlist** of human session sources, never a
+   denylist: a new machine source added upstream must not silently start
+   counting as human attention. `cli` is suspect and should be reviewed before
+   being trusted as human.
+
+2. **`source='slack'` does not mean the principal started it.** An agent that
+   spawns a task delivering into Slack produces a session carrying a human
+   source. Require **`parent_session_id IS NULL`** as well: a session the
+   principal opens has no parent, one an agent spawns does.
+
+   On one observed day, 71 of 87 Slack sessions were agent-spawned — titled
+   `… Transcription #27, #28 … #36`. Counting them as conversational work
+   reported 38.2 h displaced against 3.0 h engaged, roughly **9x** the
+   hand-computed value. Spawned sessions are **autonomous** work and belong in
+   that bucket, counted by artifact.
+
+The pattern behind both: a field named after a human describes a shape, not an
+author. Check what wrote the row, not what the column is called.
 
 ---
 
@@ -161,10 +178,17 @@ Learned from the manual passes. Each one prevented a specific error.
 Any implementation must reproduce two manually computed reference days on the
 development tenant within a stated tolerance:
 
-| day | engaged | displaced | NAR |
-|---|---|---|---|
-| A (light) | 2.03 h | 2.93 h | +0.90 h |
-| B (heavy) | 4.19 h | 12.03 h | +7.51 h |
+| day | engaged | displaced | NAR | character |
+|---|---|---|---|---|
+| A (light) | 2.03 h | 2.93 h | +0.90 h | quiet, no spawned sessions |
+| B (heavy) | 4.19 h | 12.03 h | +7.51 h | busy, no spawned sessions |
+| C (anomalous) | 1.04 h | 4.30 h | +3.26 h | 71 of 87 Slack sessions agent-spawned |
+
+**Day C exists because A and B were both normal days.** A method validated
+only on ordinary traffic is not validated — the spawned-session defect passed
+both reference days cleanly and was only caught by eye on a backfilled day
+that looked absurd. Any future reference set must include a day where
+something went wrong.
 
 Both were computed by hand before any automation existed. An implementation
 that cannot land near these is wrong, however plausible its output looks.
