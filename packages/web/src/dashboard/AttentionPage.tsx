@@ -169,7 +169,7 @@ function DayView({ day, recomp, running }: { day: AttentionDayViewModel; recomp(
       </p>
       {/* Column headers — bar track column header is blank */}
       <div className="grid font-mono text-[9px] uppercase tracking-[0.18em] pb-1 mb-0"
-        style={{ gridTemplateColumns: "1fr 300px repeat(4,62px)", color: "var(--marginalia)", borderBottom: "1px solid var(--rule)", opacity: 0.7 }}>
+        style={{ gridTemplateColumns: "1fr minmax(160px,300px) repeat(4,78px)", color: "var(--marginalia)", borderBottom: "1px solid var(--rule)", opacity: 0.7 }}>
         <span />
         <span />
         {(["DISPLACED","ENGAGED","INTERRUPT","NET"] as const).map(c => (
@@ -181,7 +181,7 @@ function DayView({ day, recomp, running }: { day: AttentionDayViewModel; recomp(
           shows the structure and makes the absence legible. */}
       {(["Work","Life","Unallocated"] as const).map((row) => (
         <div key={row} className="grid items-center"
-          style={{ gridTemplateColumns: "1fr 300px repeat(4,62px)", borderBottom: "1px solid var(--rule)", opacity: 0.65, minHeight: 21 }}>
+          style={{ gridTemplateColumns: "1fr minmax(160px,300px) repeat(4,78px)", borderBottom: "1px solid var(--rule)", opacity: 0.65, minHeight: 21 }}>
           <span className="font-sans italic" style={{ fontSize: 13 }}>{row}</span>
           {/* horizontal bar track — 10px tall, faint, always drawn */}
           <div style={{ height: 10, background: "var(--rule)", opacity: 0.18, borderRadius: 1 }} />
