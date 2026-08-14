@@ -933,6 +933,7 @@ export function registerAttentionRoutes(): void {
         hermesTs = (hsDb.prepare(
           `SELECT m.timestamp FROM messages m JOIN sessions s ON m.session_id=s.id
            WHERE m.role='user' AND s.source IN ('slack','cli','telegram')
+             AND s.parent_session_id IS NULL
              AND m.timestamp>=? AND m.timestamp<=?`,
         ).all(dayStartEp, dayEndEp) as Array<{ timestamp: number }>).map(r => r.timestamp);
         hsDb.close();

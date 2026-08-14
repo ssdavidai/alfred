@@ -3,18 +3,23 @@
 //         (3) empty day → 200 zeros not 404; (4) unrated populated;
 //         (5) rates echoes the arithmetic table used.
 
-import { describe, it, before, beforeEach } from "node:test";
+import { describe, it, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { ServerResponse } from "node:http";
+import { DatabaseSync } from "node:sqlite";
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "nar-"));
 process.env.ALFRED_DATA_DIR = tmp;
 process.env.STATE_DB_PATH   = path.join(tmp, "state.db");
 process.env.VAULT_PATH      = path.join(tmp, "vault");
 process.env.SQLITE_VEC_PATH = "";
+// Point HERMES_CONFIG_DIR at the tmp tree so the parentage-filter tests can
+// create a real main/state.db that the route handler finds. Must be set BEFORE
+// registerAttentionRoutes() captures it.
+process.env.HERMES_CONFIG_DIR = path.join(tmp, "hermes-state");
 ["needs_attention", "decision", "event"].forEach((d) =>
   fs.mkdirSync(path.join(tmp, "vault", d), { recursive: true }),
 );
@@ -306,5 +311,67 @@ describe("POST /api/v1/state/nar-entries — mode='replace'", () => {
       "SELECT dedup_key FROM nar_entry WHERE date(occurred_at)='2026-07-15' ORDER BY dedup_key",
     ).all() as any[];
     assert.deepStrictEqual(rows.map((r: any) => r.dedup_key), ["r1", "r4"]);
+  });
+});
+
+// ─── parent_session_id filter (#584) ───────────────────────────────────────
+// The human-turn query in buildDayStatement must exclude agent-spawned
+// sessions (parent_session_id IS NOT NULL) so engaged time matches the recap.
+// HERMES_CONFIG_DIR was pointed at tmp/hermes-state at module level (above)
+// so registerAttentionRoutes() captured it; we just manage the file here.
+describe("GET /api/v1/attention/statement — parent_session_id filter", () => {
+  const hsDir = path.join(tmp, "hermes-state");
+  const hsDbPath = path.join(hsDir, "main", "state.db");
+
+  before(() => {
+    fs.mkdirSync(path.join(hsDir, "main"), { recursive: true });
+    const hdb = new DatabaseSync(hsDbPath);
+    hdb.exec(`
+      CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, parent_session_id TEXT);
+      CREATE TABLE messages (id TEXT PRIMARY KEY, session_id TEXT, role TEXT, timestamp REAL NOT NULL);
+    `);
+    hdb.close();
+  });
+
+  after(() => { fs.rmSync(hsDir, { recursive: true, force: true }); });
+
+  beforeEach(() => {
+    db.prepare("DELETE FROM nar_entry").run();
+    const hdb = new DatabaseSync(hsDbPath);
+    hdb.exec("DELETE FROM messages; DELETE FROM sessions;");
+    hdb.close();
+  });
+
+  it("spawned session (parent IS NOT NULL) contributes no turns to engaged time", async () => {
+    const hdb = new DatabaseSync(hsDbPath);
+    hdb.prepare("INSERT INTO sessions VALUES (?,?,?)").run("s-agent", "slack", "parent-1");
+    hdb.prepare("INSERT INTO messages VALUES (?,?,'user',?)").run(
+      "m-1", "s-agent", new Date("2026-07-15T10:00:00Z").getTime() / 1000,
+    );
+    hdb.close();
+    const { p } = await getStatement("date=2026-07-15");
+    assert.strictEqual(p.engaged.hours, 0, "agent-spawned session must be excluded");
+  });
+
+  it("human session (parent IS NULL) contributes turns to engaged time", async () => {
+    const hdb = new DatabaseSync(hsDbPath);
+    hdb.prepare("INSERT INTO sessions VALUES (?,?,?)").run("s-human", "slack", null);
+    hdb.prepare("INSERT INTO messages VALUES (?,?,'user',?)").run(
+      "m-2", "s-human", new Date("2026-07-15T10:00:00Z").getTime() / 1000,
+    );
+    hdb.close();
+    const { p } = await getStatement("date=2026-07-15");
+    assert.ok(p.engaged.hours > 0, "human session with null parent must contribute");
+  });
+
+  it("unknown-source session excluded even with null parent", async () => {
+    const hdb = new DatabaseSync(hsDbPath);
+    hdb.prepare("INSERT INTO sessions VALUES (?,?,?)").run("s-omi", "omi", null);
+    hdb.prepare("INSERT INTO messages VALUES (?,?,'user',?)").run(
+      "m-3", "s-omi", new Date("2026-07-15T10:00:00Z").getTime() / 1000,
+    );
+    hdb.close();
+    const { p } = await getStatement("date=2026-07-15");
+    assert.strictEqual(p.engaged.hours, 0, "source not in allowlist excluded regardless of parentage");
   });
 });
