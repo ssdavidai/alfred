@@ -36,6 +36,9 @@ import { attentionCache, invalidateVaultCachesForType } from "../vaultCache.js";
 import { appendAudit } from "./state.js";
 import { getStateDb } from "../../db/state.js";
 import { indexVaultWrite } from "../../db/vaultIndex.js";
+import { clusterBursts } from "../../db/engagedTime.js";
+import { loadRateCard } from "./suppressionRateCard.js";
+import { dockerExec } from "../helpers.js";
 
 // A ULID is 26 chars of Crockford base32 (uppercase, no I/L/O/U). Signals were
 // demoted out of the vault's signal/ directory into the `state.db signal`
@@ -839,5 +842,225 @@ export function registerAttentionRoutes(): void {
 
     sendJson(res, 200, { ok: true, applied: appliedIds.length, skipped,
       decision_path: `decision/${decisionId}.md`, audit_id: auditId });
+  });
+
+  // NAR statement/stats/recompute — read from nar_entry + alfred_journal; rates from docs/design/nar-method.md.
+  const GAP_MS = 10 * 60 * 1000, FLOOR_MS = 2 * 60 * 1000;
+  const BUCKET_MINUTES: Record<string, number> = { S: 5, M: 20, L: 60, XL: 120 };
+  const INTERRUPTION_RATE_MINUTES = 2;
+
+  function buildDayStatement(dateStr: string): object {
+    const db = getStateDb();
+    const rateCard = loadRateCard();
+    const suppressionRate = rateCard.rate_minutes_per_item;
+
+    // Day window: midnight UTC to midnight UTC.
+    const dayStart = `${dateStr}T00:00:00Z`;
+    const dayEnd   = `${dateStr}T23:59:59.999Z`;
+
+    const entries = db.prepare(
+      `SELECT action_class, summary, evidence_kind, evidence_ref,
+              session_ref, baseline_minutes, estimation_method,
+              acceptance, acceptance_path, displaced_minutes, notes
+         FROM nar_entry
+        WHERE occurred_at >= ? AND occurred_at <= ?
+        ORDER BY occurred_at`,
+    ).all(dayStart, dayEnd) as Array<{
+      action_class: string; summary: string; evidence_kind: string; evidence_ref: string;
+      session_ref: string | null; baseline_minutes: number | null; estimation_method: string | null;
+      acceptance: string; acceptance_path: string | null; displaced_minutes: number | null;
+      notes: string | null;
+    }>;
+
+    // Classify entries.
+    const explicitBuckets = new Map<string, { count: number; rate_minutes: number; minutes: number }>();
+    const inferredItems: object[] = [];
+    const autonomousItems: object[] = [];
+    const unratedCounts = new Map<string, number>();
+
+    for (const row of entries) {
+      const notesData = row.notes ? (() => { try { return JSON.parse(row.notes!); } catch { return {}; } })() : {};
+      const mins = row.displaced_minutes ?? 0;
+
+      if (row.evidence_kind === "session" && row.acceptance_path === "inferred") {
+        // Inferred — conversational bucket work.
+        inferredItems.push({
+          label: row.summary, bucket: notesData.bucket ?? null, minutes: mins,
+          turns: notesData.turns ?? null, tools: notesData.tools ?? null,
+          evidence_kind: row.evidence_kind, evidence_ref: row.evidence_ref,
+          outcome: notesData.outcome ?? null,
+        });
+      } else if (
+        row.evidence_kind === "chore_run" ||
+        (row.acceptance_path === "explicit" && row.evidence_kind !== "decision" && row.evidence_kind !== "audit")
+      ) {
+        // Autonomous — unattended artifact production.
+        autonomousItems.push({
+          label: row.summary, bucket: notesData.bucket ?? null, minutes: mins,
+          evidence_kind: row.evidence_kind, evidence_ref: row.evidence_ref,
+        });
+      } else {
+        // Explicit or unrated — rate-card actions.
+        const rate = row.action_class === "suppression" ? suppressionRate : null;
+        if (rate !== null) {
+          const existing = explicitBuckets.get(row.action_class);
+          if (existing) {
+            existing.count++;
+            existing.minutes += rate;
+          } else {
+            explicitBuckets.set(row.action_class, { count: 1, rate_minutes: rate, minutes: rate });
+          }
+        } else {
+          unratedCounts.set(row.action_class, (unratedCounts.get(row.action_class) ?? 0) + 1);
+        }
+      }
+    }
+
+    // Engaged time: cluster alfred_journal inbound timestamps for the day.
+    const journalInbound = db.prepare(
+      `SELECT ts FROM alfred_journal
+        WHERE direction = 'inbound' AND ts >= ? AND ts <= ?`,
+    ).all(dayStart, dayEnd) as Array<{ ts: string }>;
+    const decisionAudit = db.prepare(
+      `SELECT ts FROM audit WHERE action_type = 'decision' AND ts >= ? AND ts <= ?`,
+    ).all(dayStart, dayEnd) as Array<{ ts: string }>;
+    const burstDates = [
+      ...journalInbound.map((r) => new Date(r.ts)),
+      ...decisionAudit.map((r) => new Date(r.ts)),
+    ];
+    const { totalMs, burstCount } = clusterBursts(burstDates, GAP_MS, FLOOR_MS);
+    const engagedHours = totalMs / (1000 * 60 * 60);
+
+    // Interruption: unsolicited outbound (solicited = 0).
+    const unsolicitedRow = db.prepare(
+      `SELECT COUNT(*) AS n FROM alfred_journal
+        WHERE direction = 'outbound' AND solicited = 0 AND ts >= ? AND ts <= ?`,
+    ).get(dayStart, dayEnd) as { n: number };
+    const interruptionCount = unsolicitedRow.n;
+    const interruptionHours = (interruptionCount * INTERRUPTION_RATE_MINUTES) / 60;
+
+    // Totals.
+    const explicitItems = [...explicitBuckets.entries()].map(([action_class, v]) => ({
+      label: action_class === "suppression" ? "Suppressed items" : action_class,
+      count: v.count, rate_minutes: v.rate_minutes, minutes: v.minutes,
+    }));
+    const explicitHours  = explicitItems.reduce((s, i) => s + (i as any).minutes, 0) / 60;
+    const inferredHours  = inferredItems.reduce((s, i) => s + ((i as any).minutes ?? 0), 0) / 60;
+    const autonomousHours = autonomousItems.reduce((s, i) => s + ((i as any).minutes ?? 0), 0) / 60;
+    const displacedHours = explicitHours + inferredHours + autonomousHours;
+    const narHours       = displacedHours - engagedHours - interruptionHours;
+
+    return {
+      date: dateStr,
+      nar_hours: Math.round(narHours * 1000) / 1000,
+      displaced: {
+        total_hours: Math.round(displacedHours * 1000) / 1000,
+        explicit:   { hours: Math.round(explicitHours * 1000) / 1000,   items: explicitItems },
+        inferred:   { hours: Math.round(inferredHours * 1000) / 1000,   items: inferredItems },
+        autonomous: { hours: Math.round(autonomousHours * 1000) / 1000, items: autonomousItems },
+      },
+      engaged: {
+        hours: Math.round(engagedHours * 1000) / 1000,
+        events: burstDates.length, bursts: burstCount,
+      },
+      interruption: {
+        hours: Math.round(interruptionHours * 1000) / 1000,
+        count: interruptionCount,
+        rate_minutes: INTERRUPTION_RATE_MINUTES,
+      },
+      rates: {
+        suppression_minutes_per_item: suppressionRate,
+        bucket_minutes: BUCKET_MINUTES,
+        interruption_minutes: INTERRUPTION_RATE_MINUTES,
+      },
+      unrated: [...unratedCounts.entries()].map(([action_class, count]) => ({ action_class, count })),
+    };
+  }
+
+  addRoute("GET", "/api/v1/attention/statement", async ({ res, query }) => {
+    const date  = query.get("date");
+    const from  = query.get("from");
+    const to    = query.get("to");
+
+    if (date) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new ValidationError("date must be YYYY-MM-DD");
+      sendJson(res, 200, buildDayStatement(date));
+      return;
+    }
+    if (!from || !to) throw new ValidationError("date= or from= and to= are required");
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) {
+      throw new ValidationError("from and to must be YYYY-MM-DD");
+    }
+
+    // Enumerate the days in the range (inclusive).
+    const days: string[] = [];
+    for (let d = new Date(`${from}T00:00:00Z`), end = new Date(`${to}T00:00:00Z`);
+         d <= end; d.setUTCDate(d.getUTCDate() + 1)) {
+      days.push(d.toISOString().slice(0, 10));
+    }
+    const dayStatements = days.map(buildDayStatement) as Array<{
+      nar_hours: number; displaced: { total_hours: number }; engaged: { hours: number };
+    }>;
+    const totals = {
+      nar_hours:       Math.round(dayStatements.reduce((s, d) => s + d.nar_hours, 0) * 1000) / 1000,
+      displaced_hours: Math.round(dayStatements.reduce((s, d) => s + d.displaced.total_hours, 0) * 1000) / 1000,
+      engaged_hours:   Math.round(dayStatements.reduce((s, d) => s + d.engaged.hours, 0) * 1000) / 1000,
+    };
+    sendJson(res, 200, { from, to, days: dayStatements, totals });
+  });
+
+  addRoute("GET", "/api/v1/attention/stats", async ({ res, query }) => {
+    const from = query.get("from");
+    const to   = query.get("to");
+    if (!from || !to) throw new ValidationError("from= and to= are required");
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) {
+      throw new ValidationError("from and to must be YYYY-MM-DD");
+    }
+    const days: string[] = [];
+    for (let d = new Date(`${from}T00:00:00Z`), end = new Date(`${to}T00:00:00Z`);
+         d <= end; d.setUTCDate(d.getUTCDate() + 1)) {
+      days.push(d.toISOString().slice(0, 10));
+    }
+    const dayStatements = days.map(buildDayStatement) as Array<{
+      date: string; nar_hours: number;
+      displaced: { total_hours: number }; engaged: { hours: number };
+    }>;
+    const series = dayStatements.map((d) => ({
+      date: d.date, nar_hours: d.nar_hours,
+      displaced_hours: d.displaced.total_hours, engaged_hours: d.engaged.hours,
+    }));
+    const totals = {
+      nar_hours:       Math.round(series.reduce((s, d) => s + d.nar_hours, 0) * 1000) / 1000,
+      displaced_hours: Math.round(series.reduce((s, d) => s + d.displaced_hours, 0) * 1000) / 1000,
+      engaged_hours:   Math.round(series.reduce((s, d) => s + d.engaged_hours, 0) * 1000) / 1000,
+    };
+    sendJson(res, 200, { from, to, totals, series });
+  });
+
+  addRoute("POST", "/api/v1/attention/recompute", async ({ res, body }) => {
+    const b = (body ?? {}) as Record<string, unknown>;
+    const date = typeof b.date === "string" ? b.date : null;
+    const from  = typeof b.from === "string" ? b.from : null;
+    const to    = typeof b.to === "string" ? b.to : null;
+
+    if (!date && (!from || !to)) {
+      throw new ValidationError("body must contain date or from+to");
+    }
+    const input = date
+      ? JSON.stringify({ date })
+      : JSON.stringify({ from, to });
+
+    // Fire-and-forget — 202 immediately; Temporal unavailable is not a client error.
+    const wfId = `nar-recap-${date ?? `${from}--${to}`}-${Date.now()}`;
+    let handle: string | null = wfId;
+    try {
+      const out = await dockerExec("temporal", [
+        "temporal","workflow","start","--type","NarRecapWorkflow",
+        "--task-queue","alfred-learn","--workflow-id",wfId,"--input",input,"--output","json",
+      ]);
+      try { const p = JSON.parse(out.trim()); handle = p?.workflowId ?? p?.workflow_id ?? wfId; } catch { /**/ }
+    } catch { handle = null; }
+
+    sendJson(res, 202, { ok: true, handle, date, from, to });
   });
 }

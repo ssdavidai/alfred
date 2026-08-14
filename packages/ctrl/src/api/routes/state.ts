@@ -756,6 +756,61 @@ export function registerStateRoutes(): void {
     });
     sendJson(res, 200, { ok: true, ref, deleted });
   });
+
+  // nar_entry — per-action displacement atom for NAR (#563, migration 0020).
+  // POST /api/v1/state/nar-entries { entries:[...] } — upserts on dedup_key.
+  // CHECK constraints are validated client-side so violations return 400, not 500.
+  addRoute("POST", "/api/v1/state/nar-entries", async ({ res, body }) => {
+    const b = asObj(body);
+    const entries = b.entries;
+    if (!Array.isArray(entries) || entries.length === 0) {
+      throw new ValidationError("entries must be a non-empty array");
+    }
+    const VA = new Set(["accepted", "rejected", "unknown"]);
+    const VAP = new Set(["explicit", "inferred"]);
+    const VEM = new Set(["standard-time","timed-sample","observed-history","model-estimate","client-estimate"]);
+    let upserted = 0, updated = 0;
+    for (const raw of entries) {
+      const e = asObj(raw as unknown);
+      const id = reqStr(e, "id"), dedup_key = reqStr(e, "dedup_key");
+      const occurred_at = reqStr(e, "occurred_at"), action_class = reqStr(e, "action_class");
+      const summary = reqStr(e, "summary");
+      const evidence_kind = reqStr(e, "evidence_kind"), evidence_ref = reqStr(e, "evidence_ref");
+      const session_ref = optStr(e, "session_ref"), baseline_minutes = optNum(e, "baseline_minutes");
+      const estimation_method = optStr(e, "estimation_method");
+      const acceptance = optStr(e, "acceptance") ?? "unknown";
+      const acceptance_path = optStr(e, "acceptance_path"), acceptance_basis = optStr(e, "acceptance_basis");
+      const displaced_minutes = optNum(e, "displaced_minutes"), notes = optStr(e, "notes");
+      if (!VA.has(acceptance))
+        throw new ValidationError(`acceptance must be one of: ${[...VA].join(", ")}; got ${JSON.stringify(acceptance)}`);
+      if (acceptance_path !== null && !VAP.has(acceptance_path))
+        throw new ValidationError(`acceptance_path must be 'explicit' or 'inferred' when set`);
+      if (estimation_method !== null && !VEM.has(estimation_method))
+        throw new ValidationError(`estimation_method must be one of: ${[...VEM].join(", ")}`);
+      if (displaced_minutes !== null && estimation_method === null)
+        throw new ValidationError("displaced_minutes requires estimation_method — no method, no claim");
+      if (db().prepare("SELECT id FROM nar_entry WHERE dedup_key = ?").get(dedup_key)) {
+        db().prepare(
+          `UPDATE nar_entry SET occurred_at=?,action_class=?,summary=?,evidence_kind=?,evidence_ref=?,
+           session_ref=?,baseline_minutes=?,estimation_method=?,acceptance=?,acceptance_path=?,
+           acceptance_basis=?,displaced_minutes=?,notes=? WHERE dedup_key=?`,
+        ).run(occurred_at,action_class,summary,evidence_kind,evidence_ref,
+              session_ref,baseline_minutes,estimation_method,acceptance,acceptance_path,
+              acceptance_basis,displaced_minutes,notes,dedup_key);
+        updated++;
+      } else {
+        db().prepare(
+          `INSERT INTO nar_entry(id,dedup_key,occurred_at,action_class,summary,evidence_kind,evidence_ref,
+           session_ref,baseline_minutes,estimation_method,acceptance,acceptance_path,acceptance_basis,
+           displaced_minutes,notes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        ).run(id,dedup_key,occurred_at,action_class,summary,evidence_kind,evidence_ref,
+              session_ref,baseline_minutes,estimation_method,acceptance,acceptance_path,
+              acceptance_basis,displaced_minutes,notes);
+        upserted++;
+      }
+    }
+    sendJson(res, 201, { ok: true, upserted, updated });
+  });
 }
 
 // ----------------------------------------------------------------------------
