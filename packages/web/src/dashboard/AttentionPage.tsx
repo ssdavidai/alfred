@@ -6,9 +6,9 @@ import { useState } from "react";
 import { useQuery, useAction, getAttentionStatement, getAttentionStats, recomputeAttention } from "wasp/client/operations";
 import { Frame } from "../client/components/ab/Frame";
 import {
-  deriveDisplacementGroups, deriveUnratedRows, isEmptyDay, formatHours,
+  normalizeAttentionDay, isEmptyDay, formatHours,
   deriveChartBars, deriveChartScale, deriveRangeAggregates,
-  type AttentionDayResponse, type AttentionStatsResponse, type ChartBar, type ChartScaleResult,
+  type AttentionDayViewModel, type AttentionStatsResponse, type ChartBar, type ChartScaleResult,
 } from "./attentionCore";
 
 const now = () => new Date().toISOString().slice(0, 10);
@@ -78,7 +78,7 @@ function NarChart({ bars, scale }: { bars: ChartBar[]; scale: ChartScaleResult }
 
 // ── Day view ──────────────────────────────────────────────────────────────────
 
-function DayView({ day, recomp, running }: { day: AttentionDayResponse; recomp(): void; running: boolean }) {
+function DayView({ day, recomp, running }: { day: AttentionDayViewModel; recomp(): void; running: boolean }) {
   if (isEmptyDay(day)) {
     return (
       <div className="py-16 text-center">
@@ -91,13 +91,15 @@ function DayView({ day, recomp, running }: { day: AttentionDayResponse; recomp()
     );
   }
 
-  const g = deriveDisplacementGroups(day.displaced);
-  const un = deriveUnratedRows(day.unrated ?? []);
+  const inferred = day.displaced?.inferred ?? { hours: 0, items: [] };
+  const explicit = day.displaced?.explicit ?? { hours: 0, items: [] };
+  const autonomous = day.displaced?.autonomous ?? { hours: 0, items: [] };
   const h = (v: number) => `${formatHours(v)} h`;
   const hm = (m: number) => h(m / 60);
   const Pill = ({ s }: { s: string }) => (
     <span className="inline-block border border-[var(--rule)] font-mono text-[9px] px-1.5 py-px mr-2 tracking-wide opacity-70">{s}</span>
   );
+  const na = (label: string) => <p className="font-mono text-xs opacity-40 mt-1">{label} not available for this period.</p>;
 
   return (
     <>
@@ -115,15 +117,15 @@ function DayView({ day, recomp, running }: { day: AttentionDayResponse; recomp()
         <div className="text-right font-mono text-xs tabular-nums shrink-0 mt-1"
           style={{ color: "var(--marginalia)", lineHeight: 2.2 }}>
           <p>{formatHours(day.displaced?.total_hours ?? 0)} displaced</p>
-          <p>− {formatHours(day.engaged.hours)} engaged</p>
-          <p>− {formatHours(day.interruption.hours)} interruption</p>
+          <p>− {day.engaged != null ? formatHours(day.engaged.hours) : "—"} engaged</p>
+          <p>− {day.interruption != null ? formatHours(day.interruption.hours) : "—"} interruption</p>
         </div>
       </div>
 
       {/* Displacement — Inferred */}
       <SH s="Displaced — inferred, conversational" />
       <p className="font-mono text-[10px] uppercase tracking-[0.18em] mb-2 opacity-40">Estimated — model heuristic, not measured</p>
-      {g.inferred.items.length === 0 ? <p className="text-xs opacity-40">None.</p> : g.inferred.items.map((it, i) => (
+      {inferred.items.length === 0 ? <p className="text-xs opacity-40">None.</p> : inferred.items.map((it, i) => (
         <div key={i}>
           <TR l={<><Pill s={it.bucket} />{it.label}</>}
             r={it.is_blocked
@@ -134,22 +136,22 @@ function DayView({ day, recomp, running }: { day: AttentionDayResponse; recomp()
           </p>
         </div>
       ))}
-      <TotalRow label="Inferred subtotal" value={h(g.inferred.hours)} />
+      <TotalRow label="Inferred subtotal" value={h(inferred.hours)} />
 
       {/* Displacement — Explicit */}
       <SH s="Displaced — explicit, rate card" />
-      {g.explicit.items.length === 0 ? <p className="text-xs opacity-40">None.</p> : g.explicit.items.map((it, i) => (
+      {explicit.items.length === 0 ? <p className="text-xs opacity-40">None.</p> : explicit.items.map((it, i) => (
         <TR key={i} l={it.label}
           r={<><span className="opacity-40 mr-2">×{it.count} @ {it.rate_minutes} min</span>{hm(it.minutes)}</>} />
       ))}
-      <TotalRow label="Explicit subtotal" value={h(g.explicit.hours)} />
+      <TotalRow label="Explicit subtotal" value={h(explicit.hours)} />
 
       {/* Displacement — Autonomous */}
       <SH s="Displaced — autonomous, by artifact" />
-      {g.autonomous.items.length === 0 ? <p className="text-xs opacity-40">None.</p> : g.autonomous.items.map((it, i) => (
+      {autonomous.items.length === 0 ? <p className="text-xs opacity-40">None.</p> : autonomous.items.map((it, i) => (
         <TR key={i} l={<><Pill s={it.bucket} />{it.label}</>} r={hm(it.minutes)} />
       ))}
-      <TotalRow label="Autonomous subtotal" value={h(g.autonomous.hours)} />
+      <TotalRow label="Autonomous subtotal" value={h(autonomous.hours)} />
 
       {/* Grand total */}
       <div className="flex justify-between items-baseline py-2 mt-2" style={{ borderTop: "2px solid var(--rule)" }}>
@@ -158,40 +160,46 @@ function DayView({ day, recomp, running }: { day: AttentionDayResponse; recomp()
       </div>
       <Rule />
 
-      {/* Mess bill — engaged and interruption as negative rows with parameters */}
+      {/* Mess bill — each section null-guarded; absent ≠ zero */}
       <SH s="Mess bill" />
-      <TR l={<>Engaged <span className="font-mono text-[10px] opacity-40 ml-2">
-        ({day.engaged.events} events · {day.engaged.bursts} bursts · gap {day.engaged.gap_minutes} min · floor {day.engaged.floor_minutes} min)
-      </span></>} r={`− ${h(day.engaged.hours)}`} />
-      <TR l={<>Interruption <span className="font-mono text-[10px] opacity-40 ml-2">
-        (×{day.interruption.count} @ {day.interruption.rate_minutes} min)
-      </span></>} r={`− ${h(day.interruption.hours)}`} />
+      {day.engaged != null
+        ? <TR l={<>Engaged <span className="font-mono text-[10px] opacity-40 ml-2">({day.engaged.events} events · {day.engaged.bursts} bursts · gap {day.engaged.gap_minutes} min · floor {day.engaged.floor_minutes} min)</span></>} r={`− ${h(day.engaged.hours)}`} />
+        : <TR l="Engaged" r="—" dim />}
+      {day.interruption != null
+        ? <TR l={<>Interruption <span className="font-mono text-[10px] opacity-40 ml-2">(×{day.interruption.count} @ {day.interruption.rate_minutes} min)</span></>} r={`− ${h(day.interruption.hours)}`} />
+        : <TR l="Interruption" r="—" dim />}
       <Rule />
 
-      {/* Statistics — bordered grid */}
+      {/* Statistics — bordered grid; absent from API until Lane I ships stats route */}
       <SH s="Statistics" />
-      <div className="grid grid-cols-4 gap-px mt-2" style={{ background: "var(--rule)", border: "1px solid var(--rule)" }}>
-        <StatCell label="Sessions" value={String(day.stats.sessions)} />
-        <StatCell label="Turns" value={String(day.stats.turns)} />
-        <StatCell label="Bursts" value={String(day.engaged.bursts)} />
-        <StatCell label="Self-corrections" value={String(day.stats.self_corrections)} />
-        <StatCell label="Blocked" value={`${day.stats.blocked} — 0.00 h`} />
-        <StatCell label="Hard failures" value={String(day.stats.hard_failures)} />
-        <StatCell label="Return ratio" value={day.stats.return_ratio.toFixed(2)} />
-        <StatCell label="Artifacts" value={String(day.stats.autonomous_artifacts)} />
-      </div>
+      {day.stats == null
+        ? na("Statistics")
+        : <div className="grid grid-cols-4 gap-px mt-2" style={{ background: "var(--rule)", border: "1px solid var(--rule)" }}>
+            <StatCell label="Sessions" value={String(day.stats.sessions)} />
+            <StatCell label="Turns" value={String(day.stats.turns)} />
+            <StatCell label="Bursts" value={String(day.engaged?.bursts ?? 0)} />
+            <StatCell label="Self-corrections" value={String(day.stats.self_corrections)} />
+            <StatCell label="Blocked" value={`${day.stats.blocked} — 0.00 h`} />
+            <StatCell label="Hard failures" value={String(day.stats.hard_failures)} />
+            <StatCell label="Return ratio" value={day.stats.return_ratio.toFixed(2)} />
+            <StatCell label="Artifacts" value={String(day.stats.autonomous_artifacts)} />
+          </div>}
 
       {/* Rate card in force */}
       <SH s="Rate card in force" />
-      <TR l="Suppression" r={`${day.rates.suppression_minutes_per_item} min / item`} />
-      <TR l="Interruption" r={`${day.rates.interruption_minutes} min`} />
-      <TR l="Buckets" r={`S ${day.rates.bucket_minutes.S} · M ${day.rates.bucket_minutes.M} · L ${day.rates.bucket_minutes.L} · XL ${day.rates.bucket_minutes.XL} min`} />
+      {day.rates == null
+        ? na("Rate card")
+        : <>
+            <TR l="Suppression" r={`${day.rates.suppression_minutes_per_item} min / item`} />
+            <TR l="Interruption" r={`${day.rates.interruption_minutes} min`} />
+            <TR l="Buckets" r={`S ${day.rates.bucket_minutes.S} · M ${day.rates.bucket_minutes.M} · L ${day.rates.bucket_minutes.L} · XL ${day.rates.bucket_minutes.XL} min`} />
+          </>}
 
-      {/* Unrated action classes */}
-      {un.length > 0 && (<>
+      {/* Unrated action classes (pre-tagged by normaliser; always an array) */}
+      {day.unrated.length > 0 && (<>
         <SH s="Unrated action classes" />
         <p className="font-mono text-[10px] opacity-40 mb-2 uppercase tracking-[0.18em]">No rate established — contribute zero to NAR</p>
-        {un.map((r) => (
+        {day.unrated.map((r) => (
           <TR key={r.action_class} l={<span className="font-mono text-xs">{r.action_class}</span>}
             r={`×${r.count} — no rate established`} dim />
         ))}
@@ -345,7 +353,7 @@ export default function AttentionPage() {
         {tab === "day"
           ? dayQ.isLoading ? <p className="font-mono text-xs opacity-40">Loading…</p>
             : dayQ.error ? <p className="font-mono text-xs" style={{ color: "oklch(0.42 0.12 30)" }}>{String((dayQ.error as any)?.message ?? "Failed.")}</p>
-            : dayQ.data ? <DayView day={dayQ.data as AttentionDayResponse} recomp={handleRecompute} running={running} /> : null
+            : dayQ.data ? <DayView day={normalizeAttentionDay(dayQ.data)} recomp={handleRecompute} running={running} /> : null
           : statsQ.isLoading ? <p className="font-mono text-xs opacity-40">Loading…</p>
             : statsQ.error ? <p className="font-mono text-xs" style={{ color: "oklch(0.42 0.12 30)" }}>{String((statsQ.error as any)?.message ?? "Failed.")}</p>
             : statsQ.data ? <RangeView stats={statsQ.data as AttentionStatsResponse} /> : null}

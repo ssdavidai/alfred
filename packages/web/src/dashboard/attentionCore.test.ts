@@ -8,6 +8,7 @@ import {
   deriveUnratedRows, deriveInferredDisplay, deriveDisplacementGroups,
   isEmptyDay, formatHours, formatMinutes,
   deriveChartBars, deriveChartScale, deriveRangeAggregates,
+  normalizeAttentionDay,
   type AttentionDayResponse, type InferredItem, type SeriesPoint,
 } from "./attentionCore";
 
@@ -135,4 +136,35 @@ test("rangeAgg: mean excludes days without data", () => {
 test("rangeAgg: negative NAR becomes worst_day correctly", () => {
   const agg = deriveRangeAggregates([mkPt("a", 2, 5, 3), mkPt("b", -1, 1, 2)]);
   assert.equal(agg.worst_day?.date, "b"); assert.equal(agg.best_day?.date, "a");
+});
+
+// 8. normalizeAttentionDay — defensive normaliser (#584)
+
+// stats absent is the live production crash; other sections are defensive.
+test("normalizeAttentionDay: stats absent → null (not zero-filled)", () => {
+  const vm = normalizeAttentionDay({
+    date: "2026-08-14", nar_hours: 0.5,
+    displaced: { total_hours: 0.5, explicit: { hours: 0.5, items: [] }, inferred: { hours: 0, items: [] }, autonomous: { hours: 0, items: [] } },
+    engaged: { hours: 0.1, events: 2, bursts: 1, gap_minutes: 10, floor_minutes: 2 },
+    interruption: { hours: 0.05, count: 1, rate_minutes: 3 },
+    rates: { suppression_minutes_per_item: 0.5, bucket_minutes: { S: 5, M: 20, L: 60, XL: 120 }, interruption_minutes: 2 }, unrated: [],
+  });
+  assert.equal(vm.stats, null); assert.ok(vm.displaced !== null); assert.equal(vm.nar_hours, 0.5);
+});
+test("normalizeAttentionDay: every absent section → null or [], no throw", () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const min = normalizeAttentionDay(null as any);
+  assert.equal(min.displaced, null); assert.equal(min.engaged, null); assert.equal(min.interruption, null);
+  assert.equal(min.rates, null); assert.equal(min.stats, null); assert.deepEqual(min.unrated, []);
+});
+test("normalizeAttentionDay: displaced.inferred.items absent → []", () => {
+  const vm = normalizeAttentionDay({ date: "2026-08-14", nar_hours: 0,
+    displaced: { total_hours: 0, explicit: { hours: 0, items: [] }, inferred: { hours: 0 }, autonomous: { hours: 0, items: [] } },
+  });
+  assert.deepEqual(vm.displaced?.inferred.items, []);
+});
+test("normalizeAttentionDay: full response → no section null, values preserved", () => {
+  const vm = normalizeAttentionDay(E);
+  assert.equal(vm.date, E.date); assert.ok(vm.stats !== null); assert.equal(vm.stats?.sessions, 0);
+  assert.ok(vm.displaced !== null); assert.ok(vm.engaged !== null); assert.ok(vm.rates !== null);
 });
