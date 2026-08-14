@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import uuid
 from datetime import date, datetime, timezone
 from typing import Any
 
@@ -290,6 +291,7 @@ async def compute_nar_day(day_iso: str) -> dict[str, Any]:
             dedup_key = f"nar:session:{sess['id']}:{day_iso}"
 
             entry: dict[str, Any] = {
+                "id": str(uuid.uuid5(uuid.NAMESPACE_DNS, dedup_key)),
                 "dedup_key": dedup_key,
                 "occurred_at": occurred_at,
                 "action_class": "conversational",
@@ -299,7 +301,7 @@ async def compute_nar_day(day_iso: str) -> dict[str, Any]:
                 "session_ref": sess["id"],
                 "baseline_minutes": displaced,
                 "estimation_method": "model-estimate" if displaced is not None else None,
-                "acceptance": "inferred",
+                "acceptance": "unknown",
                 "acceptance_path": "inferred" if displaced is not None else None,
                 "acceptance_basis": bucket_info.get("reasoning", ""),
                 "displaced_minutes": displaced,
@@ -355,6 +357,7 @@ async def compute_nar_day(day_iso: str) -> dict[str, Any]:
             basis = f"principal decided intent={intent!r}; no established rate"
 
         entry = {
+            "id": str(uuid.uuid5(uuid.NAMESPACE_DNS, dedup_key)),
             "dedup_key": dedup_key,
             "occurred_at": ts_str,
             "action_class": "desk_decision",
@@ -415,6 +418,7 @@ async def compute_nar_day(day_iso: str) -> dict[str, Any]:
             has_artifact = binfo.get("has_artifact", False)
 
         entry = {
+            "id": str(uuid.uuid5(uuid.NAMESPACE_DNS, dedup_key)),
             "dedup_key": dedup_key,
             "occurred_at": ts_str,
             "action_class": "chore_run",
@@ -424,7 +428,7 @@ async def compute_nar_day(day_iso: str) -> dict[str, Any]:
             "session_ref": None,
             "baseline_minutes": cdisp,
             "estimation_method": cmethod,
-            "acceptance": "inferred",
+            "acceptance": "unknown",
             "acceptance_path": "inferred",
             "acceptance_basis": cbasis,
             "displaced_minutes": cdisp,
