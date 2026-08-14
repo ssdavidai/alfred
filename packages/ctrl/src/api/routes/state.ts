@@ -758,18 +758,40 @@ export function registerStateRoutes(): void {
   });
 
   // nar_entry — per-action displacement atom for NAR (#563, migration 0020).
-  // POST /api/v1/state/nar-entries { entries:[...] } — upserts on dedup_key.
-  // CHECK constraints are validated client-side so violations return 400, not 500.
+  // POST /api/v1/state/nar-entries { mode?, date?, entries:[...] }
+  //   mode="upsert" (default) — upserts on dedup_key; existing callers unaffected.
+  //   mode="replace" — in one transaction: delete rows for `date` whose dedup_key
+  //     is NOT in the submitted set, then upsert the submitted entries (#584).
+  //     `date` (YYYY-MM-DD) is required for replace. Empty entries clears the day.
+  // CHECK constraints validated client-side so violations return 400, not 500.
   addRoute("POST", "/api/v1/state/nar-entries", async ({ res, body }) => {
     const b = asObj(body);
+    const rawMode = typeof b.mode === "string" ? b.mode : "upsert";
+    if (rawMode !== "upsert" && rawMode !== "replace") {
+      throw new ValidationError("mode must be 'upsert' or 'replace'");
+    }
+    const mode = rawMode as "upsert" | "replace";
+    const date = optStr(b, "date");
+    if (mode === "replace") {
+      if (!date) throw new ValidationError("date (YYYY-MM-DD) is required when mode='replace'");
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new ValidationError("date must be YYYY-MM-DD");
+    }
     const entries = b.entries;
-    if (!Array.isArray(entries) || entries.length === 0) {
+    // replace allows empty entries (clears the day); upsert requires non-empty.
+    if (!Array.isArray(entries) || (mode === "upsert" && entries.length === 0)) {
       throw new ValidationError("entries must be a non-empty array");
     }
     const VA = new Set(["accepted", "rejected", "unknown"]);
     const VAP = new Set(["explicit", "inferred"]);
     const VEM = new Set(["standard-time","timed-sample","observed-history","model-estimate","client-estimate"]);
-    let upserted = 0, updated = 0;
+    // Validate all entries before any writes — prevents partial state on replace.
+    type Ent = { id: string; dedup_key: string; occurred_at: string; action_class: string;
+                 summary: string; evidence_kind: string; evidence_ref: string;
+                 session_ref: string|null; baseline_minutes: number|null;
+                 estimation_method: string|null; acceptance: string;
+                 acceptance_path: string|null; acceptance_basis: string|null;
+                 displaced_minutes: number|null; notes: string|null };
+    const parsed: Ent[] = [];
     for (const raw of entries) {
       const e = asObj(raw as unknown);
       const id = reqStr(e, "id"), dedup_key = reqStr(e, "dedup_key");
@@ -789,27 +811,56 @@ export function registerStateRoutes(): void {
         throw new ValidationError(`estimation_method must be one of: ${[...VEM].join(", ")}`);
       if (displaced_minutes !== null && estimation_method === null)
         throw new ValidationError("displaced_minutes requires estimation_method — no method, no claim");
-      if (db().prepare("SELECT id FROM nar_entry WHERE dedup_key = ?").get(dedup_key)) {
-        db().prepare(
-          `UPDATE nar_entry SET occurred_at=?,action_class=?,summary=?,evidence_kind=?,evidence_ref=?,
-           session_ref=?,baseline_minutes=?,estimation_method=?,acceptance=?,acceptance_path=?,
-           acceptance_basis=?,displaced_minutes=?,notes=? WHERE dedup_key=?`,
-        ).run(occurred_at,action_class,summary,evidence_kind,evidence_ref,
-              session_ref,baseline_minutes,estimation_method,acceptance,acceptance_path,
-              acceptance_basis,displaced_minutes,notes,dedup_key);
-        updated++;
-      } else {
-        db().prepare(
-          `INSERT INTO nar_entry(id,dedup_key,occurred_at,action_class,summary,evidence_kind,evidence_ref,
-           session_ref,baseline_minutes,estimation_method,acceptance,acceptance_path,acceptance_basis,
-           displaced_minutes,notes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-        ).run(id,dedup_key,occurred_at,action_class,summary,evidence_kind,evidence_ref,
-              session_ref,baseline_minutes,estimation_method,acceptance,acceptance_path,
-              acceptance_basis,displaced_minutes,notes);
-        upserted++;
-      }
+      parsed.push({ id, dedup_key, occurred_at, action_class, summary, evidence_kind, evidence_ref,
+                    session_ref, baseline_minutes, estimation_method, acceptance, acceptance_path,
+                    acceptance_basis, displaced_minutes, notes });
     }
-    sendJson(res, 201, { ok: true, upserted, updated });
+    const writeEntries = (list: Ent[]): { upserted: number; updated: number } => {
+      let upserted = 0, updated = 0;
+      for (const v of list) {
+        if (db().prepare("SELECT id FROM nar_entry WHERE dedup_key = ?").get(v.dedup_key)) {
+          db().prepare(
+            `UPDATE nar_entry SET occurred_at=?,action_class=?,summary=?,evidence_kind=?,evidence_ref=?,
+             session_ref=?,baseline_minutes=?,estimation_method=?,acceptance=?,acceptance_path=?,
+             acceptance_basis=?,displaced_minutes=?,notes=? WHERE dedup_key=?`,
+          ).run(v.occurred_at,v.action_class,v.summary,v.evidence_kind,v.evidence_ref,
+                v.session_ref,v.baseline_minutes,v.estimation_method,v.acceptance,v.acceptance_path,
+                v.acceptance_basis,v.displaced_minutes,v.notes,v.dedup_key);
+          updated++;
+        } else {
+          db().prepare(
+            `INSERT INTO nar_entry(id,dedup_key,occurred_at,action_class,summary,evidence_kind,evidence_ref,
+             session_ref,baseline_minutes,estimation_method,acceptance,acceptance_path,acceptance_basis,
+             displaced_minutes,notes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          ).run(v.id,v.dedup_key,v.occurred_at,v.action_class,v.summary,v.evidence_kind,v.evidence_ref,
+                v.session_ref,v.baseline_minutes,v.estimation_method,v.acceptance,v.acceptance_path,
+                v.acceptance_basis,v.displaced_minutes,v.notes);
+          upserted++;
+        }
+      }
+      return { upserted, updated };
+    };
+    let upserted = 0, updated = 0, deleted = 0;
+    if (mode === "replace") {
+      const r = runInTx(db(), () => {
+        const keys = parsed.map(v => v.dedup_key);
+        let del: number;
+        if (keys.length === 0) {
+          del = db().prepare(`DELETE FROM nar_entry WHERE date(occurred_at) = ?`).run(date!).changes;
+        } else {
+          const ph = keys.map(() => "?").join(",");
+          del = db().prepare(
+            `DELETE FROM nar_entry WHERE date(occurred_at) = ? AND dedup_key NOT IN (${ph})`,
+          ).run(date!, ...keys).changes;
+        }
+        const w = writeEntries(parsed);
+        return { del, ins: w.upserted, upd: w.updated };
+      });
+      deleted = r.del; upserted = r.ins; updated = r.upd;
+    } else {
+      ({ upserted, updated } = writeEntries(parsed));
+    }
+    sendJson(res, 201, { ok: true, upserted, updated, deleted });
   });
 }
 

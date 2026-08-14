@@ -206,3 +206,105 @@ describe("GET /api/v1/attention/statement", () => {
     assert.ok(p.totals, "totals must be present");
   });
 });
+
+// mode='replace' — atomic day-replace (#584)
+describe("POST /api/v1/state/nar-entries — mode='replace'", () => {
+  before(() => db);
+  beforeEach(() => db.prepare("DELETE FROM nar_entry").run());
+
+  it("replace removes rows for that date absent from the payload", async () => {
+    await postEntries({ entries: [
+      entry({ dedup_key: "keep",  occurred_at: "2026-07-15T09:00:00Z" }),
+      entry({ dedup_key: "stale", occurred_at: "2026-07-15T10:00:00Z" }),
+    ]});
+    const { status, p } = await postEntries({
+      mode: "replace",
+      date: "2026-07-15",
+      entries: [entry({ dedup_key: "keep", occurred_at: "2026-07-15T09:00:00Z" })],
+    });
+    assert.strictEqual(status, 201);
+    assert.strictEqual(p.deleted, 1, "stale row must be deleted");
+    assert.strictEqual(p.updated, 1, "'keep' row already exists → updated");
+    assert.strictEqual(p.upserted, 0);
+    const rows = db.prepare("SELECT dedup_key FROM nar_entry WHERE date(occurred_at)='2026-07-15'").all() as any[];
+    assert.deepStrictEqual(rows.map((r: any) => r.dedup_key), ["keep"]);
+  });
+
+  it("replace leaves rows for OTHER dates untouched", async () => {
+    await postEntries({ entries: [
+      entry({ dedup_key: "day-a-1", occurred_at: "2026-07-14T09:00:00Z" }),
+      entry({ dedup_key: "day-b-1", occurred_at: "2026-07-15T09:00:00Z" }),
+      entry({ dedup_key: "day-b-2", occurred_at: "2026-07-15T10:00:00Z" }),
+    ]});
+    const { status, p } = await postEntries({
+      mode: "replace",
+      date: "2026-07-15",
+      entries: [entry({ dedup_key: "day-b-new", occurred_at: "2026-07-15T11:00:00Z" })],
+    });
+    assert.strictEqual(status, 201);
+    assert.strictEqual(p.deleted, 2, "both 2026-07-15 rows absent from payload deleted");
+    const day14 = db.prepare("SELECT COUNT(*) AS n FROM nar_entry WHERE date(occurred_at)='2026-07-14'").get() as any;
+    assert.strictEqual(day14.n, 1, "row on other date must survive");
+    const day15 = db.prepare("SELECT dedup_key FROM nar_entry WHERE date(occurred_at)='2026-07-15'").all() as any[];
+    assert.deepStrictEqual(day15.map((r: any) => r.dedup_key), ["day-b-new"]);
+  });
+
+  it("replace with empty entries clears exactly that day, nothing else", async () => {
+    await postEntries({ entries: [
+      entry({ dedup_key: "target",   occurred_at: "2026-07-15T09:00:00Z" }),
+      entry({ dedup_key: "survivor", occurred_at: "2026-07-14T09:00:00Z" }),
+    ]});
+    const { status, p } = await postEntries({ mode: "replace", date: "2026-07-15", entries: [] });
+    assert.strictEqual(status, 201);
+    assert.strictEqual(p.deleted, 1, "target row must be deleted");
+    assert.deepStrictEqual({ upserted: p.upserted, updated: p.updated }, { upserted: 0, updated: 0 });
+    const total = db.prepare("SELECT COUNT(*) AS n FROM nar_entry").get() as any;
+    assert.strictEqual(total.n, 1, "only the survivor on other date remains");
+    const rem = db.prepare("SELECT dedup_key FROM nar_entry").all() as any[];
+    assert.strictEqual(rem[0].dedup_key, "survivor");
+  });
+
+  it("replace without date returns 400", async () => {
+    const { status, p } = await postEntries({
+      mode: "replace",
+      entries: [entry({ occurred_at: "2026-07-15T09:00:00Z" })],
+    });
+    assert.strictEqual(status, 400);
+    assert.ok(String(p.error).toLowerCase().includes("date"), "error must mention 'date'");
+  });
+
+  it("upsert mode (default) does not delete any rows", async () => {
+    await postEntries({ entries: [entry({ dedup_key: "existing", occurred_at: "2026-07-15T09:00:00Z" })] });
+    const { status, p } = await postEntries({
+      entries: [entry({ dedup_key: "new-entry", occurred_at: "2026-07-15T10:00:00Z" })],
+    });
+    assert.strictEqual(status, 201);
+    assert.strictEqual(p.deleted, 0, "upsert must never delete rows");
+    assert.strictEqual((db.prepare("SELECT COUNT(*) AS n FROM nar_entry").get() as any).n, 2);
+  });
+
+  it("response counts match what actually changed", async () => {
+    await postEntries({ entries: [
+      entry({ dedup_key: "r1", occurred_at: "2026-07-15T08:00:00Z" }),
+      entry({ dedup_key: "r2", occurred_at: "2026-07-15T09:00:00Z" }),
+      entry({ dedup_key: "r3", occurred_at: "2026-07-15T10:00:00Z" }),
+      entry({ dedup_key: "other", occurred_at: "2026-07-14T09:00:00Z" }),
+    ]});
+    // Replace 2026-07-15: r1 (update), r4 (insert); r2+r3 should be deleted.
+    const { p } = await postEntries({
+      mode: "replace",
+      date: "2026-07-15",
+      entries: [
+        entry({ dedup_key: "r1", occurred_at: "2026-07-15T08:00:00Z" }),
+        entry({ dedup_key: "r4", occurred_at: "2026-07-15T11:00:00Z" }),
+      ],
+    });
+    assert.strictEqual(p.deleted, 2, "r2 and r3 deleted");
+    assert.strictEqual(p.updated, 1, "r1 updated (pre-existing)");
+    assert.strictEqual(p.upserted, 1, "r4 inserted (new)");
+    const rows = db.prepare(
+      "SELECT dedup_key FROM nar_entry WHERE date(occurred_at)='2026-07-15' ORDER BY dedup_key",
+    ).all() as any[];
+    assert.deepStrictEqual(rows.map((r: any) => r.dedup_key), ["r1", "r4"]);
+  });
+});
