@@ -447,6 +447,11 @@ export function registerNotificationRoutes(): void {
     if (typeof b.source_headline === "string")
       forwardBody.source_headline = b.source_headline;
     if (typeof b.summary === "string") forwardBody.summary = b.summary;
+    // solicited: 0 = Alfred initiated, 1 = reply to a principal turn.
+    // Only 0|1 forward; anything else stays absent so the row is NULL
+    // (unknown), never coerced to 0 — a wrong 0 inflates the NAR
+    // interruption term. Missed when #579 added the column (#580).
+    if (b.solicited === 0 || b.solicited === 1) forwardBody.solicited = b.solicited;
 
     let resp: Response;
     try {
