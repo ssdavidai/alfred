@@ -147,6 +147,53 @@ describe("GET /api/v1/attention/statement", () => {
     assert.strictEqual(p.rates.suppression_minutes_per_item, sup.rate_minutes);
   });
 
+  it("empty day → stats block present with all-zero values, never undefined", async () => {
+    const { status, p } = await getStatement("date=2026-08-02");
+    assert.strictEqual(status, 200);
+    assert.ok(p.stats !== undefined, "stats must be present even for an empty day");
+    assert.strictEqual(p.stats.sessions, 0);
+    assert.strictEqual(p.stats.turns, 0);
+    assert.strictEqual(p.stats.self_corrections, 0);
+    assert.strictEqual(p.stats.blocked, 0);
+    assert.strictEqual(p.stats.hard_failures, 0);
+    assert.strictEqual(p.stats.return_ratio, 0);
+    assert.strictEqual(p.stats.autonomous_artifacts, 0);
+  });
+
+  it("day with entries → stats block has every required key with non-negative integers", async () => {
+    await postEntries({ entries: [
+      entry({ dedup_key: "e1", session_ref: "sess-a", occurred_at: "2026-08-14T08:00:00Z" }),
+      entry({ dedup_key: "e2", session_ref: "sess-a", occurred_at: "2026-08-14T08:01:00Z" }),
+      entry({ dedup_key: "e3", session_ref: "sess-b", occurred_at: "2026-08-14T09:00:00Z",
+               acceptance: "rejected" }),
+    ]});
+    const { status, p } = await getStatement("date=2026-08-14");
+    assert.strictEqual(status, 200);
+    const s = p.stats;
+    assert.ok(s !== undefined, "stats must be present");
+    // Every key present
+    for (const k of ["sessions","turns","self_corrections","blocked","hard_failures",
+                      "return_ratio","autonomous_artifacts"]) {
+      assert.ok(k in s, `stats.${k} must be present`);
+    }
+    // Derivable values
+    assert.strictEqual(s.sessions, 2, "two distinct session_refs");
+    assert.strictEqual(s.blocked, 1, "one rejected entry");
+    assert.ok(Number.isFinite(s.return_ratio), "return_ratio must be finite");
+    assert.ok(s.return_ratio >= 0, "return_ratio must be non-negative");
+  });
+
+  it("return_ratio is 0 (not NaN/Infinity) when engaged and interruption are both zero", async () => {
+    // Insert a single entry on a date with no Hermes sessions and no audit decisions.
+    await postEntries({ entries: [
+      entry({ dedup_key: "rr-zero", occurred_at: "2026-08-03T10:00:00Z",
+               displaced_minutes: 5, estimation_method: "standard-time" }),
+    ]});
+    const { p } = await getStatement("date=2026-08-03");
+    assert.strictEqual(p.stats.return_ratio, 0, "return_ratio must be 0 when denominator is zero");
+    assert.ok(Number.isFinite(p.stats.return_ratio), "return_ratio must be finite");
+  });
+
   it("range query returns one object per day with totals", async () => {
     const m = matchRoute("GET", "/api/v1/attention/statement");
     assert.ok(m);

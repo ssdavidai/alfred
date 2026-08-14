@@ -879,9 +879,11 @@ export function registerAttentionRoutes(): void {
     const inferredItems: object[] = [];
     const autonomousItems: object[] = [];
     const unratedCounts = new Map<string, number>();
+    let selfCorrections = 0;
 
     for (const row of entries) {
       const notesData = row.notes ? (() => { try { return JSON.parse(row.notes!); } catch { return {}; } })() : {};
+      if (notesData.outcome === "corrective") selfCorrections++;
       const mins = row.displaced_minutes ?? 0;
 
       if (row.evidence_kind === "session" && row.acceptance_path === "inferred") {
@@ -967,6 +969,20 @@ export function registerAttentionRoutes(): void {
     const displacedHours = explicitHours + inferredHours + autonomousHours;
     const narHours       = displacedHours - engagedHours - interruptionHours;
 
+    // Stats block — quality counters derived from the same day's data.
+    // hard_failures: no dedicated field in nar_entry schema; always 0 until a
+    // source signal is introduced. self_corrections: requires notes.outcome="corrective"
+    // written by the recap workflow; zero when the field is absent.
+    const statsSessions   = new Set(
+      entries.map((e) => e.session_ref).filter((s): s is string => s !== null),
+    ).size;
+    const statsBlocked    = entries.filter((e) => e.acceptance === "rejected").length;
+    const statsArtifacts  = autonomousItems.filter(
+      (i) => ((i as any).minutes ?? 0) > suppressionRate,
+    ).length;
+    const statsDenom      = engagedHours + interruptionHours;
+    const statsRatio      = statsDenom === 0 ? 0 : Math.round((displacedHours / statsDenom) * 1000) / 1000;
+
     return {
       date: dateStr,
       nar_hours: Math.round(narHours * 1000) / 1000,
@@ -991,6 +1007,15 @@ export function registerAttentionRoutes(): void {
         interruption_minutes: INTERRUPTION_RATE_MINUTES,
       },
       unrated: [...unratedCounts.entries()].map(([action_class, count]) => ({ action_class, count })),
+      stats: {
+        sessions: statsSessions,
+        turns: burstDates.length,
+        self_corrections: selfCorrections,
+        blocked: statsBlocked,
+        hard_failures: 0,
+        return_ratio: statsRatio,
+        autonomous_artifacts: statsArtifacts,
+      },
     };
   }
 
