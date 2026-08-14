@@ -309,7 +309,10 @@ const mkInferred = (label: string, minutes: number, outcome?: string): InferredD
 };
 
 test("deriveLedger: group names are CONVERSATIONAL / EXPLICIT / AUTONOMOUS", () => {
-  const vm = deriveLedger(E.displaced);
+  // E is a RAW response; deriveLedger takes the normalised view model, so go
+  // through the real normaliser rather than casting — that is the actual path
+  // the page uses, and casting here is what let the shape drift in the first place.
+  const vm = deriveLedger(normalizeAttentionDay(E).displaced);
   const names = vm.groups.map(g => g.name);
   assert.deepEqual(names, ["CONVERSATIONAL", "EXPLICIT", "AUTONOMOUS"]);
 });
