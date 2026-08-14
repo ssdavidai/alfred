@@ -15,6 +15,12 @@ import {
 } from "./attentionCore";
 
 const now = () => new Date().toISOString().slice(0, 10);
+/** Read an ISO date from the query string; fall back when absent or malformed. */
+const dateParam = (key: string, fallback: string): string => {
+  if (typeof window === "undefined") return fallback;
+  const v = new URLSearchParams(window.location.search).get(key);
+  return v !== null && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : fallback;
+};
 const sevenAgo = () => { const d = new Date(); d.setDate(d.getDate() - 6); return d.toISOString().slice(0, 10); };
 
 // ── Shared primitives ─────────────────────────────────────────────────────────
@@ -180,8 +186,8 @@ function DayView({ day, recomp, running }: { day: AttentionDayViewModel; recomp(
       {/* ── 02 WHERE IT WENT ───────────────────────────────────────────── */}
       <SL n="02" title="WHERE IT WENT" />
       {/* Column headers — bar track column header is blank */}
-      <div className="grid font-mono text-[11px] uppercase tracking-[0.18em] pb-1 mb-0"
-        style={{ gridTemplateColumns: "1fr minmax(160px,300px) repeat(4,78px)", color: "var(--marginalia)", borderBottom: "1px solid var(--rule)", opacity: 0.7 }}>
+      <div className="grid font-mono text-[11px] uppercase tracking-[0.1em] pb-1 mb-0"
+        style={{ gridTemplateColumns: "1fr minmax(160px,300px) repeat(4,86px)", columnGap: 10, color: "var(--marginalia)", borderBottom: "1px solid var(--rule)", opacity: 0.7 }}>
         <span />
         <span />
         {(["DISPLACED","ENGAGED","INTERRUPT","NET"] as const).map(c => (
@@ -197,7 +203,7 @@ function DayView({ day, recomp, running }: { day: AttentionDayViewModel; recomp(
         const bucket = day.allocation?.[key] ?? null;
         return (
           <div key={key} className="grid items-center"
-            style={{ gridTemplateColumns: "1fr minmax(160px,300px) repeat(4,78px)", borderBottom: "1px solid var(--rule)", opacity: 0.75, minHeight: 21 }}>
+            style={{ gridTemplateColumns: "1fr minmax(160px,300px) repeat(4,86px)", columnGap: 10, borderBottom: "1px solid var(--rule)", opacity: 0.75, minHeight: 21 }}>
             <span className="font-sans italic" style={{ fontSize: 13 }}>{label}</span>
             {/* bar track — faint container, brass fill proportional to displaced */}
             <div style={{ height: 10, background: "var(--rule)", opacity: 0.18, borderRadius: 1, position: "relative", overflow: "hidden" }}>
@@ -229,8 +235,8 @@ function DayView({ day, recomp, running }: { day: AttentionDayViewModel; recomp(
         {LEDGER_PER_ITEM_NOTE}
       </p>
       {/* Column headers */}
-      <div className="grid font-mono text-[11px] uppercase tracking-[0.18em] pb-1"
-        style={{ gridTemplateColumns: "1fr repeat(3,68px)", color: "var(--marginalia)", borderBottom: "1px solid var(--rule)" }}>
+      <div className="grid font-mono text-[11px] uppercase tracking-[0.1em] pb-1"
+        style={{ gridTemplateColumns: "1fr repeat(3,86px)", columnGap: 10, color: "var(--marginalia)", borderBottom: "1px solid var(--rule)" }}>
         <span>WORK</span>
         {(["DISPLACED","ENGAGED","NAR"] as const).map(c => (
           <span key={c} className="text-right">{c}</span>
@@ -240,7 +246,7 @@ function DayView({ day, recomp, running }: { day: AttentionDayViewModel; recomp(
       {ledger.groups.map((grp) => (
         <div key={grp.name}>
           {/* Group header — brass ~8px mono caps; name + subtotals on same line */}
-          <div className="grid items-baseline" style={{ gridTemplateColumns: "1fr repeat(3,68px)", minHeight: 24, paddingTop: 4, paddingBottom: 4 }}>
+          <div className="grid items-baseline" style={{ gridTemplateColumns: "1fr repeat(3,86px)", columnGap: 10, minHeight: 24, paddingTop: 4, paddingBottom: 4 }}>
             <span className="font-mono text-[11px] uppercase tracking-[0.22em]" style={{ color: "var(--brass)" }}>{grp.name}</span>
             <span className="font-mono text-[11px] tabular-nums text-right" style={{ color: "var(--brass)" }}>{formatWholeMinutes(grp.subtotal_displaced_min)}</span>
             <span className="font-mono text-[11px] tabular-nums text-right" style={{ color: "var(--brass)" }}>{fmtM(grp.subtotal_engaged_min)}</span>
@@ -250,7 +256,7 @@ function DayView({ day, recomp, running }: { day: AttentionDayViewModel; recomp(
           {grp.rows.length === 0
             ? <p className="font-mono text-[11px] opacity-35 pl-1 pb-1">None.</p>
             : grp.rows.map((row, i) => (
-                <div key={i} className="grid items-baseline" style={{ gridTemplateColumns: "1fr repeat(3,68px)", minHeight: 24, paddingTop: 2, paddingBottom: 2 }}>
+                <div key={i} className="grid items-baseline" style={{ gridTemplateColumns: "1fr repeat(3,86px)", columnGap: 10, minHeight: 24, paddingTop: 2, paddingBottom: 2 }}>
                   <span className="font-sans" style={{ fontSize: 14 }}>
                     {row.label}
                     {(row.count ?? 1) > 1
@@ -265,7 +271,7 @@ function DayView({ day, recomp, running }: { day: AttentionDayViewModel; recomp(
         </div>
       ))}
       {/* TOTAL row — brass, rule above */}
-      <div className="grid items-baseline mt-0.5" style={{ gridTemplateColumns: "1fr repeat(3,68px)", borderTop: "2px solid var(--rule)", minHeight: 24, paddingTop: 4, paddingBottom: 4 }}>
+      <div className="grid items-baseline mt-0.5" style={{ gridTemplateColumns: "1fr repeat(3,86px)", columnGap: 10, borderTop: "2px solid var(--rule)", minHeight: 24, paddingTop: 4, paddingBottom: 4 }}>
         <span className="font-mono text-[11px] uppercase tracking-[0.22em]" style={{ color: "var(--brass)" }}>TOTAL</span>
         <span className="font-mono text-[11px] tabular-nums text-right" style={{ color: "var(--brass)" }}>{formatWholeMinutes(ledger.total_displaced_min)}</span>
         <span className="font-mono text-[11px] tabular-nums text-right" style={{ color: "var(--brass)" }}>{fmtM(ledger.total_engaged_min)}</span>
@@ -395,10 +401,11 @@ function RangeView({ stats }: { stats: AttentionStatsResponse }) {
 // ── Page shell ────────────────────────────────────────────────────────────────
 
 export default function AttentionPage() {
-  const [tab, setTab] = useState<"day" | "range">("day");
-  const [date, setDate] = useState(now());
-  const [from, setFrom] = useState(sevenAgo());
-  const [to, setTo] = useState(now());
+  const [tab, setTab] = useState<"day" | "range">(
+    dateParam("from", "") !== "" ? "range" : "day");
+  const [date, setDate] = useState(dateParam("date", now()));
+  const [from, setFrom] = useState(dateParam("from", sevenAgo()));
+  const [to, setTo] = useState(dateParam("to", now()));
   const [running, setRunning] = useState(false);
   const dayQ = useQuery(getAttentionStatement, { date }, { enabled: tab === "day" });
   const statsQ = useQuery(getAttentionStats, { from, to }, { enabled: tab === "range" });
