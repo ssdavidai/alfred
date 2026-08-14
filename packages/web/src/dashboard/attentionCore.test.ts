@@ -11,7 +11,7 @@ import {
   normalizeAttentionDay, formatScaleSignal, formatItemLabel,
   formatHeaderDate, formatWholeMinutes,
   collapseAutonomousRows, deriveLedger, LEDGER_COL_NA,
-  deriveBarGeometry,
+  deriveBarGeometry, deriveAllocationBarWidths,
   type AttentionDayResponse, type InferredItem, type InferredDisplayItem, type SeriesPoint, type AutonomousItem,
 } from "./attentionCore";
 
@@ -352,11 +352,12 @@ test("deriveLedger: autonomous rows with same label are collapsed (count > 1)", 
   assert.equal(autoGroup.rows[0].count, 3);
 });
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-test("deriveLedger: null displaced → all groups empty, total=0", () => {
+test("deriveLedger: null displaced → all groups empty, total=0, engaged null", () => {
   const vm = deriveLedger(null as any);
   assert.equal(vm.total_displaced_min, 0);
   for (const g of vm.groups) assert.equal(g.rows.length, 0);
-  assert.equal(vm.engaged, LEDGER_COL_NA);
+  assert.equal(vm.total_engaged_min, null);  // no measured rows → null, never "—"
+  assert.equal(LEDGER_COL_NA, "—");          // sentinel still exported for display layer
 });
 
 // 15. deriveBarGeometry
@@ -405,6 +406,72 @@ test("deriveBarGeometry: negative NAR (mess > displaced) produces non-negative g
   // waterfall invariants still hold with clamped net
   assert.ok(Math.abs((bg.mess.y_offset_pct + bg.mess.height_pct) - bg.displaced.height_pct) < 0.0001);
   assert.ok(Math.abs((bg.net.height_pct    + bg.mess.height_pct) - bg.displaced.height_pct) < 0.0001);
+});
+
+// 16. Ledger engaged/nar columns — null semantics (#584 allocation)
+
+const mkDisp = (items: InferredDisplayItem[]) => ({
+  total_hours: 0, inferred: { hours: 0, items }, explicit: { hours: 0, items: [] }, autonomous: { hours: 0, items: [] },
+});
+const mkIdItem = (label: string, disp: number, eng: number | null, nar: number | null): InferredDisplayItem => ({
+  label, bucket: "M", claimed_minutes: disp, display_minutes: disp, evidence_kind: "session", evidence_ref: "s",
+  outcome: "delivered", is_blocked: false, blocked_reason: null, engaged_minutes: eng, nar_minutes: nar,
+});
+
+test("ledger: item with engaged_minutes null → engaged_min and nar_min are null (not zero)", () => {
+  const vm = deriveLedger(mkDisp([mkIdItem("x", 30, null, null)]));
+  const row = vm.groups.find(g => g.name === "CONVERSATIONAL")!.rows[0];
+  assert.equal(row.engaged_min, null); assert.equal(row.nar_min, null);
+});
+
+test("ledger: all-null group yields null subtotal, never 0", () => {
+  const vm = deriveLedger(mkDisp([mkIdItem("a", 20, null, null), mkIdItem("b", 10, null, null)]));
+  const conv = vm.groups.find(g => g.name === "CONVERSATIONAL")!;
+  assert.equal(conv.subtotal_engaged_min, null); assert.equal(conv.subtotal_nar_min, null);
+  assert.equal(vm.total_engaged_min, null);
+});
+
+test("ledger: mixed group sums only measured rows, skips nulls", () => {
+  const vm = deriveLedger(mkDisp([
+    mkIdItem("a", 60, 15, 45), mkIdItem("b", 20, null, null), mkIdItem("c", 90, 25, 65),
+  ]));
+  const conv = vm.groups.find(g => g.name === "CONVERSATIONAL")!;
+  assert.equal(conv.subtotal_engaged_min, 40); assert.equal(conv.subtotal_nar_min, 110);
+});
+
+// 17. Allocation rows — four figures + bar widths (#584 allocation)
+
+const mkAlloc = (wd: number, ld: number, ud: number, ui: number) => ({
+  work:        { displaced_hours: wd, engaged_hours: 0, interruption_hours: 0,  nar_hours: wd },
+  life:        { displaced_hours: ld, engaged_hours: 0, interruption_hours: 0,  nar_hours: ld },
+  unallocated: { displaced_hours: ud, engaged_hours: 0, interruption_hours: ui, nar_hours: ud - ui },
+});
+
+test("allocation: interruption_hours is non-zero only in unallocated; work and life carry zero", () => {
+  const vm = normalizeAttentionDay({ ...E, allocation: mkAlloc(2, 1, 0.5, 0.1) });
+  assert.equal(vm.allocation!.work.interruption_hours, 0);
+  assert.equal(vm.allocation!.life.interruption_hours, 0);
+  assert.ok(vm.allocation!.unallocated.interruption_hours > 0);
+  assert.equal(vm.allocation!.work.displaced_hours, 2);
+});
+
+test("allocation bar widths: proportional to displaced, largest row gets 100%", () => {
+  const w = deriveAllocationBarWidths(mkAlloc(2, 4, 1, 0));
+  assert.equal(w.life, 100); assert.ok(Math.abs(w.work - 50) < 0.01); assert.ok(Math.abs(w.unallocated - 25) < 0.01);
+});
+
+test("allocation bar widths: all-zero → all widths zero (empty tracks still drawn)", () => {
+  const w = deriveAllocationBarWidths(mkAlloc(0, 0, 0, 0));
+  assert.ok(w.work === 0 && w.life === 0 && w.unallocated === 0);
+});
+
+test("reconciliation: difference_hours is non-zero when the two engaged measures disagree", () => {
+  const vm = normalizeAttentionDay({ ...E, allocation_reconciliation:
+    { attributed_engaged_hours: 2.45, day_engaged_hours: 3.12, difference_hours: 0.67 } });
+  assert.ok(vm.allocation_reconciliation !== null);
+  assert.ok(Math.abs(vm.allocation_reconciliation!.difference_hours) > 0);
+  const r = vm.allocation_reconciliation!;
+  assert.ok(Math.abs(r.day_engaged_hours - r.attributed_engaged_hours - r.difference_hours) < 0.001);
 });
 
 // Regression: deriveLedger consumed the RAW response shape while the component

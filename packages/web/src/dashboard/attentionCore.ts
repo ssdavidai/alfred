@@ -6,9 +6,13 @@
 //   4. empty day is identifiable without inspecting items
 
 export interface ExplicitItem { label: string; count: number; rate_minutes: number; minutes: number }
-export interface InferredItem { label: string; bucket: string; minutes: number; turns?: number | null; tools?: number | null; evidence_kind: string; evidence_ref: string; outcome?: string | null }
-export interface AutonomousItem { label: string; bucket: string; minutes: number; evidence_kind: string; evidence_ref: string }
+export interface InferredItem { label: string; bucket: string; minutes: number; turns?: number | null; tools?: number | null; evidence_kind: string; evidence_ref: string; outcome?: string | null; engaged_minutes?: number | null; nar_minutes?: number | null }
+export interface AutonomousItem { label: string; bucket: string; minutes: number; evidence_kind: string; evidence_ref: string; engaged_minutes?: number | null; nar_minutes?: number | null }
 export interface UnratedEntry { action_class: string; count: number }
+
+export interface AllocationBucket { displaced_hours: number; engaged_hours: number; interruption_hours: number; nar_hours: number }
+export interface AllocationBlock { work: AllocationBucket; life: AllocationBucket; unallocated: AllocationBucket }
+export interface AllocationReconciliation { attributed_engaged_hours: number; day_engaged_hours: number; difference_hours: number }
 
 export interface AttentionDayResponse {
   date: string; nar_hours: number;
@@ -18,6 +22,8 @@ export interface AttentionDayResponse {
   stats: { sessions: number; turns: number; self_corrections: number; blocked: number; hard_failures: number; return_ratio: number; autonomous_artifacts: number };
   rates: { suppression_minutes_per_item: number; bucket_minutes: { S: number; M: number; L: number; XL: number }; interruption_minutes: number };
   unrated: UnratedEntry[];
+  allocation?: AllocationBlock | null;
+  allocation_reconciliation?: AllocationReconciliation | null;
 }
 
 export interface SeriesPoint { date: string; nar_hours: number; displaced_hours: number; engaged_hours: number }
@@ -34,6 +40,8 @@ export interface InferredDisplayItem {
   claimed_minutes: number; display_minutes: number; // 0 only for explicit failures — asymmetry is the point
   turns?: number | null; tools?: number | null; evidence_kind: string; evidence_ref: string;
   outcome?: string | null; is_blocked: boolean; blocked_reason: string | null;
+  engaged_minutes: number | null; // null = not measured; never zero-substituted
+  nar_minutes: number | null;     // null when engaged is null
 }
 
 export function deriveUnratedRows(unrated: UnratedEntry[]): UnratedRow[] {
@@ -50,7 +58,8 @@ export function deriveInferredDisplay(items: InferredItem[]): InferredDisplayIte
     const explicitFail = typeof it.outcome === "string" && EXPLICIT_FAILURES.has(it.outcome);
     return { label: it.label, bucket: it.bucket, claimed_minutes: it.minutes, display_minutes: explicitFail ? 0 : it.minutes,
       turns: it.turns, tools: it.tools, evidence_kind: it.evidence_kind, evidence_ref: it.evidence_ref,
-      outcome: it.outcome, is_blocked: explicitFail, blocked_reason: explicitFail ? `outcome: ${it.outcome} — no displacement credit` : null };
+      outcome: it.outcome, is_blocked: explicitFail, blocked_reason: explicitFail ? `outcome: ${it.outcome} — no displacement credit` : null,
+      engaged_minutes: it.engaged_minutes ?? null, nar_minutes: it.nar_minutes ?? null };
   });
 }
 
@@ -133,6 +142,18 @@ export interface AttentionDayViewModel {
   stats: { sessions: number; turns: number; self_corrections: number; blocked: number; hard_failures: number; return_ratio: number; autonomous_artifacts: number } | null;
   rates: { suppression_minutes_per_item: number; bucket_minutes: { S: number; M: number; L: number; XL: number }; interruption_minutes: number } | null;
   unrated: UnratedRow[];
+  allocation: AllocationBlock | null;
+  allocation_reconciliation: AllocationReconciliation | null;
+}
+
+/** Normalise one AllocationBucket — all fields default to 0 when absent. */
+function _normAllocBucket(b: Partial<AllocationBucket> | null | undefined): AllocationBucket {
+  return {
+    displaced_hours:    b?.displaced_hours    ?? 0,
+    engaged_hours:      b?.engaged_hours      ?? 0,
+    interruption_hours: b?.interruption_hours ?? 0,
+    nar_hours:          b?.nar_hours          ?? 0,
+  };
 }
 
 /** Normalise a raw API day response into a fully-typed view model.
@@ -167,6 +188,16 @@ export function normalizeAttentionDay(raw: unknown): AttentionDayViewModel {
       interruption_minutes: r.rates.interruption_minutes ?? 0,
     } : null,
     unrated: deriveUnratedRows(r.unrated ?? []),
+    allocation: r.allocation != null ? {
+      work:        _normAllocBucket(r.allocation.work),
+      life:        _normAllocBucket(r.allocation.life),
+      unallocated: _normAllocBucket(r.allocation.unallocated),
+    } : null,
+    allocation_reconciliation: r.allocation_reconciliation != null ? {
+      attributed_engaged_hours: r.allocation_reconciliation.attributed_engaged_hours ?? 0,
+      day_engaged_hours:        r.allocation_reconciliation.day_engaged_hours        ?? 0,
+      difference_hours:         r.allocation_reconciliation.difference_hours         ?? 0,
+    } : null,
   };
 }
 
@@ -213,38 +244,46 @@ export function collapseAutonomousRows(items: AutonomousItem[]): CollapsedAutono
 
 // ── Ledger view model (section 03) ────────────────────────────────────────────
 
-/** Sentinel: the API does not yet provide per-item engaged or NAR. */
+/** Em-dash sentinel — used as a display constant when a measured column is absent. */
 export const LEDGER_COL_NA = "—" as const;
 export type LedgerColNA = typeof LEDGER_COL_NA;
 
 export interface LedgerItemRow {
   label: string;
-  displaced_min: number;  // available: from API
-  engaged: LedgerColNA;   // not yet in API
-  nar: LedgerColNA;       // not yet in API
-  count?: number;         // present only on collapsed autonomous rows (count > 1)
+  displaced_min: number;        // always available from API
+  engaged_min: number | null;   // null = not measured (chore run, desk decision)
+  nar_min: number | null;       // null when engaged is null — unknown ≠ zero
+  count?: number;               // present only on collapsed autonomous rows (count > 1)
 }
 
 export interface LedgerGroup {
   name: "CONVERSATIONAL" | "EXPLICIT" | "AUTONOMOUS";
   rows: LedgerItemRow[];
-  subtotal_displaced_min: number; // == sum(rows[i].displaced_min)
-  engaged: LedgerColNA;
-  nar: LedgerColNA;
+  subtotal_displaced_min: number;       // == sum(rows[i].displaced_min)
+  subtotal_engaged_min: number | null;  // null when all rows are null; sum of non-null otherwise
+  subtotal_nar_min: number | null;      // same rule
 }
 
 export interface LedgerViewModel {
   groups: LedgerGroup[];
-  total_displaced_min: number; // == sum(groups[i].subtotal_displaced_min)
-  engaged: LedgerColNA;
-  nar: LedgerColNA;
+  total_displaced_min: number;       // == sum(groups[i].subtotal_displaced_min)
+  total_engaged_min: number | null;  // null when no group has a measured row
+  total_nar_min: number | null;      // same rule
 }
 
-/** Build the three-group ledger from the API displaced block.
+/** Sum only the non-null values in an array.
+ *  Returns null when the array is empty or every element is null. */
+function sumNullable(values: (number | null)[]): number | null {
+  const measured = values.filter((v): v is number => v !== null);
+  return measured.length > 0 ? measured.reduce((a, b) => a + b, 0) : null;
+}
+
+/** Build the three-group ledger from the NORMALISED displaced block.
  *  Groups: CONVERSATIONAL (inferred) · EXPLICIT (rate-card) · AUTONOMOUS (collapsed).
  *  Invariants:
  *    group.subtotal_displaced_min == sum(rows[i].displaced_min)
- *    total_displaced_min         == sum(groups[i].subtotal_displaced_min) */
+ *    total_displaced_min         == sum(groups[i].subtotal_displaced_min)
+ *  Null-sum rule: subtotal/total for engaged/nar is null when no measured rows exist. */
 export function deriveLedger(
   displaced: AttentionDayViewModel["displaced"] | null | undefined,
 ): LedgerViewModel {
@@ -254,31 +293,64 @@ export function deriveLedger(
   // conversational row rendered NaN. Consume display_minutes directly.
   const convRows: LedgerItemRow[] = (displaced?.inferred?.items ?? []).map((it) => ({
     label: formatItemLabel(it), displaced_min: it.display_minutes,
-    engaged: LEDGER_COL_NA, nar: LEDGER_COL_NA,
+    engaged_min: it.engaged_minutes, nar_min: it.nar_minutes,
   }));
+  // Explicit (rate-card) and autonomous items carry no per-session engagement measurement.
   const explRows: LedgerItemRow[] = (displaced?.explicit?.items ?? []).map((it) => ({
     label: it.label, displaced_min: it.minutes,
-    engaged: LEDGER_COL_NA, nar: LEDGER_COL_NA,
+    engaged_min: null, nar_min: null,
   }));
   const autoRows: LedgerItemRow[] = collapseAutonomousRows(displaced?.autonomous?.items ?? []).map((it) => ({
     label: it.label, displaced_min: it.total_minutes,
-    engaged: LEDGER_COL_NA, nar: LEDGER_COL_NA,
+    engaged_min: null, nar_min: null,
     ...(it.count > 1 ? { count: it.count } : {}),
   }));
   const rowSum = (rows: LedgerItemRow[]) => rows.reduce((s, r) => s + r.displaced_min, 0);
   const groups: LedgerGroup[] = [
-    { name: "CONVERSATIONAL", rows: convRows, subtotal_displaced_min: rowSum(convRows), engaged: LEDGER_COL_NA, nar: LEDGER_COL_NA },
-    { name: "EXPLICIT",       rows: explRows, subtotal_displaced_min: rowSum(explRows), engaged: LEDGER_COL_NA, nar: LEDGER_COL_NA },
-    { name: "AUTONOMOUS",     rows: autoRows, subtotal_displaced_min: rowSum(autoRows), engaged: LEDGER_COL_NA, nar: LEDGER_COL_NA },
+    { name: "CONVERSATIONAL", rows: convRows, subtotal_displaced_min: rowSum(convRows),
+      subtotal_engaged_min: sumNullable(convRows.map(r => r.engaged_min)),
+      subtotal_nar_min:     sumNullable(convRows.map(r => r.nar_min)) },
+    { name: "EXPLICIT", rows: explRows, subtotal_displaced_min: rowSum(explRows),
+      subtotal_engaged_min: null, subtotal_nar_min: null },
+    { name: "AUTONOMOUS", rows: autoRows, subtotal_displaced_min: rowSum(autoRows),
+      subtotal_engaged_min: null, subtotal_nar_min: null },
   ];
-  return { groups, total_displaced_min: groups.reduce((s, g) => s + g.subtotal_displaced_min, 0), engaged: LEDGER_COL_NA, nar: LEDGER_COL_NA };
+  return {
+    groups,
+    total_displaced_min: groups.reduce((s, g) => s + g.subtotal_displaced_min, 0),
+    total_engaged_min: sumNullable(groups.map(g => g.subtotal_engaged_min)),
+    total_nar_min:     sumNullable(groups.map(g => g.subtotal_nar_min)),
+  };
 }
 
-/** Rendered once below section 03 column headers to explain the em-dash columns. */
-export const LEDGER_PER_ITEM_NOTE = "Per-session engaged and NAR attribution is not yet computed — columns show —." as const;
+/** Note rendered below section 03 column headers: names which row types carry no measurement. */
+export const LEDGER_PER_ITEM_NOTE = "Chore runs and desk decisions carry no per-session engagement measurement — their ENGAGED and NAR columns show —." as const;
 
-/** Rendered once in section 02 to explain the em-dash allocation rows. */
-export const ALLOCATION_UNAVAILABLE_NOTE = "Allocation (work / life split) is not yet computed — all rows show —." as const;
+// ── Section 02 bar geometry ───────────────────────────────────────────────────
+
+export interface AllocationBarWidths { work: number; life: number; unallocated: number }
+
+/** Compute bar-track fill widths (0–100%) for the three allocation rows.
+ *  Each row's width is proportional to its displaced_hours, scaled to the
+ *  largest of the three. An all-zero allocation produces all-zero widths
+ *  (empty tracks) — absence stays legible rather than vanishing.
+ *  Safe to call with null / undefined. */
+export function deriveAllocationBarWidths(
+  allocation: AllocationBlock | null | undefined,
+): AllocationBarWidths {
+  if (!allocation) return { work: 0, life: 0, unallocated: 0 };
+  const maxDisp = Math.max(
+    allocation.work.displaced_hours,
+    allocation.life.displaced_hours,
+    allocation.unallocated.displaced_hours,
+    0.001,
+  );
+  return {
+    work:        (allocation.work.displaced_hours        / maxDisp) * 100,
+    life:        (allocation.life.displaced_hours        / maxDisp) * 100,
+    unallocated: (allocation.unallocated.displaced_hours / maxDisp) * 100,
+  };
+}
 
 // ── Section 01 bar geometry ───────────────────────────────────────────────────
 

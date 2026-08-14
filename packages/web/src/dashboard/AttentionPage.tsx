@@ -7,8 +7,8 @@ import { Frame } from "../client/components/ab/Frame";
 import logoCurrentcolor from "../client/assets/brand/alfred-logo-currentcolor.svg";
 import {
   normalizeAttentionDay, isEmptyDay, formatHours, formatWholeMinutes,
-  formatHeaderDate, deriveLedger, deriveBarGeometry,
-  LEDGER_PER_ITEM_NOTE, ALLOCATION_UNAVAILABLE_NOTE,
+  formatHeaderDate, deriveLedger, deriveBarGeometry, deriveAllocationBarWidths,
+  LEDGER_PER_ITEM_NOTE,
   deriveChartBars, deriveChartScale, deriveRangeAggregates,
   type AttentionDayViewModel, type AttentionStatsResponse,
   type ChartBar, type ChartScaleResult, type BarGeometry,
@@ -147,6 +147,15 @@ function DayView({ day, recomp, running }: { day: AttentionDayViewModel; recomp(
     day.interruption?.hours ?? 0,
   );
   const NA = "—";
+  // Formatter for nullable hour/minute values: null stays "—", never "0.00".
+  const fh = (v: number | null | undefined) => v != null ? formatHours(v) : NA;
+  const fmtM = (v: number | null) => v !== null ? formatWholeMinutes(v) : NA;
+  const barWidths = deriveAllocationBarWidths(day.allocation ?? undefined);
+  const ALLOC_ROWS = [
+    { label: "Work",        key: "work"        as const },
+    { label: "Life",        key: "life"        as const },
+    { label: "Unallocated", key: "unallocated" as const },
+  ];
 
   return (
     <>
@@ -170,9 +179,6 @@ function DayView({ day, recomp, running }: { day: AttentionDayViewModel; recomp(
 
       {/* ── 02 WHERE IT WENT ───────────────────────────────────────────── */}
       <SL n="02" title="WHERE IT WENT" />
-      <p className="font-mono text-[10px] italic mb-3" style={{ color: "var(--marginalia)" }}>
-        {ALLOCATION_UNAVAILABLE_NOTE}
-      </p>
       {/* Column headers — bar track column header is blank */}
       <div className="grid font-mono text-[11px] uppercase tracking-[0.18em] pb-1 mb-0"
         style={{ gridTemplateColumns: "1fr minmax(160px,300px) repeat(4,78px)", color: "var(--marginalia)", borderBottom: "1px solid var(--rule)", opacity: 0.7 }}>
@@ -182,20 +188,40 @@ function DayView({ day, recomp, running }: { day: AttentionDayViewModel; recomp(
           <span key={c} className="text-right">{c}</span>
         ))}
       </div>
-      {/* Rows: Work / Life / Unallocated — all unavailable.
-          The bar track always draws even with no data — the empty track
-          shows the structure and makes the absence legible. */}
-      {(["Work","Life","Unallocated"] as const).map((row) => (
-        <div key={row} className="grid items-center"
-          style={{ gridTemplateColumns: "1fr minmax(160px,300px) repeat(4,78px)", borderBottom: "1px solid var(--rule)", opacity: 0.65, minHeight: 21 }}>
-          <span className="font-sans italic" style={{ fontSize: 13 }}>{row}</span>
-          {/* horizontal bar track — 10px tall, faint, always drawn */}
-          <div style={{ height: 10, background: "var(--rule)", opacity: 0.18, borderRadius: 1 }} />
-          {[NA, NA, NA, NA].map((v, ci) => (
-            <span key={ci} className="font-mono text-[9px] tabular-nums text-right opacity-40">{v}</span>
-          ))}
-        </div>
-      ))}
+      {/* Rows: Work / Life / Unallocated.
+          Bar track is proportional to each row's displaced hours, scaled
+          to the largest of the three. Empty track always drawn — absence is
+          legible, not invisible. Interruption is structurally zero for work
+          and life (all interruption lands in unallocated by construction). */}
+      {ALLOC_ROWS.map(({ label, key }) => {
+        const bucket = day.allocation?.[key] ?? null;
+        return (
+          <div key={key} className="grid items-center"
+            style={{ gridTemplateColumns: "1fr minmax(160px,300px) repeat(4,78px)", borderBottom: "1px solid var(--rule)", opacity: 0.75, minHeight: 21 }}>
+            <span className="font-sans italic" style={{ fontSize: 13 }}>{label}</span>
+            {/* bar track — faint container, brass fill proportional to displaced */}
+            <div style={{ height: 10, background: "var(--rule)", opacity: 0.18, borderRadius: 1, position: "relative", overflow: "hidden" }}>
+              {bucket != null && bucket.displaced_hours > 0 && (
+                <div style={{ position: "absolute", top: 0, left: 0, height: "100%",
+                  width: `${barWidths[key]}%`, background: "var(--brass)", opacity: 0.65, borderRadius: 1 }} />
+              )}
+            </div>
+            {[fh(bucket?.displaced_hours), fh(bucket?.engaged_hours),
+              fh(bucket?.interruption_hours), fh(bucket?.nar_hours)].map((v, ci) => (
+              <span key={ci} className="font-mono text-[9px] tabular-nums text-right" style={{ opacity: bucket != null ? 0.75 : 0.35 }}>{v}</span>
+            ))}
+          </div>
+        );
+      })}
+      {/* Reconciliation footnote: two honest measures of different scopes — not an error. */}
+      {day.allocation_reconciliation != null && (
+        <p className="font-mono text-[10px] mt-2" style={{ color: "var(--marginalia)" }}>
+          Per-session attributed {formatHours(day.allocation_reconciliation.attributed_engaged_hours)} h engaged
+          · day-level {formatHours(day.allocation_reconciliation.day_engaged_hours)} h
+          · {formatHours(Math.abs(day.allocation_reconciliation.difference_hours))} h difference.
+          {" "}Per-session clustering and whole-day burst clustering measure different scopes and are not expected to match.
+        </p>
+      )}
 
       {/* ── 03 THE LEDGER ──────────────────────────────────────────────── */}
       <SL n="03" title="THE LEDGER" />
@@ -217,8 +243,8 @@ function DayView({ day, recomp, running }: { day: AttentionDayViewModel; recomp(
           <div className="grid items-baseline" style={{ gridTemplateColumns: "1fr repeat(3,68px)", minHeight: 24, paddingTop: 4, paddingBottom: 4 }}>
             <span className="font-mono text-[11px] uppercase tracking-[0.22em]" style={{ color: "var(--brass)" }}>{grp.name}</span>
             <span className="font-mono text-[11px] tabular-nums text-right" style={{ color: "var(--brass)" }}>{formatWholeMinutes(grp.subtotal_displaced_min)}</span>
-            <span className="font-mono text-[11px] tabular-nums text-right" style={{ color: "var(--brass)" }}>{grp.engaged}</span>
-            <span className="font-mono text-[11px] tabular-nums text-right" style={{ color: "var(--brass)" }}>{grp.nar}</span>
+            <span className="font-mono text-[11px] tabular-nums text-right" style={{ color: "var(--brass)" }}>{fmtM(grp.subtotal_engaged_min)}</span>
+            <span className="font-mono text-[11px] tabular-nums text-right" style={{ color: "var(--brass)" }}>{fmtM(grp.subtotal_nar_min)}</span>
           </div>
           {/* Item rows — 14px serif label, 14px mono numbers */}
           {grp.rows.length === 0
@@ -232,8 +258,8 @@ function DayView({ day, recomp, running }: { day: AttentionDayViewModel; recomp(
                       : null}
                   </span>
                   <span className="font-mono tabular-nums text-right" style={{ fontSize: 14 }}>{formatWholeMinutes(row.displaced_min)}</span>
-                  <span className="font-mono tabular-nums text-right opacity-35" style={{ fontSize: 14 }}>{row.engaged}</span>
-                  <span className="font-mono tabular-nums text-right opacity-35" style={{ fontSize: 14 }}>{row.nar}</span>
+                  <span className="font-mono tabular-nums text-right opacity-35" style={{ fontSize: 14 }}>{fmtM(row.engaged_min)}</span>
+                  <span className="font-mono tabular-nums text-right opacity-35" style={{ fontSize: 14 }}>{fmtM(row.nar_min)}</span>
                 </div>
               ))}
         </div>
@@ -242,8 +268,8 @@ function DayView({ day, recomp, running }: { day: AttentionDayViewModel; recomp(
       <div className="grid items-baseline mt-0.5" style={{ gridTemplateColumns: "1fr repeat(3,68px)", borderTop: "2px solid var(--rule)", minHeight: 24, paddingTop: 4, paddingBottom: 4 }}>
         <span className="font-mono text-[11px] uppercase tracking-[0.22em]" style={{ color: "var(--brass)" }}>TOTAL</span>
         <span className="font-mono text-[11px] tabular-nums text-right" style={{ color: "var(--brass)" }}>{formatWholeMinutes(ledger.total_displaced_min)}</span>
-        <span className="font-mono text-[11px] tabular-nums text-right" style={{ color: "var(--brass)" }}>{ledger.engaged}</span>
-        <span className="font-mono text-[11px] tabular-nums text-right" style={{ color: "var(--brass)" }}>{ledger.nar}</span>
+        <span className="font-mono text-[11px] tabular-nums text-right" style={{ color: "var(--brass)" }}>{fmtM(ledger.total_engaged_min)}</span>
+        <span className="font-mono text-[11px] tabular-nums text-right" style={{ color: "var(--brass)" }}>{fmtM(ledger.total_nar_min)}</span>
       </div>
 
       {/* Unrated action classes — zero contribution, must not be omitted */}
