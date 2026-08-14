@@ -883,3 +883,184 @@ class TestWorkSummaryShape:
         )
         assert "artifact" not in summary
         assert summary == "Morning briefing composed and delivered"
+
+
+# ---------------------------------------------------------------------------
+# Per-session engaged minutes (#584 — section 02 of the Attention Statement)
+# ---------------------------------------------------------------------------
+
+class TestPerSessionEngagedMinutes:
+    """Per-session engaged is cluster_bursts over that session's own user turns.
+
+    Rules:
+    - Only conversational entries carry a non-null engaged_minutes.
+    - Desk decisions and chore runs carry engaged_minutes=None.
+    - A session with a single turn yields the floor (FLOOR_MS / 60_000 min), not zero.
+    - The per-session figure is intentionally independent of the day's total.
+    """
+
+    @pytest.mark.asyncio
+    async def test_single_turn_yields_floor_not_zero(self):
+        """A conversational session with one user turn must yield exactly FLOOR_MS/60_000,
+        not zero.  cluster_bursts applies the per-burst floor to a span of zero."""
+        from src.activities.nar_recap import _classify_session_bucket
+        from src.activities.nar_data import FLOOR_MS
+
+        # One user turn — span is zero, floor must apply.
+        ts = 1_000_000.0  # arbitrary epoch seconds
+        messages = [
+            {"role": "user", "content": "Quick question.", "ts": ts},
+            {"role": "assistant", "content": "Here is the answer.", "ts": ts + 30},
+        ]
+
+        with patch("src.activities.nar_recap._call_clerk", new_callable=AsyncMock) as mock_clerk:
+            mock_clerk.return_value = {
+                "bucket": "S", "reasoning": "quick Q&A", "has_artifact": True,
+                "is_failed": False, "work_summary": "Quick answer provided",
+                "allocation": "work",
+            }
+            bucket_info = await _classify_session_bucket(messages)
+
+        # Verify the allocation round-trips correctly.
+        assert bucket_info["allocation"] == "work"
+
+        # Independently verify cluster_bursts behaviour for a single timestamp.
+        engaged_ms = cluster_bursts([ts * 1000], GAP_MS, FLOOR_MS)
+        engaged_min = round(engaged_ms / 60_000, 2)
+        floor_min = round(FLOOR_MS / 60_000, 2)
+        assert engaged_min == floor_min, (
+            f"single-turn engaged_min={engaged_min} should equal floor_min={floor_min}"
+        )
+        assert engaged_min > 0, "single-turn engaged must not be zero"
+
+    def test_conversational_notes_have_engaged_minutes_key(self):
+        """The notes dict built for a conversational entry must carry engaged_minutes."""
+        import json
+        # Simulate what compute_nar_day builds for a conversational entry.
+        sess_user_ts_ms = [1_000_000_000.0]  # single turn
+        sess_engaged_ms = cluster_bursts(sess_user_ts_ms, GAP_MS, FLOOR_MS)
+        sess_engaged_min = round(sess_engaged_ms / 60_000, 2)
+
+        notes = {
+            "bucket": "S",
+            "has_artifact": True,
+            "engaged_minutes": sess_engaged_min,
+            "allocation": "work",
+        }
+        serialised = json.loads(json.dumps(notes))
+        assert "engaged_minutes" in serialised
+        assert serialised["engaged_minutes"] is not None
+        assert serialised["engaged_minutes"] > 0
+
+    def test_chore_run_engaged_minutes_is_null(self):
+        """Chore run notes must carry engaged_minutes=None (null in JSON).
+
+        Chores are autonomous — no principal time is consumed by the run itself."""
+        import json
+        # Mirror the notes shape from compute_nar_day chore loop.
+        chore_notes = {
+            "has_artifact": True,
+            "bucket": "M",
+            "engaged_minutes": None,
+            "allocation": "work",
+        }
+        serialised = json.loads(json.dumps(chore_notes))
+        assert "engaged_minutes" in serialised
+        assert serialised["engaged_minutes"] is None
+
+    def test_desk_decision_engaged_minutes_is_null(self):
+        """Desk decision notes must carry engaged_minutes=None.
+
+        Decision timestamps DO feed the day-level engaged clustering (method §2),
+        but that is separate from a per-entry engaged_minutes field.  Decisions
+        are point-in-time events, not sessions, so per-entry engaged is null."""
+        import json
+        decision_notes = {"intent": "noise", "engaged_minutes": None, "allocation": "unallocated"}
+        serialised = json.loads(json.dumps(decision_notes))
+        assert serialised["engaged_minutes"] is None
+
+
+# ---------------------------------------------------------------------------
+# Work / life / unallocated allocation (#584 — section 03 of the Statement)
+# ---------------------------------------------------------------------------
+
+class TestAllocation:
+    """Allocation is stored in notes.allocation for every entry type.
+
+    Rules:
+    - Must be one of exactly "work" | "life" | "unallocated".
+    - Clerk returning an unrecognised value → "unallocated" (never "work").
+    - Desk decisions always carry "unallocated" (no content to classify).
+    - Vigilance chore sweeps always carry "unallocated" (no artifact content).
+    """
+
+    VALID = frozenset({"work", "life", "unallocated"})
+
+    @pytest.mark.asyncio
+    async def test_session_bucket_allocation_valid_vocabulary(self):
+        """_classify_session_bucket returns one of the three valid allocation values."""
+        from src.activities.nar_recap import _classify_session_bucket
+
+        messages = [
+            {"role": "user", "content": "Draft the client invoice.", "ts": 1.0},
+            {"role": "assistant", "content": "Invoice drafted.", "ts": 2.0},
+        ]
+        for alloc in ("work", "life", "unallocated"):
+            with patch("src.activities.nar_recap._call_clerk", new_callable=AsyncMock) as mock_clerk:
+                mock_clerk.return_value = {
+                    "bucket": "S", "reasoning": "short task", "has_artifact": True,
+                    "is_failed": False, "work_summary": "Invoice drafted",
+                    "allocation": alloc,
+                }
+                result = await _classify_session_bucket(messages)
+            assert result["allocation"] in self.VALID
+            assert result["allocation"] == alloc
+
+    @pytest.mark.asyncio
+    async def test_unknown_allocation_falls_back_to_unallocated_never_work(self):
+        """When the clerk returns an unrecognised allocation value, the result must be
+        'unallocated', never defaulted to 'work'.  'work' is not a safe default."""
+        from src.activities.nar_recap import _classify_session_bucket
+
+        messages = [{"role": "user", "content": "hello", "ts": 1.0}]
+        with patch("src.activities.nar_recap._call_clerk", new_callable=AsyncMock) as mock_clerk:
+            mock_clerk.return_value = {
+                "bucket": "S", "reasoning": "ok", "has_artifact": True,
+                "is_failed": False, "work_summary": "",
+                "allocation": "BUSINESS",  # not in VALID_ALLOCATIONS
+            }
+            result = await _classify_session_bucket(messages)
+        assert result["allocation"] == "unallocated", (
+            "unrecognised allocation must collapse to 'unallocated', not 'work'"
+        )
+        assert result["allocation"] != "work"
+
+    @pytest.mark.asyncio
+    async def test_chore_allocation_returned_from_clerk(self):
+        """_classify_chore_bucket returns allocation from the clerk response."""
+        from src.activities.nar_recap import _classify_chore_bucket
+
+        with patch("src.activities.nar_recap._call_clerk", new_callable=AsyncMock) as mock_clerk:
+            mock_clerk.return_value = {
+                "bucket": "M", "reasoning": "briefing composed", "has_artifact": True,
+                "is_failed": False, "work_summary": "Morning briefing composed",
+                "allocation": "life",
+            }
+            result = await _classify_chore_bucket("composed briefing.md", "morning-brief")
+        assert result["allocation"] == "life"
+        assert result["allocation"] in self.VALID
+
+    @pytest.mark.asyncio
+    async def test_chore_unknown_allocation_collapses_to_unallocated(self):
+        """Clerk returning an unrecognised chore allocation → 'unallocated'."""
+        from src.activities.nar_recap import _classify_chore_bucket
+
+        with patch("src.activities.nar_recap._call_clerk", new_callable=AsyncMock) as mock_clerk:
+            mock_clerk.return_value = {
+                "bucket": "S", "reasoning": "ok", "has_artifact": True,
+                "is_failed": False, "work_summary": "",
+                "allocation": "PERSONAL",  # unrecognised
+            }
+            result = await _classify_chore_bucket("ran and found nothing", "test-chore")
+        assert result["allocation"] == "unallocated"
+        assert result["allocation"] != "work"

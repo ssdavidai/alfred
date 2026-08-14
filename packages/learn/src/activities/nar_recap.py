@@ -28,6 +28,7 @@ from src.activities.nar_data import (
     GAP_MS,
     HUMAN_SOURCES,  # noqa: F401 — re-exported for backward compat
     SUPPRESSION_RATE_MINUTES,
+    VALID_ALLOCATIONS,
     VALID_BUCKETS,
     _ctrl_headers,
     _extract_session_context,
@@ -80,6 +81,7 @@ Return a JSON object with exactly these keys:
   has_artifact: true | false
   is_failed: true | false (true only if session ended WITHOUT producing what was asked for)
   work_summary: 4-10 words describing what was done (e.g. "Invoice drafted for client", "Two weeks of messages gathered") — no bucket letter, no session id; use an empty string when bucket is "none"
+  allocation: one of "work" | "life" | "unallocated"
 
 Bucket meanings (minutes of principal time displaced if delivered):
   S  =   5 min — quick email, short memo, simple fact lookup
@@ -87,6 +89,11 @@ Bucket meanings (minutes of principal time displaced if delivered):
   L  =  60 min — complex document, multi-step research, large delegation
   XL = 120 min — work that would take most of a half-day by hand
   none = 0     — discussion only, or tool calls with no output
+
+Allocation meanings:
+  work         — professional: client matters, invoices, timesheets, proposals, project delivery, business operations
+  life         — personal: household, family, health, personal purchases, errands, personal correspondence
+  unallocated  — ambiguous, cannot tell, or clearly mixed — always prefer this over guessing
 
 Return ONLY the JSON, no prose."""
 
@@ -100,7 +107,7 @@ async def _classify_session_bucket(messages: list[dict[str, Any]]) -> dict[str, 
     long sessions.  Falls back to ``{"bucket": "none"}`` on any error.
     """
     if not messages:
-        return {"bucket": "none", "reasoning": "empty session", "has_artifact": False, "is_failed": False, "work_summary": ""}
+        return {"bucket": "none", "reasoning": "empty session", "has_artifact": False, "is_failed": False, "work_summary": "", "allocation": "unallocated"}
 
     ctx = _extract_session_context(messages)
     try:
@@ -113,16 +120,19 @@ async def _classify_session_bucket(messages: list[dict[str, Any]]) -> dict[str, 
         bucket = str(result.get("bucket", "none"))
         if bucket not in VALID_BUCKETS:
             bucket = "none"
+        allocation_raw = str(result.get("allocation", "unallocated"))
+        allocation = allocation_raw if allocation_raw in VALID_ALLOCATIONS else "unallocated"
         return {
             "bucket": bucket,
             "reasoning": str(result.get("reasoning", "")),
             "has_artifact": bool(result.get("has_artifact", False)),
             "is_failed": bool(result.get("is_failed", False)),
             "work_summary": str(result.get("work_summary", "")),
+            "allocation": allocation,
         }
     except Exception as exc:  # noqa: BLE001
         logger.warning("nar_recap: bucket classification failed: %s", exc)
-        return {"bucket": "none", "reasoning": f"clerk error: {str(exc)[:100]}", "has_artifact": False, "is_failed": False, "work_summary": ""}
+        return {"bucket": "none", "reasoning": f"clerk error: {str(exc)[:100]}", "has_artifact": False, "is_failed": False, "work_summary": "", "allocation": "unallocated"}
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +158,7 @@ Return a JSON object:
   has_artifact: true | false
   is_failed: true | false
   work_summary: 4-10 words describing the artifact produced (e.g. "Morning briefing composed and sent") — use an empty string when bucket is "none"
+  allocation: one of "work" | "life" | "unallocated"
 
 Bucket meanings (minutes of principal time the artifact would have taken by hand):
   S  =   5 min — short note, quick status, calendar entry
@@ -155,6 +166,11 @@ Bucket meanings (minutes of principal time the artifact would have taken by hand
   L  =  60 min — complex multi-source report or document
   XL = 120 min — half-day equivalent by hand
   none = 0     — vigilance, status-only, failed, or tool activity with no deliverable
+
+Allocation meanings:
+  work         — professional: client matters, business operations, invoices, project delivery
+  life         — personal: household, home devices, family, health, personal errands
+  unallocated  — cannot tell or ambiguous — prefer this over guessing
 
 Return ONLY the JSON, no prose."""
 
@@ -168,7 +184,7 @@ async def _classify_chore_bucket(detail: str, chore_name: str) -> dict[str, Any]
     Falls back to ``{"bucket": "none"}`` on any error.
     """
     if not detail:
-        return {"bucket": "none", "reasoning": "empty chore output", "has_artifact": False, "is_failed": False, "work_summary": ""}
+        return {"bucket": "none", "reasoning": "empty chore output", "has_artifact": False, "is_failed": False, "work_summary": "", "allocation": "unallocated"}
     try:
         # Build prompt inside try/except: detail may contain literal curly
         # braces (e.g. JSON chore output) which would crash str.format().
@@ -182,16 +198,19 @@ async def _classify_chore_bucket(detail: str, chore_name: str) -> dict[str, Any]
         bucket = str(result.get("bucket", "none"))
         if bucket not in VALID_BUCKETS:
             bucket = "none"
+        allocation_raw = str(result.get("allocation", "unallocated"))
+        allocation = allocation_raw if allocation_raw in VALID_ALLOCATIONS else "unallocated"
         return {
             "bucket": bucket,
             "reasoning": str(result.get("reasoning", "")),
             "has_artifact": bool(result.get("has_artifact", False)),
             "is_failed": bool(result.get("is_failed", False)),
             "work_summary": str(result.get("work_summary", "")),
+            "allocation": allocation,
         }
     except Exception as exc:  # noqa: BLE001
         logger.warning("nar_recap: chore bucket classification failed: %s", exc)
-        return {"bucket": "none", "reasoning": f"clerk error: {str(exc)[:100]}", "has_artifact": False, "is_failed": False, "work_summary": ""}
+        return {"bucket": "none", "reasoning": f"clerk error: {str(exc)[:100]}", "has_artifact": False, "is_failed": False, "work_summary": "", "allocation": "unallocated"}
 
 
 def _chore_is_vigilance_sweep(obs: dict[str, Any]) -> bool:
@@ -329,10 +348,24 @@ async def compute_nar_day(day_iso: str) -> dict[str, Any]:
             messages = sess["messages"]
 
             # Collect user-turn timestamps for engaged-time computation.
-            all_timestamps_ms.extend(
+            sess_user_ts_ms = [
                 m["ts"] * 1000
                 for m in messages
                 if m.get("role") == "user" and m.get("ts") is not None
+            ]
+            all_timestamps_ms.extend(sess_user_ts_ms)
+
+            # Per-session engaged: cluster only THIS session's own principal turns.
+            # This figure intentionally does NOT equal the day's total engaged.
+            # Day-level clustering merges bursts that span sessions and includes
+            # desk decisions; the per-session figure captures attention within the
+            # session boundary only.  Do not reconcile the two.
+            sess_engaged_ms: float | None = (
+                cluster_bursts(sess_user_ts_ms, GAP_MS, FLOOR_MS)
+                if sess_user_ts_ms else None
+            )
+            sess_engaged_min: float | None = (
+                round(sess_engaged_ms / 60_000, 2) if sess_engaged_ms is not None else None
             )
 
             bucket_info = await _classify_session_bucket(messages)
@@ -370,7 +403,12 @@ async def compute_nar_day(day_iso: str) -> dict[str, Any]:
                 _sess_outcome = "delivered"
             else:
                 _sess_outcome = None
-            _sess_notes: dict[str, Any] = {"bucket": bucket, "has_artifact": bucket_info.get("has_artifact")}
+            _sess_notes: dict[str, Any] = {
+                "bucket": bucket,
+                "has_artifact": bucket_info.get("has_artifact"),
+                "engaged_minutes": sess_engaged_min,
+                "allocation": bucket_info.get("allocation", "unallocated"),
+            }
             if _sess_outcome is not None:
                 _sess_notes["outcome"] = _sess_outcome
             _sess_work_summary = bucket_info.get("work_summary") or ""
@@ -452,7 +490,7 @@ async def compute_nar_day(day_iso: str) -> dict[str, Any]:
             "acceptance_path": acceptance_path,
             "acceptance_basis": basis,
             "displaced_minutes": disp,
-            "notes": json.dumps({"intent": intent}),
+            "notes": json.dumps({"intent": intent, "engaged_minutes": None, "allocation": "unallocated"}),
         }
         entries_list.append(entry)
         if disp is not None:
@@ -475,6 +513,7 @@ async def compute_nar_day(day_iso: str) -> dict[str, Any]:
 
         _chore_outcome: str | None = None
         _chore_work_summary = ""
+        _chore_alloc: str = "unallocated"
         if is_vigilance:
             # Method doc §1c: "a chore that ran, checked and found nothing →
             # suppression rate (vigilance)".  Vigilance sweeps must never reach
@@ -487,6 +526,7 @@ async def compute_nar_day(day_iso: str) -> dict[str, Any]:
             cacc_path: str | None = "inferred"
             cbasis = f"chore '{chore_name}' vigilance sweep — suppression rate"
             has_artifact = False
+            # No artifact content → cannot determine work/life; honest unallocated.
         else:
             # Artifact chore — use the chore-specific classifier (not the session
             # classifier, which models ask/delivery pairs and has no user turn).
@@ -512,8 +552,14 @@ async def compute_nar_day(day_iso: str) -> dict[str, Any]:
             elif cbucket != "none":
                 _chore_outcome = "delivered"
             _chore_work_summary = binfo.get("work_summary") or ""
+            _chore_alloc = binfo.get("allocation", "unallocated")
 
-        _chore_notes: dict[str, Any] = {"has_artifact": has_artifact, "bucket": cbucket}
+        _chore_notes: dict[str, Any] = {
+            "has_artifact": has_artifact,
+            "bucket": cbucket,
+            "engaged_minutes": None,
+            "allocation": _chore_alloc,
+        }
         if _chore_outcome is not None:
             _chore_notes["outcome"] = _chore_outcome
         _chore_summary = (

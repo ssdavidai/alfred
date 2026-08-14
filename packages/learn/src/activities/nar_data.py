@@ -31,6 +31,10 @@ logger = logging.getLogger("alfred-learn")
 BUCKET_MINUTES: dict[str, float] = {"S": 5.0, "M": 20.0, "L": 60.0, "XL": 120.0}
 VALID_BUCKETS = frozenset(BUCKET_MINUTES) | {"none"}
 
+# Allocation vocabulary (§ work/life allocation feature).
+# "unallocated" is the explicit honest third option — not a fallback label.
+VALID_ALLOCATIONS: frozenset[str] = frozenset({"work", "life", "unallocated"})
+
 # Suppression rate (§1a, from #582 rate card — 0.5 min/item).
 SUPPRESSION_RATE_MINUTES = 0.5
 
