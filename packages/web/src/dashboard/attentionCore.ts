@@ -246,9 +246,13 @@ export interface LedgerViewModel {
  *    group.subtotal_displaced_min == sum(rows[i].displaced_min)
  *    total_displaced_min         == sum(groups[i].subtotal_displaced_min) */
 export function deriveLedger(
-  displaced: AttentionDayResponse["displaced"] | null | undefined,
+  displaced: AttentionDayViewModel["displaced"] | null | undefined,
 ): LedgerViewModel {
-  const convRows: LedgerItemRow[] = deriveInferredDisplay(displaced?.inferred?.items ?? []).map((it) => ({
+  // Takes the ALREADY-NORMALISED displaced block, not the raw response.
+  // normalizeAttentionDay has run deriveInferredDisplay; running it again here
+  // read `it.minutes`, which does not exist on InferredDisplayItem, so every
+  // conversational row rendered NaN. Consume display_minutes directly.
+  const convRows: LedgerItemRow[] = (displaced?.inferred?.items ?? []).map((it) => ({
     label: formatItemLabel(it), displaced_min: it.display_minutes,
     engaged: LEDGER_COL_NA, nar: LEDGER_COL_NA,
   }));

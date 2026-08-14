@@ -12,7 +12,7 @@ import {
   formatHeaderDate, formatWholeMinutes,
   collapseAutonomousRows, deriveLedger, LEDGER_COL_NA,
   deriveBarGeometry,
-  type AttentionDayResponse, type InferredItem, type SeriesPoint, type AutonomousItem,
+  type AttentionDayResponse, type InferredItem, type InferredDisplayItem, type SeriesPoint, type AutonomousItem,
 } from "./attentionCore";
 
 const I: InferredItem = { label: "x", bucket: "M", minutes: 20, turns: 10, tools: 5, evidence_kind: "session", evidence_ref: "s", outcome: "delivered" };
@@ -296,9 +296,17 @@ test("collapseAutonomousRows: sum invariant — collapsed total == input total",
 test("collapseAutonomousRows: null-safe → []", () => assert.deepEqual(collapseAutonomousRows(null as any), []));
 
 // 14. deriveLedger
-const mkInferred = (label: string, minutes: number, outcome?: string): InferredItem => ({
-  label, bucket: "M", minutes, evidence_kind: "session", evidence_ref: "s", outcome: outcome ?? "delivered",
-});
+// deriveLedger consumes the NORMALISED view model, not the raw response —
+// normalizeAttentionDay has already run deriveInferredDisplay. Fixtures must
+// therefore be display items carrying display_minutes, not raw minutes.
+const mkInferred = (label: string, minutes: number, outcome?: string): InferredDisplayItem => {
+  const failed = outcome !== undefined && outcome !== "delivered";
+  return {
+    label, bucket: "M", claimed_minutes: minutes, display_minutes: failed ? 0 : minutes,
+    evidence_kind: "session", evidence_ref: "s", outcome: outcome ?? "delivered",
+    is_blocked: failed, blocked_reason: failed ? `${outcome} — no displacement credit` : null,
+  };
+};
 
 test("deriveLedger: group names are CONVERSATIONAL / EXPLICIT / AUTONOMOUS", () => {
   const vm = deriveLedger(E.displaced);
@@ -364,4 +372,32 @@ test("deriveBarGeometry: all-zero guard — no division by zero", () => {
   assert.ok(isFinite(bg.displaced.height_pct));
   assert.ok(isFinite(bg.mess.height_pct));
   assert.ok(isFinite(bg.net.height_pct));
+});
+
+// Regression: deriveLedger consumed the RAW response shape while the component
+// passed the NORMALISED view model. deriveInferredDisplay ran twice, the second
+// pass read `it.minutes` (absent on InferredDisplayItem), and every
+// conversational row rendered NaN. wasp build caught the type error; tsx could
+// not, because tsc cannot run pre-codegen in this package.
+test("deriveLedger reads display_minutes from normalised items — never NaN", () => {
+  const vm = {
+    total_hours: 1,
+    explicit: { hours: 0, items: [] },
+    inferred: { hours: 1, items: [
+      { label: "Invoice rebuilt", bucket: "L", claimed_minutes: 60, display_minutes: 60,
+        turns: 6, tools: 57, evidence_kind: "session", evidence_ref: "s1",
+        outcome: "delivered", is_blocked: false, blocked_reason: null },
+      { label: "Failed thing", bucket: "M", claimed_minutes: 20, display_minutes: 0,
+        turns: 2, tools: 3, evidence_kind: "session", evidence_ref: "s2",
+        outcome: "failed", is_blocked: true, blocked_reason: "failed — no displacement credit" },
+    ] },
+    autonomous: { hours: 0, items: [] },
+  };
+  const l = deriveLedger(vm as never);
+  const conv = l.groups.find((g) => g.name === "CONVERSATIONAL")!;
+  for (const r of conv.rows) assert.ok(Number.isFinite(r.displaced_min), `NaN in ${r.label}`);
+  assert.equal(conv.rows[0].displaced_min, 60);
+  assert.equal(conv.rows[1].displaced_min, 0, "blocked row credits zero");
+  assert.equal(conv.subtotal_displaced_min, 60, "subtotal is the sum of displayed rows");
+  assert.equal(l.total_displaced_min, 60);
 });
