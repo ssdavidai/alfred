@@ -8,6 +8,7 @@ import { Frame } from "../client/components/ab/Frame";
 import {
   normalizeAttentionDay, isEmptyDay, formatHours,
   deriveChartBars, deriveChartScale, deriveRangeAggregates,
+  formatScaleSignal, formatItemLabel,
   type AttentionDayViewModel, type AttentionStatsResponse, type ChartBar, type ChartScaleResult,
 } from "./attentionCore";
 
@@ -127,12 +128,12 @@ function DayView({ day, recomp, running }: { day: AttentionDayViewModel; recomp(
       <p className="font-mono text-[10px] uppercase tracking-[0.18em] mb-2 opacity-40">Estimated — model heuristic, not measured</p>
       {inferred.items.length === 0 ? <p className="text-xs opacity-40">None.</p> : inferred.items.map((it, i) => (
         <div key={i}>
-          <TR l={<><Pill s={it.bucket} />{it.label}</>}
+          <TR l={<><Pill s={it.bucket} />{formatItemLabel(it)}</>}
             r={it.is_blocked
               ? <><span className="line-through opacity-40 mr-1.5">{hm(it.claimed_minutes)}</span><span>0.00 h</span></>
               : hm(it.display_minutes)} />
           <p className="text-right font-mono text-[10px] opacity-40 mb-0.5">
-            {it.turns}t · {it.tools} tools{it.is_blocked ? ` · ${it.blocked_reason}` : ""}
+            {[formatScaleSignal(it), it.is_blocked ? it.blocked_reason : null].filter(Boolean).join(" · ")}
           </p>
         </div>
       ))}

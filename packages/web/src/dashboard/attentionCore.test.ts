@@ -8,7 +8,7 @@ import {
   deriveUnratedRows, deriveInferredDisplay, deriveDisplacementGroups,
   isEmptyDay, formatHours, formatMinutes,
   deriveChartBars, deriveChartScale, deriveRangeAggregates,
-  normalizeAttentionDay,
+  normalizeAttentionDay, formatScaleSignal, formatItemLabel,
   type AttentionDayResponse, type InferredItem, type SeriesPoint,
 } from "./attentionCore";
 
@@ -35,20 +35,54 @@ test("unrated: empty → []", () => assert.deepEqual(deriveUnratedRows([]), []))
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 test("unrated: null-tolerant", () => assert.deepEqual(deriveUnratedRows(null as any), []));
 
-// 2. Blocked / non-delivered → display_minutes=0
+// 2. Outcome gate — only explicit failures zero credit; absent ≠ failed
 test("inferred: delivered passes at full minutes, no reason", () => {
   const [d] = deriveInferredDisplay([I]);
   assert.equal(d.display_minutes, 20); assert.equal(d.is_blocked, false); assert.equal(d.blocked_reason, null);
 });
-test("inferred: non-delivered → zero with reason (asymmetry visible via claimed_minutes)", () => {
+test("inferred: outcome null → full credit, not blocked (absent ≠ failed)", () => {
+  const [d] = deriveInferredDisplay([{ ...I, outcome: null }]);
+  assert.equal(d.display_minutes, 20);
+  assert.equal(d.is_blocked, false);
+  assert.equal(d.blocked_reason, null);
+});
+test("inferred: outcome undefined (key absent) → full credit, not blocked", () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const [d] = deriveInferredDisplay([{ ...I, outcome: undefined as any }]);
+  assert.equal(d.display_minutes, 20);
+  assert.equal(d.is_blocked, false);
+  assert.equal(d.blocked_reason, null);
+});
+test("inferred: explicit 'aborted' → zero with reason (asymmetry visible via claimed_minutes)", () => {
   const [d] = deriveInferredDisplay([{ ...I, outcome: "aborted" }]);
   assert.equal(d.display_minutes, 0); assert.equal(d.claimed_minutes, 20);
   assert.equal(d.is_blocked, true); assert.match(d.blocked_reason ?? "", /aborted/);
   assert.match(d.blocked_reason ?? "", /no displacement credit/);
 });
-test("inferred: 'blocked' outcome → zero", () => {
+test("inferred: explicit 'failed' → zero, reason present, claimed_minutes preserved", () => {
+  const [d] = deriveInferredDisplay([{ ...I, minutes: 45, outcome: "failed" }]);
+  assert.equal(d.display_minutes, 0);
+  assert.equal(d.claimed_minutes, 45);
+  assert.equal(d.is_blocked, true);
+  assert.match(d.blocked_reason ?? "", /no displacement credit/);
+});
+test("inferred: explicit 'blocked' outcome → zero", () => {
   const [d] = deriveInferredDisplay([{ ...I, outcome: "blocked" }]);
   assert.equal(d.display_minutes, 0); assert.equal(d.is_blocked, true);
+});
+// Sum invariant: rows must sum to section total (the key correctness property).
+// Mix: delivered=30, null-outcome=20, aborted=15. Non-failed sum=50; aborted=0.
+test("inferred: sum of display_minutes equals non-failed total (rows consistent with section total)", () => {
+  const items = deriveInferredDisplay([
+    { ...I, minutes: 30, outcome: "delivered" },
+    { ...I, minutes: 20, outcome: null },
+    { ...I, minutes: 15, outcome: "aborted" },
+  ]);
+  const displaySum = items.reduce((s, it) => s + it.display_minutes, 0);
+  // 30 (delivered) + 20 (null-outcome credited) + 0 (aborted) = 50
+  assert.equal(displaySum, 50);
+  // The API's inferred.hours for these items = 50 / 60; rows and total agree.
+  assert.ok(Math.abs(displaySum / 60 - 50 / 60) < 0.001);
 });
 
 // 3. Empty day detection
@@ -167,4 +201,43 @@ test("normalizeAttentionDay: full response → no section null, values preserved
   const vm = normalizeAttentionDay(E);
   assert.equal(vm.date, E.date); assert.ok(vm.stats !== null); assert.equal(vm.stats?.sessions, 0);
   assert.ok(vm.displaced !== null); assert.ok(vm.engaged !== null); assert.ok(vm.rates !== null);
+});
+
+// 9. formatScaleSignal — scale signal must carry the numbers, not bare unit labels
+test("formatScaleSignal: both counts → 'N turns · N tools'", () => {
+  assert.equal(formatScaleSignal({ turns: 12, tools: 85 }), "12 turns · 85 tools");
+});
+test("formatScaleSignal: only turns present → 'N turns', no bare · tools", () => {
+  assert.equal(formatScaleSignal({ turns: 3, tools: null }), "3 turns");
+  assert.equal(formatScaleSignal({ turns: 3 }), "3 turns");
+});
+test("formatScaleSignal: only tools present → 'N tools', no bare turns ·", () => {
+  assert.equal(formatScaleSignal({ turns: null, tools: 7 }), "7 tools");
+  assert.equal(formatScaleSignal({ tools: 7 }), "7 tools");
+});
+test("formatScaleSignal: neither present → empty string", () => {
+  assert.equal(formatScaleSignal({}), "");
+  assert.equal(formatScaleSignal({ turns: null, tools: undefined }), "");
+});
+test("formatScaleSignal: zero is a valid count, not omitted", () => {
+  assert.equal(formatScaleSignal({ turns: 0, tools: 0 }), "0 turns · 0 tools");
+});
+
+// 10. formatItemLabel — degrade gracefully from bare session IDs
+test("formatItemLabel: descriptive label → returned as-is", () => {
+  assert.equal(formatItemLabel({ label: "Email thread: Q3 planning", evidence_kind: "session" }), "Email thread: Q3 planning");
+});
+test("formatItemLabel: label with channel annotation → not bare, returned as-is", () => {
+  // "Session 20260715_113 (slack)" has readable info beyond the ID
+  assert.equal(formatItemLabel({ label: "Session 20260715_113 (slack)", evidence_kind: "session" }), "Session 20260715_113 (slack)");
+});
+test("formatItemLabel: bare session ID → falls back to evidence_kind", () => {
+  assert.equal(formatItemLabel({ label: "Session 20260715_113", evidence_kind: "session" }), "session");
+});
+test("formatItemLabel: null label → falls back to evidence_kind", () => {
+  assert.equal(formatItemLabel({ label: null, evidence_kind: "chore_run" }), "chore_run");
+});
+test("formatItemLabel: neither label nor evidence_kind → honest placeholder", () => {
+  assert.equal(formatItemLabel({ label: null, evidence_kind: null }), "—");
+  assert.equal(formatItemLabel({}), "—");
 });
