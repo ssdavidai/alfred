@@ -503,11 +503,17 @@ class TestIsFailedEnforcement:
             mock_clerk.return_value = {"bucket": "S", "reasoning": "short email", "has_artifact": True, "is_failed": False}
             await _classify_session_bucket(messages)
 
-        # Verify the prompt sent to the clerk contained the failure signal excerpt.
+        # The concession reaches the clerk as a SIGNAL, not a verdict. A phrase
+        # match cannot tell "I was wrong, here is the corrected result" from
+        # "I was wrong and could not do it" — deterministic matching zeroed three
+        # delivering sessions and cost a reference day 4h. The clerk decides.
         prompt_sent = mock_clerk.call_args[0][0]
-        assert "Failure signal:" in prompt_sent
-        # The concession phrase should appear in the failure_note.
+        assert "Self-correction signal:" in prompt_sent
+        assert "Failure signal:" not in prompt_sent
+        # The concession excerpt itself is passed through for the clerk to weigh.
         assert "i was wrong" in prompt_sent.lower() or "i apologize" in prompt_sent.lower()
+        # And the prompt must tell the clerk that correction is not failure.
+        assert "is not a failure" in prompt_sent.lower()
 
 
 # ---------------------------------------------------------------------------
