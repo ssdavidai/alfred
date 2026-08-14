@@ -281,10 +281,24 @@ async def compute_nar_day(day_iso: str) -> dict[str, Any]:
             bucket_info = await _classify_session_bucket(messages)
             bucket = bucket_info["bucket"]
             displaced: float | None = BUCKET_MINUTES.get(bucket)
-            # Method doc rule 3: failed/blocked sessions cost ZERO displacement
-            # regardless of bucket size.  bucket and is_failed are independent.
+
+            # Acceptance depends on outcome (method doc §1b + §563):
+            # failed/blocked → rejected, displaced forced to 0;
+            # work delivered (bucket ≠ none) → accepted via inferred path;
+            # discussion only (bucket = none) → unknown, no minutes claimed.
             if bucket_info.get("is_failed"):
                 displaced = 0.0
+                acc: str = "rejected"
+                acc_path: str | None = "inferred"
+                est_method: str | None = "model-estimate"
+            elif displaced is not None:
+                acc = "accepted"
+                acc_path = "inferred"
+                est_method = "model-estimate"
+            else:
+                acc = "unknown"
+                acc_path = None
+                est_method = None
 
             started_at = float(sess.get("started_at") or 0.0)
             occurred_at = datetime.fromtimestamp(started_at, tz=timezone.utc).isoformat()
@@ -300,9 +314,9 @@ async def compute_nar_day(day_iso: str) -> dict[str, Any]:
                 "evidence_ref": sess["id"],
                 "session_ref": sess["id"],
                 "baseline_minutes": displaced,
-                "estimation_method": "model-estimate" if displaced is not None else None,
-                "acceptance": "unknown",
-                "acceptance_path": "inferred" if displaced is not None else None,
+                "estimation_method": est_method,
+                "acceptance": acc,
+                "acceptance_path": acc_path,
                 "acceptance_basis": bucket_info.get("reasoning", ""),
                 "displaced_minutes": displaced,
                 "notes": json.dumps({"bucket": bucket, "has_artifact": bucket_info.get("has_artifact")}),
@@ -399,10 +413,13 @@ async def compute_nar_day(day_iso: str) -> dict[str, Any]:
         if is_vigilance:
             # Method doc §1c: "a chore that ran, checked and found nothing →
             # suppression rate (vigilance)".  Vigilance sweeps must never reach
-            # the bucket classifier.
+            # the bucket classifier.  The chore DID run and DID do real work
+            # (checking is the work) so acceptance = accepted, inferred.
             cbucket = "none"
             cdisp: float | None = SUPPRESSION_RATE_MINUTES
             cmethod: str | None = "standard-time"
+            cacc: str = "accepted"
+            cacc_path: str | None = "inferred"
             cbasis = f"chore '{chore_name}' vigilance sweep — suppression rate"
             has_artifact = False
         else:
@@ -410,10 +427,19 @@ async def compute_nar_day(day_iso: str) -> dict[str, Any]:
             # classifier, which models ask/delivery pairs and has no user turn).
             binfo = await _classify_chore_bucket(detail, chore_name)
             cbucket = binfo["bucket"]
-            cdisp = BUCKET_MINUTES.get(cbucket)
+            # Same three-way acceptance split as sessions:
             if binfo.get("is_failed"):
                 cdisp = 0.0
-            cmethod = "model-estimate" if cdisp else "standard-time"
+                cmethod = "model-estimate"
+                cacc, cacc_path = "rejected", "inferred"
+            else:
+                cdisp = BUCKET_MINUTES.get(cbucket)
+                if cdisp is not None:
+                    cmethod = "model-estimate"
+                    cacc, cacc_path = "accepted", "inferred"
+                else:
+                    cmethod = None
+                    cacc, cacc_path = "unknown", None
             cbasis = f"chore '{chore_name}' artifact — {binfo.get('reasoning', '')}"
             has_artifact = binfo.get("has_artifact", False)
 
@@ -428,8 +454,8 @@ async def compute_nar_day(day_iso: str) -> dict[str, Any]:
             "session_ref": None,
             "baseline_minutes": cdisp,
             "estimation_method": cmethod,
-            "acceptance": "unknown",
-            "acceptance_path": "inferred",
+            "acceptance": cacc,
+            "acceptance_path": cacc_path,
             "acceptance_basis": cbasis,
             "displaced_minutes": cdisp,
             "notes": json.dumps({"has_artifact": has_artifact, "bucket": cbucket}),
