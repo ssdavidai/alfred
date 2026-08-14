@@ -4,6 +4,7 @@
 import { useState } from "react";
 import { useQuery, useAction, getAttentionStatement, getAttentionStats, recomputeAttention } from "wasp/client/operations";
 import { Frame } from "../client/components/ab/Frame";
+import logoCurrentcolor from "../client/assets/brand/alfred-logo-currentcolor.svg";
 import {
   normalizeAttentionDay, isEmptyDay, formatHours, formatWholeMinutes,
   formatHeaderDate, deriveLedger, deriveBarGeometry,
@@ -55,7 +56,7 @@ function StatCell({ label, value }: { label: string; value: string }) {
 // to magnitude (deriveBarGeometry). Labelled beneath in mono caps + hours value.
 
 function AccountBars({ geo }: { geo: BarGeometry }) {
-  const H = 80; const BAR_W = 26; const GAP = 10;
+  const H = 160; const BAR_W = 44; const GAP = 20;
   const W = 3 * BAR_W + 2 * GAP;
   const bars = [
     { label: "DISPLACED", valH: geo.displaced.value_hours, pct: geo.displaced.height_pct, hatch: false },
@@ -85,10 +86,10 @@ function AccountBars({ geo }: { geo: BarGeometry }) {
       <div style={{ display: "flex", width: W, gap: GAP, marginTop: 6 }}>
         {bars.map((bar, i) => (
           <div key={i} style={{ width: BAR_W, textAlign: "center", flexShrink: 0 }}>
-            <p className="font-mono uppercase tracking-wide" style={{ fontSize: 7, color: "var(--marginalia)", lineHeight: 1.3 }}>
+            <p className="font-mono uppercase tracking-wide" style={{ fontSize: 9, color: "var(--marginalia)", lineHeight: 1.3 }}>
               {bar.label}
             </p>
-            <p className="font-mono tabular-nums" style={{ fontSize: 9, color: "var(--brass)", marginTop: 2 }}>
+            <p className="font-mono tabular-nums" style={{ fontSize: 11, color: "var(--brass)", marginTop: 2 }}>
               {bar.valH < 0 ? "−" : ""}{formatHours(Math.abs(bar.valH))}
             </p>
           </div>
@@ -143,25 +144,6 @@ function DayView({ day, recomp, running }: { day: AttentionDayViewModel; recomp(
 
   return (
     <>
-      {/* STATEMENT HEADER — mark + letterspaced mono caps; date right */}
-      <div className="flex justify-between items-baseline">
-        <div className="flex items-baseline gap-3">
-          <span className="font-mono text-[10px] uppercase tracking-[0.32em]" style={{ color: "var(--brass)" }}>Alfred Black</span>
-          <span className="font-mono text-[10px] uppercase tracking-[0.32em]" style={{ color: "var(--marginalia)" }}>ALFRED BLACK</span>
-        </div>
-        <span className="font-mono text-[10px] uppercase tracking-[0.22em]" style={{ color: "var(--marginalia)" }}>
-          {formatHeaderDate(day.date)}
-        </span>
-      </div>
-      {/* Double rule: thick brass + hairline */}
-      <div style={{ borderTop: "2px solid var(--brass)", marginTop: 6 }} />
-      <div style={{ borderTop: "1px solid var(--rule)", marginTop: 2, opacity: 0.45 }} />
-
-      {/* TITLE */}
-      <h2 className="font-display tracking-[-0.01em] mt-6 mb-10" style={{ fontSize: "clamp(30px,4vw,50px)" }}>
-        Attention Statement.
-      </h2>
-
       {/* ── 01 THE ACCOUNT ─────────────────────────────────────────────── */}
       <SL n="01" title="THE ACCOUNT" />
       <div className="flex justify-between items-end gap-8 mb-6">
@@ -185,7 +167,7 @@ function DayView({ day, recomp, running }: { day: AttentionDayViewModel; recomp(
       </p>
       {/* Column headers */}
       <div className="grid font-mono text-[9px] uppercase tracking-[0.18em] pb-1 mb-0"
-        style={{ gridTemplateColumns: "1fr 12px repeat(4,60px)", color: "var(--marginalia)", borderBottom: "1px solid var(--rule)", opacity: 0.7 }}>
+        style={{ gridTemplateColumns: "1fr 12px repeat(4,96px)", color: "var(--marginalia)", borderBottom: "1px solid var(--rule)", opacity: 0.7 }}>
         <span />
         <span />
         {(["DISPLACED","ENGAGED","INTERRUPT","NET"] as const).map(c => (
@@ -195,7 +177,7 @@ function DayView({ day, recomp, running }: { day: AttentionDayViewModel; recomp(
       {/* Rows: Work / Life / Unallocated — all unavailable */}
       {(["Work","Life","Unallocated"] as const).map((row) => (
         <div key={row} className="grid items-center py-1.5"
-          style={{ gridTemplateColumns: "1fr 12px repeat(4,60px)", borderBottom: "1px solid var(--rule)", opacity: 0.65 }}>
+          style={{ gridTemplateColumns: "1fr 12px repeat(4,96px)", borderBottom: "1px solid var(--rule)", opacity: 0.65 }}>
           <span className="font-sans text-sm italic">{row}</span>
           {/* bar track placeholder — data not yet available */}
           <div style={{ height: 6, background: "var(--rule)", opacity: 0.2, borderRadius: 1, margin: "0 2px" }} />
@@ -233,17 +215,17 @@ function DayView({ day, recomp, running }: { day: AttentionDayViewModel; recomp(
           {grp.rows.length === 0
             ? <p className="font-mono text-[10px] opacity-35 pl-1 pb-1">None.</p>
             : grp.rows.map((row, i) => (
-                <div key={i} className="grid items-baseline py-0.5"
+                <div key={i} className="grid items-baseline py-1"
                   style={{ gridTemplateColumns: "1fr repeat(3,68px)" }}>
-                  <span className="font-sans text-xs">
+                  <span className="font-sans text-sm">
                     {row.label}
                     {(row.count ?? 1) > 1
                       ? <span className="font-mono text-[9px] opacity-45 ml-1.5">×{row.count}</span>
                       : null}
                   </span>
-                  <span className="font-mono text-xs tabular-nums text-right">{formatWholeMinutes(row.displaced_min)}</span>
-                  <span className="font-mono text-xs tabular-nums text-right opacity-35">{row.engaged}</span>
-                  <span className="font-mono text-xs tabular-nums text-right opacity-35">{row.nar}</span>
+                  <span className="font-mono text-sm tabular-nums text-right">{formatWholeMinutes(row.displaced_min)}</span>
+                  <span className="font-mono text-sm tabular-nums text-right opacity-35">{row.engaged}</span>
+                  <span className="font-mono text-sm tabular-nums text-right opacity-35">{row.nar}</span>
                 </div>
               ))}
         </div>
@@ -402,6 +384,27 @@ export default function AttentionPage() {
   return (
     <Frame>
       <section className="mx-auto max-w-[900px] px-8 py-12">
+
+        {/* Day-tab statement letterhead — mark + wordmark once, date right.
+            Placed first so letterhead leads the document, controls follow (#1, #5). */}
+        {tab === "day" && (
+          <>
+            <div className="flex justify-between items-baseline mb-0">
+              <div className="flex items-center gap-2">
+                <img src={logoCurrentcolor} alt="" className="h-4 w-auto" />
+                <span className="font-mono text-[10px] uppercase tracking-[0.32em]" style={{ color: "var(--brass)" }}>Alfred Black</span>
+              </div>
+              <span className="font-mono text-[10px] uppercase tracking-[0.22em]" style={{ color: "var(--marginalia)" }}>
+                {formatHeaderDate(date)}
+              </span>
+            </div>
+            <div style={{ borderTop: "2px solid var(--brass)", marginTop: 6 }} />
+            <div style={{ borderTop: "1px solid var(--rule)", marginTop: 2, opacity: 0.45 }} />
+            <h2 className="font-display tracking-[-0.01em] mt-6 mb-8" style={{ fontSize: "clamp(40px,5vw,64px)" }}>
+              Attention Statement.
+            </h2>
+          </>
+        )}
 
         {/* Page-level header — shown on range tab; day tab has its own statement header */}
         {tab === "range" && (
