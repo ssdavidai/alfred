@@ -905,7 +905,12 @@ export function registerAttentionRoutes(): void {
         });
       } else {
         // Explicit or unrated — rate-card actions.
-        const rate = row.action_class === "suppression" ? suppressionRate : null;
+        // Suppression always uses the rate-card value. Other action classes
+        // (e.g. desk_decision noise rows) carry their own displaced_minutes set
+        // by the recap workflow; null displaced_minutes means no agreed rate →
+        // unrated. The prior code hard-coded null for every non-suppression row,
+        // which dropped the desk_decision explicit group entirely (#584).
+        const rate = row.action_class === "suppression" ? suppressionRate : row.displaced_minutes;
         if (rate !== null) {
           const existing = explicitBuckets.get(row.action_class);
           if (existing) {

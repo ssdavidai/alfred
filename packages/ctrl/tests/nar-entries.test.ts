@@ -194,6 +194,65 @@ describe("GET /api/v1/attention/statement", () => {
     assert.ok(Number.isFinite(p.stats.return_ratio), "return_ratio must be finite");
   });
 
+  // ── #584 explicit-group fix ─────────────────────────────────────────────
+  // Non-suppression rows with displaced_minutes must credit explicit, not unrated.
+
+  it("rated desk_decision rows credit explicit; unrated ones appear in unrated — never dropped", async () => {
+    // 3 noise decisions × 0.5 min = 1.5 min; 2 done decisions with no rate.
+    await postEntries({ entries: [
+      entry({ dedup_key: "dd-r1", action_class: "desk_decision", evidence_kind: "decision",
+              displaced_minutes: 0.5, estimation_method: "standard-time",
+              acceptance: "accepted", acceptance_path: "explicit" }),
+      entry({ dedup_key: "dd-r2", action_class: "desk_decision", evidence_kind: "decision",
+              displaced_minutes: 0.5, estimation_method: "standard-time",
+              acceptance: "accepted", acceptance_path: "explicit" }),
+      entry({ dedup_key: "dd-r3", action_class: "desk_decision", evidence_kind: "decision",
+              displaced_minutes: 0.5, estimation_method: "standard-time",
+              acceptance: "accepted", acceptance_path: "explicit" }),
+      entry({ dedup_key: "dd-u1", action_class: "desk_decision", evidence_kind: "decision",
+              displaced_minutes: null, estimation_method: null,
+              acceptance: "accepted", acceptance_path: "explicit" }),
+      entry({ dedup_key: "dd-u2", action_class: "desk_decision", evidence_kind: "decision",
+              displaced_minutes: null, estimation_method: null,
+              acceptance: "accepted", acceptance_path: "explicit" }),
+    ]});
+    const { p } = await getStatement("date=2026-08-14");
+    // Rated entries land in explicit.
+    const ddItem = p.displaced.explicit.items.find((i: any) => i.label === "desk_decision");
+    assert.ok(ddItem, `desk_decision must appear in explicit.items; got ${JSON.stringify(p.displaced.explicit.items)}`);
+    assert.strictEqual(ddItem.count, 3, "3 rated desk_decision rows");
+    assert.strictEqual(ddItem.minutes, 1.5, "3 × 0.5 = 1.5 min");
+    // Unrated entries land in unrated, not silently dropped.
+    const unratedEntry = p.unrated.find((u: any) => u.action_class === "desk_decision");
+    assert.ok(unratedEntry, `desk_decision must appear in unrated; got ${JSON.stringify(p.unrated)}`);
+    assert.strictEqual(unratedEntry.count, 2, "2 unrated desk_decision rows");
+  });
+
+  it("explicit + inferred + autonomous hours sum exactly to displaced.total_hours", async () => {
+    // A mix of all three classification paths ensures no group is silently dropped.
+    // estimation_method must be one of the CHECK-list values.
+    await postEntries({ entries: [
+      entry({ dedup_key: "sup-sum", action_class: "suppression", evidence_kind: "audit",
+              displaced_minutes: 0.5, estimation_method: "standard-time",
+              acceptance: "accepted", acceptance_path: "explicit" }),
+      entry({ dedup_key: "inf-sum", action_class: "conversational", evidence_kind: "session",
+              displaced_minutes: 30, estimation_method: "standard-time",
+              acceptance: "accepted", acceptance_path: "inferred" }),
+      entry({ dedup_key: "aut-sum", action_class: "chore_run", evidence_kind: "chore_run",
+              displaced_minutes: 20, estimation_method: "standard-time",
+              acceptance: "accepted", acceptance_path: "explicit" }),
+    ]});
+    const { p } = await getStatement("date=2026-08-14");
+    const sum = p.displaced.explicit.hours + p.displaced.inferred.hours + p.displaced.autonomous.hours;
+    // Each group is independently rounded to 3 dp before summing; total_hours rounds the
+    // unrounded sum. A 1-unit-last-place (≤0.002 h) discrepancy is normal floating-point
+    // behaviour. The test is that no group is silently dropped — if it were, sum would be
+    // far smaller than total_hours.
+    assert.ok(Math.abs(sum - p.displaced.total_hours) <= 0.002,
+      `explicit+inferred+autonomous must approximate total_hours within 0.002 (got ${sum} vs ${p.displaced.total_hours})`);
+    assert.ok(p.displaced.total_hours > 0, "total must be positive with these entries");
+  });
+
   it("range query returns one object per day with totals", async () => {
     const m = matchRoute("GET", "/api/v1/attention/statement");
     assert.ok(m);
