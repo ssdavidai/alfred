@@ -36,7 +36,10 @@ const PRIMARY: NavItem[] = [
 // #120 Lane III — "Profiles" is the multi-profile Hermes manager; lives in
 // More for now so the primary nav stays short. Switching profiles is
 // UI-driven (navigate to /profiles/<slug>); per-page scoping is deferred.
+// #584 — "Attention" is the NAR statement surface; lives in More alongside
+// the other back-office views so the primary nav stays scannable.
 const MORE: NavItem[] = [
+  { to: "/attention", label: "Attention", icon: "pocket_watch" },
   { to: "/connections", label: "Apps", icon: "globe" },
   { to: "/profiles", label: "Profiles", icon: "calling_card" },
   { to: "/settings", label: "Settings", icon: "settings" },

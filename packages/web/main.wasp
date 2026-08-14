@@ -2107,3 +2107,33 @@ route NotFoundRoute { path: "*", to: NotFoundPage }
 page NotFoundPage {
   component: import { NotFoundPage } from "@src/client/components/NotFoundPage"
 }
+
+// ============================================================
+// Attention Statement (#584 — NAR per day, queryable, on screen)
+// ============================================================
+// /attention — daily NAR breakdown plus range statistics.
+// The page shows three displacement groups (explicit / inferred /
+// autonomous) separately, the mess bill, the rate card, and any
+// unrated action classes. A recompute control POSTs for the
+// shown date. Both web + web-client need redeploying (§15.4).
+
+route AttentionRoute { path: "/attention", to: AttentionPage }
+page AttentionPage {
+  authRequired: true,
+  component: import AttentionPage from "@src/dashboard/AttentionPage"
+}
+
+query getAttentionStatement {
+  fn: import { getAttentionStatement } from "@src/dashboard/operations",
+  entities: []
+}
+
+query getAttentionStats {
+  fn: import { getAttentionStats } from "@src/dashboard/operations",
+  entities: []
+}
+
+action recomputeAttention {
+  fn: import { recomputeAttention } from "@src/dashboard/operations",
+  entities: []
+}

@@ -4439,3 +4439,24 @@ function mintDecisionRef(): string {
   }
   return timeChars + randChars;
 }
+
+// Attention Statement (#584) — thin proxies to /api/v1/attention/*.
+export const getAttentionStatement = async (args: { date?: string; from?: string; to?: string } | void, context: any): Promise<any> => {
+  const instance = await getUserInstance(context);
+  const q: Record<string, string> = {};
+  if (args && typeof args === "object") { if (args.date) q.date = args.date; if (args.from) q.from = args.from; if (args.to) q.to = args.to; }
+  return proxyToTenant(instance, { method: "GET", path: "/api/v1/attention/statement", query: Object.keys(q).length ? q : undefined });
+};
+
+export const getAttentionStats = async (args: { from: string; to: string } | void, context: any): Promise<any> => {
+  const instance = await getUserInstance(context);
+  const q: Record<string, string> = {};
+  if (args && typeof args === "object") { if (args.from) q.from = args.from; if (args.to) q.to = args.to; }
+  return proxyToTenant(instance, { method: "GET", path: "/api/v1/attention/stats", query: Object.keys(q).length ? q : undefined });
+};
+
+export const recomputeAttention = async (args: { date: string }, context: any): Promise<any> => {
+  if (!args?.date) throw new HttpError(400, "date required");
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, { method: "POST", path: "/api/v1/attention/recompute", body: { date: args.date } });
+};
