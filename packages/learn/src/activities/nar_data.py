@@ -127,6 +127,7 @@ def _get_human_sessions(db: sqlite3.Connection, day: date) -> list[dict[str, Any
             WHERE source IN ({placeholders})
               AND started_at >= ?
               AND started_at <= ?
+              AND parent_session_id IS NULL
             ORDER BY started_at ASC
             """.format(placeholders=",".join("?" * len(HUMAN_SOURCES))),
             (*HUMAN_SOURCES, start_s, end_s),

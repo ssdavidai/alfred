@@ -13,6 +13,7 @@ Non-negotiables validated here (from the method doc):
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import date, datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -26,6 +27,7 @@ from src.activities.nar_data import (
     SUPPRESSION_RATE_MINUTES,
     VALID_BUCKETS,
     _day_epoch_window,
+    _get_human_sessions,
     _iso,
     cluster_bursts,
 )
@@ -574,3 +576,116 @@ class TestClassifyChoreeBucket:
         result = await _classify_chore_bucket("", "test-chore")
         assert result["bucket"] == "none"
         assert result["has_artifact"] is False
+
+
+# ---------------------------------------------------------------------------
+# _get_human_sessions — parent_session_id IS NULL filter (#584)
+# ---------------------------------------------------------------------------
+
+def _make_session_db(
+    sessions: list[dict],
+    messages: list[dict] | None = None,
+) -> sqlite3.Connection:
+    """In-memory Hermes session store with the exact columns _get_human_sessions reads."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript("""
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            source TEXT,
+            started_at REAL,
+            ended_at REAL,
+            parent_session_id TEXT
+        );
+        CREATE TABLE messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT,
+            role TEXT,
+            content TEXT,
+            timestamp REAL
+        );
+    """)
+    for s in sessions:
+        conn.execute(
+            "INSERT INTO sessions VALUES (?, ?, ?, ?, ?)",
+            (s["id"], s["source"], s["started_at"],
+             s.get("ended_at"), s.get("parent_session_id")),
+        )
+    for m in (messages or []):
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+            (m["session_id"], m["role"], m["content"], m["timestamp"]),
+        )
+    conn.commit()
+    return conn
+
+
+class TestGetHumanSessionsParentage:
+    """_get_human_sessions must exclude agent-spawned sessions (#584).
+
+    sessions.parent_session_id IS NULL is the structural discriminator:
+    the principal's sessions have no parent; agent-spawned ones do.
+    """
+
+    def _day(self) -> date:
+        return date(2026, 7, 15)
+
+    def _ts(self, hour: int = 10) -> float:
+        """Epoch-seconds for 2026-07-15 HH:00:00 UTC."""
+        return datetime(2026, 7, 15, hour, 0, 0, tzinfo=timezone.utc).timestamp()
+
+    def test_null_parent_slack_session_included(self):
+        """A slack session with parent_session_id=NULL is a human session."""
+        db = _make_session_db([
+            {"id": "s1", "source": "slack", "started_at": self._ts(10),
+             "ended_at": self._ts(11), "parent_session_id": None},
+        ])
+        results = _get_human_sessions(db, self._day())
+        assert len(results) == 1
+        assert results[0]["id"] == "s1"
+
+    def test_nonnull_parent_slack_session_excluded(self):
+        """A slack session with a non-null parent_session_id is agent-spawned
+        and must NOT appear in the human session list."""
+        db = _make_session_db([
+            {"id": "s_spawned", "source": "slack", "started_at": self._ts(10),
+             "ended_at": self._ts(10) + 300, "parent_session_id": "parent_abc"},
+        ])
+        results = _get_human_sessions(db, self._day())
+        assert results == []
+
+    def test_spawned_session_turns_absent_from_results(self):
+        """Turns belonging to an agent-spawned session must not appear in the
+        returned session list, so their timestamps cannot reach cluster_bursts."""
+        spawned_ts = self._ts(9)
+        human_ts = self._ts(10)
+        db = _make_session_db(
+            sessions=[
+                {"id": "s_human", "source": "slack", "started_at": human_ts,
+                 "parent_session_id": None},
+                {"id": "s_spawned", "source": "slack", "started_at": spawned_ts,
+                 "parent_session_id": "some_parent"},
+            ],
+            messages=[
+                {"session_id": "s_human", "role": "user", "content": "hi", "timestamp": human_ts * 1000},
+                {"session_id": "s_spawned", "role": "user", "content": "agent task", "timestamp": spawned_ts * 1000},
+            ],
+        )
+        results = _get_human_sessions(db, self._day())
+        assert len(results) == 1
+        assert results[0]["id"] == "s_human"
+        all_ts = [m["ts"] for s in results for m in s["messages"]]
+        # spawned session's turn must not be in the timestamp set
+        assert spawned_ts * 1000 not in all_ts
+        assert human_ts * 1000 in all_ts
+
+    def test_unknown_source_excluded_regardless_of_parent(self):
+        """The source allowlist is maintained independently of the parentage
+        filter.  An api_server session with parent_session_id=NULL is still
+        machine traffic and must be excluded."""
+        db = _make_session_db([
+            {"id": "s_api", "source": "api_server", "started_at": self._ts(10),
+             "parent_session_id": None},
+        ])
+        results = _get_human_sessions(db, self._day())
+        assert results == []
