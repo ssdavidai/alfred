@@ -436,6 +436,28 @@ CALENDAR_SCHEDULES = [
             minute=[ScheduleRange(start=0)],
         ),
     },
+    {
+        # #584 — pre-compute the trailing-7-day attention trend so the
+        # Range tab on /attention is populated without a manual Recompute.
+        #
+        # The UI's default window is sevenAgo()→now() (today − 6 days to
+        # today, computed at render time in AttentionPage.tsx), so the
+        # window cannot be encoded as a fixed string in the schedule.  The
+        # workflow derives from/to at run time; only the grain is passed.
+        #
+        # Monday 04:00 LOCAL: nightly-maintenance (03:00) has settled and
+        # the morning briefing (05:00) hasn't fired yet, so a full week of
+        # fresh nar_entry data is ready when Sir opens /attention Monday
+        # morning.  day_of_week=1 is Monday (0=Sunday).
+        "id": "al-attention-trend-read",
+        "workflow": "AttentionTrendReadWorkflow",
+        "args": [{"grain": "week"}],
+        "calendar": ScheduleCalendarSpec(
+            day_of_week=[ScheduleRange(start=1, end=1)],
+            hour=[ScheduleRange(start=4)],
+            minute=[ScheduleRange(start=0)],
+        ),
+    },
 ]
 
 

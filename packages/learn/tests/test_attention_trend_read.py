@@ -198,3 +198,72 @@ class TestMaterialityRuleExtension:
         # Engaged/interruption counts are described as measured, not displacement-derived
         p = self._prompt()
         assert "directly measured" in p or "Engaged" in p
+
+
+# ---------------------------------------------------------------------------
+# Schedule registration (#584) — weekly al-attention-trend-read entry.
+# ---------------------------------------------------------------------------
+
+import datetime as _dt
+import scripts.register_schedules as _reg
+
+
+def _schedule_entry() -> dict:
+    entries = _reg._build_schedule_entries("UTC")
+    found = [e for e in entries if e.get("id") == "al-attention-trend-read"]
+    assert len(found) == 1, f"expected 1 entry, got {len(found)}"
+    return found[0]
+
+
+class TestScheduleEntry:
+    def test_id_and_workflow_name(self):
+        """Schedule id exists and workflow name matches @workflow.defn(name=...)."""
+        from src.workflows.attention_trend_read import AttentionTrendReadWorkflow
+        defn = getattr(AttentionTrendReadWorkflow, "__temporal_workflow_definition", None)
+        assert defn is not None
+        e = _schedule_entry()
+        assert e["id"] == "al-attention-trend-read"
+        assert e["workflow"] == defn.name
+
+    def test_no_duplicates(self):
+        """Re-calling _build_schedule_entries returns exactly one entry."""
+        ids = [e["id"] for e in _reg._build_schedule_entries("UTC")
+               if e["id"] == "al-attention-trend-read"]
+        assert ids == ["al-attention-trend-read"]
+
+    def test_calendar_monday_04_00_local(self):
+        """Monday 04:00 LOCAL: after nightly-maintenance, before morning briefing."""
+        cal = _schedule_entry()["spec"].calendars[0]
+        assert cal.day_of_week[0].start == 1  # 1=Monday, 0=Sunday
+        assert cal.hour[0].start == 4
+
+    def test_timezone_propagated(self):
+        entries = _reg._build_schedule_entries("America/New_York")
+        e = next(x for x in entries if x["id"] == "al-attention-trend-read")
+        assert e["spec"].time_zone_name == "America/New_York"
+
+    def test_args_grain_only(self):
+        """grain is the only schedule arg; from/to are derived at run time."""
+        assert _schedule_entry().get("args") == [{"grain": "week"}]
+
+
+class TestWindowComputation:
+    """_window_for_grain must match the UI's sevenAgo()→now() default (#584)."""
+
+    def _w(self, ref: _dt.date) -> tuple[_dt.date, _dt.date]:
+        from src.workflows.attention_trend_read import _window_for_grain
+        return _window_for_grain("week", ref)
+
+    def test_week_shape_matches_seven_ago(self):
+        """from = ref − 6 (JS setDate(d.getDate()−6)), to = ref, span = 7 days."""
+        ref = _dt.date(2026, 8, 17)
+        from_d, to_d = self._w(ref)
+        assert to_d == ref
+        assert from_d == ref - _dt.timedelta(days=6)
+        assert (to_d - from_d).days + 1 == 7
+
+    def test_iso_serialisation(self):
+        """Dates are YYYY-MM-DD strings matching the UI's .toISOString().slice(0,10)."""
+        from_d, to_d = self._w(_dt.date(2026, 8, 10))
+        assert from_d.isoformat() == "2026-08-04"
+        assert to_d.isoformat() == "2026-08-10"
