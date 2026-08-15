@@ -132,6 +132,77 @@ them together swamps the term and flatters the number.
 
 ---
 
+## 4. Attribution — per-session engaged, and allocation
+
+The three terms above give a day's figure. Two further quantities exist only
+to break that day down. **Neither may alter the day's NAR**; a breakdown that
+changes the total it breaks down is not a breakdown.
+
+### 4a. Per-session engaged
+
+Each conversational entry carries `notes.engaged_minutes`: that session's own
+principal turns, burst-clustered with the same gap and floor as §2.
+
+**Only conversational entries.** Chore runs and desk decisions carry `null`,
+deliberately:
+
+- a chore consumed no principal attention at all;
+- a desk decision's attention is *already* inside the day-level clustering,
+  which includes decision timestamps — attributing it to the individual
+  decision as well would bank it twice.
+
+`null` means *not measured*, and must never be rendered or summed as zero. A
+group whose rows are all `null` subtotals to `null`, not `0.0`. Zero is a
+claim that a thing was free; the ledger may not make that claim by accident.
+
+Per-entry NAR is `displaced − engaged`, derived at read time, `null` whenever
+engaged is `null`. On a failed session — zero displaced, real engaged time —
+this is correctly **negative**. That is §Judgement-rule 3 showing up as
+arithmetic instead of prose.
+
+### 4b. The sums do not reconcile, and must not be made to
+
+Per-session engaged summed across a day **will not equal** the day's
+`engaged`. Two reasons, both structural:
+
+- day-level clustering merges bursts that span sessions; per-session
+  clustering cannot;
+- the 2-minute floor applies once per session rather than once per burst, so
+  many short sessions inflate the attributed figure.
+
+The difference runs in either direction. On the first live day the attributed
+total *exceeded* the day total (4.75 h vs 4.19 h) — thirteen sessions each
+taking a floor.
+
+Both numbers are correct measures of different scopes. The statement prints
+the difference explicitly (`allocation_reconciliation`) rather than scaling
+either one to agree. **Forcing them to match would silently shrink the
+per-session figures to fit a total they were never meant to sum to** — the
+page would look consistent and be wrong.
+
+The same rule governs the ledger's totals. `ENGAGED` and `NAR` cover only
+measured rows, while `DISPLACED` covers all of them, so a single TOTAL row
+invites a subtraction that does not come out. The statement shows a `MEASURED`
+row where the arithmetic holds and a `TOTAL` row that declares how much
+displacement carries no measurement.
+
+### 4c. Allocation — work / life / unallocated
+
+The clerk that picks a session's bucket also returns an allocation. Client and
+business work is `work`; household, family, health and errands are `life`.
+
+`unallocated` is a **first-class answer**, not a failure. Anything the clerk
+cannot place stays there, and it is never defaulted to `work`. Desk decisions
+and vigilance sweeps are always `unallocated` — there is nothing in them to
+classify.
+
+Interruption carries no allocation, because it is counted from
+`alfred_journal` rows that have none. All of it lands in `unallocated`; `work`
+and `life` show zero interruption **by construction**, not by measurement.
+Splitting it would mean inventing an attribution.
+
+---
+
 ## Judgement rules
 
 Learned from the manual passes. Each one prevented a specific error.
@@ -211,3 +282,32 @@ chores    morning M + evening M  =  40 min
 The lesson worth keeping: a reference figure computed before the method was
 settled is not a reference. When an implementation disagrees with a target,
 re-derive the target before touching the code.
+
+### How much the figure moves between runs
+
+**Displaced is not reproducible to the decimal, and a validation tolerance has
+to allow for that.** Re-running the recap over day B with unchanged code
+produced **10.95 h** displaced against the 12.03 h recorded above — about 9%
+lower.
+
+Nothing was wrong with either run. Bucket assignment is a judgement the clerk
+makes from session content, and it is not deterministic: a session read as L
+one day can read as M the next. Engaged time, by contrast, is measured from
+timestamps and does reproduce.
+
+So the two halves of the formula have different characters, and the statement
+should be read accordingly:
+
+| term | character | reproducible |
+|---|---|---|
+| engaged | measured from timestamps | yes |
+| interruption | counted rows × published rate | yes |
+| displaced | estimated from judgement | **no — expect single-digit % drift** |
+
+A re-run landing within ~10% on displaced is agreement. Chasing exact equality
+would mean pinning the clerk's output, which would replace an honest estimate
+with a frozen one.
+
+This is also why §Integrity's "a defensible small number beats an impressive
+one" is load-bearing rather than decorative: the largest term in the formula
+is the one that cannot be checked against a clock.
