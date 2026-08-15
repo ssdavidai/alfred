@@ -2137,3 +2137,8 @@ action recomputeAttention {
   fn: import { recomputeAttention } from "@src/dashboard/operations",
   entities: []
 }
+
+query getAttentionTrends {
+  fn: import { getAttentionTrends } from "@src/dashboard/operations",
+  entities: []
+}

@@ -4460,3 +4460,14 @@ export const recomputeAttention = async (args: { date: string }, context: any): 
   const instance = await getUserInstance(context);
   return proxyToTenant(instance, { method: "POST", path: "/api/v1/attention/recompute", body: { date: args.date } });
 };
+
+export const getAttentionTrends = async (args: { grain?: string; from?: string; to?: string } | void, context: any): Promise<any> => {
+  const instance = await getUserInstance(context);
+  const q: Record<string, string> = {};
+  if (args && typeof args === "object") {
+    if (args.grain) q.grain = args.grain;
+    if (args.from) q.from = args.from;
+    if (args.to) q.to = args.to;
+  }
+  return proxyToTenant(instance, { method: "GET", path: "/api/v1/attention/trends", query: Object.keys(q).length ? q : undefined });
+};

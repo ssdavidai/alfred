@@ -2,7 +2,7 @@
 // Day view: canonical statement (header → 01 The Account → 02 Where It Went →
 // 03 The Ledger → rate card → footer). Range tab: unchanged.
 import { useState } from "react";
-import { useQuery, useAction, getAttentionStatement, getAttentionStats, recomputeAttention } from "wasp/client/operations";
+import { useQuery, useAction, getAttentionStatement, getAttentionStats, recomputeAttention, getAttentionTrends } from "wasp/client/operations";
 import { Frame } from "../client/components/ab/Frame";
 import logoCurrentcolor from "../client/assets/brand/alfred-logo-currentcolor.svg";
 import {
@@ -13,6 +13,12 @@ import {
   type AttentionDayViewModel, type AttentionStatsResponse,
   type ChartBar, type ChartScaleResult, type BarGeometry,
 } from "./attentionCore";
+import {
+  deriveNarBars, deriveSeriesMax, deriveTrendsSummary,
+  deriveAllocationBars, deriveRatioBars, deriveBucketBars, deriveOutcomesBars,
+  isReadGenerated, BUCKET_KEYS, LOW_ENGAGEMENT_HOURS,
+  type TrendsGrain, type AttentionTrendsResponse,
+} from "./attentionTrendsCore";
 
 const now = () => new Date().toISOString().slice(0, 10);
 /** Read an ISO date from the query string; fall back when absent or malformed. */
@@ -22,6 +28,7 @@ const dateParam = (key: string, fallback: string): string => {
   return v !== null && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : fallback;
 };
 const sevenAgo = () => { const d = new Date(); d.setDate(d.getDate() - 6); return d.toISOString().slice(0, 10); };
+const thirteenWeeksAgo = () => { const d = new Date(); d.setDate(d.getDate() - 91); return d.toISOString().slice(0, 10); };
 
 // ── Shared primitives ─────────────────────────────────────────────────────────
 
@@ -434,17 +441,216 @@ function RangeView({ stats }: { stats: AttentionStatsResponse }) {
   );
 }
 
+// ── Trends view (#584 — TRENDS tab) ──────────────────────────────────────────
+
+function TrendsView({ data, grain, setGrain }: { data: AttentionTrendsResponse; grain: TrendsGrain; setGrain: (g: TrendsGrain) => void }) {
+  const ps = data.periods ?? [];
+  if (!ps.length) return <p className="font-mono text-xs opacity-40 mt-12">No data for this period.</p>;
+  const nb = deriveNarBars(ps, grain); const ab = deriveAllocationBars(ps, grain);
+  const rb = deriveRatioBars(ps, grain); const bb = deriveBucketBars(ps, grain);
+  const ob = deriveOutcomesBars(ps, grain); const sum = deriveTrendsSummary(ps);
+  const BW = 24; const GP = 5; const H = 80; const CW = ps.length * (BW + GP) - GP;
+  const xi = (i: number) => i * (BW + GP);
+  const bar = (v: number, max: number) => Math.round(Math.max(v, 0) / max * H);
+  const maxDisp = deriveSeriesMax(nb.map(b => b.displaced_hours));
+  const maxAlloc = deriveSeriesMax(ab.map(b => b.total));
+  const maxOut = deriveSeriesMax(ob.map(b => b.total));
+  const validR = rb.filter(b => b.ratio != null && !b.low_engagement).map(b => b.ratio!);
+  const maxRatio = deriveSeriesMax(validR.length ? validR : rb.filter(b => b.ratio != null).map(b => b.ratio!));
+  const fh = (v: number | null, d = 1) => v == null ? "—" : v.toFixed(d);
+  const totalUnbucketed = bb.reduce((s, b) => s + b.unbucketed_count, 0);
+  return (
+    <div className="mt-4">
+      {/* Grain selector */}
+      <div className="flex gap-4 mb-10">
+        {(["week", "month", "quarter"] as TrendsGrain[]).map(g => (
+          <button key={g} type="button" onClick={() => setGrain(g)}
+            className="font-mono text-[10px] uppercase tracking-[0.22em] pb-1 transition-colors"
+            style={{ color: grain === g ? "var(--brass)" : "var(--marginalia)", borderBottom: grain === g ? "1px solid var(--brass)" : "1px solid transparent" }}>
+            {g === "week" ? "Weekly" : g === "month" ? "Monthly" : "Quarterly"}
+          </button>
+        ))}
+      </div>
+
+      {/* 01 Headline pair */}
+      <div className="grid grid-cols-2 gap-8 mb-12">
+        <div>
+          <p className="font-mono text-[10px] uppercase tracking-[0.22em] mb-2" style={{ color: "var(--marginalia)" }}>NAR this {grain}</p>
+          <p className="font-display" style={{ fontSize: 48, lineHeight: 1 }}>{fh(sum.latest_nar)}<span className="font-mono text-base ml-2 opacity-50">h</span></p>
+          {sum.nar_delta != null && (
+            <p className="font-mono text-[11px] mt-1" style={{ color: sum.nar_delta >= 0 ? "var(--brass)" : "oklch(0.42 0.12 30)" }}>
+              {sum.nar_delta >= 0 ? "+" : ""}{fh(sum.nar_delta)}h vs prior {grain}
+            </p>
+          )}
+        </div>
+        <div>
+          <p className="font-mono text-[10px] uppercase tracking-[0.22em] mb-2" style={{ color: "var(--marginalia)" }}>Return ratio</p>
+          <p className="font-display" style={{ fontSize: 48, lineHeight: 1 }}>{fh(sum.latest_ratio)}{sum.latest_ratio != null && <span className="font-mono text-base ml-1 opacity-50">×</span>}</p>
+          {sum.ratio_direction && (
+            <p className="font-mono text-[11px] mt-1" style={{ color: sum.ratio_direction === "up" ? "var(--brass)" : sum.ratio_direction === "down" ? "oklch(0.42 0.12 30)" : "var(--marginalia)" }}>
+              {sum.ratio_direction === "up" ? "↑ improving" : sum.ratio_direction === "down" ? "↓ declining" : "→ flat"}
+            </p>
+          )}
+        </div>
+      </div>
+
+      {/* 02 NAR chart — displaced (total) bars with engaged overlay; partial=dashed; uninstrumented=dim */}
+      <div className="mb-12">
+        <SL n="02" title="NAR by period" />
+        <svg width={CW} height={H + 16} className="overflow-visible mt-4" role="img" aria-label="NAR by period chart">
+          {nb.map((b, i) => {
+            const disp = bar(b.displaced_hours, maxDisp); const eng = bar(b.engaged_hours, maxDisp);
+            return (
+              <g key={b.key} opacity={b.uninstrumented ? 0.4 : 1}>
+                <rect x={xi(i)} y={H - disp} width={BW} height={disp} fill="var(--rule)" rx={1} stroke={b.partial ? "var(--brass)" : "none"} strokeWidth={b.partial ? 1 : 0} strokeDasharray={b.partial ? "3 2" : undefined} />
+                <rect x={xi(i)} y={H - eng} width={BW} height={eng} fill="var(--brass)" rx={1} opacity={0.6} />
+                <text x={xi(i) + BW / 2} y={H + 12} textAnchor="middle" fontSize={8} fontFamily="monospace" fill="var(--marginalia)">{b.label}</text>
+              </g>
+            );
+          })}
+        </svg>
+        <p className="font-mono text-[9px] mt-2" style={{ color: "var(--marginalia)" }}>
+          <span className="inline-block w-2 h-2 mr-1 align-middle" style={{ background: "var(--brass)", opacity: 0.6 }} /> engaged
+          &nbsp;<span className="inline-block w-2 h-2 mr-1 align-middle" style={{ background: "var(--rule)" }} /> NAR
+          {nb.some(b => b.partial) && <>&nbsp; · dashed outline = partial period</>}
+          {nb.some(b => b.uninstrumented) && <>&nbsp; · dim = interruptions unmeasured</>}
+        </p>
+      </div>
+
+      {/* 03 Allocation — proportional bars: work / life / unallocated */}
+      <div className="mb-12">
+        <SL n="03" title="Where it went" />
+        <div className="flex flex-col gap-2 mt-4">
+          {ab.map(b => (
+            <div key={b.key} className="flex items-center gap-3">
+              <span className="font-mono text-[9px] w-8 shrink-0 text-right" style={{ color: "var(--marginalia)" }}>{b.label}</span>
+              <div className="flex-1 flex h-4 gap-px overflow-hidden rounded-sm">
+                {(["work", "life", "unallocated"] as const).map(k => {
+                  const v = b[k]; const pct = v / b.total * 100;
+                  return pct > 0.5 ? <div key={k} style={{ width: `${pct}%`, background: k === "work" ? "var(--brass)" : k === "life" ? "oklch(0.62 0.09 200)" : "var(--rule)", opacity: k === "unallocated" ? 0.4 : 0.8 }} /> : null;
+                })}
+              </div>
+              <span className="font-mono text-[9px] w-10 shrink-0" style={{ color: "var(--marginalia)" }}>{b.total.toFixed(1)}h</span>
+            </div>
+          ))}
+        </div>
+        <div className="flex gap-4 mt-2">
+          {(["work", "life", "unallocated"] as const).map(k => (
+            <span key={k} className="font-mono text-[9px] flex items-center gap-1" style={{ color: "var(--marginalia)" }}>
+              <span className="inline-block w-2 h-2" style={{ background: k === "work" ? "var(--brass)" : k === "life" ? "oklch(0.62 0.09 200)" : "var(--rule)" }} /> {k}
+            </span>
+          ))}
+        </div>
+      </div>
+
+      {/* 04 Return ratio — null preserved as em-dash; low-engagement dimmed */}
+      <div className="mb-12">
+        <SL n="04" title="Return ratio" />
+        <svg width={CW} height={H + 16} className="overflow-visible mt-4" role="img" aria-label="Return ratio chart">
+          {rb.map((b, i) => {
+            if (b.ratio == null) return (
+              <g key={b.key}>
+                <text x={xi(i) + BW / 2} y={H / 2} textAnchor="middle" fontSize={11} fontFamily="monospace" fill="var(--marginalia)" dominantBaseline="middle">—</text>
+                <text x={xi(i) + BW / 2} y={H + 12} textAnchor="middle" fontSize={8} fontFamily="monospace" fill="var(--marginalia)">{b.label}</text>
+              </g>
+            );
+            const h = bar(b.ratio, maxRatio);
+            return (
+              <g key={b.key} opacity={b.low_engagement ? 0.3 : 1}>
+                <rect x={xi(i)} y={H - h} width={BW} height={h} fill="var(--brass)" rx={1} />
+                <text x={xi(i) + BW / 2} y={H + 12} textAnchor="middle" fontSize={8} fontFamily="monospace" fill="var(--marginalia)">{b.label}</text>
+              </g>
+            );
+          })}
+        </svg>
+        <p className="font-mono text-[9px] mt-2" style={{ color: "var(--marginalia)" }}>
+          — = no engagement data · dim bars = engaged &lt; {LOW_ENGAGEMENT_HOURS}h (ratio unreliable)
+        </p>
+      </div>
+
+      {/* 05 Outcomes — delivered/failed/unknown; failures in destructive red */}
+      <div className="mb-12">
+        <SL n="05" title="Outcomes" />
+        <svg width={CW} height={H + 16} className="overflow-visible mt-4" role="img" aria-label="Outcomes chart">
+          {ob.map((b, i) => {
+            const tot = bar(b.total, maxOut); const del = bar(b.delivered, maxOut); const fail = bar(b.failed, maxOut);
+            return (
+              <g key={b.key}>
+                <rect x={xi(i)} y={H - tot} width={BW} height={tot} fill="var(--rule)" rx={1} />
+                <rect x={xi(i)} y={H - del} width={BW} height={del} fill="var(--brass)" rx={1} opacity={0.75} />
+                {fail > 0 && <rect x={xi(i)} y={H - fail} width={BW / 2} height={fail} fill="oklch(0.42 0.12 30)" rx={1} />}
+                <text x={xi(i) + BW / 2} y={H + 12} textAnchor="middle" fontSize={8} fontFamily="monospace" fill="var(--marginalia)">{b.label}</text>
+              </g>
+            );
+          })}
+        </svg>
+        {ob.some(b => b.failed > 0) && (
+          <p className="font-mono text-[10px] font-semibold mt-2" style={{ color: "oklch(0.42 0.12 30)" }}>
+            {ob.reduce((s, b) => s + b.failed, 0)} failed · {ob.reduce((s, b) => s + b.delivered, 0)} delivered
+          </p>
+        )}
+      </div>
+
+      {/* 06 Task size mix — S/M/L/XL stacked; unbucketed is footnote only */}
+      <div className="mb-12">
+        <SL n="06" title="Task size mix" />
+        <div className="flex flex-col gap-2 mt-4">
+          {bb.map(b => {
+            const tot = b.S + b.M + b.L + b.XL || 1;
+            return (
+              <div key={b.key} className="flex items-center gap-3">
+                <span className="font-mono text-[9px] w-8 shrink-0 text-right" style={{ color: "var(--marginalia)" }}>{b.label}</span>
+                <div className="flex-1 flex h-4 gap-px overflow-hidden rounded-sm">
+                  {BUCKET_KEYS.map((k, ki) => { const v = b[k]; const pct = v / tot * 100; return pct > 0.5 ? <div key={k} style={{ width: `${pct}%`, background: `oklch(${0.52 + ki * 0.07} 0.08 75)` }} /> : null; })}
+                </div>
+                <span className="font-mono text-[9px] w-10 shrink-0" style={{ color: "var(--marginalia)" }}>{tot}</span>
+              </div>
+            );
+          })}
+        </div>
+        {totalUnbucketed > 0 && <p className="font-mono text-[9px] mt-2" style={{ color: "var(--marginalia)" }}>+ {totalUnbucketed} vigilance sweeps (unbucketed — not shown)</p>}
+      </div>
+
+      {/* 07 Alfred's read — null = not yet generated; never fabricate observations */}
+      <div className="mb-10">
+        <SL n="07" title="Alfred's read" />
+        {isReadGenerated(data.read) ? (
+          data.read!.observations.length === 0
+            ? <p className="font-mono text-xs mt-4 opacity-40">Alfred ran the analysis but found no patterns to surface for this period.</p>
+            : <div className="mt-4 flex flex-col gap-6">
+                {data.read!.observations.map((obs, i) => (
+                  <div key={i} className="grid grid-cols-[1fr_2fr] gap-6 pb-6 border-b border-[var(--rule)] last:border-0">
+                    <p className="font-display text-lg leading-snug">{obs.headline}</p>
+                    <div>
+                      <p className="font-mono text-sm mb-2">{obs.detail}</p>
+                      <p className="font-mono text-[10px] opacity-50">{obs.evidence}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+        ) : (
+          <p className="font-mono text-xs mt-4 opacity-50">Alfred hasn't generated a read for this period yet — it runs automatically after the nightly workflow.</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── Page shell ────────────────────────────────────────────────────────────────
 
 export default function AttentionPage() {
-  const [tab, setTab] = useState<"day" | "range">(
+  const [tab, setTab] = useState<"day" | "range" | "trends">(
     dateParam("from", "") !== "" ? "range" : "day");
   const [date, setDate] = useState(dateParam("date", now()));
   const [from, setFrom] = useState(dateParam("from", sevenAgo()));
   const [to, setTo] = useState(dateParam("to", now()));
   const [running, setRunning] = useState(false);
+  const [grain, setGrain] = useState<TrendsGrain>("week");
+  const [trendsFrom] = useState(thirteenWeeksAgo);
+  const [trendsTo] = useState(now);
   const dayQ = useQuery(getAttentionStatement, { date }, { enabled: tab === "day" });
   const statsQ = useQuery(getAttentionStats, { from, to }, { enabled: tab === "range" });
+  const trendsQ = useQuery(getAttentionTrends, { grain, from: trendsFrom, to: trendsTo }, { enabled: tab === "trends" });
   const recompute = useAction(recomputeAttention);
 
   async function handleRecompute() {
@@ -482,7 +688,7 @@ export default function AttentionPage() {
           </>
         )}
 
-        {/* Page-level header — shown on range tab; day tab has its own statement header */}
+        {/* Page-level header — shown on range/trends tabs; day tab has its own statement header */}
         {tab === "range" && (
           <div className="mb-10">
             <p className="font-mono text-[10px] uppercase tracking-[0.32em] mb-3" style={{ color: "var(--marginalia)" }}>
@@ -493,33 +699,49 @@ export default function AttentionPage() {
             </h1>
           </div>
         )}
+        {tab === "trends" && (
+          <div className="mb-10">
+            <p className="font-mono text-[10px] uppercase tracking-[0.32em] mb-3" style={{ color: "var(--marginalia)" }}>
+              Alfred Black · Attention Trends
+            </p>
+            <h1 className="font-display tracking-[-0.02em] leading-[0.98]" style={{ fontSize: "clamp(44px,6vw,72px)" }}>
+              Usage over time.
+            </h1>
+          </div>
+        )}
 
         {/* Tab bar */}
         <div className="flex gap-6 mb-6 border-b border-[var(--rule)]">
-          {(["day", "range"] as const).map((t) => (
+          {(["day", "range", "trends"] as const).map((t) => (
             <button key={t} type="button" onClick={() => setTab(t)}
               className="font-mono text-[10px] uppercase tracking-[0.22em] pb-2 transition-colors"
               style={{ color: tab === t ? "var(--brass)" : "var(--marginalia)", borderBottom: tab === t ? "1px solid var(--brass)" : "1px solid transparent" }}>
-              {t === "day" ? "Day" : "Range"}
+              {t === "day" ? "Day" : t === "range" ? "Range" : "Trends"}
             </button>
           ))}
         </div>
 
-        {/* Date controls */}
-        <div className="flex items-center gap-3 mb-8">
-          {tab === "day"
-            ? din(date, setDate, now())
-            : <>{din(from, setFrom, to)}<span className="font-mono text-xs opacity-40">to</span>{din(to, setTo, now())}</>}
-        </div>
+        {/* Date controls — Trends uses internal grain selector; no date pickers */}
+        {tab !== "trends" && (
+          <div className="flex items-center gap-3 mb-8">
+            {tab === "day"
+              ? din(date, setDate, now())
+              : <>{din(from, setFrom, to)}<span className="font-mono text-xs opacity-40">to</span>{din(to, setTo, now())}</>}
+          </div>
+        )}
 
         {/* Content */}
         {tab === "day"
           ? dayQ.isLoading ? <p className="font-mono text-xs opacity-40">Loading…</p>
             : dayQ.error ? <p className="font-mono text-xs" style={{ color: "oklch(0.42 0.12 30)" }}>{String((dayQ.error as any)?.message ?? "Failed.")}</p>
             : dayQ.data ? <DayView day={normalizeAttentionDay(dayQ.data)} recomp={handleRecompute} running={running} /> : null
-          : statsQ.isLoading ? <p className="font-mono text-xs opacity-40">Loading…</p>
-            : statsQ.error ? <p className="font-mono text-xs" style={{ color: "oklch(0.42 0.12 30)" }}>{String((statsQ.error as any)?.message ?? "Failed.")}</p>
-            : statsQ.data ? <RangeView stats={statsQ.data as AttentionStatsResponse} /> : null}
+          : tab === "range"
+            ? statsQ.isLoading ? <p className="font-mono text-xs opacity-40">Loading…</p>
+              : statsQ.error ? <p className="font-mono text-xs" style={{ color: "oklch(0.42 0.12 30)" }}>{String((statsQ.error as any)?.message ?? "Failed.")}</p>
+              : statsQ.data ? <RangeView stats={statsQ.data as AttentionStatsResponse} /> : null
+            : trendsQ.isLoading ? <p className="font-mono text-xs opacity-40">Loading…</p>
+              : trendsQ.error ? <p className="font-mono text-xs" style={{ color: "oklch(0.42 0.12 30)" }}>{String((trendsQ.error as any)?.message ?? "Failed.")}</p>
+              : trendsQ.data ? <TrendsView data={trendsQ.data as AttentionTrendsResponse} grain={grain} setGrain={setGrain} /> : null}
 
       </section>
     </Frame>
