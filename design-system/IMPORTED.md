@@ -28,7 +28,8 @@ The **buildable core** — everything needed to write in-brand CSS and markup:
 | `tokens/typography.css` | display/body/mono scales, tracking, leading |
 | `tokens/spacing.css` | `--radius: 0`, 4px scale, hairlines, layout widths |
 | `tokens/surfaces.css` | `.paper` `.wool` `.rule` `.gilt` `.press`, the button family |
-| `templates/attention-statement/` | the canonical Attention Statement layout |
+| `templates/attention-statement/AttentionStatement.dc.html` | canonical statement — **light**, A4 client-facing |
+| `templates/attention-statement/AttentionStatementDark.html` | canonical statement — **dark**, the in-app treatment |
 | `_brandpack/prompts/UI_RULES.md` | the ten UI rules (older layer) |
 | `_brandpack/ui-kit/components/COMPONENT_RULES.md` | panels, buttons, inputs, tables (older layer) |
 
@@ -46,10 +47,15 @@ The **buildable core** — everything needed to write in-brand CSS and markup:
 
 ## Sample data was scrubbed
 
-`templates/attention-statement/AttentionStatement.dc.html` shipped with a real client
-company name in its standfirst and is a client-facing document. The name has been
-replaced with the fictional **Northwind & Co**. Any future import must repeat this
-check before committing — the design project is private, this repository is not.
+`AttentionStatement.dc.html` (light) shipped with a real client company name in its
+standfirst; replaced with the fictional **Northwind & Co**.
+
+`AttentionStatementDark.html` shipped with the principal's full name in its `<title>`;
+removed. Its ledger line items are generic by nature ("Client invoice rebuilt") and were
+kept — they demonstrate the register the ledger should be written in.
+
+Any future import must repeat both checks before committing — the design project is
+private, this repository is not.
 
 ---
 
