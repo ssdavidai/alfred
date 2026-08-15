@@ -689,9 +689,34 @@ function TrendsView({ data, grain, setGrain, interpretingRead, onGenerateRead, r
   const maxRatio = deriveSeriesMax(validR.length ? validR : rb.filter(b => b.ratio != null).map(b => b.ratio!));
   const fh = (v: number | null, d = 1) => v == null ? "—" : v.toFixed(d);
   const totalUnbucketed = bb.reduce((s, b) => s + b.unbucketed_count, 0);
+  // Bucket opacity levels — brass at four steps; one hue, no second accent.
+  const BUCKET_OP: Record<string, number> = { S: 0.25, M: 0.45, L: 0.65, XL: 0.85 };
+  const wrapStyle = { padding: "36px 58px 30px", ...DARK_VARS, "--background": WOOL_BG } as CSSProperties;
 
   return (
-    <div className="mt-4">
+    <div className="wool" style={wrapStyle}>
+
+      {/* ── Letterhead — matches DAY and RANGE ───────────────────────── */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 24 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 13 }}>
+          <img src={logoWhite} alt="Alfred Black" style={{ height: 34, width: "auto", display: "block" }} />
+          <span style={{ fontFamily: "var(--font-mono)", fontWeight: 800, fontSize: 11.5,
+            letterSpacing: "0.32em", textTransform: "uppercase", color: "var(--ink)" }}>
+            ALFRED&nbsp;BLACK
+          </span>
+        </div>
+        <div style={{ textAlign: "right", fontFamily: "var(--font-mono)", fontWeight: 700,
+          fontSize: 9.5, letterSpacing: "0.2em", color: "var(--marginalia)", lineHeight: 1.9 }}>
+          {data.from} — {data.to}
+        </div>
+      </div>
+      <div style={{ borderTop: "1px solid var(--ink)", borderBottom: "1px solid var(--ink)",
+        height: 4, margin: "14px 0 20px" }} />
+      <h1 style={{ fontFamily: "var(--font-display)", fontWeight: 600, fontSize: 30,
+        letterSpacing: "-0.015em", lineHeight: 1.05, margin: "0 0 20px" }}>
+        Attention Trends.
+      </h1>
+
       {/* Grain selector */}
       <div className="flex gap-4 mb-10">
         {(["week", "month", "quarter"] as TrendsGrain[]).map(g => (
@@ -703,11 +728,12 @@ function TrendsView({ data, grain, setGrain, interpretingRead, onGenerateRead, r
         ))}
       </div>
 
-      {/* 01 Headline pair */}
-      <div className="grid grid-cols-2 gap-8 mb-12">
+      {/* 01 Headline pair — 76 px display-serif brass, matching DAY/RANGE hero idiom */}
+      <SL n="01" title="HEADLINE" mt={0} />
+      <div className="grid grid-cols-2 gap-8 mb-12" style={{ marginTop: 14 }}>
         <div>
           <p className="font-mono text-[10px] uppercase tracking-[0.22em] mb-2" style={{ color: "var(--marginalia)" }}>NAR this {grain}</p>
-          <p className="font-display" style={{ fontSize: 48, lineHeight: 1 }}>{fh(sum.latest_nar)}<span className="font-mono text-base ml-2 opacity-50">h</span></p>
+          <p style={{ fontFamily: "var(--font-display)", fontWeight: 600, fontSize: 76, letterSpacing: "-0.02em", lineHeight: 1, color: "var(--brass)" }}>{fh(sum.latest_nar)}<span style={{ fontFamily: "var(--font-mono)", fontSize: 36, opacity: 0.5, marginLeft: 6 }}>h</span></p>
           {sum.nar_delta != null && (
             <p className="font-mono text-[11px] mt-1" style={{ color: sum.nar_delta >= 0 ? "var(--brass)" : "oklch(0.42 0.12 30)" }}>
               {sum.nar_delta >= 0 ? "+" : ""}{fh(sum.nar_delta)}h vs prior {grain}
@@ -716,7 +742,7 @@ function TrendsView({ data, grain, setGrain, interpretingRead, onGenerateRead, r
         </div>
         <div>
           <p className="font-mono text-[10px] uppercase tracking-[0.22em] mb-2" style={{ color: "var(--marginalia)" }}>Return ratio</p>
-          <p className="font-display" style={{ fontSize: 48, lineHeight: 1 }}>{fh(sum.latest_ratio)}{sum.latest_ratio != null && <span className="font-mono text-base ml-1 opacity-50">×</span>}</p>
+          <p style={{ fontFamily: "var(--font-display)", fontWeight: 600, fontSize: 76, letterSpacing: "-0.02em", lineHeight: 1, color: "var(--brass)" }}>{fh(sum.latest_ratio)}{sum.latest_ratio != null && <span style={{ fontFamily: "var(--font-mono)", fontSize: 36, opacity: 0.5, marginLeft: 4 }}>{"×"}</span>}</p>
           {sum.ratio_direction && (
             <p className="font-mono text-[11px] mt-1" style={{ color: sum.ratio_direction === "up" ? "var(--brass)" : sum.ratio_direction === "down" ? "oklch(0.42 0.12 30)" : "var(--marginalia)" }}>
               {sum.ratio_direction === "up" ? "↑ improving" : sum.ratio_direction === "down" ? "↓ declining" : "→ flat"}
@@ -736,20 +762,20 @@ function TrendsView({ data, grain, setGrain, interpretingRead, onGenerateRead, r
             const eng = barPx(b.engaged_hours, maxDisp, H_NAR);
             return (
               <g key={b.key} opacity={b.uninstrumented ? 0.4 : 1}>
-                <rect x={xi(i)} y={H_NAR - disp} width={BW} height={Math.max(disp, 1)} fill="var(--rule)" rx={1}
+                <rect x={xi(i)} y={H_NAR - disp} width={BW} height={Math.max(disp, 1)} fill="oklch(0.62 0.09 75 / 0.22)" rx={1}
                   stroke={b.partial ? "var(--brass)" : "none"} strokeWidth={b.partial ? 1 : 0}
                   strokeDasharray={b.partial ? "3 2" : undefined} />
-                {eng > 0 && <rect x={xi(i)} y={H_NAR - eng} width={BW} height={eng} fill="var(--brass)" rx={1} opacity={0.6} />}
+                {eng > 0 && <rect x={xi(i)} y={H_NAR - eng} width={BW} height={eng} fill="var(--brass)" rx={1} opacity={0.72} />}
                 <text x={xi(i) + BW / 2} y={H_NAR + 14} textAnchor="middle" fontSize={9} fontFamily="monospace" fill="var(--marginalia)">{b.label}</text>
               </g>
             );
           })}
         </svg>
         <p className="font-mono text-[9px] mt-2" style={{ color: "var(--marginalia)" }}>
-          <span className="inline-block w-2 h-2 mr-1 align-middle" style={{ background: "var(--brass)", opacity: 0.6 }} /> engaged
-          &nbsp;<span className="inline-block w-2 h-2 mr-1 align-middle" style={{ background: "var(--rule)" }} /> NAR
-          {nb.some(b => b.partial) && <>&nbsp; · dashed outline = partial period</>}
-          {nb.some(b => b.uninstrumented) && <>&nbsp; · dim = interruptions unmeasured</>}
+          <span className="inline-block w-2 h-2 mr-1 align-middle" style={{ background: "var(--brass)", opacity: 0.72 }} /> engaged
+          {" "}<span className="inline-block w-2 h-2 mr-1 align-middle" style={{ background: "oklch(0.62 0.09 75 / 0.22)" }} /> displaced
+          {nb.some(b => b.partial) && <>{" "}{"·"} dashed outline = partial period</>}
+          {nb.some(b => b.uninstrumented) && <>{" "}{"·"} dim = interruptions unmeasured</>}
         </p>
       </div>
 
@@ -765,8 +791,8 @@ function TrendsView({ data, grain, setGrain, interpretingRead, onGenerateRead, r
               <div className="flex-1 flex h-4 gap-px overflow-hidden rounded-sm">
                 {(["work", "life", "unallocated"] as const).map(k => {
                   const v = b[k]; const pct = v / b.total * 100;
-                  const bg = k === "work" ? "var(--brass)" : k === "life" ? "var(--marginalia)" : "var(--rule)";
-                  return pct > 0.5 ? <div key={k} style={{ width: `${pct}%`, background: bg, opacity: k === "unallocated" ? 0.35 : k === "life" ? 0.6 : 0.8 }} /> : null;
+                  const bg = k === "work" ? "var(--brass)" : k === "life" ? "var(--marginalia)" : "oklch(0.62 0.09 75 / 0.22)";
+                  return pct > 0.5 ? <div key={k} style={{ width: `${pct}%`, background: bg, opacity: k === "unallocated" ? 1 : k === "life" ? 0.6 : 0.8 }} /> : null;
                 })}
               </div>
               <span className="font-mono text-[9px] w-10 shrink-0" style={{ color: "var(--marginalia)" }}>{b.total.toFixed(1)}h</span>
@@ -775,7 +801,7 @@ function TrendsView({ data, grain, setGrain, interpretingRead, onGenerateRead, r
         </div>
         <div className="flex gap-4 mt-2">
           {(["work", "life", "unallocated"] as const).map(k => {
-            const bg = k === "work" ? "var(--brass)" : k === "life" ? "var(--marginalia)" : "var(--rule)";
+            const bg = k === "work" ? "var(--brass)" : k === "life" ? "var(--marginalia)" : "oklch(0.62 0.09 75 / 0.22)";
             return (
               <span key={k} className="font-mono text-[9px] flex items-center gap-1" style={{ color: "var(--marginalia)" }}>
                 <span className="inline-block w-2 h-2" style={{ background: bg, opacity: k === "life" ? 0.6 : 1 }} /> {k}
@@ -816,23 +842,28 @@ function TrendsView({ data, grain, setGrain, interpretingRead, onGenerateRead, r
         <SL n="05" title="Outcomes" />
         <svg width={CW} height={H_SUB + 20} style={{ display: "block", maxWidth: "100%", overflow: "visible" }}
           role="img" aria-label="Outcomes chart">
+          <defs>
+            <pattern id="trends-hatch-fail" width="4" height="4" patternUnits="userSpaceOnUse" patternTransform="rotate(-45)">
+              <line x1="0" y1="0" x2="0" y2="4" stroke="var(--brass)" strokeWidth="1.5" opacity="0.65" />
+            </pattern>
+          </defs>
           {ob.map((b, i) => {
             const tot = barPx(b.total, maxOut, H_SUB);
             const del = barPx(b.delivered, maxOut, H_SUB);
             const fail = barPx(b.failed, maxOut, H_SUB);
             return (
               <g key={b.key}>
-                <rect x={xi(i)} y={H_SUB - tot} width={BW} height={Math.max(tot, 1)} fill="var(--rule)" rx={1} />
+                {tot > 0 && <rect x={xi(i)} y={H_SUB - tot} width={BW} height={Math.max(tot, 1)} fill="oklch(0.62 0.09 75 / 0.18)" rx={1} />}
                 {del > 0 && <rect x={xi(i)} y={H_SUB - del} width={BW} height={del} fill="var(--brass)" rx={1} opacity={0.75} />}
-                {fail > 0 && <rect x={xi(i)} y={H_SUB - fail} width={Math.ceil(BW / 2)} height={fail} fill="oklch(0.42 0.12 30)" rx={1} />}
+                {fail > 0 && <rect x={xi(i)} y={H_SUB - fail} width={BW} height={fail} fill="url(#trends-hatch-fail)" stroke="var(--brass)" strokeWidth={0.5} rx={1} />}
                 <text x={xi(i) + BW / 2} y={H_SUB + 14} textAnchor="middle" fontSize={9} fontFamily="monospace" fill="var(--marginalia)">{b.label}</text>
               </g>
             );
           })}
         </svg>
         {ob.some(b => b.failed > 0) && (
-          <p className="font-mono text-[10px] font-semibold mt-2" style={{ color: "oklch(0.42 0.12 30)" }}>
-            {ob.reduce((s, b) => s + b.failed, 0)} failed · {ob.reduce((s, b) => s + b.delivered, 0)} delivered
+          <p className="font-mono text-[10px] font-semibold mt-2" style={{ color: "var(--brass)" }}>
+            {ob.reduce((s, b) => s + b.failed, 0)} failed {"·"} {ob.reduce((s, b) => s + b.delivered, 0)} delivered
           </p>
         )}
       </div>
@@ -847,7 +878,7 @@ function TrendsView({ data, grain, setGrain, interpretingRead, onGenerateRead, r
               <div key={b.key} className="flex items-center gap-3">
                 <span className="font-mono text-[9px] w-8 shrink-0 text-right" style={{ color: "var(--marginalia)" }}>{b.label}</span>
                 <div className="flex-1 flex h-4 gap-px overflow-hidden rounded-sm">
-                  {BUCKET_KEYS.map((k, ki) => { const v = b[k]; const pct = v / tot * 100; return pct > 0.5 ? <div key={k} style={{ width: `${pct}%`, background: `oklch(${0.52 + ki * 0.07} 0.08 75)` }} /> : null; })}
+                  {BUCKET_KEYS.map((k) => { const v = b[k]; const pct = v / tot * 100; return pct > 0.5 ? <div key={k} style={{ width: `${pct}%`, background: "var(--brass)", opacity: BUCKET_OP[k] }} /> : null; })}
                 </div>
                 <span className="font-mono text-[9px] w-10 shrink-0" style={{ color: "var(--marginalia)" }}>{tot}</span>
               </div>
@@ -894,6 +925,19 @@ function TrendsView({ data, grain, setGrain, interpretingRead, onGenerateRead, r
             </button>
           </div>
         )}
+      </div>
+
+      {/* Footer */}
+      <div style={{ borderTop: `1px solid ${HAIR}`, marginTop: 32, paddingTop: 14,
+        display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+        <span style={{ fontFamily: "var(--font-mono)", fontWeight: 700, fontSize: 8.5,
+          letterSpacing: "0.28em", textTransform: "uppercase", color: "var(--marginalia)" }}>
+          ALFRED BLACK {"·"} ATTENTION TRENDS {"·"} {data.from} {"—"} {data.to}
+        </span>
+        <span style={{ fontFamily: "var(--font-mono)", fontWeight: 700, fontSize: 8.5,
+          letterSpacing: "0.22em", textTransform: "uppercase", color: "var(--marginalia)", opacity: 0.5 }}>
+          PAGE 1 OF 1
+        </span>
       </div>
     </div>
   );
@@ -968,18 +1012,6 @@ export default function AttentionPage() {
   return (
     <Frame>
       <section className="mx-auto max-w-[900px] px-8 py-12">
-
-        {/* Page-level header — Trends tab only; Day and Range carry their own letterhead */}
-        {tab === "trends" && (
-          <div className="mb-10">
-            <p className="font-mono text-[10px] uppercase tracking-[0.32em] mb-3" style={{ color: "var(--marginalia)" }}>
-              Alfred Black · Attention Trends
-            </p>
-            <h1 className="font-display tracking-[-0.02em] leading-[0.98]" style={{ fontSize: "clamp(44px,6vw,72px)" }}>
-              Usage over time.
-            </h1>
-          </div>
-        )}
 
         {/* Tab bar */}
         <div className="flex gap-6 mb-6 border-b border-[var(--rule)]">
