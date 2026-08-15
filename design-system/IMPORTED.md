@@ -30,6 +30,7 @@ The **buildable core** — everything needed to write in-brand CSS and markup:
 | `tokens/surfaces.css` | `.paper` `.wool` `.rule` `.gilt` `.press`, the button family |
 | `templates/attention-statement/AttentionStatement.dc.html` | canonical statement — **light**, A4 client-facing |
 | `templates/attention-statement/AttentionStatementDark.html` | canonical statement — **dark**, the in-app treatment |
+| `templates/attention-trends/AttentionTrends.html` | canonical **trends report** — sentence-led panels, mirrored chart, ratio plot |
 | `_brandpack/prompts/UI_RULES.md` | the ten UI rules (older layer) |
 | `_brandpack/ui-kit/components/COMPONENT_RULES.md` | panels, buttons, inputs, tables (older layer) |
 
@@ -58,6 +59,21 @@ Any future import must repeat both checks before committing — the design proje
 private, this repository is not.
 
 ---
+
+## The trends template carries logic, not just layout
+
+`templates/attention-trends/AttentionTrends.html` ships an inline `<script>` that
+**computes its own headlines** from a JSON feed. That script is part of the design,
+not scaffolding: the sentence it picks is how the report stays honest.
+
+- engaged is null → *"your time wasn't measured"* rather than a ratio
+- engaged < 1h → *"Too little of your time was logged this week to price it."*
+- NAR ≤ 0 → *"Nothing came back this week"*
+- a `null` in `ratio_series` is drawn as a faint dashed segment — a gap, never interpolated
+- the read picks from eight templates on the direction triple (ratio / XL hours / failures)
+
+Port those rules faithfully when implementing. Dropping them turns an honest report
+into a confident one.
 
 ## The one contradiction, and which side wins
 

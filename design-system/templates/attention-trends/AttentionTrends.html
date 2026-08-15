@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Attention — Usage over time</title>
+<link rel="icon" href="brand/alfred-logo-brass.svg">
+<link rel="stylesheet" href="styles.css">
+<style>
+:root{--bg:oklch(0.16 0.005 60);--bg2:oklch(0.19 0.006 60);--ink:oklch(0.94 0.012 80);--dim:oklch(0.68 0.01 80);--brass:oklch(0.62 0.09 75);--hair:oklch(0.94 0.012 80 / 0.14);--hair2:oklch(0.94 0.012 80 / 0.22);--fd:var(--font-display,Georgia,serif);--fm:var(--font-mono,monospace);--fb:var(--font-body,Georgia,serif)}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--fb);-webkit-font-smoothing:antialiased}
+a{color:var(--ink);text-decoration:none}a:hover{color:var(--brass)}
+::selection{background:var(--brass);color:var(--bg)}
+.mono{font-family:var(--fm);font-weight:800;letter-spacing:0.26em;font-size:10px;text-transform:uppercase}
+.k{color:var(--brass)}
+.wrap{max-width:1080px;margin:0 auto;padding:0 36px 70px}
+.topbar{display:flex;align-items:center;justify-content:space-between;padding:22px 0;border-bottom:1px solid var(--hair)}
+.hero{display:flex;align-items:flex-end;justify-content:space-between;gap:30px;padding:40px 0 6px;flex-wrap:wrap}
+h1{font-family:var(--fd);font-weight:600;font-size:36px;letter-spacing:-0.015em;margin:10px 0 0}
+.tabs{display:flex;border:1px solid var(--hair2)}
+.tabs a{font-family:var(--fm);font-weight:800;font-size:9px;letter-spacing:0.2em;text-transform:uppercase;color:var(--dim);padding:10px 16px;border-right:1px solid var(--hair)}
+.tabs a:last-child{border-right:none}
+.tabs a.on{color:var(--brass);background:oklch(0.62 0.09 75 / 0.09)}
+.panel{border-top:1px solid var(--hair);padding:44px 0 8px;margin-top:26px}
+h2{font-family:var(--fd);font-weight:600;font-size:27px;letter-spacing:-0.012em;line-height:1.3;margin:0}
+h2 em{font-style:italic;color:var(--brass)}
+.when{font-family:var(--fm);font-weight:700;font-size:9px;letter-spacing:0.2em;color:var(--dim);text-transform:uppercase;margin:10px 0 0}
+.fig{margin-top:34px}
+.lab{font-family:var(--fm);font-weight:700;font-size:9px;letter-spacing:0.14em;color:var(--dim);text-align:center}
+.gut{display:flex;gap:20px}
+.gut .names{display:flex;flex-direction:column;flex-shrink:0;width:86px;text-align:right}
+.gut .names span{font-family:var(--fm);font-weight:800;font-size:8px;letter-spacing:0.16em;color:var(--dim)}
+.chart{display:grid;grid-template-columns:repeat(13,1fr);gap:12px;flex:1}
+.chart .cell{display:flex;flex-direction:column;align-items:center;min-width:0}
+.up{height:96px;display:flex;align-items:flex-end;width:100%;justify-content:center}
+.dn{height:36px;width:100%;display:flex;justify-content:center;border-top:1px solid var(--hair2)}
+.up i,.dn i{width:100%;max-width:46px;display:block}
+.hatch{background:repeating-linear-gradient(-45deg,oklch(0.94 0.012 80 / 0.3) 0 2.5px,transparent 2.5px 6px)}
+.dashed{outline:1.5px dashed var(--brass);outline-offset:2px}
+.dimmed{opacity:0.42}
+.xlabels{display:grid;grid-template-columns:repeat(13,1fr);margin-top:10px}
+svg.plot{width:100%;height:auto;display:block}
+svg.plot text{font-family:var(--fm);font-weight:700;letter-spacing:0.06em}
+.pairs{display:grid;grid-template-columns:1fr 1fr 1fr;gap:2px;margin-top:34px;border:1px solid var(--hair)}
+.pair{background:var(--bg2);padding:26px 28px 24px}
+.pair .v{font-family:var(--fd);font-weight:600;font-size:38px;letter-spacing:-0.015em;line-height:1;margin:0 0 12px}
+.pair .v .arr{color:var(--brass);font-size:26px}
+.pair .n{font-family:var(--fm);font-weight:800;font-size:8.5px;letter-spacing:0.2em;color:var(--dim);text-transform:uppercase;line-height:1.8}
+.strip{display:flex;height:16px;border:1px solid var(--hair2);margin-top:30px}
+.footline{display:flex;gap:26px;flex-wrap:wrap;margin-top:12px;font-family:var(--fm);font-weight:700;font-size:9px;letter-spacing:0.18em;color:var(--dim);text-transform:uppercase}
+.foot{display:flex;justify-content:space-between;border-top:1px solid var(--hair);margin-top:60px;padding-top:14px;font-family:var(--fm);font-weight:700;font-size:8.5px;letter-spacing:0.22em;color:var(--dim);text-transform:uppercase}
+@media(max-width:820px){.pairs{grid-template-columns:1fr}.gut .names{width:60px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<div class="topbar">
+<div style="display:flex;align-items:center;gap:12px">
+<img src="brand/alfred-logo-white.svg" alt="" style="height:24px;width:auto;display:block">
+<span class="mono" style="font-size:11px;letter-spacing:0.3em">ALFRED&nbsp;BLACK</span>
+</div>
+<span class="mono" style="font-size:9px;color:var(--dim)">/ ATTENTION · <span data-slot="as_of">AS OF THU 14 AUG, 21:40</span></span>
+</div>
+
+<div class="hero">
+<div>
+<h1>Usage over time.</h1>
+</div>
+<div style="display:flex;gap:14px;flex-wrap:wrap">
+<div class="tabs"><a href="#">Day</a><a href="#">Range</a><a href="#" class="on">Trends</a></div>
+<div class="tabs"><a href="#" class="on">Weekly</a><a href="#">Monthly</a><a href="#">Quarterly</a></div>
+</div>
+</div>
+
+<div class="panel" style="border-top:none">
+<div class="mono k" style="font-size:8.5px;margin-bottom:14px">NET RETURNED · <span data-slot="period_label">W33, DAY 6 OF 7</span></div>
+<h2 data-slot="nar_headline"><em><span data-slot="nar_week">15.3</span> hours came back this week,</em> for the <span data-slot="engaged_week">6.5</span> you put in.</h2>
+<div class="fig gut">
+<div class="names"><span style="height:96px;display:flex;align-items:center;justify-content:flex-end">GIVEN BACK</span><span style="height:36px;display:flex;align-items:center;justify-content:flex-end">YOUR TIME</span></div>
+<div style="flex:1;min-width:0">
+<div class="chart">
+<div class="cell dimmed"><div class="up"><i style="height:5px;background:var(--brass)"></i></div><div class="dn"></div></div>
+<div class="cell"><div class="up"><i style="height:54px;background:var(--brass)"></i></div><div class="dn"><i class="hatch" style="height:19px"></i></div></div>
+<div class="cell"><div class="up"><i style="height:62px;background:var(--brass)"></i></div><div class="dn"><i class="hatch" style="height:23px"></i></div></div>
+<div class="cell"><div class="up"><i style="height:34px;background:var(--brass)"></i></div><div class="dn"><i class="hatch" style="height:17px"></i></div></div>
+<div class="cell"><div class="up"><i style="height:57px;background:var(--brass)"></i></div><div class="dn"><i class="hatch" style="height:21px"></i></div></div>
+<div class="cell"><div class="up"><i style="height:27px;background:var(--brass)"></i></div><div class="dn"><i class="hatch" style="height:15px"></i></div></div>
+<div class="cell"><div class="up"><i style="height:55px;background:var(--brass)"></i></div><div class="dn"><i class="hatch" style="height:22px"></i></div></div>
+<div class="cell"><div class="up"><i style="height:28px;background:var(--brass)"></i></div><div class="dn"><i class="hatch" style="height:4px"></i></div></div>
+<div class="cell"><div class="up"><i style="height:89px;background:var(--brass)"></i></div><div class="dn"><i class="hatch" style="height:28px"></i></div></div>
+<div class="cell"><div class="up"><i style="height:69px;background:var(--brass)"></i></div><div class="dn"><i class="hatch" style="height:20px"></i></div></div>
+<div class="cell"><div class="up"><i style="height:84px;background:var(--brass)"></i></div><div class="dn"><i class="hatch" style="height:18px"></i></div></div>
+<div class="cell"><div class="up"><i style="height:78px;background:var(--brass)"></i></div><div class="dn"><i class="hatch" style="height:31px"></i></div></div>
+<div class="cell"><div class="up"><i class="dashed" style="height:70px;background:var(--brass)"></i></div><div class="dn"><i class="hatch" style="height:30px"></i></div></div>
+</div>
+<div class="xlabels"><span class="lab">MAY</span><span></span><span></span><span></span><span class="lab">JUN</span><span></span><span></span><span></span><span class="lab">JUL</span><span></span><span></span><span></span><span class="lab k">NOW</span></div>
+</div>
+</div>
+</div>
+
+<div class="panel">
+<div class="mono k" style="font-size:8.5px;margin-bottom:14px">RETURN RATIO</div>
+<h2 data-slot="ratio_headline">An hour of you now buys <em><span data-slot="ratio_now">3.5</span> hours</em> of work. In <span data-slot="ratio_peak_month">July</span> it bought <span data-slot="ratio_peak">5.9</span>.</h2>
+<div class="fig">
+<svg class="plot" viewBox="0 0 1040 208">
+<line x1="20" y1="175" x2="1020" y2="175" stroke="var(--dim)" stroke-width="1" stroke-dasharray="2 6" opacity="0.6"></line>
+<text x="24" y="163" font-size="15" fill="var(--dim)" opacity="0.8">BREAK-EVEN</text>
+<polyline points="120,114 200,117 280,132 360,116 440,137 520,121" fill="none" stroke="var(--brass)" stroke-width="2.5"></polyline>
+<polyline points="520,121 600,28 680,107" fill="none" stroke="var(--brass)" stroke-width="1.5" stroke-dasharray="4 5" opacity="0.35"></polyline>
+<polyline points="680,107 760,100 840,73 920,120" fill="none" stroke="var(--brass)" stroke-width="2.5"></polyline>
+<polyline points="920,120 1000,123" fill="none" stroke="var(--brass)" stroke-width="2.5" stroke-dasharray="4 5"></polyline>
+<circle cx="600" cy="28" r="4.5" fill="var(--bg)" stroke="var(--brass)" stroke-width="1.5" opacity="0.45"></circle>
+<circle cx="840" cy="73" r="5" fill="var(--brass)"></circle>
+<text x="840" y="50" text-anchor="middle" font-size="19" fill="var(--brass)">5.9×</text>
+<circle cx="1000" cy="123" r="5" fill="var(--bg)" stroke="var(--brass)" stroke-width="2"></circle>
+<text x="1000" y="100" text-anchor="middle" font-size="19" fill="var(--brass)">3.5×</text>
+</svg>
+<div class="xlabels"><span class="lab">MAY</span><span></span><span></span><span></span><span class="lab">JUN</span><span></span><span></span><span></span><span class="lab">JUL</span><span></span><span></span><span></span><span class="lab k">NOW</span></div>
+</div>
+</div>
+
+<div class="panel">
+<div class="mono k" style="font-size:8.5px;margin-bottom:14px">ALFRED'S READ · GENERATED <span data-slot="read_window">FROM W31 → W32</span></div>
+<h2 data-slot="read_headline">Why the rate fell: <em>the work got bigger</em> — not worse.</h2>
+<div class="when">LAST TWO FULL WEEKS</div>
+<div class="pairs">
+<div class="pair">
+<div class="v" data-slot="pair_xl">4 <span class="arr">→</span> 10 h <span class="arr">▲</span></div>
+<div class="n">HOURS IN THE BIGGEST TASKS</div>
+</div>
+<div class="pair">
+<div class="v" data-slot="pair_failures">26 <span class="arr">→</span> 18 <span class="arr">▼</span></div>
+<div class="n">FAILED TASKS</div>
+</div>
+<div class="pair">
+<div class="v" data-slot="pair_finished">27 <span class="arr">→</span> 26</div>
+<div class="n">FINISHED TASKS</div>
+</div>
+</div>
+</div>
+
+<div class="panel">
+<div class="mono k" style="font-size:8.5px;margin-bottom:14px">ALLOCATION · <span data-slot="alloc_window">SINCE MAY</span></div>
+<h2 data-slot="alloc_headline"><em><span data-slot="total_returned">217</span> returned hours</em> have gone almost entirely to work.</h2>
+<div class="strip">
+<div style="width:88.8%;background:var(--brass)"></div>
+<div style="width:8%;background:oklch(0.62 0.09 75 / 0.4)"></div>
+<div style="width:3.2%;background:oklch(0.94 0.012 80 / 0.2)"></div>
+</div>
+<div class="footline"><span class="k">WORK · 89%</span><span>LIFE · 8%</span><span>NOT YET ASSIGNED · 3%</span></div>
+</div>
+
+<div class="foot"><span>ALFRED BLACK · THE ATTENTION REPORT</span><span data-slot="range_label">W21 – W33 · 2026</span></div>
+
+</div>
+
+<script type="application/json" id="attention-feed">
+{
+"as_of_display":"AS OF THU 14 AUG, 21:40",
+"range":{"from":"W21","to":"W33","year":2026},
+"current":{"week":"W33","days_recorded":6,"days_total":7,"nar":15.3,"engaged":6.5,"displaced":22.5},
+"prior":{"week":"W31","ratio":5.85,"xl_hours":4,"failures":26,"finished":27,"engaged":3.97},
+"latest":{"week":"W32","ratio":3.595,"xl_hours":10,"failures":18,"finished":26,"engaged":6.84},
+"ratio_now":3.46,
+"ratio_series":[null,3.93,3.75,3.05,3.83,2.82,3.55,null,4.26,4.55,5.85,3.6,3.46],
+"ratio_peak":{"value":5.85,"week":"W31","month":"July"},
+"alloc":{"window_label":"SINCE MAY","total":217,"work":0.888,"life":0.08,"unassigned":0.032}
+}
+</script>
+<script>
+(function(){
+const feed=JSON.parse(document.getElementById('attention-feed').textContent);
+const $=s=>document.querySelector('[data-slot="'+s+'"]');
+const set=(s,v)=>{const el=$(s);if(el)el.innerHTML=v;};
+const f1=n=>{const v=Math.round(n*10)/10;return v%1===0?String(Math.round(v)):v.toFixed(1)};
+const hrs=n=>f1(n)+(Math.abs(n-1)<1e-9?' hour':' hours');
+const dir=(a,b)=>{if(a===0)return b>0?'up':'flat';const p=(b-a)/Math.abs(a);return p<=-0.10?'down':(p>=0.10?'up':'flat')};
+const pct=(a,b)=>Math.abs(Math.round(((b-a)/Math.abs(a))*1000)/10);
+// chrome
+set('as_of',feed.as_of_display);
+set('range_label',feed.range.from+' – '+feed.range.to+' · '+feed.range.year);
+set('period_label',feed.current.week+', DAY '+feed.current.days_recorded+' OF '+feed.current.days_total);
+// panel 1 — net returned
+const c=feed.current;
+if(c.engaged==null)set('nar_headline','<em>'+f1(c.nar)+' hours came back this week;</em> your time wasn\u2019t measured.');
+else if(c.nar<=0)set('nar_headline','<em>Nothing came back this week:</em> '+f1(c.engaged)+' hours in, '+f1(c.displaced)+' out.');
+else set('nar_headline','<em>'+f1(c.nar)+' hours came back this week,</em> for the '+f1(c.engaged)+' you put in.');
+// panel 2 — ratio
+const rs=feed.ratio_series.filter(v=>v!=null);
+let streak=1;for(let i=rs.length-1;i>0;i--){if(Math.abs(rs[i]-rs[i-1])/rs[i-1]<0.05)streak++;else break;}
+if(c.engaged!=null&&c.engaged<1)set('ratio_headline','Too little of your time was logged this week to price it.');
+else if(feed.ratio_now>=feed.ratio_peak.value)set('ratio_headline','An hour of you now buys <em>'+f1(feed.ratio_now)+' hours</em> of work — the best yet.');
+else if(streak>=3)set('ratio_headline','An hour of you buys <em>'+f1(feed.ratio_now)+' hours</em> of work — steady for '+streak+' weeks.');
+else set('ratio_headline','An hour of you now buys <em>'+f1(feed.ratio_now)+' hours</em> of work. In '+feed.ratio_peak.month+' it bought '+f1(feed.ratio_peak.value)+'.');
+// panel 3 — read
+const a=feed.prior,b=feed.latest;
+const dR=dir(a.ratio,b.ratio),dX=dir(a.xl_hours,b.xl_hours),dF=dir(a.failures,b.failures);
+let read;
+if(dR==='down'&&dX==='up'&&dF!=='up')read='Why the rate fell: <em>the work got bigger</em> — not worse.';
+else if(dR==='down'&&dX==='up')read='The rate fell: <em>bigger work,</em> and more of it failed.';
+else if(dR==='down'&&dF==='up')read='The rate fell where quality slipped: <em>failures rose '+a.failures+' → '+b.failures+'.</em>';
+else if(dR==='down')read='The rate fell on your side of the desk: <em>your time rose '+f1(a.engaged)+' → '+f1(b.engaged)+' hours.</em>';
+else if(dR==='up'&&dF==='down')read='The rate improved: <em>less of your time, fewer failures.</em>';
+else if(dR==='up')read='The rate improved <em>even as the work got bigger.</em>';
+else if(dR==='flat')read='The rate held at <em>'+f1(b.ratio)+'×</em> across both weeks.';
+else read='Return ratio moved '+pct(a.ratio,b.ratio)+'% from '+a.week+' to '+b.week+'.';
+set('read_headline',read);
+set('read_window','FROM '+a.week+' → '+b.week);
+const arrow=d=>d==='up'?' <span class="arr">▲</span>':(d==='down'?' <span class="arr">▼</span>':'');
+set('pair_xl',f1(a.xl_hours)+' <span class="arr">→</span> '+f1(b.xl_hours)+' h'+arrow(dX));
+set('pair_failures',a.failures+' <span class="arr">→</span> '+b.failures+arrow(dF));
+set('pair_finished',a.finished+' <span class="arr">→</span> '+b.finished+arrow(dir(a.finished,b.finished)));
+// panel 4 — allocation
+const al=feed.alloc;
+let phrase=al.work>=0.85?'almost entirely to work':(al.work>=0.60?'mostly to work':(al.work>=0.40?'to work and life evenly':'mostly to life'));
+let tail=al.unassigned>0.25?' — '+Math.round(al.unassigned*100)+'% still unassigned':'';
+set('alloc_headline','<em>'+al.total+' returned hours</em> have gone '+phrase+'.'+tail);
+set('alloc_window',al.window_label);
+})();
+</script>
+</body>
+</html>
