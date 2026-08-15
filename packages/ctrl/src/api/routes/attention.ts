@@ -52,6 +52,7 @@ const ULID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/;
 // Authorship rationale per docs/design/nar-method.md §2:
 //   slack    — messages arrive via the Slack channel integration; Sir typed them.
 //   telegram — messages arrive via the Telegram bot; Sir typed them.
+//   web      — the dashboard chat surface; Sir typed them in the browser.
 //   cli      — EXCLUDED: cli sessions are agent-driven one-shots (context-compressed
 //              task lists, vault reads, "gather…" instructions). Live data shows 177
 //              such sessions in June 2026, nearly all with a single user turn. Because
@@ -59,7 +60,12 @@ const ULID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/;
 //              calls each became their own burst — inflating engaged by hours per month
 //              and pushing NAR down. Confirmed machine traffic; removed here.
 // Adding a new source requires confirming it is human-authored, not machine traffic.
-export const HUMAN_SESSION_SOURCES = ["slack", "telegram"] as const;
+// MUST stay identical to HUMAN_SOURCES in packages/learn/src/activities/nar_data.py.
+// The two are read by different halves of the same formula — learn decides which
+// sessions become displacement, ctrl decides which turns become engaged. A source
+// present in one and absent from the other credits work with no attention cost
+// against it (or the reverse), and the divergence is invisible on the statement.
+export const HUMAN_SESSION_SOURCES = ["slack", "telegram", "web"] as const;
 
 // Precomputed IN-clause fragment — these are static string literals, safe to interpolate.
 const HUMAN_SOURCES_SQL = HUMAN_SESSION_SOURCES.map((s) => `'${s}'`).join(",");

@@ -557,6 +557,27 @@ describe("HUMAN_SESSION_SOURCES allowlist — cli excluded (#584)", () => {
     hdb.close();
   });
 
+  // Parity guard. ctrl decides which turns become ENGAGED; learn decides which
+  // sessions become DISPLACED. They read separate copies of the same allowlist,
+  // so a source present in one and absent from the other credits work with no
+  // attention cost against it (or the reverse) — and nothing on the statement
+  // shows the divergence. This test failed to exist when ctrl carried
+  // [slack, telegram] against learn's [web, slack, telegram].
+  it("allowlist matches learn's HUMAN_SOURCES exactly", () => {
+    const pyPath = path.join(
+      import.meta.dirname, "..", "..", "learn", "src", "activities", "nar_data.py",
+    );
+    const py = fs.readFileSync(pyPath, "utf8");
+    const m = py.match(/HUMAN_SOURCES:\s*frozenset\[str\]\s*=\s*frozenset\(\{([^}]*)\}\)/);
+    assert.ok(m, "could not find HUMAN_SOURCES in nar_data.py — has it moved?");
+    const learnSources = [...m![1].matchAll(/"([a-z_]+)"/g)].map((x) => x[1]).sort();
+    const ctrlSources = [...HUMAN_SESSION_SOURCES].sort();
+    assert.deepEqual(
+      ctrlSources, learnSources,
+      `ctrl [${ctrlSources}] and learn [${learnSources}] must list the same human sources`,
+    );
+  });
+
   it("constant contains slack and telegram and does NOT contain cli", () => {
     assert.ok(
       (HUMAN_SESSION_SOURCES as readonly string[]).includes("slack"),

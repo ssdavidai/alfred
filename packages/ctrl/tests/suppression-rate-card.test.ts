@@ -75,7 +75,15 @@ describe("suppression rate card", () => {
   it("audit payload carries rate, source, hash, previous_hash=null on init", () => {
     getRateCard({ dataDir: tmp });
     const row = getStateDb()
-      .prepare("SELECT payload_json FROM audit WHERE action_type='suppression_rate_card_change' ORDER BY created_at DESC LIMIT 1")
+      // The INIT row specifically — id is a ULID, so ASC is insertion order.
+      // This used to read `ORDER BY created_at DESC LIMIT 1`, but created_at has
+      // one-second resolution: when the whole file runs inside a single second
+      // the ordering is a tie and SQLite may return either row. The preceding
+      // test deliberately leaves a 0.75 override in place, so the tie resolved
+      // to that row and the assertion saw 0.75 instead of 0.5. It passed only by
+      // timing luck and broke as soon as an unrelated test file shifted the
+      // schedule across a second boundary.
+      .prepare("SELECT payload_json FROM audit WHERE action_type='suppression_rate_card_change' ORDER BY id ASC LIMIT 1")
       .get() as { payload_json: string };
     const p = JSON.parse(row.payload_json);
     assert.strictEqual(p.rate_minutes_per_item, 0.5);
