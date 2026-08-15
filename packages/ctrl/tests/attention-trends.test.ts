@@ -44,7 +44,19 @@ function jrn(ts:string,dir="outbound"){
   db.prepare(`INSERT INTO alfred_journal(id,ts,channel,chat_id,direction,message)VALUES(?,?,?,?,?,?)`)
     .run(`jrn-${++_seq}`,ts,"telegram","test",dir,"msg");
 }
-function clear(){db.prepare("DELETE FROM nar_entry").run();db.prepare("DELETE FROM alfred_journal").run();}
+function clear(){
+  db.prepare("DELETE FROM nar_entry").run();
+  db.prepare("DELETE FROM alfred_journal").run();
+  db.prepare("DELETE FROM observation").run();
+}
+/** Insert a fake attention_read observation for the given window. */
+function obs(grain:string,from:string,to:string,observations:unknown[]=[],generated_at="2026-08-10T00:00:00.000000+00:00"){
+  _seq++;
+  db.prepare(`INSERT INTO observation(id,ts,subject,kind,summary,confidence,status,payload_json)VALUES(?,?,?,?,?,?,?,?)`)
+    .run(`01OBS${String(_seq).padStart(21,"0")}`,generated_at,
+      `attention_trend:${grain}:${from}:${to}`,"attention_read","summary",1.0,"open",
+      JSON.stringify({grain,from,to,observations,generated_at,period_count:0}));
+}
 
 // 1. periodKeyBounds helper — keys and boundaries for all three grains
 describe("periodKeyBounds",()=>{
@@ -140,5 +152,69 @@ describe("400-day cap",()=>{
   it("400 days → 200",async()=>{
     const {status}=await getTrends("grain=month&from=2025-01-01&to=2026-02-04");
     assert.strictEqual(status,200);
+  });
+});
+
+// 8. read field — joins attention_read observation for the exact window
+describe("read field",()=>{
+  beforeEach(clear);
+  it("null when no observation exists for this window",async()=>{
+    const {p}=await getTrends("grain=week&from=2026-08-10&to=2026-08-16");
+    assert.strictEqual(p.read,null);
+  });
+  it("returns generated_at + observations array when a matching obs exists",async()=>{
+    const obsList=[{headline:"Return ratio fell",detail:"From 1.4 to 0.9.",evidence:"return_ratio=0.9"}];
+    obs("week","2026-08-10","2026-08-16",obsList,"2026-08-11T02:00:00.000000+00:00");
+    const {p}=await getTrends("grain=week&from=2026-08-10&to=2026-08-16");
+    assert.ok(p.read,"read should not be null");
+    assert.strictEqual(p.read.generated_at,"2026-08-11T02:00:00.000000+00:00");
+    assert.deepStrictEqual(p.read.observations,obsList);
+  });
+  it("returns [] (not null) when a matching obs exists with empty observations",async()=>{
+    obs("week","2026-08-10","2026-08-16",[],"2026-08-11T02:00:00.000000+00:00");
+    const {p}=await getTrends("grain=week&from=2026-08-10&to=2026-08-16");
+    assert.ok(p.read!==null,"read must not be null — workflow ran, found nothing");
+    assert.deepStrictEqual(p.read.observations,[]);
+  });
+  it("null when obs exists for different grain (month vs week)",async()=>{
+    obs("month","2026-08-01","2026-08-31",[{headline:"H"}]);
+    const {p}=await getTrends("grain=week&from=2026-08-01&to=2026-08-07");
+    assert.strictEqual(p.read,null);
+  });
+  it("null when obs exists for different date range",async()=>{
+    obs("week","2026-08-03","2026-08-09",[{headline:"H"}]);
+    const {p}=await getTrends("grain=week&from=2026-08-10&to=2026-08-16");
+    assert.strictEqual(p.read,null);
+  });
+});
+
+// 9. by_bucket / unbucketed — "none" must not appear as a size tier
+describe("by_bucket and unbucketed",()=>{
+  beforeEach(clear);
+  it("items with bucket='none' land in unbucketed, not by_bucket",async()=>{
+    nar({occurred_at:"2026-08-10T09:00:00Z",displaced_minutes:12,notes:JSON.stringify({bucket:"none"})});
+    const {p}=await getTrends("grain=week&from=2026-08-10&to=2026-08-10");
+    const per=p.periods[0];
+    assert.ok(!("none" in per.by_bucket),"by_bucket must not contain 'none'");
+    assert.strictEqual(per.unbucketed.count,1);
+    assert.ok(per.unbucketed.displaced_hours>0);
+  });
+  it("items with no bucket also land in unbucketed",async()=>{
+    nar({occurred_at:"2026-08-10T09:00:00Z",displaced_minutes:6,notes:JSON.stringify({allocation:"work"})});
+    const {p}=await getTrends("grain=week&from=2026-08-10&to=2026-08-10");
+    const per=p.periods[0];
+    assert.ok(!("none" in per.by_bucket));
+    assert.strictEqual(per.unbucketed.count,1);
+  });
+  it("by_bucket displaced + unbucketed displaced equals total displaced",async()=>{
+    nar({occurred_at:"2026-08-10T09:00:00Z",displaced_minutes:30,notes:JSON.stringify({bucket:"S"})});
+    nar({occurred_at:"2026-08-10T10:00:00Z",displaced_minutes:20,notes:JSON.stringify({bucket:"none"})});
+    nar({occurred_at:"2026-08-10T11:00:00Z",displaced_minutes:10,notes:null});
+    const {p}=await getTrends("grain=week&from=2026-08-10&to=2026-08-10");
+    const per=p.periods[0];
+    const bktTotal=Object.values(per.by_bucket as Record<string,{displaced_hours:number}>).reduce((s,v)=>s+v.displaced_hours,0);
+    const total=bktTotal+per.unbucketed.displaced_hours;
+    assert.ok(Math.abs(total-per.displaced_hours)<0.001,
+      `bkt(${bktTotal})+unbucketed(${per.unbucketed.displaced_hours})=${total} ≠ displaced(${per.displaced_hours})`);
   });
 });

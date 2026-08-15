@@ -1267,6 +1267,10 @@ export function registerAttentionRoutes(): void {
       const al:Record<"work"|"life"|"unallocated",{d:number;e:number}>={work:{d:0,e:0},life:{d:0,e:0},unallocated:{d:0,e:0}};
       let cDisp=0,cEng=0,cCnt=0,aDisp=0,aCnt=0,eDisp=0,eCnt=0;
       const bkt:Record<string,{count:number;displaced_hours:number}>={};
+      // Items with bucket=null/undefined/"none" land in unbucketed, not by_bucket.
+      // "none" is a sentinel written by vigilance chore sweeps; it must not appear
+      // as a size tier beside S/M/L/XL — it would skew any size comparison.
+      let ubCnt=0,ubDisp=0;
       const oc={delivered:0,failed:0,unknown:0};
       for (const dr of drs) {
         nar+=dr.nar_hours; disp+=dr.displaced.total_hours;
@@ -1278,13 +1282,15 @@ export function registerAttentionRoutes(): void {
         cDisp+=dr.displaced.inferred.hours; cCnt+=dr.displaced.inferred.items.length;
         for (const it of dr.displaced.inferred.items) {
           cEng+=(it.engaged_minutes??0)/60;
-          if (it.bucket) { bkt[it.bucket]??={count:0,displaced_hours:0}; bkt[it.bucket].count++; bkt[it.bucket].displaced_hours+=it.minutes/60; }
+          if (it.bucket && it.bucket!=="none") { bkt[it.bucket]??={count:0,displaced_hours:0}; bkt[it.bucket].count++; bkt[it.bucket].displaced_hours+=it.minutes/60; }
+          else { ubCnt++; ubDisp+=it.minutes/60; }
           const o=it.outcome??null;
           if (o==="delivered") oc.delivered++; else if (o==="failed") oc.failed++; else oc.unknown++;
         }
         aDisp+=dr.displaced.autonomous.hours; aCnt+=dr.displaced.autonomous.items.length;
         for (const it of dr.displaced.autonomous.items)
-          if (it.bucket) { bkt[it.bucket]??={count:0,displaced_hours:0}; bkt[it.bucket].count++; bkt[it.bucket].displaced_hours+=it.minutes/60; }
+          if (it.bucket && it.bucket!=="none") { bkt[it.bucket]??={count:0,displaced_hours:0}; bkt[it.bucket].count++; bkt[it.bucket].displaced_hours+=it.minutes/60; }
+          else { ubCnt++; ubDisp+=it.minutes/60; }
         eDisp+=dr.displaced.explicit.hours; eCnt+=dr.displaced.explicit.items.reduce((s,x)=>s+x.count,0);
       }
       // interruption_instrumented false = "nothing recorded" not "no interruptions occurred"
@@ -1297,11 +1303,26 @@ export function registerAttentionRoutes(): void {
         allocation:{work:{displaced_hours:r3(al.work.d),engaged_hours:r3(al.work.e)},life:{displaced_hours:r3(al.life.d),engaged_hours:r3(al.life.e)},unallocated:{displaced_hours:r3(al.unallocated.d),engaged_hours:r3(al.unallocated.e)}},
         by_class:{conversational:{displaced_hours:r3(cDisp),engaged_hours:r3(cEng),count:cCnt},autonomous:{displaced_hours:r3(aDisp),engaged_hours:0,count:aCnt},explicit:{displaced_hours:r3(eDisp),engaged_hours:0,count:eCnt}},
         by_bucket:Object.fromEntries(Object.entries(bkt).map(([k,v])=>[k,{count:v.count,displaced_hours:r3(v.displaced_hours)}])),
+        unbucketed:{count:ubCnt,displaced_hours:r3(ubDisp)},
         outcomes:oc,sessions:sess,
       });
     }
+    // Join the clerk-written interpretation for this exact window.
+    // kind='attention_read', subject='attention_trend:{grain}:{from}:{to}'.
+    // null = workflow has not run for this window yet (normal until first run).
+    // {generated_at, observations:[]} = ran but found nothing to say (show, not null).
+    const obsRow=(db.prepare(
+      `SELECT payload_json FROM observation WHERE kind='attention_read' AND subject=? ORDER BY ts DESC LIMIT 1`
+    ).get(`attention_trend:${grain}:${from}:${to}`) as {payload_json:string}|undefined);
+    let read:{generated_at:string;observations:unknown[]}|null=null;
+    if (obsRow?.payload_json) {
+      try {
+        const p=JSON.parse(obsRow.payload_json);
+        read={generated_at:p.generated_at??null,observations:Array.isArray(p.observations)?p.observations:[]};
+      } catch { /* malformed payload — treat as not generated */ }
+    }
     sendJson(res,200,{grain,from,to,
       coverage:{interruption_instrumented_from:firstJ??null,days_total:dates.length,days_with_data:daysData},
-      periods});
+      periods,read});
   });
 }
