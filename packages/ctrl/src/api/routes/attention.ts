@@ -1204,6 +1204,37 @@ export function registerAttentionRoutes(): void {
     sendJson(res, 200, { from, to, totals, series });
   });
 
+  // Trigger Alfred's read of a trends window. Same fire-and-forget shape as
+  // /recompute. There is no Temporal SCHEDULE for AttentionTrendReadWorkflow —
+  // without this route the read only ever exists if someone starts the workflow
+  // by hand, so the Trends tab would show "not generated yet" forever.
+  addRoute("POST", "/api/v1/attention/trends/interpret", async ({ res, body }) => {
+    const b = (body ?? {}) as Record<string, unknown>;
+    const grain = typeof b.grain === "string" ? b.grain : null;
+    const from  = typeof b.from  === "string" ? b.from  : null;
+    const to    = typeof b.to    === "string" ? b.to    : null;
+    if (!grain || !from || !to) {
+      throw new ValidationError("body must contain grain, from and to");
+    }
+    if (!["week", "month", "quarter"].includes(grain)) {
+      throw new ValidationError("grain must be week, month or quarter");
+    }
+    // The workflow id is NOT derived from the window alone — re-reading the same
+    // window is a legitimate repeat action (the underlying data moves), and a
+    // stable id would collide with the completed run and silently no-op.
+    const wfId = `attn-read-${grain}-${from}--${to}-${Date.now()}`;
+    let handle: string | null = wfId;
+    try {
+      const out = await dockerExec("temporal", [
+        "temporal","workflow","start","--type","AttentionTrendReadWorkflow",
+        "--task-queue","alfred-learn","--workflow-id",wfId,
+        "--input",JSON.stringify({ grain, from, to }),"--output","json",
+      ]);
+      try { const p = JSON.parse(out.trim()); handle = p?.workflowId ?? p?.workflow_id ?? wfId; } catch { /**/ }
+    } catch { handle = null; }
+    sendJson(res, 202, { ok: true, handle, grain, from, to });
+  });
+
   addRoute("POST", "/api/v1/attention/recompute", async ({ res, body }) => {
     const b = (body ?? {}) as Record<string, unknown>;
     const date = typeof b.date === "string" ? b.date : null;

@@ -218,3 +218,49 @@ describe("by_bucket and unbucketed",()=>{
       `bkt(${bktTotal})+unbucketed(${per.unbucketed.displaced_hours})=${total} ≠ displaced(${per.displaced_hours})`);
   });
 });
+
+// ─── POST /api/v1/attention/trends/interpret (#584) ──────────────────────────
+async function postInterpret(body:unknown):Promise<{status:number;p:any}> {
+  const m=matchRoute("POST","/api/v1/attention/trends/interpret"); assert.ok(m);
+  let status=0; let p:any={};
+  const res={writeHead(s:number){status=s;return res;},end(j?:string){if(j)p=JSON.parse(j);}} as unknown as ServerResponse;
+  try { await m.handler({req:{}as any,res,params:{},body,query:new URLSearchParams("")}); }
+  catch(e:any){if(typeof e?.statusCode==="number"){status=e.statusCode;p={error:e.message};}else throw e;}
+  return {status,p};
+}
+
+describe("POST /api/v1/attention/trends/interpret", () => {
+  // The workflow TYPE string is the fragile part: ctrl starts a Temporal
+  // workflow by name and learn registers it by name, in a different language,
+  // with no shared constant. A mismatch does not error — Temporal accepts the
+  // start, reports RUNNING, and the workflow task fails and retries forever.
+  // That exact failure already cost this feature one silent debugging cycle.
+  it("starts the workflow name learn actually registers", () => {
+    const routeSrc = fs.readFileSync(
+      path.join(import.meta.dirname, "..", "src", "api", "routes", "attention.ts"), "utf8");
+    // Slice from the interpret route so the NarDayRecapWorkflow start below
+    // cannot satisfy this match; the source wraps lines, so match the type alone.
+    const m = /"--type","([A-Za-z]+)"/.exec(
+      routeSrc.slice(routeSrc.indexOf("trends/interpret")));
+    assert.ok(m, "could not find the interpret route's workflow-start invocation");
+
+    const wfSrc = fs.readFileSync(
+      path.join(import.meta.dirname, "..", "..", "learn", "src", "workflows",
+                "attention_trend_read.py"), "utf8");
+    const reg = /@workflow\.defn\(name="([A-Za-z]+)"\)/.exec(wfSrc);
+    assert.ok(reg, "could not find @workflow.defn in attention_trend_read.py");
+
+    assert.strictEqual(m![1], reg![1],
+      `ctrl starts "${m![1]}" but learn registers "${reg![1]}" — a mismatch retries forever, silently`);
+  });
+
+  it("rejects a bad grain", async () => {
+    const r = await postInterpret({grain:"fortnight",from:"2026-08-01",to:"2026-08-15"});
+    assert.strictEqual(r.status, 400);
+  });
+
+  it("rejects a missing range", async () => {
+    const r = await postInterpret({grain:"week",from:"2026-08-01"});
+    assert.strictEqual(r.status, 400);
+  });
+});
