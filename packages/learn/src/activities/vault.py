@@ -627,9 +627,17 @@ async def collect_living_brief_data() -> dict[str, Any]:
         # state.db rows now — query ctrl-api's /api/v1/state/observations
         # instead of walking vault/observation/.
         try:
-            from src.utils.signal_state import list_observation_records
+            from src.utils.signal_state import (
+                INTUITION_OBS_KINDS, list_observation_records,
+            )
 
-            observations = await list_observation_records(limit=20)
+            # The observation table is a shared bus and this is a
+            # principal-facing surface: filter to the kinds that describe the
+            # world. Unfiltered, any derived/reporting kind written by another
+            # workflow surfaces in Sir's brief dressed as an intuition note.
+            observations = await list_observation_records(
+                limit=20, kinds=INTUITION_OBS_KINDS,
+            )
         except Exception:  # noqa: BLE001
             observations = []
         quiet_notes: list[dict[str, Any]] = []

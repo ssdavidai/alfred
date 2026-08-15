@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timezone
+from collections.abc import Collection
 from typing import Any
 
 from src.config import Config, load_config
@@ -419,9 +420,25 @@ def observation_row_to_record(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# The kinds that describe the world — what the intuition layer learns from and
+# what the brief may show Sir. The observation table is a SHARED BUS and its
+# readers historically filtered nothing, so any new derived/reporting kind
+# written into it silently appeared in the daily brief and in pattern
+# discovery. Consumers of those two surfaces must pass this set.
+#
+# Reporting kinds (e.g. attention_read) are deliberately absent: they are
+# statements about the system, not observations about the world, and feeding
+# them to pattern discovery would let a dashboard shape proposed instincts.
+INTUITION_OBS_KINDS: frozenset[str] = frozenset({
+    "chore_run", "decision", "signal", "constraint",
+    "synthesis", "assumption", "contradiction", "system",
+})
+
+
 async def list_observation_records(
     *,
     kind: str | None = None,
+    kinds: Collection[str] | None = None,
     since: str | None = None,
     limit: int | None = None,
     config: Config | None = None,
@@ -430,10 +447,21 @@ async def list_observation_records(
 
     Replaces ``GET /api/v1/vault/list/observation`` for the pattern
     detector — observations are Store 2 rows now.
+
+    ``kinds`` filters to a SET of kinds (``kind`` filters to one, server-side).
+    The filter is applied to the RAW ROW, before rehydration, deliberately:
+    ``observation_row_to_record`` does not carry ``kind`` at the top level — it
+    folds the column into ``frontmatter["source_kind"]`` via ``setdefault``, so
+    a payload that already carries ``source_kind`` keeps its own value and the
+    column is lost. Filtering the rehydrated record would therefore drop rows
+    it should keep and keep rows it should drop.
     """
     cfg = config or load_config()
     async with StateClient(cfg) as sc:
         rows = await sc.list_observations(kind=kind, since=since, limit=limit)
+    if kinds is not None:
+        allowed = set(kinds)
+        rows = [r for r in rows if r.get("kind") in allowed]
     return [observation_row_to_record(r) for r in rows]
 
 

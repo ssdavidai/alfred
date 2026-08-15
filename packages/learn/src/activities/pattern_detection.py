@@ -468,14 +468,19 @@ async def detect_pattern_proposals() -> dict[str, Any]:
         # the clusterer expects.
         from datetime import timedelta as _td
 
-        from src.utils.signal_state import list_observation_records
+        from src.utils.signal_state import (
+            INTUITION_OBS_KINDS, list_observation_records,
+        )
 
         since_iso = (
             datetime.now(timezone.utc) - _td(days=WINDOW_DAYS)
         ).isoformat()
         try:
+            # Shared-bus filter — see INTUITION_OBS_KINDS. Feeding a
+            # reporting kind to pattern discovery would let a statement about
+            # the system shape a proposed instinct about the world.
             observations = await list_observation_records(
-                since=since_iso, limit=20_000,
+                since=since_iso, limit=20_000, kinds=INTUITION_OBS_KINDS,
             )
         except httpx.HTTPError as exc:
             counters["errors"] += 1
