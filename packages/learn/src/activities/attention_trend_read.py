@@ -1,7 +1,7 @@
 """Attention trend read — fetch, clerk-read, write observation (#584)."""
 from __future__ import annotations
 import json, logging
-from datetime import datetime, timezone
+from datetime import date as _date, datetime, timezone
 from typing import Any
 import httpx
 from temporalio import activity
@@ -20,6 +20,17 @@ async def _fetch_trends(ctrl_url: str, grain: str, from_: str, to: str) -> dict[
         return r.json()
 
 
+def _full_period_days(period: dict[str, Any]) -> int:
+    """Days from period['start'] to period['end'] inclusive — the canonical full-period length.
+
+    Works for any grain: week (always 7), month (28–31), quarter (89–92).
+    The period's start/end are the canonical ISO boundaries returned by ctrl-api.
+    """
+    start = _date.fromisoformat(period["start"][:10])
+    end = _date.fromisoformat(period["end"][:10])
+    return (end - start).days + 1
+
+
 def _build_prompt(payload: dict[str, Any]) -> str:
     periods = payload.get("periods", [])
     grain = payload.get("grain", "week")
@@ -31,12 +42,46 @@ def _build_prompt(payload: dict[str, Any]) -> str:
         "Do NOT describe or compare them.  Omit interruption entirely.\n\n"
         if unmeasured else ""
     )
+
+    # Annotate each period so the model can distinguish complete from partial windows.
+    annotated: list[dict[str, Any]] = []
+    partial_keys: list[str] = []
+    for p in periods:
+        try:
+            full = _full_period_days(p)
+        except (ValueError, TypeError, KeyError):
+            full = None
+        days = p.get("days", 0)
+        if full is not None and days < full:
+            status = f"PARTIAL ({days}/{full} days)"
+            partial_keys.append(p.get("key", "?"))
+        elif full is not None:
+            status = f"full ({days} days)"
+        else:
+            status = f"({days} days)"
+        annotated.append({**p, "_status": status})
+
+    partial_rule = (
+        f"PARTIAL PERIOD RULE: periods {partial_keys} are incomplete windows.  "
+        "Do NOT use a partial period as one endpoint of a 'rose/fell/increased/decreased' "
+        "comparison against a full period.  Either (a) normalise to a per-day rate and "
+        "state that you are doing so, or (b) describe the partial period standalone "
+        "without directional comparison to a full period.\n\n"
+        if partial_keys else ""
+    )
     return (
         f"You are reading Alfred's attention trend data for the principal.\n\n"
-        f"{guard}DATA:\n{json.dumps({'grain': grain, 'periods': periods}, indent=2)}\n\n"
+        f"{guard}"
+        f"{partial_rule}"
+        f"DATA:\n{json.dumps({'grain': grain, 'periods': annotated}, indent=2)}\n\n"
         "Produce 3–5 observations (fewer if data doesn't support 3).  Rules:\n"
         "- Cite the specific number supporting each observation.\n"
-        "- Only flag displaced_hours changes >10 % (drift is single-digit %).\n"
+        "- Materiality: flag changes >10 % for displaced_hours, return_ratio, nar_hours, "
+        "and per-class/per-bucket displaced figures — all are derived from displacement, "
+        "which drifts ±single-digit % run-to-run, so smaller moves are noise.  Engaged "
+        "and interruption counts are directly measured (not displacement-derived) and may "
+        "be noted at a lower threshold — but omit interruption entirely if it is not "
+        "instrumented for a period.\n"
         "- No praise, no encouragement.\n"
         "- If interruption_instrumented is false for a period, omit interruption.\n\n"
         "Useful shapes: return_ratio falling; class handed over more/less than prior period;\n"
