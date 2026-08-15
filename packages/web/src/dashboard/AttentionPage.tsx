@@ -494,7 +494,10 @@ function DayView({ day, date, recomp, running }: {
   );
 }
 
-// ── Range view ────────────────────────────────────────────────────────────────
+// ── Range view — dark Attention Statement matching the DAY tab treatment ───────
+// Self-contained wool-dark document: letterhead (logo · date range · double rule
+// · title) + three numbered sections + footer. All information from the old view
+// is preserved; only the visual treatment changes.
 
 function RangeView({ stats }: { stats: AttentionStatsResponse }) {
   const bars = deriveChartBars(stats.series);
@@ -503,67 +506,147 @@ function RangeView({ stats }: { stats: AttentionStatsResponse }) {
   const h = (v: number) => `${formatHours(v)} h`;
   const noData = agg.days_with_data === 0;
 
+  const wrapStyle = { padding: "36px 58px 30px", ...DARK_VARS, "--background": WOOL_BG } as CSSProperties;
+
   return (
-    <>
+    <div className="wool" style={wrapStyle}>
+
+      {/* ── Letterhead ──────────────────────────────────────────────────── */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 24 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 13 }}>
+          <img src={logoWhite} alt="Alfred Black" style={{ height: 34, width: "auto", display: "block" }} />
+          <span style={{ fontFamily: "var(--font-mono)", fontWeight: 800, fontSize: 11.5,
+            letterSpacing: "0.32em", textTransform: "uppercase", color: "var(--ink)" }}>
+            ALFRED&nbsp;BLACK
+          </span>
+        </div>
+        <div style={{ textAlign: "right", fontFamily: "var(--font-mono)", fontWeight: 700,
+          fontSize: 9.5, letterSpacing: "0.2em", color: "var(--marginalia)", lineHeight: 1.9 }}>
+          {stats.from} — {stats.to}
+        </div>
+      </div>
+      {/* 4px double rule — top and bottom 1px solid ink, height 4px */}
+      <div style={{ borderTop: "1px solid var(--ink)", borderBottom: "1px solid var(--ink)",
+        height: 4, margin: "14px 0 20px" }} />
+      <h1 style={{ fontFamily: "var(--font-display)", fontWeight: 600, fontSize: 30,
+        letterSpacing: "-0.015em", lineHeight: 1.05, margin: 0 }}>
+        Attention Statement.
+      </h1>
+
+      {/* Rate-change honesty warning */}
       {stats.rate_changed && (
-        <div className="border border-[var(--brass)]/40 px-4 py-3 mb-6 font-mono text-xs" style={{ color: "var(--brass)" }}>
+        <div style={{ border: "1px solid oklch(0.62 0.09 75 / 0.4)", padding: "12px 16px",
+          marginTop: 20, fontFamily: "var(--font-mono)", fontSize: 11,
+          letterSpacing: "0.06em", color: "var(--brass)" }}>
           Rate card changed within this range. Figures before and after the change are not directly comparable.
         </div>
       )}
 
-      {/* Per-day NAR column chart */}
-      <SH s="Net attention returned — per day" />
-      {noData
-        ? <p className="font-mono text-xs opacity-40 mt-2">No data in range.</p>
-        : <div className="mt-3">
-            <NarChart bars={bars} scale={scale} />
-            <div className="flex justify-between font-mono text-[10px] mt-1.5 opacity-40">
-              <span>{stats.from}</span><span>{stats.to}</span>
-            </div>
-          </div>}
-
-      {/* Coverage note */}
+      {/* ── 01 NET ATTENTION RETURNED ───────────────────────────────────── */}
+      <SL n="01" title="NET ATTENTION RETURNED" mt={24} />
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between",
+        gap: 32, marginTop: 16 }}>
+        {/* Hero total NAR — display serif brass, mirrors the DAY tab hero */}
+        <div>
+          <div style={{ fontFamily: "var(--font-display)", fontWeight: 600, fontSize: 76,
+            letterSpacing: "-0.02em", lineHeight: 1, color: "var(--brass)", margin: "0 0 12px" }}>
+            {noData ? "—" : `${agg.total_nar < 0 ? "−" : ""}${formatHours(Math.abs(agg.total_nar))} h`}
+          </div>
+          <div style={{ fontFamily: "var(--font-mono)", fontWeight: 800, fontSize: 8.5,
+            letterSpacing: "0.26em", textTransform: "uppercase", color: "var(--brass)" }}>
+            NET ATTENTION RETURNED
+          </div>
+        </div>
+        {/* Per-day NAR column chart */}
+        <div style={{ flex: 1 }}>
+          {noData
+            ? <p style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--marginalia)" }}>
+                No data in range.
+              </p>
+            : <>
+                <NarChart bars={bars} scale={scale} />
+                <div style={{ display: "flex", justifyContent: "space-between",
+                  fontFamily: "var(--font-mono)", fontSize: 9, marginTop: 6,
+                  color: "var(--marginalia)", letterSpacing: "0.06em" }}>
+                  <span>{stats.from}</span><span>{stats.to}</span>
+                </div>
+              </>
+          }
+        </div>
+      </div>
+      {/* Coverage note — honesty marker: partial ranges are flagged */}
       {agg.total_days > 0 && (
-        <p className="font-mono text-[10px] mt-3 mb-0"
-          style={{ color: agg.days_with_data < agg.total_days / 2 ? "var(--brass)" : "var(--marginalia)" }}>
+        <p style={{ fontFamily: "var(--font-mono)", fontSize: 9, marginTop: 10,
+          color: agg.days_with_data < agg.total_days / 2 ? "var(--brass)" : "var(--marginalia)",
+          letterSpacing: "0.06em" }}>
           {agg.days_with_data} of {agg.total_days} days in range have data.
           {agg.days_with_data < agg.total_days / 2 ? " Range is mostly empty — averages are not meaningful." : ""}
         </p>
       )}
 
-      {/* Aggregate cells */}
-      <SH s="Range summary" />
-      <div className="grid grid-cols-3 gap-px mt-2" style={{ background: "var(--rule)", border: "1px solid var(--rule)" }}>
-        <StatCell label="Total NAR" value={h(agg.total_nar)} />
-        <StatCell label="Mean / day" value={agg.days_with_data > 0 ? h(agg.mean_nar) : "—"} />
-        <StatCell label="Days with data" value={agg.total_days > 0 ? `${agg.days_with_data} / ${agg.total_days}` : "0"} />
-        <StatCell label="Best day" value={agg.best_day ? `${agg.best_day.date}  ${h(agg.best_day.nar_hours)}` : "—"} />
-        <StatCell label="Worst day" value={agg.worst_day ? `${agg.worst_day.date}  ${h(agg.worst_day.nar_hours)}` : "—"} />
-        <StatCell label="Displaced / engaged" value={noData ? "—" : `${h(stats.totals.displaced_hours)} / ${h(stats.totals.engaged_hours)}`} />
+      {/* ── 02 SUMMARY ──────────────────────────────────────────────────── */}
+      <SL n="02" title="SUMMARY" />
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 1,
+        background: "var(--rule)", border: "1px solid var(--rule)", marginTop: 16 }}>
+        {([
+          ["Total NAR",           h(agg.total_nar)],
+          ["Mean / day",          agg.days_with_data > 0 ? h(agg.mean_nar) : "—"],
+          ["Days with data",      agg.total_days > 0 ? `${agg.days_with_data} / ${agg.total_days}` : "0"],
+          ["Best day",            agg.best_day ? `${agg.best_day.date}  ${h(agg.best_day.nar_hours)}` : "—"],
+          ["Worst day",           agg.worst_day ? `${agg.worst_day.date}  ${h(agg.worst_day.nar_hours)}` : "—"],
+          ["Displaced / engaged", noData ? "—" : `${h(stats.totals.displaced_hours)} / ${h(stats.totals.engaged_hours)}`],
+        ] as [string, string][]).map(([label, value]) => (
+          <div key={label} style={{ background: WOOL_BG, padding: "12px 16px" }}>
+            <div style={{ fontFamily: "var(--font-mono)", fontWeight: 800, fontSize: 9,
+              letterSpacing: "0.22em", textTransform: "uppercase",
+              color: "var(--marginalia)", marginBottom: 5 }}>
+              {label}
+            </div>
+            <div style={{ fontFamily: "var(--font-mono)", fontWeight: 700, fontSize: 14,
+              letterSpacing: 0, color: "var(--ink)" }}>
+              {value}
+            </div>
+          </div>
+        ))}
       </div>
 
-      {/* Composition bar */}
+      {/* ── 03 PERIOD COMPOSITION ───────────────────────────────────────── */}
       {!noData && (() => {
         const total = (stats.totals.displaced_hours + stats.totals.engaged_hours) || 1;
         const dispPct = (stats.totals.displaced_hours / total) * 100;
         return (
           <>
-            <SH s="Period composition" />
-            <p className="font-mono text-[10px] opacity-40 mb-2">
+            <SL n="03" title="PERIOD COMPOSITION" />
+            <p style={{ fontFamily: "var(--font-mono)", fontSize: 9, letterSpacing: "0.06em",
+              color: "var(--marginalia)", opacity: 0.6, marginTop: 6, marginBottom: 6 }}>
               Source breakdown (explicit / inferred / autonomous) requires per-day rate data — follow-up #584.
             </p>
-            <div className="flex gap-px h-5 w-full overflow-hidden mt-1" style={{ border: "1px solid var(--rule)" }}>
-              <div style={{ width: `${dispPct}%`, background: "var(--brass)", opacity: 0.75 }} title={`Displaced ${h(stats.totals.displaced_hours)}`} />
-              <div className="flex-1" style={{ background: "var(--marginalia)", opacity: 0.25 }} title={`Engaged ${h(stats.totals.engaged_hours)}`} />
+            <div style={{ display: "flex", gap: 1, height: 20, width: "100%",
+              overflow: "hidden", border: "1px solid var(--rule)", marginTop: 4 }}>
+              <div style={{ width: `${dispPct}%`, background: "var(--brass)", opacity: 0.75 }}
+                title={`Displaced ${h(stats.totals.displaced_hours)}`} />
+              <div style={{ flex: 1, background: "var(--marginalia)", opacity: 0.25 }}
+                title={`Engaged ${h(stats.totals.engaged_hours)}`} />
             </div>
-            <div className="flex justify-between font-mono text-[10px] mt-1" style={{ color: "var(--marginalia)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between",
+              fontFamily: "var(--font-mono)", fontSize: 9, marginTop: 4,
+              color: "var(--marginalia)", letterSpacing: "0.06em" }}>
               <span>Displaced {h(stats.totals.displaced_hours)}</span>
               <span>Engaged {h(stats.totals.engaged_hours)}</span>
             </div>
           </>
         );
       })()}
-    </>
+
+      {/* Footer — matches the template's .foot */}
+      <div style={{ display: "flex", justifyContent: "space-between", marginTop: 40,
+        borderTop: `1px solid ${HAIR}`, paddingTop: 9,
+        fontFamily: "var(--font-mono)", fontWeight: 700, fontSize: 8,
+        letterSpacing: "0.22em", color: "var(--marginalia)" }}>
+        <span>ALFRED BLACK · ATTENTION STATEMENT · {stats.from} — {stats.to}</span>
+        <span>PAGE 1 OF 1</span>
+      </div>
+    </div>
   );
 }
 
@@ -886,17 +969,7 @@ export default function AttentionPage() {
     <Frame>
       <section className="mx-auto max-w-[900px] px-8 py-12">
 
-        {/* Page-level header — shown on range/trends tabs; day tab carries its own letterhead */}
-        {tab === "range" && (
-          <div className="mb-10">
-            <p className="font-mono text-[10px] uppercase tracking-[0.32em] mb-3" style={{ color: "var(--marginalia)" }}>
-              Alfred Black · Attention Statement
-            </p>
-            <h1 className="font-display tracking-[-0.02em] leading-[0.98]" style={{ fontSize: "clamp(44px,6vw,72px)" }}>
-              {from} — {to}
-            </h1>
-          </div>
-        )}
+        {/* Page-level header — Trends tab only; Day and Range carry their own letterhead */}
         {tab === "trends" && (
           <div className="mb-10">
             <p className="font-mono text-[10px] uppercase tracking-[0.32em] mb-3" style={{ color: "var(--marginalia)" }}>
