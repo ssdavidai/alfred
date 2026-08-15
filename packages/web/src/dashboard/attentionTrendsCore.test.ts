@@ -11,7 +11,9 @@ import {
   isReadGenerated, BUCKET_KEYS, LOW_ENGAGEMENT_HOURS,
   trimEmptyEdgePeriods, READ_EMPTY_STATE_TEXT,
   POLL_GIVE_UP_MS, READ_POLL_PENDING_TEXT, READ_POLL_GAVE_UP_TEXT,
-  type TrendsPeriod,
+  f1, dir, deriveNarHeadline, deriveRatioHeadline,
+  deriveRatioLineSegmentsFromBars, deriveReadHeadline, deriveAllocationHeadline,
+  type TrendsPeriod, type ReadHeadlineParams, type RatioBar,
 } from "./attentionTrendsCore";
 
 // ── Fixture factory ───────────────────────────────────────────────────────────
@@ -205,4 +207,117 @@ test("READ_POLL_GAVE_UP_TEXT and READ_POLL_PENDING_TEXT are distinct non-empty s
     "gave-up and pending messages must be distinct — they signal different states");
   assert.ok(READ_POLL_PENDING_TEXT.length > 10, "pending text must be a real sentence");
   assert.ok(READ_POLL_GAVE_UP_TEXT.length > 10, "gave-up text must be a real sentence");
+});
+
+// ── Sentence engine ───────────────────────────────────────────────────────────
+
+// — deriveNarHeadline —
+test("deriveNarHeadline: engaged null → wasn’t measured, no ratio claimed", () => {
+  const s = deriveNarHeadline({ nar: 5, engaged: null, displaced: 10 });
+  assert.ok(s.includes("wasn’t measured"), `got: ${s}`);
+  assert.ok(!s.includes("you put in"), `must not claim ratio when unmeasured, got: ${s}`);
+});
+test("deriveNarHeadline: NAR ≤ 0 → nothing came back", () => {
+  const s = deriveNarHeadline({ nar: 0, engaged: 4, displaced: 7 });
+  assert.ok(s.includes("Nothing came back"), `got: ${s}`);
+  const s2 = deriveNarHeadline({ nar: -2, engaged: 6, displaced: 8 });
+  assert.ok(s2.includes("Nothing came back"), `got: ${s2}`);
+});
+test("deriveNarHeadline: positive NAR with engagement → came back … you put in", () => {
+  const s = deriveNarHeadline({ nar: 12.5, engaged: 6, displaced: 18.5 });
+  assert.ok(s.includes("came back this week"), `got: ${s}`);
+  assert.ok(s.includes("you put in"), `got: ${s}`);
+});
+
+// — deriveRatioHeadline —
+test("deriveRatioHeadline: engaged null → null (no ratio claimed)", () => {
+  assert.strictEqual(deriveRatioHeadline({ ratio: 4, engaged: null, peakValue: 5, peakMonth: "Jun", ratioSeries: [4] }), null);
+});
+test("deriveRatioHeadline: engaged 0.5h → too little of your time", () => {
+  const s = deriveRatioHeadline({ ratio: 3.5, engaged: 0.5, peakValue: 5, peakMonth: "Jun", ratioSeries: [3.5] });
+  assert.ok(s?.includes("Too little of your time"), `got: ${s}`);
+});
+test("deriveRatioHeadline: ratio at peak → the best yet; 3 flat periods → steady for N weeks", () => {
+  const sBest = deriveRatioHeadline({ ratio: 5.9, engaged: 6, peakValue: 5.85, peakMonth: "Jul", ratioSeries: [3, 4, 5.9] });
+  assert.ok(sBest?.includes("the best yet"), `got: ${sBest}`);
+  const sFlat = deriveRatioHeadline({ ratio: 3.5, engaged: 4, peakValue: 6, peakMonth: "Jul", ratioSeries: [3.5, 3.48, 3.52] });
+  assert.ok(sFlat?.includes("steady for") && sFlat.includes("weeks"), `got: ${sFlat}`);
+});
+
+// — deriveRatioLineSegmentsFromBars: null produces gap segment, never interpolated point —
+const mkRBars = (ratios: (number | null)[]): RatioBar[] =>
+  ratios.map((r, i) => ({ key: `W${i}`, label: `W${i}`, ratio: r, low_engagement: false, uninstrumented: false }));
+
+test("deriveRatioLineSegmentsFromBars: null in series → isGap=true; adjacent non-null → isGap=false", () => {
+  const gap = deriveRatioLineSegmentsFromBars(mkRBars([3.5, null, 4.0]));
+  assert.strictEqual(gap.length, 1); assert.strictEqual(gap[0].isGap, true);
+  assert.strictEqual(gap[0].from, 0); assert.strictEqual(gap[0].to, 2);
+  const solid = deriveRatioLineSegmentsFromBars(mkRBars([3, 4, 5]));
+  assert.ok(solid.every(s => !s.isGap), "all solid when no nulls");
+});
+
+// — deriveReadHeadline (8 templates) —
+const rh = (dR: string, dX: string, dF: string, extra: Partial<ReadHeadlineParams> = {}): string =>
+  deriveReadHeadline({
+    dR: dR as any, dX: dX as any, dF: dF as any,
+    priorKey: "W1", latestKey: "W2",
+    priorRatio: 4, latestRatio: 3,
+    priorFailures: 5, latestFailures: 8,
+    priorEngaged: 4, latestEngaged: 5,
+    priorXLHours: 2, latestXLHours: 6,
+    ...extra,
+  });
+
+test("read template 1: down+up+!up → work got bigger, not worse", () => {
+  const s = rh("down", "up", "flat");
+  assert.ok(s.includes("work got bigger"), `got: ${s}`);
+  assert.ok(s.includes("not worse"), `got: ${s}`);
+});
+test("read template 2: down+up+up → bigger work and more failed", () => {
+  const s = rh("down", "up", "up");
+  assert.ok(s.includes("bigger work"), `got: ${s}`);
+  assert.ok(s.includes("failed"), `got: ${s}`);
+});
+test("read template 3: down+flat+up → quality slipped, failures rose", () => {
+  const s = rh("down", "flat", "up");
+  assert.ok(s.includes("quality slipped"), `got: ${s}`);
+  assert.ok(s.includes("failures rose"), `got: ${s}`);
+});
+test("read template 4: down+flat+flat → your side of the desk", () => {
+  const s = rh("down", "flat", "flat");
+  assert.ok(s.includes("your side of the desk"), `got: ${s}`);
+  assert.ok(s.includes("your time rose"), `got: ${s}`);
+});
+test("read template 5: up+flat+down → fewer failures", () =>
+  assert.ok(rh("up", "flat", "down").includes("fewer failures")));
+test("read template 6: up+up+flat → improved even as the work", () =>
+  assert.ok(rh("up", "up", "flat").includes("even as the work")));
+test("read template 7: flat → held at X× across both weeks", () => {
+  const s = rh("flat", "flat", "flat", { latestRatio: 3.5 });
+  assert.ok(s.includes("held at"), `got: ${s}`);
+  assert.ok(s.includes("across both weeks"), `got: ${s}`);
+  assert.ok(s.includes("×") || s.includes("×"), `must include × char, got: ${s}`);
+});
+
+// — deriveAllocationHeadline —
+test("allocation headline: workFrac ≥ 0.85 → almost entirely to work", () => {
+  const s = deriveAllocationHeadline({ totalNar: 40, workFrac: 0.88, lifeFrac: 0.09, unassignedFrac: 0.03 });
+  assert.ok(s.includes("almost entirely to work"), `got: ${s}`);
+});
+test("allocation headline: 0.60 ≤ workFrac < 0.85 → mostly to work", () => {
+  const s = deriveAllocationHeadline({ totalNar: 30, workFrac: 0.70, lifeFrac: 0.25, unassignedFrac: 0.05 });
+  assert.ok(s.includes("mostly to work"), `got: ${s}`);
+});
+test("allocation headline: 0.40 ≤ workFrac < 0.60 → to work and life evenly", () => {
+  const s = deriveAllocationHeadline({ totalNar: 20, workFrac: 0.50, lifeFrac: 0.45, unassignedFrac: 0.05 });
+  assert.ok(s.includes("to work and life evenly"), `got: ${s}`);
+});
+test("allocation headline: workFrac < 0.40 → mostly to life", () => {
+  const s = deriveAllocationHeadline({ totalNar: 15, workFrac: 0.30, lifeFrac: 0.65, unassignedFrac: 0.05 });
+  assert.ok(s.includes("mostly to life"), `got: ${s}`);
+});
+test("allocation headline: unassigned > 25% → tail clause appended", () => {
+  const s = deriveAllocationHeadline({ totalNar: 20, workFrac: 0.55, lifeFrac: 0.15, unassignedFrac: 0.30 });
+  assert.ok(s.includes("still unassigned"), `tail clause expected, got: ${s}`);
+  assert.ok(s.includes("30%"), `must include pct, got: ${s}`);
 });
