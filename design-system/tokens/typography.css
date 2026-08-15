@@ -1,0 +1,48 @@
+/* Alfred Black — Typography tokens
+ * "Serif for human presence, mono for machine truth." Display is set big and
+ * frequently italic; mono is always uppercase with wide tracking for labels. */
+
+:root {
+  /* Families */
+  --font-display: 'Playfair Display', 'Didot', 'Bodoni 72', Georgia, serif;
+  --font-body:    'EB Garamond', Garamond, Georgia, serif;
+  --font-mono:    'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+
+  /* Display scale (Playfair) — editorial, tight leading */
+  --text-hero:    clamp(80px, 14vw, 180px); /* the Door            */
+  --text-display: 64px;                     /* page titles         */
+  --text-h1:      48px;
+  --text-h2:      36px;
+  --text-h3:      28px;
+
+  /* Body scale (EB Garamond) */
+  --text-lede:    21px;   /* page lede / standfirst */
+  --text-body-lg: 19px;   /* brief & long-form body */
+  --text-body:    17px;
+  --text-small:   15px;
+
+  /* Mono scale (JetBrains) — labels & marginalia */
+  --text-label:   10px;   /* uppercase nav / kicker / pill */
+  --text-meta:    11px;
+  --text-mono-sm: 13px;
+
+  /* Weights */
+  --weight-body: 400;
+  --weight-medium: 500;
+  --weight-display: 700;
+  --weight-display-black: 900;  /* the wordmark "Alfred Black." */
+  --weight-mono-bold: 800;      /* nav & pills                 */
+
+  /* Tracking — mono labels are wide, display is tight */
+  --tracking-display: -0.02em;
+  --tracking-label:   0.22em;   /* default uppercase mono       */
+  --tracking-kicker:  0.32em;   /* widest — section eyebrows    */
+  --tracking-nav:     0.18em;
+
+  /* Leading */
+  --leading-display: 1.02;
+  --leading-body:    1.6;
+
+  /* Body font-feature-settings: kerning, ligatures, oldstyle numerals */
+  --font-features-body: "kern", "liga", "onum";
+}

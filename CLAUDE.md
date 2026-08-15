@@ -68,6 +68,7 @@ alfred-black/
 │   ├── FIX-CONTRACTS.md     frozen cross-lane interfaces (Cn…)
 │   ├── design/ specs/       design rationale + per-issue specs
 │   └── operators/           ops runbooks
+├── design-system/           the Alfred Black brand system — tokens, rules, templates (§19)
 ├── deploy/                  ops runbooks
 ├── debug/                   ignored — investigation outputs land here
 └── CLAUDE.md                this file
@@ -669,7 +670,7 @@ For mapping unknown breakage (e.g. a sweep over the live product):
    | **II**·learn | `lane-2/` | `packages/learn/**` | Temporal activities, the intelligence layer, scoring |
    | **III**·web | `lane-3/` | `packages/web/**` | Wasp app, dashboard pages, operations.ts |
    | **IV**·alfred-vault | `lane-4/` | `packages/alfred-vault/**` | The Python vault daemon (separate package `alfred-vault` 1.0+) |
-   | **V**·edges/infra | `lane-5/` | `packages/{hermes,mcp-server,vault-init,setup}/**`, `scripts/**`, `caddy/**`, `docker-compose.yaml`, `.env.example`, `Makefile`, `docs/**` | All non-package config |
+   | **V**·edges/infra | `lane-5/` | `packages/{hermes,mcp-server,vault-init,setup}/**`, `scripts/**`, `caddy/**`, `docker-compose.yaml`, `.env.example`, `Makefile`, `docs/**`, `design-system/**` | All non-package config + the brand system |
    | **VI**·voice-bridge | `lane-6/` | `packages/voice-bridge/**` | Twilio/telephony bridge |
    | **VII**·paperclip | `lane-7/` | `packages/paperclip/**` | Paperclip adapter |
 
@@ -1085,6 +1086,75 @@ containers.
   is that human decisions on /desk become observations become tier
   promotions. If observations aren't landing in `state.db`, the system
   isn't learning — and that's a bug to fix urgently, not a "we'll iterate" item.
+
+---
+
+---
+
+## 19. The design system — read this before touching any surface
+
+`design-system/` holds the **Alfred Black brand system**. It is not decoration and it
+is not optional: every principal-facing surface is expected to be derived from it.
+
+**`design-system/readme.md` is the authoritative document.** Read it before designing
+anything. `design-system/IMPORTED.md` records where the snapshot came from, what was
+left out, and the one place the older `_brandpack/` layer contradicts the readme.
+
+### The identity in one paragraph
+
+**Letterpress meets terminal.** Ivory paper `#F4EFE6`, wool black `#0B0B0B`, ink
+`#1A1A1A`, and **one** antique-brass accent `#A8843A`. Playfair Display (Didone) for
+display, frequently italic. EB Garamond for running text, oldstyle numerals. JetBrains
+Mono for everything machine — labels, ledgers, marginalia — uppercase, 0.18–0.32em
+tracking. The product is a *private command room*, not a SaaS dashboard.
+
+### Non-negotiables
+
+- **One brass accent per screen.** No second accent, ever. Brass is punctuation: it
+  marks the single most important thing, then falls silent. If a chart needs a second
+  series colour, use tints of brass or the marginalia grey — **not a new hue**.
+- **`--radius: 0`.** Corners are sharp. Only tiny chips earn 2px.
+- **Hairline rules, not cards.** Structure is drawn with `--ab-rule`; there are no
+  filled cards, no drop shadows, no glassmorphism, no blur. Print does not float.
+- **Serif for what Alfred says; mono for machine truth.** Prose in EB Garamond, signed
+  *"— Alfred."* Labels, statuses and ledger figures in mono caps.
+- **No emoji. Ever.** The only non-icon glyphs are `● → ↓ · ✕` and roman numerals.
+- **No ASCII / dot-matrix art.** The engraved icon set carries the whole iconographic
+  load, including empty states. (`_brandpack/` says otherwise; it is the older layer —
+  see `IMPORTED.md`.)
+- **Calm copy.** No hype, no exclamation marks, no "Oops!". *"No urgent action is
+  required."* is the register.
+
+### Where things live
+
+| path | what |
+|---|---|
+| `design-system/readme.md` | **authoritative** — voice, palette, type, surfaces, iconography |
+| `design-system/styles.css` | single entry point; `@import`s the tokens in order |
+| `design-system/tokens/` | `colors` · `typography` · `spacing` · `surfaces` · `fonts` |
+| `design-system/templates/attention-statement/` | the canonical statement layout |
+| `design-system/SKILL.md` | portable Agent-Skill wrapper |
+
+### The token values are the product's, not a mockup's
+
+`design-system/tokens/*.css` is lifted verbatim from `packages/web/src/client/Main.css`.
+That file remains the source of truth for the running app. If the two ever drift,
+**the product theme wins and the snapshot is stale** — re-import rather than editing
+`Main.css` to match a mockup.
+
+### Snapshot, not sync
+
+This is a point-in-time copy of a Claude Design project (id in `IMPORTED.md`). Editing
+files here does not change the design project. The React components, the 17 engraved
+SVG icons, brand marks and textures are **not yet imported** — `readme.md` describes
+assets that this directory does not yet contain.
+
+### Never commit the source project's `uploads/`
+
+The design project carries client PDFs, a competitive-landscape report and personal
+travel documents. **This repository is public.** Sample data in the templates has also
+carried real client names — scrub before committing, and never put a real name in a
+commit message, PR body or comment.
 
 ---
 

@@ -1,0 +1,6 @@
+/* Alfred Black — Webfonts
+ * Display : Playfair Display (Didone) — headlines, often italic for emphasis
+ * Body    : EB Garamond — running text, oldstyle numerals
+ * Mono    : JetBrains Mono — labels, marginalia, nav, ledgers
+ * The real product uses the same three families (see packages/web Main.css). */
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,500;0,600;0,700;0,800;0,900;1,400;1,500;1,600;1,700;1,900&family=EB+Garamond:ital,wght@0,400;0,500;0,600;0,700;1,400;1,500;1,600&family=JetBrains+Mono:wght@400;500;600;700;800&display=swap');

@@ -1,0 +1,76 @@
+/* Alfred Black — Colour
+ * Material: wool black, ivory paper, ink, a SINGLE brass accent. No second accent. Ever.
+ * Values lifted verbatim from the product theme (packages/web/src/client/Main.css).
+ * Paper (light) is the default mode; .dark inverts ink/paper while brass holds. */
+
+:root {
+  /* ── Material (raw) ─────────────────────────────── */
+  --ab-paper:      oklch(0.953 0.018 80);   /* #F4EFE6 ivory page          */
+  --ab-wool:       oklch(0.16 0.005 60);    /* #0B0B0B wool black surface   */
+  --ab-ink:        oklch(0.22 0.004 60);    /* #1A1A1A type                 */
+  --ab-brass:      oklch(0.62 0.09 75);     /* #A8843A the one accent       */
+  --ab-marginalia: oklch(0.40 0.005 60);    /* muted ink — notes in margin  */
+  --ab-rule:       oklch(0.22 0.004 60 / 0.55); /* hairline rules           */
+
+  /* ── Semantic — paper mode is default ───────────── */
+  --background: var(--ab-paper);
+  --foreground: var(--ab-ink);
+
+  --card: var(--ab-paper);
+  --card-foreground: var(--ab-ink);
+  --popover: var(--ab-paper);
+  --popover-foreground: var(--ab-ink);
+
+  --primary: var(--ab-ink);
+  --primary-foreground: var(--ab-paper);
+  --secondary: oklch(0.92 0.014 80);
+  --secondary-foreground: var(--ab-ink);
+  --muted: oklch(0.92 0.014 80);
+  --muted-foreground: var(--ab-marginalia);
+  --accent: var(--ab-brass);
+  --accent-foreground: var(--ab-paper);
+
+  /* States — brass is punctuation; these stay quiet, never neon */
+  --destructive: oklch(0.42 0.12 30);      /* deep oxblood, not fire-red */
+  --destructive-foreground: var(--ab-paper);
+  --success: oklch(0.55 0.13 150);          /* muted billiard green       */
+  --success-foreground: var(--ab-paper);
+  --warning: oklch(0.72 0.14 75);           /* amber, brass-adjacent      */
+  --warning-foreground: var(--ab-wool);
+
+  --border: oklch(0.22 0.004 60 / 0.18);
+  --input:  oklch(0.22 0.004 60 / 0.25);
+  --ring:   var(--ab-brass);
+
+  /* Convenience aliases used across cards/components */
+  --text-body:    var(--ab-ink);
+  --text-muted:   var(--ab-marginalia);
+  --text-on-wool: var(--ab-paper);
+  --surface-page: var(--ab-paper);
+  --surface-wool: var(--ab-wool);
+}
+
+/* Dark / wool mode — material inverts, brass is unchanged. */
+.dark,
+.ab-dark {
+  --ab-paper: oklch(0.16 0.005 60);         /* wool becomes the page */
+  --ab-ink:   oklch(0.94 0.012 80);         /* ivory becomes the type */
+  --ab-marginalia: oklch(0.70 0.008 80);
+  --ab-rule:  oklch(0.94 0.012 80 / 0.22);
+
+  --background: var(--ab-paper);
+  --foreground: var(--ab-ink);
+  --card: oklch(0.20 0.005 60);
+  --card-foreground: var(--ab-ink);
+  --popover: oklch(0.20 0.005 60);
+  --popover-foreground: var(--ab-ink);
+  --secondary: oklch(0.22 0.005 60);
+  --muted: oklch(0.22 0.005 60);
+  --muted-foreground: var(--ab-marginalia);
+  --border: oklch(0.94 0.012 80 / 0.18);
+  --input:  oklch(0.94 0.012 80 / 0.25);
+
+  --text-body: var(--ab-ink);
+  --text-muted: var(--ab-marginalia);
+  --surface-page: var(--ab-paper);
+}

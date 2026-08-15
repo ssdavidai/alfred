@@ -1,0 +1,199 @@
+/* Alfred Black — Surfaces & utilities
+ * The tactile layer: paper grain, wool grain, letterpress hairlines, the single
+ * gilt rule, and the button family. Ported from the product theme so consuming
+ * designs look identical to the shipping app. Class-based (not tokens) but
+ * reachable from styles.css, so it ships to every consumer. */
+
+/* ── Base ───────────────────────────────────────────── */
+body.ab-base {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-body);
+  font-feature-settings: var(--font-features-body);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+::selection { background: var(--ab-brass); color: var(--ab-paper); }
+
+/* ── Family helpers ─────────────────────────────────── */
+.font-display { font-family: var(--font-display); font-feature-settings: "kern","liga"; }
+.font-body    { font-family: var(--font-body); }
+.font-mono    { font-family: var(--font-mono); }
+
+/* ── Paper & wool surfaces (SVG grain, never raster) ── */
+.paper {
+  background-color: var(--ab-paper);
+  background-image:
+    radial-gradient(oklch(0.22 0.004 60 / 0.025) 1px, transparent 1px),
+    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='240' height='240'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' seed='3'/><feColorMatrix values='0 0 0 0 0.10  0 0 0 0 0.10  0 0 0 0 0.10  0 0 0 0.10 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+  background-size: 4px 4px, 240px 240px;
+}
+.dark .paper {
+  background-image:
+    radial-gradient(oklch(0.94 0.012 80 / 0.04) 1px, transparent 1px),
+    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='240' height='240'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' seed='3'/><feColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.06 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+  background-size: 4px 4px, 240px 240px;
+}
+/* Wool is ALWAYS dark by design — it does not theme-swap. */
+.wool {
+  background-color: oklch(0.16 0.005 60);
+  color: oklch(0.953 0.018 80);
+  background-image:
+    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='240' height='240'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='1.2' numOctaves='2' seed='7'/><feColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.05 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+}
+
+/* ── Letterpress rules ──────────────────────────────── */
+.rule { border: 0; border-top: 1px solid var(--ab-rule); margin: 0; }
+.rule-double {
+  border: 0;
+  border-top: 1px solid var(--ab-rule);
+  border-bottom: 1px solid var(--ab-rule);
+  height: 4px;
+}
+/* Gilt — hairline brass rule with a soft glow. Use ONCE per page. */
+.gilt {
+  height: 1px;
+  background: var(--ab-brass);
+  box-shadow: 0 0 6px color-mix(in oklab, var(--ab-brass) 35%, transparent);
+  border: 0;
+}
+
+/* ── Cinematic type effects ─────────────────────────── */
+.press {
+  text-shadow:
+    0 1px 0 color-mix(in oklab, var(--ab-wool) 70%, transparent),
+    0 -1px 0 color-mix(in oklab, var(--ab-paper) 12%, transparent);
+}
+.smallcaps { font-variant-caps: all-small-caps; letter-spacing: 0.12em; }
+.tabular   { font-variant-numeric: tabular-nums lining-nums; }
+.struck    { text-decoration: line-through; text-decoration-thickness: 1px; color: var(--ab-marginalia); }
+.marginalia {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  line-height: 1.45;
+  color: var(--ab-marginalia);
+  letter-spacing: 0.01em;
+}
+
+/* ── Terminal caret (blinking block) ────────────────── */
+@keyframes ab-caret { 0%,49% { opacity: 1 } 50%,100% { opacity: 0 } }
+.caret::after {
+  content: "";
+  display: inline-block;
+  width: 0.5ch;
+  height: 1em;
+  background: currentColor;
+  margin-left: 2px;
+  vertical-align: -0.12em;
+  animation: ab-caret 1s steps(1) infinite;
+}
+
+/* ── Buttons ────────────────────────────────────────── */
+/* Primary CTA — brass border, fills with brass on hover. Italic display face. */
+.btn-brass {
+  font-family: var(--font-display);
+  font-style: italic;
+  font-size: 1.5rem;
+  line-height: 1;
+  padding: 0.55em 1.1em;
+  border: 1px solid var(--ab-brass);
+  background: transparent;
+  color: var(--ab-ink);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6em;
+  cursor: pointer;
+  transition: background-color 160ms ease, color 160ms ease, box-shadow 160ms ease;
+}
+.btn-brass:hover, .btn-brass:hover * {
+  background: var(--ab-brass);
+  color: var(--ab-paper);
+  box-shadow: 0 1px 0 var(--ab-brass);
+}
+.btn-brass:disabled { opacity: 0.35; cursor: not-allowed; }
+.wool .btn-brass { color: oklch(0.953 0.018 80); }
+.wool .btn-brass:hover, .wool .btn-brass:hover * { background: var(--ab-brass); color: oklch(0.16 0.005 60); }
+
+/* Small ghost action — uppercase mono, brass on hover */
+.btn-ghost {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  font-weight: 800;
+  padding: 6px 10px;
+  border: 1px solid var(--ab-rule);
+  background: transparent;
+  color: var(--ab-ink);
+  cursor: pointer;
+  transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease;
+}
+.btn-ghost:hover {
+  background: color-mix(in oklab, var(--ab-brass) 12%, transparent);
+  border-color: var(--ab-brass);
+  color: var(--ab-brass);
+}
+.wool .btn-ghost { color: var(--ab-paper); border-color: color-mix(in oklab, var(--ab-paper) 25%, transparent); }
+.wool .btn-ghost:hover { color: var(--ab-brass); border-color: var(--ab-brass); }
+
+/* Underlined text action — minimal, no border */
+.btn-link {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  padding: 6px 0;
+  background: transparent;
+  color: var(--ab-ink);
+  border: 0;
+  border-bottom: 1px solid transparent;
+  cursor: pointer;
+  transition: color 160ms ease, border-color 160ms ease;
+}
+.btn-link:hover { color: var(--ab-brass); border-bottom-color: var(--ab-brass); }
+.wool .btn-link { color: var(--ab-paper); }
+.wool .btn-link:hover { color: var(--ab-brass); border-bottom-color: var(--ab-brass); }
+
+/* Italic display action — Delegate · Defer · Delete · Do */
+.btn-instruction {
+  font-family: var(--font-display);
+  font-style: italic;
+  font-weight: 400;
+  font-size: 26px;
+  line-height: 1;
+  background: transparent;
+  border: 0;
+  padding: 4px 2px;
+  color: var(--ab-ink);
+  cursor: pointer;
+  transition: color 200ms ease;
+}
+.btn-instruction:hover { color: var(--ab-brass); }
+.wool .btn-instruction { color: var(--ab-paper); }
+.wool .btn-instruction:hover { color: var(--ab-brass); }
+
+/* Pill — brass status chip */
+.pill-brass {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  font-weight: 800;
+  padding: 3px 8px;
+  background: var(--ab-brass);
+  color: var(--ab-paper);
+  white-space: nowrap;
+}
+
+/* Linkable card / ledger row */
+.card-hover { transition: background-color 160ms ease, border-color 160ms ease; }
+.card-hover:hover {
+  background: color-mix(in oklab, var(--ab-brass) 6%, transparent);
+  border-color: var(--ab-brass);
+}
+
+/* Focus ring — brass, keyboard users only */
+:focus-visible { outline: 1px solid var(--ab-brass); outline-offset: 3px; }

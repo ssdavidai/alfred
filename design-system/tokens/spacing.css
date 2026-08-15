@@ -1,0 +1,37 @@
+/* Alfred Black — Spacing, radius, shadow, layout
+ * Corners are SHARP. --radius is 0 by design; this is a letterpress, not a SaaS.
+ * Elevation is hairline rules and the faintest paper-grain shadow, never glow. */
+
+:root {
+  /* Radius — zero. The single exception (2px) exists only for tiny chips. */
+  --radius: 0px;
+  --radius-chip: 2px;
+
+  /* Spacing scale (4px base) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+  --space-8: 64px;
+  --space-9: 96px;
+  --space-10: 128px;
+
+  /* Borders — everything is a hairline */
+  --hairline: 1px solid var(--ab-rule);
+  --hairline-brass: 1px solid var(--ab-brass);
+
+  /* Elevation — used sparingly. Print does not float. */
+  --shadow-rest: none;
+  --shadow-raise: 0 1px 0 color-mix(in oklab, var(--ab-ink) 8%, transparent);
+  --shadow-modal: 0 24px 80px rgba(0, 0, 0, 0.45);
+
+  /* Layout */
+  --measure: 64ch;          /* max reading width      */
+  --container: 1280px;      /* framed page max-width  */
+  --container-narrow: 860px;/* door / manifesto       */
+  --gutter: 32px;           /* page side padding      */
+  --header-h: 88px;
+}

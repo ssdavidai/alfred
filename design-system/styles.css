@@ -1,0 +1,13 @@
+/* ════════════════════════════════════════════════════════════
+   ALFRED BLACK — Design System
+   "Not an app you use. A person you employ."
+
+   Global entry point. Consumers link THIS file only.
+   Import order: fonts → colour → type → spacing → surfaces.
+   ════════════════════════════════════════════════════════════ */
+
+@import url("./tokens/fonts.css");
+@import url("./tokens/colors.css");
+@import url("./tokens/typography.css");
+@import url("./tokens/spacing.css");
+@import url("./tokens/surfaces.css");
