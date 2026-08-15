@@ -15,11 +15,11 @@ import {
   type ChartBar, type ChartScaleResult, type BarGeometry,
 } from "./attentionCore";
 import {
-  deriveNarBars, deriveSeriesMax, deriveTrendsSummary,
-  deriveAllocationBars, deriveRatioBars, deriveBucketBars, deriveOutcomesBars,
-  isReadGenerated, BUCKET_KEYS, LOW_ENGAGEMENT_HOURS,
-  trimEmptyEdgePeriods, READ_EMPTY_STATE_TEXT,
-  POLL_GIVE_UP_MS, READ_POLL_PENDING_TEXT, READ_POLL_GAVE_UP_TEXT,
+  deriveNarBars, deriveSeriesMax, deriveRatioBars, deriveBucketBars,
+  isReadGenerated, LOW_ENGAGEMENT_HOURS, trimEmptyEdgePeriods,
+  READ_EMPTY_STATE_TEXT, POLL_GIVE_UP_MS, READ_POLL_PENDING_TEXT, READ_POLL_GAVE_UP_TEXT,
+  f1, dir, deriveNarHeadline, deriveRatioHeadline, deriveRatioLineSegmentsFromBars,
+  deriveReadHeadline, deriveReadPairData, deriveAllocationHeadline, deriveTrendsAllocTotals,
   type TrendsGrain, type AttentionTrendsResponse,
 } from "./attentionTrendsCore";
 
@@ -650,53 +650,96 @@ function RangeView({ stats }: { stats: AttentionStatsResponse }) {
   );
 }
 
-// ── Trends view (#584 — TRENDS tab) ──────────────────────────────────────────
+// ── Trends view (#584 — canonical 4-panel report) ────────────────────────────
 
 function TrendsView({ data, grain, setGrain, interpretingRead, onGenerateRead, readTimedOut, onRetry }: {
-  data: AttentionTrendsResponse;
-  grain: TrendsGrain;
-  setGrain: (g: TrendsGrain) => void;
-  interpretingRead: boolean;
-  onGenerateRead: () => void;
-  readTimedOut: boolean;
-  onRetry: () => void;
+  data: AttentionTrendsResponse; grain: TrendsGrain; setGrain: (g: TrendsGrain) => void;
+  interpretingRead: boolean; onGenerateRead: () => void; readTimedOut: boolean; onRetry: () => void;
 }) {
-  // Trim leading/trailing empty periods (range padding — e.g. a week that predates
-  // any data on the tenant). Mid-series zeros are kept — a quiet week is data.
   const ps = trimEmptyEdgePeriods(data.periods ?? []);
   if (!ps.length) return <p className="font-mono text-xs opacity-40 mt-12">No data for this period.</p>;
 
-  const nb = deriveNarBars(ps, grain); const ab = deriveAllocationBars(ps, grain);
-  const rb = deriveRatioBars(ps, grain); const bb = deriveBucketBars(ps, grain);
-  const ob = deriveOutcomesBars(ps, grain); const sum = deriveTrendsSummary(ps);
-
-  // Chart sizing: scale bars to fill ~600px at the target column width, capped so
-  // a small series doesn't get absurdly wide bars. GP=4px gap; BW min 12px, max 60px.
+  const nb = deriveNarBars(ps, grain);
+  const rb = deriveRatioBars(ps, grain);
+  const bb = deriveBucketBars(ps, grain);
   const N = ps.length;
   const GP = 4;
-  const BW = Math.min(Math.max(Math.round((600 - Math.max(N - 1, 0) * GP) / Math.max(N, 1)), 12), 60);
+  const BW = Math.min(Math.max(Math.round((560 - Math.max(N - 1, 0) * GP) / Math.max(N, 1)), 10), 56);
   const CW = N * BW + Math.max(N - 1, 0) * GP;
-  // Section 02 is the hero chart — give it real vertical presence.
-  const H_NAR = 230;
-  // Sections 04 and 05 are secondary — less height.
-  const H_SUB = 150;
+  const H_UP = 96; const H_DN = 36; // mirrored NAR chart heights
+  const SVG_H = 168;                 // ratio line-plot height
 
-  const xi = (i: number) => i * (BW + GP);
-  const barPx = (v: number, max: number, h: number) => Math.max(Math.round(Math.max(v, 0) / max * h), 0);
-  const maxDisp = deriveSeriesMax(nb.map(b => b.displaced_hours));
-  const maxOut = deriveSeriesMax(ob.map(b => b.total));
+  const barPx = (v: number, mx: number, h: number) => Math.max(Math.round(Math.max(v, 0) / mx * h), 0);
+  const maxNar = deriveSeriesMax(nb.map(b => b.nar_hours));
+  const maxEng = deriveSeriesMax(nb.map(b => b.engaged_hours));
   const validR = rb.filter(b => b.ratio != null && !b.low_engagement).map(b => b.ratio!);
-  const maxRatio = deriveSeriesMax(validR.length ? validR : rb.filter(b => b.ratio != null).map(b => b.ratio!));
-  const fh = (v: number | null, d = 1) => v == null ? "—" : v.toFixed(d);
+  const maxR = deriveSeriesMax(validR.length ? validR : rb.filter(b => b.ratio != null).map(b => b.ratio!));
+  const chartMax = maxR * 1.1;
+  const xc = (i: number) => i * (BW + GP) + BW / 2;
+  const ry = (r: number) => SVG_H - 10 - (r / chartMax) * (SVG_H - 20);
+
+  // Sentence engine inputs
+  const lastP = ps[ps.length - 1];
+  const engNow = lastP.engaged_hours > 0 ? lastP.engaged_hours : null;
+  const narHtml = deriveNarHeadline({ nar: lastP.nar_hours, engaged: engNow, displaced: lastP.displaced_hours });
+
+  const peakIdx = rb.reduce((bi, b, i) => (b.ratio ?? 0) > (rb[bi].ratio ?? 0) ? i : bi, 0);
+  const peakBar = rb[peakIdx];
+  const peakMonth = ps[peakIdx]?.start
+    ? new Date(ps[peakIdx].start).toLocaleString("en", { month: "short" }) : "";
+  const ratioHtml = deriveRatioHeadline({
+    ratio: lastP.return_ratio, engaged: engNow,
+    peakValue: peakBar?.ratio ?? 1, peakMonth,
+    ratioSeries: rb.map(b => b.ratio),
+  });
+
+  const readPair = deriveReadPairData(ps, grain);
+  let readHtml: string | null = null;
+  if (readPair) {
+    const dR = dir(readPair.priorRatio, readPair.latestRatio);
+    const dX = dir(readPair.priorXLHours, readPair.latestXLHours);
+    const dF = dir(readPair.priorFailures, readPair.latestFailures);
+    readHtml = deriveReadHeadline({
+      dR, dX, dF,
+      priorKey: readPair.priorKey, latestKey: readPair.latestKey,
+      priorRatio: readPair.priorRatio, latestRatio: readPair.latestRatio,
+      priorFailures: readPair.priorFailures, latestFailures: readPair.latestFailures,
+      priorEngaged: readPair.priorEngaged, latestEngaged: readPair.latestEngaged,
+      priorXLHours: readPair.priorXLHours, latestXLHours: readPair.latestXLHours,
+    });
+  }
+
+  const allocTotals = deriveTrendsAllocTotals(ps);
+  const allocHtml = deriveAllocationHeadline(allocTotals);
+
+  const uninstrumentedCount = nb.filter(b => b.uninstrumented).length;
   const totalUnbucketed = bb.reduce((s, b) => s + b.unbucketed_count, 0);
-  // Bucket opacity levels — brass at four steps; one hue, no second accent.
-  const BUCKET_OP: Record<string, number> = { S: 0.25, M: 0.45, L: 0.65, XL: 0.85 };
+  const lineSegs = deriveRatioLineSegmentsFromBars(rb);
+
+  // Month-based x-axis: show month name at each month boundary; "NOW" for the last period.
+  const MONTHS_ABR = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"];
+  const xLabel = (i: number): string => {
+    if (i === N - 1) return "NOW";
+    if (!ps[i]?.start) return "";
+    const m = new Date(ps[i].start).getMonth();
+    if (i === 0 || new Date(ps[i - 1]?.start).getMonth() !== m) return MONTHS_ABR[m];
+    return "";
+  };
+
   const wrapStyle = { padding: "36px 58px 30px", ...DARK_VARS, "--background": WOOL_BG } as CSSProperties;
+  const ML: CSSProperties = { fontFamily: "var(--font-mono)", fontWeight: 800, fontSize: 8,
+    letterSpacing: "0.2em", color: "var(--marginalia)", textTransform: "uppercase" };
+  const H2S: CSSProperties = { fontFamily: "var(--font-display)", fontWeight: 600, fontSize: 22,
+    letterSpacing: "-0.01em", lineHeight: 1.3, margin: "14px 0 20px", color: "var(--ink)" };
+  const pairArr: CSSProperties = { color: "var(--brass)", fontSize: 22, fontStyle: "normal" };
+  const pDelta = (a: number, b: number) => b > a + 0.001 ? "▲" : b < a - 0.001 ? "▼" : "";
 
   return (
     <div className="wool" style={wrapStyle}>
+      {/* att-h em: styled normal weight, brass — matches template's `h2 em { font-style:normal; color:var(--brass) }` */}
+      <style>{`.att-h em { font-style: normal; color: var(--brass); }`}</style>
 
-      {/* ── Letterhead — matches DAY and RANGE ───────────────────────── */}
+      {/* Letterhead */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 24 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 13 }}>
           <img src={logoWhite} alt="Alfred Black" style={{ height: 34, width: "auto", display: "block" }} />
@@ -707,11 +750,10 @@ function TrendsView({ data, grain, setGrain, interpretingRead, onGenerateRead, r
         </div>
         <div style={{ textAlign: "right", fontFamily: "var(--font-mono)", fontWeight: 700,
           fontSize: 9.5, letterSpacing: "0.2em", color: "var(--marginalia)", lineHeight: 1.9 }}>
-          {data.from} — {data.to}
+          {data.from} {"—"} {data.to}
         </div>
       </div>
-      <div style={{ borderTop: "1px solid var(--ink)", borderBottom: "1px solid var(--ink)",
-        height: 4, margin: "14px 0 20px" }} />
+      <div style={{ borderTop: "1px solid var(--ink)", borderBottom: "1px solid var(--ink)", height: 4, margin: "14px 0 20px" }} />
       <h1 style={{ fontFamily: "var(--font-display)", fontWeight: 600, fontSize: 30,
         letterSpacing: "-0.015em", lineHeight: 1.05, margin: "0 0 20px" }}>
         Attention Trends.
@@ -728,166 +770,163 @@ function TrendsView({ data, grain, setGrain, interpretingRead, onGenerateRead, r
         ))}
       </div>
 
-      {/* 01 Headline pair — 76 px display-serif brass, matching DAY/RANGE hero idiom */}
-      <SL n="01" title="HEADLINE" mt={0} />
-      <div className="grid grid-cols-2 gap-8 mb-12" style={{ marginTop: 14 }}>
-        <div>
-          <p className="font-mono text-[10px] uppercase tracking-[0.22em] mb-2" style={{ color: "var(--marginalia)" }}>NAR this {grain}</p>
-          <p style={{ fontFamily: "var(--font-display)", fontWeight: 600, fontSize: 76, letterSpacing: "-0.02em", lineHeight: 1, color: "var(--brass)" }}>{fh(sum.latest_nar)}<span style={{ fontFamily: "var(--font-mono)", fontSize: 36, opacity: 0.5, marginLeft: 6 }}>h</span></p>
-          {sum.nar_delta != null && (
-            <p className="font-mono text-[11px] mt-1" style={{ color: sum.nar_delta >= 0 ? "var(--brass)" : "oklch(0.42 0.12 30)" }}>
-              {sum.nar_delta >= 0 ? "+" : ""}{fh(sum.nar_delta)}h vs prior {grain}
-            </p>
-          )}
+      {/* 01 NET RETURNED — mirrored chart: GIVEN BACK above axis, YOUR TIME below */}
+      <SL n="01" title="NET RETURNED" mt={0} />
+      {/* SAFETY: narHtml is built solely from f1(number) + hard-coded markup.
+          No API-, model-, or user-supplied string may ever be interpolated here
+          without switching to React nodes — doing so would be an XSS vector. */}
+      <h2 className="att-h" style={H2S} dangerouslySetInnerHTML={{ __html: narHtml }} />
+      <div style={{ display: "grid", gridTemplateColumns: "72px 1fr", gap: 0, marginBottom: 4 }}>
+        <div style={{ display: "flex", flexDirection: "column" }}>
+          <div style={{ height: H_UP, display: "flex", alignItems: "center", justifyContent: "flex-end", paddingRight: 8 }}>
+            <span style={{ ...ML, fontSize: 7, letterSpacing: "0.12em" }}>GIVEN{" "}BACK</span>
+          </div>
+          <div style={{ height: 1, borderTop: `1px solid ${HAIR2}` }} />
+          <div style={{ height: H_DN, display: "flex", alignItems: "center", justifyContent: "flex-end", paddingRight: 8 }}>
+            <span style={{ ...ML, fontSize: 7, letterSpacing: "0.12em" }}>YOUR{" "}TIME</span>
+          </div>
         </div>
         <div>
-          <p className="font-mono text-[10px] uppercase tracking-[0.22em] mb-2" style={{ color: "var(--marginalia)" }}>Return ratio</p>
-          <p style={{ fontFamily: "var(--font-display)", fontWeight: 600, fontSize: 76, letterSpacing: "-0.02em", lineHeight: 1, color: "var(--brass)" }}>{fh(sum.latest_ratio)}{sum.latest_ratio != null && <span style={{ fontFamily: "var(--font-mono)", fontSize: 36, opacity: 0.5, marginLeft: 4 }}>{"×"}</span>}</p>
-          {sum.ratio_direction && (
-            <p className="font-mono text-[11px] mt-1" style={{ color: sum.ratio_direction === "up" ? "var(--brass)" : sum.ratio_direction === "down" ? "oklch(0.42 0.12 30)" : "var(--marginalia)" }}>
-              {sum.ratio_direction === "up" ? "↑ improving" : sum.ratio_direction === "down" ? "↓ declining" : "→ flat"}
-            </p>
-          )}
-        </div>
-      </div>
-
-      {/* 02 NAR chart — hero; displaced (total) bars with engaged overlay.
-           partial=dashed outline; uninstrumented=dimmed. Full-width at ~600px. */}
-      <div className="mb-12">
-        <SL n="02" title="NAR by period" />
-        <svg width={CW} height={H_NAR + 20} style={{ display: "block", maxWidth: "100%", overflow: "visible" }}
-          role="img" aria-label="NAR by period chart">
-          {nb.map((b, i) => {
-            const disp = barPx(b.displaced_hours, maxDisp, H_NAR);
-            const eng = barPx(b.engaged_hours, maxDisp, H_NAR);
-            return (
-              <g key={b.key} opacity={b.uninstrumented ? 0.4 : 1}>
-                <rect x={xi(i)} y={H_NAR - disp} width={BW} height={Math.max(disp, 1)} fill="oklch(0.62 0.09 75 / 0.22)" rx={1}
-                  stroke={b.partial ? "var(--brass)" : "none"} strokeWidth={b.partial ? 1 : 0}
-                  strokeDasharray={b.partial ? "3 2" : undefined} />
-                {eng > 0 && <rect x={xi(i)} y={H_NAR - eng} width={BW} height={eng} fill="var(--brass)" rx={1} opacity={0.72} />}
-                <text x={xi(i) + BW / 2} y={H_NAR + 14} textAnchor="middle" fontSize={9} fontFamily="monospace" fill="var(--marginalia)">{b.label}</text>
-              </g>
-            );
-          })}
-        </svg>
-        <p className="font-mono text-[9px] mt-2" style={{ color: "var(--marginalia)" }}>
-          <span className="inline-block w-2 h-2 mr-1 align-middle" style={{ background: "var(--brass)", opacity: 0.72 }} /> engaged
-          {" "}<span className="inline-block w-2 h-2 mr-1 align-middle" style={{ background: "oklch(0.62 0.09 75 / 0.22)" }} /> displaced
-          {nb.some(b => b.partial) && <>{" "}{"·"} dashed outline = partial period</>}
-          {nb.some(b => b.uninstrumented) && <>{" "}{"·"} dim = interruptions unmeasured</>}
-        </p>
-      </div>
-
-      {/* 03 Allocation — proportional bars: work / life / unallocated.
-           Palette: brass for work, marginalia-grey for life, rule for unallocated.
-           No teal — the whole view uses this two-tone palette. */}
-      <div className="mb-12">
-        <SL n="03" title="Where it went" />
-        <div className="flex flex-col gap-2 mt-4">
-          {ab.map(b => (
-            <div key={b.key} className="flex items-center gap-3">
-              <span className="font-mono text-[9px] w-8 shrink-0 text-right" style={{ color: "var(--marginalia)" }}>{b.label}</span>
-              <div className="flex-1 flex h-4 gap-px overflow-hidden rounded-sm">
-                {(["work", "life", "unallocated"] as const).map(k => {
-                  const v = b[k]; const pct = v / b.total * 100;
-                  const bg = k === "work" ? "var(--brass)" : k === "life" ? "var(--marginalia)" : "oklch(0.62 0.09 75 / 0.22)";
-                  return pct > 0.5 ? <div key={k} style={{ width: `${pct}%`, background: bg, opacity: k === "unallocated" ? 1 : k === "life" ? 0.6 : 0.8 }} /> : null;
-                })}
-              </div>
-              <span className="font-mono text-[9px] w-10 shrink-0" style={{ color: "var(--marginalia)" }}>{b.total.toFixed(1)}h</span>
-            </div>
-          ))}
-        </div>
-        <div className="flex gap-4 mt-2">
-          {(["work", "life", "unallocated"] as const).map(k => {
-            const bg = k === "work" ? "var(--brass)" : k === "life" ? "var(--marginalia)" : "oklch(0.62 0.09 75 / 0.22)";
-            return (
-              <span key={k} className="font-mono text-[9px] flex items-center gap-1" style={{ color: "var(--marginalia)" }}>
-                <span className="inline-block w-2 h-2" style={{ background: bg, opacity: k === "life" ? 0.6 : 1 }} /> {k}
-              </span>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* 04 Return ratio — null preserved as em-dash; low-engagement dimmed */}
-      <div className="mb-12">
-        <SL n="04" title="Return ratio" />
-        <svg width={CW} height={H_SUB + 20} style={{ display: "block", maxWidth: "100%", overflow: "visible" }}
-          role="img" aria-label="Return ratio chart">
-          {rb.map((b, i) => {
-            if (b.ratio == null) return (
-              <g key={b.key}>
-                <text x={xi(i) + BW / 2} y={H_SUB / 2} textAnchor="middle" fontSize={11} fontFamily="monospace" fill="var(--marginalia)" dominantBaseline="middle">—</text>
-                <text x={xi(i) + BW / 2} y={H_SUB + 14} textAnchor="middle" fontSize={9} fontFamily="monospace" fill="var(--marginalia)">{b.label}</text>
-              </g>
-            );
-            const h = barPx(b.ratio, maxRatio, H_SUB);
-            return (
-              <g key={b.key} opacity={b.low_engagement ? 0.3 : 1}>
-                <rect x={xi(i)} y={H_SUB - h} width={BW} height={Math.max(h, 1)} fill="var(--brass)" rx={1} />
-                <text x={xi(i) + BW / 2} y={H_SUB + 14} textAnchor="middle" fontSize={9} fontFamily="monospace" fill="var(--marginalia)">{b.label}</text>
-              </g>
-            );
-          })}
-        </svg>
-        <p className="font-mono text-[9px] mt-2" style={{ color: "var(--marginalia)" }}>
-          — = no engagement data · dim bars = engaged &lt; {LOW_ENGAGEMENT_HOURS}h (ratio unreliable)
-        </p>
-      </div>
-
-      {/* 05 Outcomes — delivered/failed/unknown; failures in destructive red */}
-      <div className="mb-12">
-        <SL n="05" title="Outcomes" />
-        <svg width={CW} height={H_SUB + 20} style={{ display: "block", maxWidth: "100%", overflow: "visible" }}
-          role="img" aria-label="Outcomes chart">
-          {ob.map((b, i) => {
-            const tot = barPx(b.total, maxOut, H_SUB);
-            const del = barPx(b.delivered, maxOut, H_SUB);
-            const fail = barPx(b.failed, maxOut, H_SUB);
-            return (
-              <g key={b.key}>
-                {tot > 0 && <rect x={xi(i)} y={H_SUB - tot} width={BW} height={Math.max(tot, 1)} fill="oklch(0.62 0.09 75 / 0.18)" rx={1} />}
-                {del > 0 && <rect x={xi(i)} y={H_SUB - del} width={BW} height={del} fill="var(--brass)" rx={1} opacity={0.75} />}
-                {/* --destructive is oxblood from the design-system token file — sanctioned semantic state colour, not a second accent */}
-                {fail > 0 && <rect x={xi(i)} y={H_SUB - fail} width={BW} height={fail} fill="var(--destructive)" rx={1} />}
-                <text x={xi(i) + BW / 2} y={H_SUB + 14} textAnchor="middle" fontSize={9} fontFamily="monospace" fill="var(--marginalia)">{b.label}</text>
-              </g>
-            );
-          })}
-        </svg>
-        {ob.some(b => b.failed > 0) && (
-          <p className="font-mono text-[10px] font-semibold mt-2" style={{ color: "var(--destructive)" }}>
-            {ob.reduce((s, b) => s + b.failed, 0)} failed {"·"} {ob.reduce((s, b) => s + b.delivered, 0)} delivered
-          </p>
-        )}
-      </div>
-
-      {/* 06 Task size mix — S/M/L/XL stacked; unbucketed is footnote only */}
-      <div className="mb-12">
-        <SL n="06" title="Task size mix" />
-        <div className="flex flex-col gap-2 mt-4">
-          {bb.map(b => {
-            const tot = b.S + b.M + b.L + b.XL || 1;
-            return (
-              <div key={b.key} className="flex items-center gap-3">
-                <span className="font-mono text-[9px] w-8 shrink-0 text-right" style={{ color: "var(--marginalia)" }}>{b.label}</span>
-                <div className="flex-1 flex h-4 gap-px overflow-hidden rounded-sm">
-                  {BUCKET_KEYS.map((k) => { const v = b[k]; const pct = v / tot * 100; return pct > 0.5 ? <div key={k} style={{ width: `${pct}%`, background: "var(--brass)", opacity: BUCKET_OP[k] }} /> : null; })}
+          <div style={{ display: "grid", gridTemplateColumns: `repeat(${N}, 1fr)`, gap: GP }}>
+            {nb.map((b, i) => {
+              const upH = barPx(b.nar_hours, maxNar, H_UP);
+              const dnH = barPx(b.engaged_hours, maxEng, H_DN);
+              return (
+                <div key={b.key} style={{ opacity: b.uninstrumented ? 0.38 : 1 }}>
+                  <div style={{ height: H_UP, display: "flex", alignItems: "flex-end" }}>
+                    <div style={{ width: "100%", height: Math.max(upH, 1), boxSizing: "border-box" as const,
+                      background: upH > 1 ? "var(--brass)" : "transparent",
+                      border: b.partial ? `1px dashed var(--brass)` : undefined,
+                      opacity: upH > 1 ? 1 : 0.14 }} />
+                  </div>
+                  <div style={{ height: 1, borderTop: `1px solid ${HAIR2}` }} />
+                  <div style={{ height: H_DN }}>
+                    {dnH > 0 && <div style={{ width: "100%", height: dnH, background: HATCH_BG }} />}
+                  </div>
                 </div>
-                <span className="font-mono text-[9px] w-10 shrink-0" style={{ color: "var(--marginalia)" }}>{tot}</span>
+              );
+            })}
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: `repeat(${N}, 1fr)`, gap: GP, marginTop: 5 }}>
+            {nb.map((b, i) => { const lbl = xLabel(i); return (
+              <div key={b.key} style={{ ...ML, fontSize: 7.5, textAlign: "center",
+                color: lbl === "NOW" ? "var(--brass)" : "var(--marginalia)", opacity: lbl ? 1 : 0 }}>
+                {lbl || " "}
               </div>
-            );
-          })}
+            ); })}
+          </div>
         </div>
-        {totalUnbucketed > 0 && <p className="font-mono text-[9px] mt-2" style={{ color: "var(--marginalia)" }}>+ {totalUnbucketed} vigilance sweeps (unbucketed — not shown)</p>}
+      </div>
+      {uninstrumentedCount > 0 && (
+        <p style={{ ...ML, marginTop: 6, fontStyle: "italic", textTransform: "none" }}>
+          {uninstrumentedCount} of {N} {grain}s have unmeasured interruption costs {"—"} not shown as zero
+        </p>
+      )}
+
+      {/* 02 RETURN RATIO — SVG line plot; nulls draw as gap segments, never interpolated */}
+      <SL n="02" title="RETURN RATIO" />
+      {/* SAFETY: ratioHtml is built solely from f1(number) + hard-coded markup.
+          No API-, model-, or user-supplied string may ever be interpolated here
+          without switching to React nodes — doing so would be an XSS vector. */}
+      {ratioHtml
+        ? <h2 className="att-h" style={H2S} dangerouslySetInnerHTML={{ __html: ratioHtml }} />
+        : <p style={{ ...ML, marginTop: 14, marginBottom: 20, fontStyle: "italic" }}>Engagement not measured for this period.</p>}
+      <svg width={CW} height={SVG_H + 18} style={{ display: "block", maxWidth: "100%", overflow: "visible" }}
+        role="img" aria-label="Return ratio trend">
+        <line x1={0} y1={ry(1)} x2={CW} y2={ry(1)} stroke={HAIR2} strokeWidth={1} strokeDasharray="3 4" />
+        <text x={CW + 4} y={ry(1)} dominantBaseline="middle" fontSize={7.5} fontFamily="monospace" fill="var(--marginalia)">1{"×"}</text>
+        {lineSegs.map((seg, si) => {
+          const pts = seg.isGap
+            ? `${xc(seg.from)},${ry(rb[seg.from].ratio!)} ${xc(seg.to)},${ry(rb[seg.to].ratio!)}`
+            : `${xc(seg.from)},${ry(rb[seg.from].ratio!)} ${xc(seg.to)},${ry(rb[seg.to].ratio!)}`;
+          return <polyline key={si} points={pts} fill="none" stroke="var(--brass)"
+            strokeWidth={seg.isGap ? 1.5 : 2.5} strokeDasharray={seg.isGap ? "4 5" : undefined} opacity={seg.isGap ? 0.3 : 1} />;
+        })}
+        {peakBar?.ratio != null && peakIdx !== N - 1 && (
+          <g>
+            <circle cx={xc(peakIdx)} cy={ry(peakBar.ratio)} r={4} fill="var(--brass)" />
+            <text x={xc(peakIdx)} y={ry(peakBar.ratio) - 9} textAnchor="middle" fontSize={8.5} fontFamily="monospace" fill="var(--brass)">{f1(peakBar.ratio)}{"×"}</text>
+          </g>
+        )}
+        {rb[N - 1]?.ratio != null && (
+          <g>
+            <circle cx={xc(N - 1)} cy={ry(rb[N - 1].ratio!)} r={4} fill="none" stroke="var(--brass)" strokeWidth={2} />
+            <text x={xc(N - 1)} y={ry(rb[N - 1].ratio!) - 9} textAnchor="middle" fontSize={8} fontFamily="monospace" fill="var(--brass)">NOW</text>
+          </g>
+        )}
+        {nb.map((b, i) => { const lbl = xLabel(i); return lbl ? (
+          <text key={b.key} x={xc(i)} y={SVG_H + 14} textAnchor="middle" fontSize={8} fontFamily="monospace"
+            fill={lbl === "NOW" ? "var(--brass)" : "var(--marginalia)"}>{lbl}</text>
+        ) : null; })}
+      </svg>
+      <p style={{ ...ML, marginTop: 4, fontStyle: "italic", textTransform: "none" }}>
+        {"—"} = no data {"·"} dim = engaged {"<"} {LOW_ENGAGEMENT_HOURS}h (ratio unreliable)
+      </p>
+
+      {/* 03 ALFRED'S READ — algorithmic sentence from direction triple + last-two-periods pairs */}
+      <SL n="03" title={readPair ? `ALFRED'S READ · ${readPair.priorKey} → ${readPair.latestKey}` : "ALFRED'S READ"} />
+      {readHtml && readPair ? (
+        <>
+          {/* SAFETY: readHtml is built solely from f1(number) + hard-coded markup.
+              No API-, model-, or user-supplied string may ever be interpolated here
+              without switching to React nodes — doing so would be an XSS vector. */}
+          <h2 className="att-h" style={H2S} dangerouslySetInnerHTML={{ __html: readHtml }} />
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 2 }}>
+            {([
+              { label: "HOURS IN THE BIGGEST TASKS", prior: readPair.priorXLHours, latest: readPair.latestXLHours, sfx: " h" },
+              { label: "FAILED TASKS", prior: readPair.priorFailures, latest: readPair.latestFailures, sfx: "" },
+              { label: "FINISHED TASKS", prior: readPair.priorFinished, latest: readPair.latestFinished, sfx: "" },
+            ] as const).map(({ label, prior, latest, sfx }) => (
+              <div key={label} style={{ padding: "22px 18px 16px", background: WOOL_BG }}>
+                <div style={{ fontFamily: "var(--font-display)", fontWeight: 600, fontSize: 30,
+                  lineHeight: 1, marginBottom: 10, letterSpacing: "-0.015em" }}>
+                  {f1(prior)} <span style={pairArr}>{"→"}</span> {f1(latest)}{sfx}
+                  {pDelta(prior, latest) && <>{" "}<span style={pairArr}>{pDelta(prior, latest)}</span></>}
+                </div>
+                <div style={ML}>{label}</div>
+              </div>
+            ))}
+          </div>
+          {totalUnbucketed > 0 && (
+            <p style={{ ...ML, marginTop: 8, fontStyle: "italic", textTransform: "none" }}>
+              + {totalUnbucketed} vigilance sweeps (unbucketed {"—"} not counted in task size totals)
+            </p>
+          )}
+        </>
+      ) : (
+        <p style={{ ...ML, marginTop: 14, fontStyle: "italic", textTransform: "none" }}>
+          {readPair === null ? "Not enough full periods to compare." : ""}
+        </p>
+      )}
+
+      {/* 04 ALLOCATION — cumulative strip across the full window */}
+      <SL n="04" title="ALLOCATION" />
+      {/* SAFETY: allocHtml is built solely from f1(number) + hard-coded markup.
+          No API-, model-, or user-supplied string may ever be interpolated here
+          without switching to React nodes — doing so would be an XSS vector. */}
+      <h2 className="att-h" style={H2S} dangerouslySetInnerHTML={{ __html: allocHtml }} />
+      <div style={{ height: 16, display: "flex", overflow: "hidden", borderRadius: 2, gap: 1 }}>
+        {([["work", "var(--brass)", 0.85], ["life", "var(--marginalia)", 0.55],
+          ["unallocated", "oklch(0.62 0.09 75 / 0.35)", 1]] as const).map(([k, col, op]) => {
+          const frac = k === "work" ? allocTotals.workFrac : k === "life" ? allocTotals.lifeFrac : allocTotals.unassignedFrac;
+          return frac > 0.005 ? <div key={k} style={{ flex: frac, background: col, opacity: op }} /> : null;
+        })}
+      </div>
+      <div style={{ display: "flex", gap: 16, marginTop: 8 }}>
+        {([["work", "WORK", "var(--brass)"], ["life", "LIFE", "var(--marginalia)"],
+          ["unallocated", "NOT YET ASSIGNED", "oklch(0.62 0.09 75 / 0.6)"]] as const).map(([k, lbl, col]) => {
+          const frac = k === "work" ? allocTotals.workFrac : k === "life" ? allocTotals.lifeFrac : allocTotals.unassignedFrac;
+          return (
+            <span key={k} style={{ ...ML, color: col }}>
+              {lbl}: {Math.round(frac * 100)}%
+            </span>
+          );
+        })}
       </div>
 
-      {/* 07 Alfred's read — null = not yet generated; never fabricate observations.
-           There is no nightly schedule — the read must be explicitly triggered. */}
+      {/* 05 ALFRED'S OBSERVATIONS — LLM-generated, explicitly triggered; no nightly schedule */}
       <div className="mb-10">
-        <SL n="07" title="Alfred's read" />
+        <SL n="05" title="ALFRED'S OBSERVATIONS" />
         {isReadGenerated(data.read) ? (
           data.read!.observations.length === 0
             ? <p className="font-mono text-xs mt-4 opacity-40">Alfred ran the analysis but found no patterns to surface for this period.</p>
@@ -917,7 +956,7 @@ function TrendsView({ data, grain, setGrain, interpretingRead, onGenerateRead, r
             <p className="font-mono text-xs opacity-50">{READ_EMPTY_STATE_TEXT}</p>
             <button type="button" onClick={onGenerateRead}
               className="mt-4 font-mono text-[10px] uppercase tracking-[0.22em] border border-[var(--rule)] px-5 py-2 hover:border-[var(--brass)] transition-colors">
-              Generate Alfred's read
+              Generate Alfred{"'"}s read
             </button>
           </div>
         )}
