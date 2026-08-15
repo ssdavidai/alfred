@@ -386,33 +386,44 @@ test("deriveBarGeometry: all-zero guard — no division by zero", () => {
 });
 
 // 15b. deriveBarGeometry — waterfall geometry invariants
-test("deriveBarGeometry: mess.y_offset_pct + mess.height_pct == displaced.height_pct", () => {
-  // Reference values from the brief: displaced 12.03, mess 4.52, net 7.51
-  const bg = deriveBarGeometry(12.03, 3, 1.52, 100);
-  assert.ok(
-    Math.abs((bg.mess.y_offset_pct + bg.mess.height_pct) - bg.displaced.height_pct) < 0.0001,
-    `y_offset_pct(${bg.mess.y_offset_pct}) + height_pct(${bg.mess.height_pct}) should equal displaced(${bg.displaced.height_pct})`,
-  );
-});
-test("deriveBarGeometry: net.height_pct + mess.height_pct == displaced.height_pct", () => {
+// Universal invariant: Math.abs(displaced.height_pct − mess.height_pct) == net.height_pct
+// Simplifies to net+mess==displaced (positive NAR) or net+displaced==mess (negative NAR).
+// Also: baseline_pct == displaced.height_pct always.
+test("deriveBarGeometry: positive NAR — net+mess == displaced, baseline at bottom", () => {
   const bg = deriveBarGeometry(12.03, 3, 1.52, 100);
   assert.ok(
     Math.abs((bg.net.height_pct + bg.mess.height_pct) - bg.displaced.height_pct) < 0.0001,
     `net(${bg.net.height_pct}) + mess(${bg.mess.height_pct}) should equal displaced(${bg.displaced.height_pct})`,
   );
+  assert.ok(Math.abs(bg.baseline_pct - 100) < 0.0001, "baseline at bottom (=100) for positive NAR");
+  assert.ok(Math.abs(bg.baseline_pct - bg.displaced.height_pct) < 0.0001, "baseline_pct == displaced.height_pct");
 });
-test("deriveBarGeometry: negative NAR (mess > displaced) produces non-negative geometry", () => {
-  // displaced=5h, mess=8h → NAR=-3h
+test("deriveBarGeometry: universal invariant — |displaced − mess| == net (holds for both NAR signs)", () => {
+  // Positive NAR
+  const pos = deriveBarGeometry(12, 3, 1, 100);
+  assert.ok(Math.abs(Math.abs(pos.displaced.height_pct - pos.mess.height_pct) - pos.net.height_pct) < 0.0001);
+  // Negative NAR: displaced=5h, mess=8h
+  const neg = deriveBarGeometry(5, 6, 2, 100);
+  assert.ok(Math.abs(Math.abs(neg.displaced.height_pct - neg.mess.height_pct) - neg.net.height_pct) < 0.0001);
+});
+test("deriveBarGeometry: negative NAR — baseline inside viewBox, NET below baseline, MESS crosses it", () => {
+  // displaced=5h, engaged=6h, interruption=2h → mess=8h, net=-3h
   const bg = deriveBarGeometry(5, 6, 2, 100);
-  assert.ok(bg.displaced.height_pct >= 0, "displaced height non-negative");
-  assert.ok(bg.mess.height_pct >= 0,      "mess height non-negative");
-  assert.ok(bg.mess.y_offset_pct >= 0,    "mess y_offset non-negative");
-  assert.ok(bg.net.height_pct >= 0,       "net height non-negative (clamped from negative NAR)");
-  assert.equal(bg.net.height_pct, 0,      "clamped net is 0 when NAR<0");
-  assert.ok(bg.net.value_hours < 0,       "but net.value_hours still carries the real (negative) NAR");
-  // waterfall invariants still hold with clamped net
-  assert.ok(Math.abs((bg.mess.y_offset_pct + bg.mess.height_pct) - bg.displaced.height_pct) < 0.0001);
-  assert.ok(Math.abs((bg.net.height_pct    + bg.mess.height_pct) - bg.displaced.height_pct) < 0.0001);
+  assert.ok(bg.net.value_hours < 0,                   "net.value_hours is negative (true NAR)");
+  assert.ok(bg.net.height_pct > 0,                    "net.height_pct is the magnitude (positive)");
+  assert.ok(bg.baseline_pct < 100,                    "baseline moves inside viewBox (not at bottom)");
+  assert.ok(bg.mess.height_pct > bg.displaced.height_pct, "MESS taller than DISPLACED when NAR<0");
+  assert.ok(Math.abs(bg.baseline_pct - bg.displaced.height_pct) < 0.0001, "baseline_pct == displaced.height_pct");
+  // Net+displaced == mess (the negative-NAR form of the invariant)
+  assert.ok(
+    Math.abs((bg.net.height_pct + bg.displaced.height_pct) - bg.mess.height_pct) < 0.0001,
+    `net(${bg.net.height_pct}) + displaced(${bg.displaced.height_pct}) should equal mess(${bg.mess.height_pct})`,
+  );
+  // Concrete values: totalRange=8, scale=100/8=12.5
+  assert.ok(Math.abs(bg.displaced.height_pct - 62.5) < 0.0001, "displaced = 5/8*100 = 62.5");
+  assert.ok(Math.abs(bg.mess.height_pct      - 100)  < 0.0001, "mess = 8/8*100 = 100 (full chart)");
+  assert.ok(Math.abs(bg.net.height_pct       - 37.5) < 0.0001, "net = 3/8*100 = 37.5");
+  assert.ok(Math.abs(bg.baseline_pct         - 62.5) < 0.0001, "baseline = displaced = 62.5");
 });
 
 // 16. Ledger engaged/nar columns — null semantics (#584 allocation)
@@ -479,6 +490,62 @@ test("reconciliation: difference_hours is non-zero when the two engaged measures
   assert.ok(Math.abs(vm.allocation_reconciliation!.difference_hours) > 0);
   const r = vm.allocation_reconciliation!;
   assert.ok(Math.abs(r.day_engaged_hours - r.attributed_engaged_hours - r.difference_hours) < 0.001);
+});
+
+// 18. Ledger scope fields — measured_displaced_min / unmeasured_displaced_min (#584 / #622)
+// These fields expose WHICH displacement the ENGAGED and NAR totals cover,
+// preventing a reader from mistaking "NAR 310" for "DISPLACED 657 minus ENGAGED 285".
+
+test("ledger scope: unmeasured is sum of EXPLICIT + AUTONOMOUS displaced", () => {
+  const displaced = {
+    total_hours: 0,
+    inferred:   { hours: 0, items: [mkIdItem("conv-a", 30, 10, 20), mkIdItem("conv-b", 20, 5, 15)] },
+    explicit:   { hours: 0, items: [{ label: "E1", count: 1, rate_minutes: 5, minutes: 15 }] },
+    autonomous: { hours: 0, items: [mkAuto("A1", 10), mkAuto("A2", 7)] },
+  };
+  const vm = deriveLedger(displaced);
+  // measured = CONVERSATIONAL rows with engaged_min non-null = 30 + 20 = 50
+  assert.ok(Math.abs(vm.measured_displaced_min - 50) < 0.0001, "measured = 50");
+  // unmeasured = EXPLICIT(15) + AUTONOMOUS(17) = 32
+  assert.ok(Math.abs(vm.unmeasured_displaced_min - 32) < 0.0001, "unmeasured = 32");
+  // partition invariant
+  assert.ok(Math.abs(vm.measured_displaced_min + vm.unmeasured_displaced_min - vm.total_displaced_min) < 0.0001);
+});
+
+test("ledger scope: when no explicit or autonomous, unmeasured is 0", () => {
+  const displaced = {
+    total_hours: 0,
+    inferred:   { hours: 0, items: [mkIdItem("x", 60, 20, 40)] },
+    explicit:   { hours: 0, items: [] },
+    autonomous: { hours: 0, items: [] },
+  };
+  const vm = deriveLedger(displaced);
+  assert.equal(vm.unmeasured_displaced_min, 0);
+  assert.ok(Math.abs(vm.measured_displaced_min - 60) < 0.0001);
+});
+
+test("ledger scope: CONVERSATIONAL row with null engagement counts as unmeasured", () => {
+  // Some conversational rows may have no per-session measurement (older rows).
+  const displaced = {
+    total_hours: 0,
+    inferred:   { hours: 0, items: [mkIdItem("measured", 30, 10, 20), mkIdItem("unmeasured", 20, null, null)] },
+    explicit:   { hours: 0, items: [] },
+    autonomous: { hours: 0, items: [] },
+  };
+  const vm = deriveLedger(displaced);
+  assert.ok(Math.abs(vm.measured_displaced_min   - 30) < 0.0001, "only the measured conv row counts");
+  assert.ok(Math.abs(vm.unmeasured_displaced_min - 20) < 0.0001, "null-engagement conv row is unmeasured");
+});
+
+test("ledger scope: all unmeasured (no conversational) → measured=0, unmeasured=total", () => {
+  const displaced = {
+    total_hours: 0, inferred: { hours: 0, items: [] },
+    explicit:   { hours: 0, items: [{ label: "E", count: 2, rate_minutes: 0.5, minutes: 8 }] },
+    autonomous: { hours: 0, items: [mkAuto("V", 4)] },
+  };
+  const vm = deriveLedger(displaced);
+  assert.equal(vm.measured_displaced_min, 0);
+  assert.ok(Math.abs(vm.unmeasured_displaced_min - vm.total_displaced_min) < 0.0001);
 });
 
 // Regression: deriveLedger consumed the RAW response shape while the component

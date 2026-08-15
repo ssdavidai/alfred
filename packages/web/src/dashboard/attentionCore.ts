@@ -269,6 +269,13 @@ export interface LedgerViewModel {
   total_displaced_min: number;       // == sum(groups[i].subtotal_displaced_min)
   total_engaged_min: number | null;  // null when no group has a measured row
   total_nar_min: number | null;      // same rule
+  /** Displaced from rows that carry engagement measurements (non-null engaged_min).
+   *  In practice: CONVERSATIONAL rows only; EXPLICIT and AUTONOMOUS are always unmeasured.
+   *  The ENGAGED and NAR totals cover exactly this scope — not total_displaced_min. */
+  measured_displaced_min: number;
+  /** Displaced from rows WITHOUT engagement data — total − measured.
+   *  When > 0, the TOTAL row ENGAGED/NAR figures do not span all displacement. */
+  unmeasured_displaced_min: number;
 }
 
 /** Sum only the non-null values in an array.
@@ -315,11 +322,16 @@ export function deriveLedger(
     { name: "AUTONOMOUS", rows: autoRows, subtotal_displaced_min: rowSum(autoRows),
       subtotal_engaged_min: null, subtotal_nar_min: null },
   ];
+  const total_displaced_min = groups.reduce((s, g) => s + g.subtotal_displaced_min, 0);
+  const measured_displaced_min = groups.reduce((s, g) =>
+    s + g.rows.filter(r => r.engaged_min !== null).reduce((rs, r) => rs + r.displaced_min, 0), 0);
   return {
     groups,
-    total_displaced_min: groups.reduce((s, g) => s + g.subtotal_displaced_min, 0),
+    total_displaced_min,
     total_engaged_min: sumNullable(groups.map(g => g.subtotal_engaged_min)),
     total_nar_min:     sumNullable(groups.map(g => g.subtotal_nar_min)),
+    measured_displaced_min,
+    unmeasured_displaced_min: total_displaced_min - measured_displaced_min,
   };
 }
 
@@ -355,25 +367,33 @@ export function deriveAllocationBarWidths(
 // ── Section 01 bar geometry ───────────────────────────────────────────────────
 
 export interface BarGeometry {
-  /** DISPLACED — solid brass, typically the tallest bar; sets the scale. */
+  /** % from the top of the SVG viewBox where the zero baseline sits.
+   *  Positive NAR: equals 100 (baseline at the bottom, normal case).
+   *  Negative NAR: equals displaced.height_pct (baseline floats inside the viewBox
+   *  so NET can extend downward below it). Always equals displaced.height_pct. */
+  baseline_pct: number;
+  /** DISPLACED — solid brass; top edge always aligns with the SVG top (y=0). */
   displaced: { value_hours: number; height_pct: number };
-  /** THE MESS — hatched, floats between NET's top edge and DISPLACED's top edge.
-   *  y_offset_pct: percentage-units above baseline where the mess bar's BOTTOM sits
-   *  (equals net.height_pct). Invariant: y_offset_pct + height_pct == displaced.height_pct. */
-  mess: { value_hours: number; height_pct: number; y_offset_pct: number };
-  /** NET — NAR = displaced − mess; solid brass, grows from baseline. */
+  /** THE MESS — hatched; top edge always aligns with DISPLACED top (y=0).
+   *  Positive NAR: height_pct < displaced.height_pct (sits above NET).
+   *  Negative NAR: height_pct > displaced.height_pct (crosses the baseline). */
+  mess: { value_hours: number; height_pct: number };
+  /** NET — solid brass. Above baseline when value_hours >= 0; below when < 0.
+   *  height_pct is always the absolute magnitude. value_hours carries the signed NAR. */
   net: { value_hours: number; height_pct: number };
 }
 
 /** Compute waterfall bar geometry for the three-bar SVG in section 01.
- *  DISPLACED and NET share a baseline and grow upward.
- *  THE MESS floats as a hatched slice between NET's top and DISPLACED's top —
- *  it does not touch the baseline.
- *  Invariants (enforced by algebra, tested separately):
- *    mess.y_offset_pct + mess.height_pct == displaced.height_pct
- *    net.height_pct    + mess.height_pct == displaced.height_pct
- *  Negative NAR (mess > displaced) is handled by clamping net to 0, which keeps
- *  all values non-negative while preserving net.value_hours for the label. */
+ *  Scaling covers the full range [min(0, net), displaced] so bars always stay
+ *  within [0, barHeight], with the baseline floating inside the viewBox when NAR < 0.
+ *
+ *  Positive NAR (net >= 0): baseline at barHeight (bottom). Bars grow upward.
+ *    Universal invariant: Math.abs(displaced.height_pct − mess.height_pct) == net.height_pct
+ *    Simplifies to:      net.height_pct + mess.height_pct == displaced.height_pct
+ *  Negative NAR (net < 0): baseline at displaced.height_pct (inside viewBox).
+ *    NET extends downward; MESS spans from SVG top to chart bottom.
+ *    Simplifies to:      net.height_pct + displaced.height_pct == mess.height_pct
+ *  baseline_pct == displaced.height_pct always (both equal d * scale). */
 export function deriveBarGeometry(
   displaced_hours: number, engaged_hours: number, interruption_hours: number,
   barHeight = 100,
@@ -381,16 +401,18 @@ export function deriveBarGeometry(
   const d    = Math.max(displaced_hours ?? 0, 0);
   const mess = (engaged_hours ?? 0) + (interruption_hours ?? 0);
   const net  = d - mess;
-  // Scale: displaced is always the reference bar (tallest when NAR >= 0).
-  // When mess > displaced (negative NAR) use mess so bars stay inside [0, barHeight].
-  const maxMag  = Math.max(d, mess, 0.001);
-  const dispPct = (d / maxMag) * barHeight;
-  const netPct  = (Math.max(net, 0) / maxMag) * barHeight; // clamped — negative NAR → 0
-  const messPct = dispPct - netPct;                         // invariant holds by construction
+  // totalRange covers [min(0,net), d] — includes the below-zero extension when NAR<0.
+  // Positive NAR: totalRange = d (displaced is the reference; baseline at bottom).
+  // Negative NAR: totalRange = mess (mess is larger; baseline floats inside frame).
+  const totalRange = d - Math.min(0, net);
+  const scale = totalRange > 0.001 ? barHeight / totalRange : 0;
+  // baselinePct == displaced.height_pct always (both = d * scale).
+  const baselinePct = d * scale;
   return {
-    displaced: { value_hours: d,    height_pct: dispPct },
-    mess:      { value_hours: mess, height_pct: messPct, y_offset_pct: netPct },
-    net:       { value_hours: net,  height_pct: netPct },
+    baseline_pct: baselinePct,
+    displaced: { value_hours: d,    height_pct: d             * scale },
+    mess:      { value_hours: mess, height_pct: mess          * scale },
+    net:       { value_hours: net,  height_pct: Math.abs(net) * scale },
   };
 }
 

@@ -65,15 +65,22 @@ function StatCell({ label, value }: { label: string; value: string }) {
 function AccountBars({ geo }: { geo: BarGeometry }) {
   const H = 140; const BAR_W = 84; const GAP = 28;
   const W = 3 * BAR_W + 2 * GAP;
-  // Pixel heights from geometry percentages
+  // Baseline Y in SVG pixels — at the bottom for positive NAR; inside the chart
+  // for negative NAR (where NET extends below baseline and MESS crosses it).
+  const baselineY = (geo.baseline_pct / 100) * H;
+  // DISPLACED always starts at the SVG top (baseline_pct == displaced.height_pct).
   const dispH = Math.max((geo.displaced.height_pct / 100) * H, 1);
-  const netH  = (geo.net.height_pct  / 100) * H;
+  const dispY = baselineY - dispH; // always 0 by construction
+  // MESS starts at the same top as DISPLACED; its height can exceed DISPLACED when NAR<0.
   const messH = (geo.mess.height_pct / 100) * H;
-  // Waterfall positions: MESS top aligns with DISPLACED top; MESS bottom = NET top.
+  const messY = dispY;
+  // NET: above baseline when NAR>=0, below when NAR<0.
+  const netH = Math.max((geo.net.height_pct / 100) * H, geo.net.value_hours === 0 ? 1 : 0);
+  const netY = geo.net.value_hours >= 0 ? baselineY - netH : baselineY;
   const bars = [
-    { label: "DISPLACED", valH: geo.displaced.value_hours, y: H - dispH,        barH: dispH,                 hatch: false },
-    { label: "THE MESS",  valH: geo.mess.value_hours,      y: H - dispH,        barH: Math.max(messH, 0),    hatch: true  },
-    { label: "NET",       valH: geo.net.value_hours,       y: H - Math.max(netH, 1),  barH: Math.max(netH, 1), hatch: false },
+    { label: "DISPLACED", valH: geo.displaced.value_hours, y: dispY, barH: dispH,                 hatch: false },
+    { label: "THE MESS",  valH: geo.mess.value_hours,      y: messY, barH: Math.max(messH, 0),    hatch: true  },
+    { label: "NET",       valH: geo.net.value_hours,       y: netY,  barH: netH,                  hatch: false },
   ];
   return (
     <div className="flex flex-col items-start">
@@ -93,7 +100,8 @@ function AccountBars({ geo }: { geo: BarGeometry }) {
               opacity={bar.hatch ? 0.8 : 0.82} />
           );
         })}
-        <line x1={0} y1={H} x2={W} y2={H} stroke="var(--rule)" strokeWidth={0.5} />
+        {/* Baseline: at the bottom for positive NAR, inside the chart for negative NAR */}
+        <line x1={0} y1={baselineY} x2={W} y2={baselineY} stroke="var(--rule)" strokeWidth={0.5} />
       </svg>
       <div style={{ display: "flex", width: W, gap: GAP, marginTop: 8 }}>
         {bars.map((bar, i) => (
@@ -270,13 +278,41 @@ function DayView({ day, recomp, running }: { day: AttentionDayViewModel; recomp(
               ))}
         </div>
       ))}
-      {/* TOTAL row — brass, rule above */}
-      <div className="grid items-baseline mt-0.5" style={{ gridTemplateColumns: "1fr repeat(3,86px)", columnGap: 10, borderTop: "2px solid var(--rule)", minHeight: 24, paddingTop: 4, paddingBottom: 4 }}>
-        <span className="font-mono text-[11px] uppercase tracking-[0.22em]" style={{ color: "var(--brass)" }}>TOTAL</span>
-        <span className="font-mono text-[11px] tabular-nums text-right" style={{ color: "var(--brass)" }}>{formatWholeMinutes(ledger.total_displaced_min)}</span>
-        <span className="font-mono text-[11px] tabular-nums text-right" style={{ color: "var(--brass)" }}>{fmtM(ledger.total_engaged_min)}</span>
-        <span className="font-mono text-[11px] tabular-nums text-right" style={{ color: "var(--brass)" }}>{fmtM(ledger.total_nar_min)}</span>
-      </div>
+      {/* TOTAL rows — when some displacement is unmeasured, render two rows:
+           1. MEASURED — shows the scope that ENGAGED and NAR actually cover
+           2. TOTAL    — shows full displaced; ENGAGED/NAR show — (out of scope)
+           This prevents the reader from computing "DISPLACED − ENGAGED" and getting
+           a number different from NAR. When everything is measured, one row suffices. */}
+      {ledger.unmeasured_displaced_min > 0 ? (
+        <>
+          <div className="grid items-baseline mt-0.5" style={{ gridTemplateColumns: "1fr repeat(3,86px)", columnGap: 10, borderTop: "2px solid var(--rule)", minHeight: 24, paddingTop: 4, paddingBottom: 2 }}>
+            <span className="font-mono text-[11px] uppercase tracking-[0.22em]" style={{ color: "var(--brass)" }}>
+              MEASURED
+            </span>
+            <span className="font-mono text-[11px] tabular-nums text-right" style={{ color: "var(--brass)" }}>{formatWholeMinutes(ledger.measured_displaced_min)}</span>
+            <span className="font-mono text-[11px] tabular-nums text-right" style={{ color: "var(--brass)" }}>{fmtM(ledger.total_engaged_min)}</span>
+            <span className="font-mono text-[11px] tabular-nums text-right" style={{ color: "var(--brass)" }}>{fmtM(ledger.total_nar_min)}</span>
+          </div>
+          <div className="grid items-baseline" style={{ gridTemplateColumns: "1fr repeat(3,86px)", columnGap: 10, borderTop: "1px solid var(--rule)", minHeight: 24, paddingTop: 2, paddingBottom: 4 }}>
+            <span className="font-mono text-[11px] uppercase tracking-[0.22em]" style={{ color: "var(--brass)" }}>
+              TOTAL
+              <span className="font-mono text-[10px] normal-case tracking-normal opacity-50 ml-1.5">
+                (+{formatWholeMinutes(ledger.unmeasured_displaced_min)} min no measurement)
+              </span>
+            </span>
+            <span className="font-mono text-[11px] tabular-nums text-right" style={{ color: "var(--brass)" }}>{formatWholeMinutes(ledger.total_displaced_min)}</span>
+            <span className="font-mono text-[11px] tabular-nums text-right opacity-35" style={{ color: "var(--brass)" }}>{NA}</span>
+            <span className="font-mono text-[11px] tabular-nums text-right opacity-35" style={{ color: "var(--brass)" }}>{NA}</span>
+          </div>
+        </>
+      ) : (
+        <div className="grid items-baseline mt-0.5" style={{ gridTemplateColumns: "1fr repeat(3,86px)", columnGap: 10, borderTop: "2px solid var(--rule)", minHeight: 24, paddingTop: 4, paddingBottom: 4 }}>
+          <span className="font-mono text-[11px] uppercase tracking-[0.22em]" style={{ color: "var(--brass)" }}>TOTAL</span>
+          <span className="font-mono text-[11px] tabular-nums text-right" style={{ color: "var(--brass)" }}>{formatWholeMinutes(ledger.total_displaced_min)}</span>
+          <span className="font-mono text-[11px] tabular-nums text-right" style={{ color: "var(--brass)" }}>{fmtM(ledger.total_engaged_min)}</span>
+          <span className="font-mono text-[11px] tabular-nums text-right" style={{ color: "var(--brass)" }}>{fmtM(ledger.total_nar_min)}</span>
+        </div>
+      )}
 
       {/* Unrated action classes — zero contribution, must not be omitted */}
       {day.unrated.length > 0 && (
