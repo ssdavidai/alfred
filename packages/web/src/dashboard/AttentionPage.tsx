@@ -842,11 +842,6 @@ function TrendsView({ data, grain, setGrain, interpretingRead, onGenerateRead, r
         <SL n="05" title="Outcomes" />
         <svg width={CW} height={H_SUB + 20} style={{ display: "block", maxWidth: "100%", overflow: "visible" }}
           role="img" aria-label="Outcomes chart">
-          <defs>
-            <pattern id="trends-hatch-fail" width="4" height="4" patternUnits="userSpaceOnUse" patternTransform="rotate(-45)">
-              <line x1="0" y1="0" x2="0" y2="4" stroke="var(--brass)" strokeWidth="1.5" opacity="0.65" />
-            </pattern>
-          </defs>
           {ob.map((b, i) => {
             const tot = barPx(b.total, maxOut, H_SUB);
             const del = barPx(b.delivered, maxOut, H_SUB);
@@ -855,14 +850,15 @@ function TrendsView({ data, grain, setGrain, interpretingRead, onGenerateRead, r
               <g key={b.key}>
                 {tot > 0 && <rect x={xi(i)} y={H_SUB - tot} width={BW} height={Math.max(tot, 1)} fill="oklch(0.62 0.09 75 / 0.18)" rx={1} />}
                 {del > 0 && <rect x={xi(i)} y={H_SUB - del} width={BW} height={del} fill="var(--brass)" rx={1} opacity={0.75} />}
-                {fail > 0 && <rect x={xi(i)} y={H_SUB - fail} width={BW} height={fail} fill="url(#trends-hatch-fail)" stroke="var(--brass)" strokeWidth={0.5} rx={1} />}
+                {/* --destructive is oxblood from the design-system token file — sanctioned semantic state colour, not a second accent */}
+                {fail > 0 && <rect x={xi(i)} y={H_SUB - fail} width={BW} height={fail} fill="var(--destructive)" rx={1} />}
                 <text x={xi(i) + BW / 2} y={H_SUB + 14} textAnchor="middle" fontSize={9} fontFamily="monospace" fill="var(--marginalia)">{b.label}</text>
               </g>
             );
           })}
         </svg>
         {ob.some(b => b.failed > 0) && (
-          <p className="font-mono text-[10px] font-semibold mt-2" style={{ color: "var(--brass)" }}>
+          <p className="font-mono text-[10px] font-semibold mt-2" style={{ color: "var(--destructive)" }}>
             {ob.reduce((s, b) => s + b.failed, 0)} failed {"·"} {ob.reduce((s, b) => s + b.delivered, 0)} delivered
           </p>
         )}
