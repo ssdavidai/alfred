@@ -10,6 +10,7 @@ import {
   deriveAllocationBars, deriveRatioBars, deriveBucketBars, deriveOutcomesBars,
   isReadGenerated, BUCKET_KEYS, LOW_ENGAGEMENT_HOURS,
   trimEmptyEdgePeriods, READ_EMPTY_STATE_TEXT,
+  POLL_GIVE_UP_MS, READ_POLL_PENDING_TEXT, READ_POLL_GAVE_UP_TEXT,
   type TrendsPeriod,
 } from "./attentionTrendsCore";
 
@@ -181,4 +182,27 @@ test("READ_EMPTY_STATE_TEXT: no claim of automatic or scheduled generation", () 
   assert.ok(!t.includes("scheduled"), "must not say 'scheduled'");
   assert.ok(!t.includes("nightly"), "must not say 'nightly'");
   assert.ok(t.length > 10, "must be a real sentence, not empty");
+});
+
+// ── 13. Poll state constants ──────────────────────────────────────────────────
+
+test("POLL_GIVE_UP_MS: strictly greater than the expected 2-minute generation time, not equal", () => {
+  const EXPECTED_MAX_MS = 2 * 60 * 1000; // 2 min — top of the stated 1-2 min range
+  assert.ok(POLL_GIVE_UP_MS > EXPECTED_MAX_MS,
+    `give-up bound (${POLL_GIVE_UP_MS} ms) must strictly exceed expected generation time (${EXPECTED_MAX_MS} ms)`);
+});
+
+test("READ_POLL_GAVE_UP_TEXT: does not assert failure as a certainty; hedges with 'may'", () => {
+  const t = READ_POLL_GAVE_UP_TEXT.toLowerCase();
+  assert.ok(!t.includes("has failed"), "must not say 'has failed'");
+  assert.ok(!t.includes("workflow failed"), "must not say 'workflow failed'");
+  assert.ok(t.includes("may"), "must hedge with 'may'");
+  assert.ok(READ_POLL_GAVE_UP_TEXT.length > 20, "must be a real sentence");
+});
+
+test("READ_POLL_GAVE_UP_TEXT and READ_POLL_PENDING_TEXT are distinct non-empty strings", () => {
+  assert.notEqual(READ_POLL_GAVE_UP_TEXT, READ_POLL_PENDING_TEXT,
+    "gave-up and pending messages must be distinct — they signal different states");
+  assert.ok(READ_POLL_PENDING_TEXT.length > 10, "pending text must be a real sentence");
+  assert.ok(READ_POLL_GAVE_UP_TEXT.length > 10, "gave-up text must be a real sentence");
 });

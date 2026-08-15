@@ -149,6 +149,19 @@ export function isReadGenerated(read: TrendsRead | null | undefined): read is Tr
  *  Must NOT claim automatic or scheduled generation — there is no nightly job for this. */
 export const READ_EMPTY_STATE_TEXT = "No read has been generated for this window.";
 
+/** How long the generate-read poll runs before giving up.
+ *  Must be strictly greater than the expected 1-2 min generation time. */
+export const POLL_GIVE_UP_MS = 5 * 60 * 1000; // 5 minutes
+
+/** Shown while the read poll is active and waiting for the workflow to complete. */
+export const READ_POLL_PENDING_TEXT =
+  "Generating Alfred's read — this takes a minute or two. The page will update automatically.";
+
+/** Shown when the poll reaches its lifetime limit.
+ *  Must NOT assert failure as a certainty — the workflow may simply be slow. */
+export const READ_POLL_GAVE_UP_TEXT =
+  "The read was requested and has not appeared after several minutes. The workflow may have failed or may simply be slow. Try again when ready.";
+
 // ── Empty-edge trimming ────────────────────────────────────────────────────────
 
 /** A period is data-empty when all key fields are zero — no displacement, no engagement, no NAR.

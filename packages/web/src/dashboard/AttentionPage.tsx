@@ -1,7 +1,7 @@
 // AttentionPage — Attention Statement redesign for /attention (#584).
 // Day view: canonical statement (header → 01 The Account → 02 Where It Went →
 // 03 The Ledger → rate card → footer). Range tab: unchanged.
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useQuery, useAction, getAttentionStatement, getAttentionStats, recomputeAttention, getAttentionTrends, interpretAttentionTrends } from "wasp/client/operations";
 import { Frame } from "../client/components/ab/Frame";
 import logoCurrentcolor from "../client/assets/brand/alfred-logo-currentcolor.svg";
@@ -18,6 +18,7 @@ import {
   deriveAllocationBars, deriveRatioBars, deriveBucketBars, deriveOutcomesBars,
   isReadGenerated, BUCKET_KEYS, LOW_ENGAGEMENT_HOURS,
   trimEmptyEdgePeriods, READ_EMPTY_STATE_TEXT,
+  POLL_GIVE_UP_MS, READ_POLL_PENDING_TEXT, READ_POLL_GAVE_UP_TEXT,
   type TrendsGrain, type AttentionTrendsResponse,
 } from "./attentionTrendsCore";
 
@@ -444,12 +445,14 @@ function RangeView({ stats }: { stats: AttentionStatsResponse }) {
 
 // ── Trends view (#584 — TRENDS tab) ──────────────────────────────────────────
 
-function TrendsView({ data, grain, setGrain, interpretingRead, onGenerateRead }: {
+function TrendsView({ data, grain, setGrain, interpretingRead, onGenerateRead, readTimedOut, onRetry }: {
   data: AttentionTrendsResponse;
   grain: TrendsGrain;
   setGrain: (g: TrendsGrain) => void;
   interpretingRead: boolean;
   onGenerateRead: () => void;
+  readTimedOut: boolean;
+  onRetry: () => void;
 }) {
   // Trim leading/trailing empty periods (range padding — e.g. a week that predates
   // any data on the tenant). Mid-series zeros are kept — a quiet week is data.
@@ -666,7 +669,15 @@ function TrendsView({ data, grain, setGrain, interpretingRead, onGenerateRead }:
                 ))}
               </div>
         ) : interpretingRead ? (
-          <p className="font-mono text-xs mt-4 opacity-50">Generating Alfred's read — this takes a minute or two. The page will update automatically.</p>
+          <p className="font-mono text-xs mt-4 opacity-50">{READ_POLL_PENDING_TEXT}</p>
+        ) : readTimedOut ? (
+          <div className="mt-4">
+            <p className="font-mono text-xs opacity-50">{READ_POLL_GAVE_UP_TEXT}</p>
+            <button type="button" onClick={onRetry}
+              className="mt-4 font-mono text-[10px] uppercase tracking-[0.22em] border border-[var(--rule)] px-5 py-2 hover:border-[var(--brass)] transition-colors">
+              Try again
+            </button>
+          </div>
         ) : (
           <div className="mt-4">
             <p className="font-mono text-xs opacity-50">{READ_EMPTY_STATE_TEXT}</p>
@@ -694,16 +705,28 @@ export default function AttentionPage() {
   const [trendsFrom] = useState(thirteenWeeksAgo);
   const [trendsTo] = useState(now);
   const [interpretingRead, setInterpretingRead] = useState(false);
+  const [readTimedOut, setReadTimedOut] = useState(false);
+  // Timestamp recorded when polling starts; compared against POLL_GIVE_UP_MS in the interval.
+  const pollStartRef = useRef<number>(0);
   const dayQ = useQuery(getAttentionStatement, { date }, { enabled: tab === "day" });
   const statsQ = useQuery(getAttentionStats, { from, to }, { enabled: tab === "range" });
   const trendsQ = useQuery(getAttentionTrends, { grain, from: trendsFrom, to: trendsTo }, { enabled: tab === "trends" });
   const recompute = useAction(recomputeAttention);
   const interpretTrends = useAction(interpretAttentionTrends);
 
-  // Poll for the read every 15 s while it is being generated.
+  // Poll for the read every 15 s while it is being generated; give up after POLL_GIVE_UP_MS.
+  // Interval is cleared on unmount and when the read arrives (see effect below).
   useEffect(() => {
     if (!interpretingRead) return;
-    const id = setInterval(() => { trendsQ.refetch(); }, 15_000);
+    const id = setInterval(() => {
+      if (Date.now() - pollStartRef.current > POLL_GIVE_UP_MS) {
+        setInterpretingRead(false);
+        setReadTimedOut(true);
+        clearInterval(id);
+        return;
+      }
+      trendsQ.refetch();
+    }, 15_000);
     return () => clearInterval(id);
   }, [interpretingRead]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -719,10 +742,15 @@ export default function AttentionPage() {
     try { await recompute({ date }); await dayQ.refetch(); } finally { setRunning(false); }
   }
 
+  // Only enter the polling state after the trigger call succeeds.
+  // A thrown or non-2xx response means nothing was started — stay on the idle state.
   async function handleGenerateRead() {
-    setInterpretingRead(true);
-    try { await interpretTrends({ grain, from: trendsFrom, to: trendsTo }); }
-    catch { setInterpretingRead(false); }
+    setReadTimedOut(false);
+    try {
+      await interpretTrends({ grain, from: trendsFrom, to: trendsTo });
+      pollStartRef.current = Date.now();
+      setInterpretingRead(true);
+    } catch { /* trigger rejected — stay on idle; user sees the button */ }
   }
 
   const din = (val: string, set: (v: string) => void, max?: string) => (
@@ -808,7 +836,7 @@ export default function AttentionPage() {
               : statsQ.data ? <RangeView stats={statsQ.data as AttentionStatsResponse} /> : null
             : trendsQ.isLoading ? <p className="font-mono text-xs opacity-40">Loading…</p>
               : trendsQ.error ? <p className="font-mono text-xs" style={{ color: "oklch(0.42 0.12 30)" }}>{String((trendsQ.error as any)?.message ?? "Failed.")}</p>
-              : trendsQ.data ? <TrendsView data={trendsQ.data as AttentionTrendsResponse} grain={grain} setGrain={setGrain} interpretingRead={interpretingRead} onGenerateRead={handleGenerateRead} /> : null}
+              : trendsQ.data ? <TrendsView data={trendsQ.data as AttentionTrendsResponse} grain={grain} setGrain={setGrain} interpretingRead={interpretingRead} onGenerateRead={handleGenerateRead} readTimedOut={readTimedOut} onRetry={handleGenerateRead} /> : null}
 
       </section>
     </Frame>
