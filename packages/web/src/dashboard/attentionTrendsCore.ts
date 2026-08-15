@@ -180,3 +180,159 @@ export function trimEmptyEdgePeriods(periods: TrendsPeriod[]): TrendsPeriod[] {
   while (e >= s && isEmptyPeriod(periods[e])) e--;
   return periods.slice(s, e + 1);
 }
+
+// ── Sentence engine ───────────────────────────────────────────────────────────
+// Port of the AttentionTrends.html inline <script>. Pure functions; zero deps.
+// JSX text rule: always \u escapes in strings — \x escapes render literally in JSX children.
+
+/** Round to 1 dp, drop trailing zero for whole values. */
+export function f1(n: number): string {
+  const v = Math.round(n * 10) / 10;
+  return v % 1 === 0 ? String(Math.round(v)) : v.toFixed(1);
+}
+
+export type Direction = "up" | "down" | "flat";
+/** Direction at ±10% threshold. Zero base: up when b > 0, flat otherwise. */
+export function dir(a: number, b: number): Direction {
+  if (a === 0) return b > 0 ? "up" : "flat";
+  const p = (b - a) / Math.abs(a);
+  return p <= -0.10 ? "down" : p >= 0.10 ? "up" : "flat";
+}
+
+// Panel 1 — NET RETURNED
+
+export interface NarHeadlineParams { nar: number; engaged: number | null; displaced: number }
+/** HTML string for the NET RETURNED h2.
+ *  When engaged is null no ratio is claimed (instrumentation was absent). */
+export function deriveNarHeadline(p: NarHeadlineParams): string {
+  const { nar, engaged, displaced } = p;
+  if (engaged == null)
+    return `<em>${f1(nar)} hours came back this week;</em> your time wasn’t measured.`;
+  if (nar <= 0)
+    return `<em>Nothing came back this week:</em> ${f1(engaged)} hours in, ${f1(displaced)} out.`;
+  return `<em>${f1(nar)} hours came back this week,</em> for the ${f1(engaged)} you put in.`;
+}
+
+// Panel 2 — RETURN RATIO
+
+export interface RatioHeadlineParams {
+  ratio: number | null; engaged: number | null;
+  peakValue: number; peakMonth: string;
+  ratioSeries: (number | null)[];
+}
+/** HTML string for the RETURN RATIO h2.
+ *  Returns null when engaged is null — no ratio claimed. */
+export function deriveRatioHeadline(p: RatioHeadlineParams): string | null {
+  if (p.engaged == null) return null;
+  if (p.engaged < 1) return "Too little of your time was logged this week to price it.";
+  if (p.ratio == null) return "No engagement data this week — return ratio unavailable.";
+  const rs = (p.ratioSeries ?? []).filter((v): v is number => v != null);
+  let streak = 1;
+  for (let i = rs.length - 1; i > 0; i--) {
+    if (rs[i - 1] > 0 && Math.abs(rs[i] - rs[i - 1]) / rs[i - 1] < 0.05) streak++;
+    else break;
+  }
+  if (p.ratio >= p.peakValue)
+    return `An hour of you now buys <em>${f1(p.ratio)} hours</em> of work — the best yet.`;
+  if (streak >= 3)
+    return `An hour of you buys <em>${f1(p.ratio)} hours</em> of work — steady for ${streak} weeks.`;
+  return `An hour of you now buys <em>${f1(p.ratio)} hours</em> of work. In ${p.peakMonth} it bought ${f1(p.peakValue)}.`;
+}
+
+/** Split ratio bars into solid (adjacent non-null) and gap (crossing-null) segments.
+ *  A null produces a gap segment — never an interpolated point. */
+export interface LineSegment { from: number; to: number; isGap: boolean }
+export function deriveRatioLineSegmentsFromBars(bars: RatioBar[]): LineSegment[] {
+  const segs: LineSegment[] = [];
+  let last = -1;
+  for (let i = 0; i < (bars ?? []).length; i++) {
+    if (bars[i].ratio != null) {
+      if (last >= 0) segs.push({ from: last, to: i, isGap: i > last + 1 });
+      last = i;
+    }
+  }
+  return segs;
+}
+
+// Panel 3 — ALFRED'S READ
+
+export interface ReadHeadlineParams {
+  dR: Direction; dX: Direction; dF: Direction;
+  priorKey: string; latestKey: string; priorRatio: number; latestRatio: number;
+  priorFailures: number; latestFailures: number; priorEngaged: number; latestEngaged: number;
+  priorXLHours: number; latestXLHours: number;
+}
+/** HTML string chosen from 8 templates by direction triple (dR × dX × dF). */
+export function deriveReadHeadline(p: ReadHeadlineParams): string {
+  const { dR, dX, dF, priorFailures: af, latestFailures: bf,
+    priorEngaged: ae, latestEngaged: be, priorRatio: ar, latestRatio: br,
+    priorKey, latestKey } = p;
+  const pct = (a: number, b: number) =>
+    Math.abs(Math.round(((b - a) / Math.abs(a || 1)) * 1000) / 10);
+  if (dR === "down" && dX === "up" && dF !== "up")
+    return "Why the rate fell: <em>the work got bigger</em> — not worse.";
+  if (dR === "down" && dX === "up")
+    return "The rate fell: <em>bigger work,</em> and more of it failed.";
+  if (dR === "down" && dF === "up")
+    return `The rate fell where quality slipped: <em>failures rose ${af} → ${bf}.</em>`;
+  if (dR === "down")
+    return `The rate fell on your side of the desk: <em>your time rose ${f1(ae)} → ${f1(be)} hours.</em>`;
+  if (dR === "up" && dF === "down")
+    return "The rate improved: <em>less of your time, fewer failures.</em>";
+  if (dR === "up")
+    return "The rate improved <em>even as the work got bigger.</em>";
+  if (dR === "flat")
+    return `The rate held at <em>${f1(br)}×</em> across both weeks.`;
+  return `Return ratio moved ${pct(ar, br)}% from ${priorKey} to ${latestKey}.`;
+}
+
+/** Last two full non-partial periods with non-null ratio — read panel source. */
+export interface ReadPairData {
+  priorKey: string; latestKey: string; priorRatio: number; latestRatio: number;
+  priorXLHours: number; latestXLHours: number; priorFailures: number; latestFailures: number;
+  priorFinished: number; latestFinished: number; priorEngaged: number; latestEngaged: number;
+}
+export function deriveReadPairData(periods: TrendsPeriod[], grain: TrendsGrain): ReadPairData | null {
+  const full = (periods ?? []).filter(p => !isPartialPeriod(p, grain) && p.return_ratio != null);
+  if (full.length < 2) return null;
+  const pr = full[full.length - 2], la = full[full.length - 1];
+  return {
+    priorKey: pr.key, latestKey: la.key,
+    priorRatio: pr.return_ratio!, latestRatio: la.return_ratio!,
+    priorXLHours: pr.by_bucket?.XL?.displaced_hours ?? 0,
+    latestXLHours: la.by_bucket?.XL?.displaced_hours ?? 0,
+    priorFailures: pr.outcomes?.failed ?? 0, latestFailures: la.outcomes?.failed ?? 0,
+    priorFinished: pr.outcomes?.delivered ?? 0, latestFinished: la.outcomes?.delivered ?? 0,
+    priorEngaged: pr.engaged_hours, latestEngaged: la.engaged_hours,
+  };
+}
+
+// Panel 4 — ALLOCATION
+
+export interface AllocationHeadlineParams {
+  totalNar: number; workFrac: number; lifeFrac: number; unassignedFrac: number;
+}
+/** HTML string for the ALLOCATION h2.
+ *  Banded at 0.85/0.60/0.40; tail clause when unassigned > 25%. */
+export function deriveAllocationHeadline(p: AllocationHeadlineParams): string {
+  const phrase = p.workFrac >= 0.85 ? "almost entirely to work"
+    : p.workFrac >= 0.60 ? "mostly to work"
+    : p.workFrac >= 0.40 ? "to work and life evenly"
+    : "mostly to life";
+  const tail = p.unassignedFrac > 0.25
+    ? ` — ${Math.round(p.unassignedFrac * 100)}% still unassigned` : "";
+  return `<em>${f1(p.totalNar)} returned hours</em> have gone ${phrase}.${tail}`;
+}
+
+/** Cumulative allocation totals across all periods in the window. */
+export interface TrendsAllocTotals {
+  totalNar: number; workFrac: number; lifeFrac: number; unassignedFrac: number;
+}
+export function deriveTrendsAllocTotals(periods: TrendsPeriod[]): TrendsAllocTotals {
+  const totalNar = (periods ?? []).reduce((s, p) => s + (p.nar_hours ?? 0), 0);
+  const tw = (periods ?? []).reduce((s, p) => s + (p.allocation?.work?.displaced_hours ?? 0), 0);
+  const tl = (periods ?? []).reduce((s, p) => s + (p.allocation?.life?.displaced_hours ?? 0), 0);
+  const tu = (periods ?? []).reduce((s, p) => s + (p.allocation?.unallocated?.displaced_hours ?? 0), 0);
+  const tot = Math.max(tw + tl + tu, 0.001);
+  return { totalNar: Math.round(totalNar * 10) / 10, workFrac: tw / tot, lifeFrac: tl / tot, unassignedFrac: tu / tot };
+}
