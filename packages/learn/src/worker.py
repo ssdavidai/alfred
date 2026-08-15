@@ -64,6 +64,7 @@ from src.workflows.recall_dispatcher import RecallDispatcherWorkflow
 from src.workflows.ha_bootstrap import HaBootstrapWorkflow
 from src.workflows.cron_journal import CronJournalReconcileWorkflow
 from src.workflows.nar_recap import NarDayRecapWorkflow
+from src.workflows.attention_trend_read import AttentionTrendReadWorkflow
 
 # Chore template workflows (static + dynamic)
 from src.workflows.chores import ALL_CHORE_TEMPLATES
@@ -726,8 +727,9 @@ from src.activities.cron_journal import (
     reconcile_cron_journal,
 )
 
-# NAR daily recap (#584) — backs NarDayRecapWorkflow.
+# NAR daily recap (#584) + attention trend read (#584)
 from src.activities.nar_recap import compute_nar_day
+from src.activities.attention_trend_read import read_attention_trends
 
 # Validators used as activities
 from src.validators.frontmatter import validate_classification
@@ -848,9 +850,8 @@ _STATIC_WORKFLOWS = [
     # outbounds that carry a ``deliver`` field into alfred_journal.
     # Gated on CRON_JOURNAL_RECONCILE_ENABLED (default OFF).
     CronJournalReconcileWorkflow,
-    # NAR daily recap (#584) — triggered ad-hoc or by backfill;
-    # not scheduled automatically (validation must pass first).
-    NarDayRecapWorkflow,
+    NarDayRecapWorkflow,       # NAR daily recap (#584) — triggered ad-hoc or by backfill
+    AttentionTrendReadWorkflow,  # Attention trend read (#584) — ad-hoc grain+range read
     *ALL_CHORE_TEMPLATES,
 ]
 
@@ -1280,8 +1281,8 @@ ALL_ACTIVITIES = [
     # Cron-journal reconciler (#418) — backs CronJournalReconcileWorkflow.
     cron_journal_reconcile_is_enabled,
     reconcile_cron_journal,
-    # NAR daily recap (#584) — backs NarDayRecapWorkflow.
-    compute_nar_day,
+    compute_nar_day,         # NAR daily recap (#584)
+    read_attention_trends,   # attention trend read (#584)
 ]
 
 
