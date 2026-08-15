@@ -142,3 +142,28 @@ export function deriveOutcomesBars(periods: TrendsPeriod[], grain: TrendsGrain):
 export function isReadGenerated(read: TrendsRead | null | undefined): read is TrendsRead {
   return read != null && Array.isArray(read.observations);
 }
+
+// ── Empty-state text (exported so the test can assert honesty) ─────────────────
+
+/** Displayed when no read has been generated for the current window.
+ *  Must NOT claim automatic or scheduled generation — there is no nightly job for this. */
+export const READ_EMPTY_STATE_TEXT = "No read has been generated for this window.";
+
+// ── Empty-edge trimming ────────────────────────────────────────────────────────
+
+/** A period is data-empty when all key fields are zero — no displacement, no engagement, no NAR.
+ *  This distinguishes "system not yet deployed" padding from a genuine quiet week. */
+export function isEmptyPeriod(p: TrendsPeriod): boolean {
+  return (p.nar_hours ?? 0) === 0 && (p.displaced_hours ?? 0) === 0 && (p.engaged_hours ?? 0) === 0;
+}
+
+/** Remove leading and trailing periods that contain no data at all.
+ *  A zero-activity period in the MIDDLE of the series is preserved — a quiet week
+ *  that falls between active weeks reads correctly as a quiet week, not as padding. */
+export function trimEmptyEdgePeriods(periods: TrendsPeriod[]): TrendsPeriod[] {
+  if (!periods?.length) return [];
+  let s = 0, e = periods.length - 1;
+  while (s <= e && isEmptyPeriod(periods[s])) s++;
+  while (e >= s && isEmptyPeriod(periods[e])) e--;
+  return periods.slice(s, e + 1);
+}

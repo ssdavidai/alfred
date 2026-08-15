@@ -4471,3 +4471,9 @@ export const getAttentionTrends = async (args: { grain?: string; from?: string; 
   }
   return proxyToTenant(instance, { method: "GET", path: "/api/v1/attention/trends", query: Object.keys(q).length ? q : undefined });
 };
+
+export const interpretAttentionTrends = async (args: { grain: string; from: string; to: string }, context: any): Promise<any> => {
+  if (!args?.grain || !args?.from || !args?.to) throw new HttpError(400, "grain, from, to required");
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, { method: "POST", path: "/api/v1/attention/trends/interpret", body: { grain: args.grain, from: args.from, to: args.to } });
+};

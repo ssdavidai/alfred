@@ -1,8 +1,8 @@
 // AttentionPage — Attention Statement redesign for /attention (#584).
 // Day view: canonical statement (header → 01 The Account → 02 Where It Went →
 // 03 The Ledger → rate card → footer). Range tab: unchanged.
-import { useState } from "react";
-import { useQuery, useAction, getAttentionStatement, getAttentionStats, recomputeAttention, getAttentionTrends } from "wasp/client/operations";
+import { useState, useEffect } from "react";
+import { useQuery, useAction, getAttentionStatement, getAttentionStats, recomputeAttention, getAttentionTrends, interpretAttentionTrends } from "wasp/client/operations";
 import { Frame } from "../client/components/ab/Frame";
 import logoCurrentcolor from "../client/assets/brand/alfred-logo-currentcolor.svg";
 import {
@@ -17,6 +17,7 @@ import {
   deriveNarBars, deriveSeriesMax, deriveTrendsSummary,
   deriveAllocationBars, deriveRatioBars, deriveBucketBars, deriveOutcomesBars,
   isReadGenerated, BUCKET_KEYS, LOW_ENGAGEMENT_HOURS,
+  trimEmptyEdgePeriods, READ_EMPTY_STATE_TEXT,
   type TrendsGrain, type AttentionTrendsResponse,
 } from "./attentionTrendsCore";
 
@@ -443,22 +444,42 @@ function RangeView({ stats }: { stats: AttentionStatsResponse }) {
 
 // ── Trends view (#584 — TRENDS tab) ──────────────────────────────────────────
 
-function TrendsView({ data, grain, setGrain }: { data: AttentionTrendsResponse; grain: TrendsGrain; setGrain: (g: TrendsGrain) => void }) {
-  const ps = data.periods ?? [];
+function TrendsView({ data, grain, setGrain, interpretingRead, onGenerateRead }: {
+  data: AttentionTrendsResponse;
+  grain: TrendsGrain;
+  setGrain: (g: TrendsGrain) => void;
+  interpretingRead: boolean;
+  onGenerateRead: () => void;
+}) {
+  // Trim leading/trailing empty periods (range padding — e.g. a week that predates
+  // any data on the tenant). Mid-series zeros are kept — a quiet week is data.
+  const ps = trimEmptyEdgePeriods(data.periods ?? []);
   if (!ps.length) return <p className="font-mono text-xs opacity-40 mt-12">No data for this period.</p>;
+
   const nb = deriveNarBars(ps, grain); const ab = deriveAllocationBars(ps, grain);
   const rb = deriveRatioBars(ps, grain); const bb = deriveBucketBars(ps, grain);
   const ob = deriveOutcomesBars(ps, grain); const sum = deriveTrendsSummary(ps);
-  const BW = 24; const GP = 5; const H = 80; const CW = ps.length * (BW + GP) - GP;
+
+  // Chart sizing: scale bars to fill ~600px at the target column width, capped so
+  // a small series doesn't get absurdly wide bars. GP=4px gap; BW min 12px, max 60px.
+  const N = ps.length;
+  const GP = 4;
+  const BW = Math.min(Math.max(Math.round((600 - Math.max(N - 1, 0) * GP) / Math.max(N, 1)), 12), 60);
+  const CW = N * BW + Math.max(N - 1, 0) * GP;
+  // Section 02 is the hero chart — give it real vertical presence.
+  const H_NAR = 230;
+  // Sections 04 and 05 are secondary — less height.
+  const H_SUB = 150;
+
   const xi = (i: number) => i * (BW + GP);
-  const bar = (v: number, max: number) => Math.round(Math.max(v, 0) / max * H);
+  const barPx = (v: number, max: number, h: number) => Math.max(Math.round(Math.max(v, 0) / max * h), 0);
   const maxDisp = deriveSeriesMax(nb.map(b => b.displaced_hours));
-  const maxAlloc = deriveSeriesMax(ab.map(b => b.total));
   const maxOut = deriveSeriesMax(ob.map(b => b.total));
   const validR = rb.filter(b => b.ratio != null && !b.low_engagement).map(b => b.ratio!);
   const maxRatio = deriveSeriesMax(validR.length ? validR : rb.filter(b => b.ratio != null).map(b => b.ratio!));
   const fh = (v: number | null, d = 1) => v == null ? "—" : v.toFixed(d);
   const totalUnbucketed = bb.reduce((s, b) => s + b.unbucketed_count, 0);
+
   return (
     <div className="mt-4">
       {/* Grain selector */}
@@ -494,17 +515,22 @@ function TrendsView({ data, grain, setGrain }: { data: AttentionTrendsResponse; 
         </div>
       </div>
 
-      {/* 02 NAR chart — displaced (total) bars with engaged overlay; partial=dashed; uninstrumented=dim */}
+      {/* 02 NAR chart — hero; displaced (total) bars with engaged overlay.
+           partial=dashed outline; uninstrumented=dimmed. Full-width at ~600px. */}
       <div className="mb-12">
         <SL n="02" title="NAR by period" />
-        <svg width={CW} height={H + 16} className="overflow-visible mt-4" role="img" aria-label="NAR by period chart">
+        <svg width={CW} height={H_NAR + 20} style={{ display: "block", maxWidth: "100%", overflow: "visible" }}
+          role="img" aria-label="NAR by period chart">
           {nb.map((b, i) => {
-            const disp = bar(b.displaced_hours, maxDisp); const eng = bar(b.engaged_hours, maxDisp);
+            const disp = barPx(b.displaced_hours, maxDisp, H_NAR);
+            const eng = barPx(b.engaged_hours, maxDisp, H_NAR);
             return (
               <g key={b.key} opacity={b.uninstrumented ? 0.4 : 1}>
-                <rect x={xi(i)} y={H - disp} width={BW} height={disp} fill="var(--rule)" rx={1} stroke={b.partial ? "var(--brass)" : "none"} strokeWidth={b.partial ? 1 : 0} strokeDasharray={b.partial ? "3 2" : undefined} />
-                <rect x={xi(i)} y={H - eng} width={BW} height={eng} fill="var(--brass)" rx={1} opacity={0.6} />
-                <text x={xi(i) + BW / 2} y={H + 12} textAnchor="middle" fontSize={8} fontFamily="monospace" fill="var(--marginalia)">{b.label}</text>
+                <rect x={xi(i)} y={H_NAR - disp} width={BW} height={Math.max(disp, 1)} fill="var(--rule)" rx={1}
+                  stroke={b.partial ? "var(--brass)" : "none"} strokeWidth={b.partial ? 1 : 0}
+                  strokeDasharray={b.partial ? "3 2" : undefined} />
+                {eng > 0 && <rect x={xi(i)} y={H_NAR - eng} width={BW} height={eng} fill="var(--brass)" rx={1} opacity={0.6} />}
+                <text x={xi(i) + BW / 2} y={H_NAR + 14} textAnchor="middle" fontSize={9} fontFamily="monospace" fill="var(--marginalia)">{b.label}</text>
               </g>
             );
           })}
@@ -517,7 +543,9 @@ function TrendsView({ data, grain, setGrain }: { data: AttentionTrendsResponse; 
         </p>
       </div>
 
-      {/* 03 Allocation — proportional bars: work / life / unallocated */}
+      {/* 03 Allocation — proportional bars: work / life / unallocated.
+           Palette: brass for work, marginalia-grey for life, rule for unallocated.
+           No teal — the whole view uses this two-tone palette. */}
       <div className="mb-12">
         <SL n="03" title="Where it went" />
         <div className="flex flex-col gap-2 mt-4">
@@ -527,7 +555,8 @@ function TrendsView({ data, grain, setGrain }: { data: AttentionTrendsResponse; 
               <div className="flex-1 flex h-4 gap-px overflow-hidden rounded-sm">
                 {(["work", "life", "unallocated"] as const).map(k => {
                   const v = b[k]; const pct = v / b.total * 100;
-                  return pct > 0.5 ? <div key={k} style={{ width: `${pct}%`, background: k === "work" ? "var(--brass)" : k === "life" ? "oklch(0.62 0.09 200)" : "var(--rule)", opacity: k === "unallocated" ? 0.4 : 0.8 }} /> : null;
+                  const bg = k === "work" ? "var(--brass)" : k === "life" ? "var(--marginalia)" : "var(--rule)";
+                  return pct > 0.5 ? <div key={k} style={{ width: `${pct}%`, background: bg, opacity: k === "unallocated" ? 0.35 : k === "life" ? 0.6 : 0.8 }} /> : null;
                 })}
               </div>
               <span className="font-mono text-[9px] w-10 shrink-0" style={{ color: "var(--marginalia)" }}>{b.total.toFixed(1)}h</span>
@@ -535,30 +564,34 @@ function TrendsView({ data, grain, setGrain }: { data: AttentionTrendsResponse; 
           ))}
         </div>
         <div className="flex gap-4 mt-2">
-          {(["work", "life", "unallocated"] as const).map(k => (
-            <span key={k} className="font-mono text-[9px] flex items-center gap-1" style={{ color: "var(--marginalia)" }}>
-              <span className="inline-block w-2 h-2" style={{ background: k === "work" ? "var(--brass)" : k === "life" ? "oklch(0.62 0.09 200)" : "var(--rule)" }} /> {k}
-            </span>
-          ))}
+          {(["work", "life", "unallocated"] as const).map(k => {
+            const bg = k === "work" ? "var(--brass)" : k === "life" ? "var(--marginalia)" : "var(--rule)";
+            return (
+              <span key={k} className="font-mono text-[9px] flex items-center gap-1" style={{ color: "var(--marginalia)" }}>
+                <span className="inline-block w-2 h-2" style={{ background: bg, opacity: k === "life" ? 0.6 : 1 }} /> {k}
+              </span>
+            );
+          })}
         </div>
       </div>
 
       {/* 04 Return ratio — null preserved as em-dash; low-engagement dimmed */}
       <div className="mb-12">
         <SL n="04" title="Return ratio" />
-        <svg width={CW} height={H + 16} className="overflow-visible mt-4" role="img" aria-label="Return ratio chart">
+        <svg width={CW} height={H_SUB + 20} style={{ display: "block", maxWidth: "100%", overflow: "visible" }}
+          role="img" aria-label="Return ratio chart">
           {rb.map((b, i) => {
             if (b.ratio == null) return (
               <g key={b.key}>
-                <text x={xi(i) + BW / 2} y={H / 2} textAnchor="middle" fontSize={11} fontFamily="monospace" fill="var(--marginalia)" dominantBaseline="middle">—</text>
-                <text x={xi(i) + BW / 2} y={H + 12} textAnchor="middle" fontSize={8} fontFamily="monospace" fill="var(--marginalia)">{b.label}</text>
+                <text x={xi(i) + BW / 2} y={H_SUB / 2} textAnchor="middle" fontSize={11} fontFamily="monospace" fill="var(--marginalia)" dominantBaseline="middle">—</text>
+                <text x={xi(i) + BW / 2} y={H_SUB + 14} textAnchor="middle" fontSize={9} fontFamily="monospace" fill="var(--marginalia)">{b.label}</text>
               </g>
             );
-            const h = bar(b.ratio, maxRatio);
+            const h = barPx(b.ratio, maxRatio, H_SUB);
             return (
               <g key={b.key} opacity={b.low_engagement ? 0.3 : 1}>
-                <rect x={xi(i)} y={H - h} width={BW} height={h} fill="var(--brass)" rx={1} />
-                <text x={xi(i) + BW / 2} y={H + 12} textAnchor="middle" fontSize={8} fontFamily="monospace" fill="var(--marginalia)">{b.label}</text>
+                <rect x={xi(i)} y={H_SUB - h} width={BW} height={Math.max(h, 1)} fill="var(--brass)" rx={1} />
+                <text x={xi(i) + BW / 2} y={H_SUB + 14} textAnchor="middle" fontSize={9} fontFamily="monospace" fill="var(--marginalia)">{b.label}</text>
               </g>
             );
           })}
@@ -571,15 +604,18 @@ function TrendsView({ data, grain, setGrain }: { data: AttentionTrendsResponse; 
       {/* 05 Outcomes — delivered/failed/unknown; failures in destructive red */}
       <div className="mb-12">
         <SL n="05" title="Outcomes" />
-        <svg width={CW} height={H + 16} className="overflow-visible mt-4" role="img" aria-label="Outcomes chart">
+        <svg width={CW} height={H_SUB + 20} style={{ display: "block", maxWidth: "100%", overflow: "visible" }}
+          role="img" aria-label="Outcomes chart">
           {ob.map((b, i) => {
-            const tot = bar(b.total, maxOut); const del = bar(b.delivered, maxOut); const fail = bar(b.failed, maxOut);
+            const tot = barPx(b.total, maxOut, H_SUB);
+            const del = barPx(b.delivered, maxOut, H_SUB);
+            const fail = barPx(b.failed, maxOut, H_SUB);
             return (
               <g key={b.key}>
-                <rect x={xi(i)} y={H - tot} width={BW} height={tot} fill="var(--rule)" rx={1} />
-                <rect x={xi(i)} y={H - del} width={BW} height={del} fill="var(--brass)" rx={1} opacity={0.75} />
-                {fail > 0 && <rect x={xi(i)} y={H - fail} width={BW / 2} height={fail} fill="oklch(0.42 0.12 30)" rx={1} />}
-                <text x={xi(i) + BW / 2} y={H + 12} textAnchor="middle" fontSize={8} fontFamily="monospace" fill="var(--marginalia)">{b.label}</text>
+                <rect x={xi(i)} y={H_SUB - tot} width={BW} height={Math.max(tot, 1)} fill="var(--rule)" rx={1} />
+                {del > 0 && <rect x={xi(i)} y={H_SUB - del} width={BW} height={del} fill="var(--brass)" rx={1} opacity={0.75} />}
+                {fail > 0 && <rect x={xi(i)} y={H_SUB - fail} width={Math.ceil(BW / 2)} height={fail} fill="oklch(0.42 0.12 30)" rx={1} />}
+                <text x={xi(i) + BW / 2} y={H_SUB + 14} textAnchor="middle" fontSize={9} fontFamily="monospace" fill="var(--marginalia)">{b.label}</text>
               </g>
             );
           })}
@@ -611,7 +647,8 @@ function TrendsView({ data, grain, setGrain }: { data: AttentionTrendsResponse; 
         {totalUnbucketed > 0 && <p className="font-mono text-[9px] mt-2" style={{ color: "var(--marginalia)" }}>+ {totalUnbucketed} vigilance sweeps (unbucketed — not shown)</p>}
       </div>
 
-      {/* 07 Alfred's read — null = not yet generated; never fabricate observations */}
+      {/* 07 Alfred's read — null = not yet generated; never fabricate observations.
+           There is no nightly schedule — the read must be explicitly triggered. */}
       <div className="mb-10">
         <SL n="07" title="Alfred's read" />
         {isReadGenerated(data.read) ? (
@@ -628,8 +665,16 @@ function TrendsView({ data, grain, setGrain }: { data: AttentionTrendsResponse; 
                   </div>
                 ))}
               </div>
+        ) : interpretingRead ? (
+          <p className="font-mono text-xs mt-4 opacity-50">Generating Alfred's read — this takes a minute or two. The page will update automatically.</p>
         ) : (
-          <p className="font-mono text-xs mt-4 opacity-50">Alfred hasn't generated a read for this period yet — it runs automatically after the nightly workflow.</p>
+          <div className="mt-4">
+            <p className="font-mono text-xs opacity-50">{READ_EMPTY_STATE_TEXT}</p>
+            <button type="button" onClick={onGenerateRead}
+              className="mt-4 font-mono text-[10px] uppercase tracking-[0.22em] border border-[var(--rule)] px-5 py-2 hover:border-[var(--brass)] transition-colors">
+              Generate Alfred's read
+            </button>
+          </div>
         )}
       </div>
     </div>
@@ -648,14 +693,36 @@ export default function AttentionPage() {
   const [grain, setGrain] = useState<TrendsGrain>("week");
   const [trendsFrom] = useState(thirteenWeeksAgo);
   const [trendsTo] = useState(now);
+  const [interpretingRead, setInterpretingRead] = useState(false);
   const dayQ = useQuery(getAttentionStatement, { date }, { enabled: tab === "day" });
   const statsQ = useQuery(getAttentionStats, { from, to }, { enabled: tab === "range" });
   const trendsQ = useQuery(getAttentionTrends, { grain, from: trendsFrom, to: trendsTo }, { enabled: tab === "trends" });
   const recompute = useAction(recomputeAttention);
+  const interpretTrends = useAction(interpretAttentionTrends);
+
+  // Poll for the read every 15 s while it is being generated.
+  useEffect(() => {
+    if (!interpretingRead) return;
+    const id = setInterval(() => { trendsQ.refetch(); }, 15_000);
+    return () => clearInterval(id);
+  }, [interpretingRead]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Stop polling once the read appears in the data.
+  useEffect(() => {
+    if (interpretingRead && (trendsQ.data as AttentionTrendsResponse | undefined)?.read != null) {
+      setInterpretingRead(false);
+    }
+  }, [interpretingRead, trendsQ.data]);
 
   async function handleRecompute() {
     setRunning(true);
     try { await recompute({ date }); await dayQ.refetch(); } finally { setRunning(false); }
+  }
+
+  async function handleGenerateRead() {
+    setInterpretingRead(true);
+    try { await interpretTrends({ grain, from: trendsFrom, to: trendsTo }); }
+    catch { setInterpretingRead(false); }
   }
 
   const din = (val: string, set: (v: string) => void, max?: string) => (
@@ -741,7 +808,7 @@ export default function AttentionPage() {
               : statsQ.data ? <RangeView stats={statsQ.data as AttentionStatsResponse} /> : null
             : trendsQ.isLoading ? <p className="font-mono text-xs opacity-40">Loading…</p>
               : trendsQ.error ? <p className="font-mono text-xs" style={{ color: "oklch(0.42 0.12 30)" }}>{String((trendsQ.error as any)?.message ?? "Failed.")}</p>
-              : trendsQ.data ? <TrendsView data={trendsQ.data as AttentionTrendsResponse} grain={grain} setGrain={setGrain} /> : null}
+              : trendsQ.data ? <TrendsView data={trendsQ.data as AttentionTrendsResponse} grain={grain} setGrain={setGrain} interpretingRead={interpretingRead} onGenerateRead={handleGenerateRead} /> : null}
 
       </section>
     </Frame>

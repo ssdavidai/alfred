@@ -9,6 +9,7 @@ import {
   deriveNarBars, deriveSeriesMax, deriveTrendsSummary,
   deriveAllocationBars, deriveRatioBars, deriveBucketBars, deriveOutcomesBars,
   isReadGenerated, BUCKET_KEYS, LOW_ENGAGEMENT_HOURS,
+  trimEmptyEdgePeriods, READ_EMPTY_STATE_TEXT,
   type TrendsPeriod,
 } from "./attentionTrendsCore";
 
@@ -138,4 +139,46 @@ test("isReadGenerated: null/undefined → false; object (even empty) → true", 
   assert.equal(isReadGenerated(null), false); assert.equal(isReadGenerated(undefined), false);
   assert.equal(isReadGenerated({ generated_at: "2026-08-10", observations: [] }), true);
   assert.equal(isReadGenerated({ generated_at: "2026-08-10", observations: [{ headline:"h",detail:"d",evidence:"e" }] }), true);
+});
+
+// ── 11. Empty-edge trimming ───────────────────────────────────────────────────
+
+const EMPTY_P = mkP("2026-W20", 7, 0, 0, 0, null); // no displacement, no engagement, zero NAR
+
+test("trimEmptyEdgePeriods: leading and trailing empty periods are removed; mid-series zero is kept", () => {
+  // A genuinely quiet week (mid-series) must NOT be removed — absence in the middle
+  // is data; absence at the edge is only range padding (e.g. W20 predating deployment).
+  const midZero = mkP("2026-W25", 7, 0, 0, 0, null); // zero activity between two live weeks
+  const series = [EMPTY_P, W22, midZero, W32, EMPTY_P];
+  const trimmed = trimEmptyEdgePeriods(series);
+  assert.equal(trimmed.length, 3, "leading and trailing W20 empties removed");
+  assert.equal(trimmed[0].key, "2026-W22", "first kept period is W22");
+  assert.equal(trimmed[1].key, "2026-W25", "mid-series zero is preserved");
+  assert.equal(trimmed[2].key, "2026-W32", "last kept period is W32");
+
+  // Leading only
+  const leadOnly = [EMPTY_P, W32, W33];
+  const tl = trimEmptyEdgePeriods(leadOnly);
+  assert.equal(tl.length, 2); assert.equal(tl[0].key, "2026-W32");
+
+  // All-empty series collapses to []
+  assert.deepEqual(trimEmptyEdgePeriods([EMPTY_P, EMPTY_P]), []);
+
+  // No empties → unchanged
+  const noEmp = trimEmptyEdgePeriods([W22, W32]);
+  assert.equal(noEmp.length, 2);
+
+  // Null-safe
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  assert.deepEqual(trimEmptyEdgePeriods(null as any), []);
+});
+
+// ── 12. Empty-state text honesty ──────────────────────────────────────────────
+
+test("READ_EMPTY_STATE_TEXT: no claim of automatic or scheduled generation", () => {
+  const t = READ_EMPTY_STATE_TEXT.toLowerCase();
+  assert.ok(!t.includes("automatic"), "must not say 'automatic'");
+  assert.ok(!t.includes("scheduled"), "must not say 'scheduled'");
+  assert.ok(!t.includes("nightly"), "must not say 'nightly'");
+  assert.ok(t.length > 10, "must be a real sentence, not empty");
 });

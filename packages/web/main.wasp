@@ -2142,3 +2142,8 @@ query getAttentionTrends {
   fn: import { getAttentionTrends } from "@src/dashboard/operations",
   entities: []
 }
+
+action interpretAttentionTrends {
+  fn: import { interpretAttentionTrends } from "@src/dashboard/operations",
+  entities: []
+}
