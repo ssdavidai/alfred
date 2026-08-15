@@ -437,24 +437,27 @@ CALENDAR_SCHEDULES = [
         ),
     },
     {
-        # #584 — pre-compute the weekly attention trend so the TRENDS tab
-        # on /attention shows a read without requiring the Generate button.
+        # #584 — pre-compute the TRENDS tab attention read so it appears
+        # without the Generate button.
+        #
+        # The schedule MUST be DAILY, not weekly.  Reason: trendsTo is
+        # `now` (AttentionPage.tsx:695), so the subject key the UI looks
+        # up is "attention_trend:week:<from>:<today>".  A weekly schedule
+        # would write a key anchored to Monday's date; any visit on Tue–Sun
+        # would find nothing and show "not generated yet".  Daily ensures
+        # the stored key always matches the current day's window.
         #
         # AttentionPage.tsx line 32/694:
         #   const thirteenWeeksAgo = () => { d.setDate(d.getDate()-91) }
         #   const [trendsFrom] = useState(thirteenWeeksAgo);   // today−91d
-        #   const [trendsTo]   = useState(now);
-        # The window is fixed at 91 days regardless of grain.  A hardcoded
-        # date in the schedule would be stale by next Monday, so only the
-        # grain is passed and the workflow derives from/to at run time.
+        #   const [trendsTo]   = useState(now);               // today
         #
-        # Monday 04:00 LOCAL: nightly-maintenance (03:00) has settled, one
-        # hour before the morning briefing (05:00).  day_of_week=1=Monday.
+        # 04:00 LOCAL: nightly-maintenance (03:00) has settled, one hour
+        # before the morning briefing (05:00).
         "id": "al-attention-trend-read",
         "workflow": "AttentionTrendReadWorkflow",
         "args": [{"grain": "week"}],
         "calendar": ScheduleCalendarSpec(
-            day_of_week=[ScheduleRange(start=1, end=1)],
             hour=[ScheduleRange(start=4)],
             minute=[ScheduleRange(start=0)],
         ),

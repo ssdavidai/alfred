@@ -231,11 +231,30 @@ class TestScheduleEntry:
                if e["id"] == "al-attention-trend-read"]
         assert ids == ["al-attention-trend-read"]
 
-    def test_calendar_monday_04_00_local(self):
-        """Monday 04:00 LOCAL: after nightly-maintenance, before morning briefing."""
+    def test_calendar_daily_04_00_local(self):
+        """Schedule must fire DAILY, not weekly.
+
+        trendsTo = now (AttentionPage.tsx:695), so the subject key the UI
+        requests is attention_trend:week:<from>:<today>.  A weekly schedule
+        anchors the key to one fixed day; any other day finds nothing.
+        Daily means the stored key always matches the current day's window.
+
+        The Temporal SDK fills day_of_week with ScheduleRange(0, 6) (all days)
+        when no DOW restriction is set.  A single-day restriction would be
+        ScheduleRange(start=N, end=N) with start==end.  We assert that all
+        7 days are covered so nobody "optimises" this back to weekly.
+        """
         cal = _schedule_entry()["spec"].calendars[0]
-        assert cal.day_of_week[0].start == 1  # 1=Monday, 0=Sunday
         assert cal.hour[0].start == 4
+        # All 7 days must be covered (SDK default: start=0, end=6, step=1).
+        # A weekly-only restriction has start==end (e.g. start=1, end=1 for Monday).
+        dow = cal.day_of_week
+        assert dow, "day_of_week must be present"
+        assert not any(r.start == r.end for r in dow), (
+            "schedule must cover all 7 days (daily); "
+            "found single-day restriction — see comment: trendsTo=now means "
+            "the observation key changes every day"
+        )
 
     def test_timezone_propagated(self):
         entries = _reg._build_schedule_entries("America/New_York")
