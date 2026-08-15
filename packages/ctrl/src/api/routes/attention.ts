@@ -513,6 +513,31 @@ export async function dispatchSignalToAgent(
   return { outcome_signal_path: sourceSignal, error: null };
 }
 
+/** Subset of buildDayStatement return read by the trends aggregator. */
+interface DayStatement {
+  nar_hours: number;
+  displaced: { total_hours: number; explicit: { hours: number; items: Array<{ count: number; minutes: number }> }; inferred: { hours: number; items: Array<{ bucket: string|null; minutes: number; outcome: string|null; engaged_minutes: number|null }> }; autonomous: { hours: number; items: Array<{ bucket: string|null; minutes: number }> } };
+  engaged: { hours: number }; interruption: { hours: number };
+  allocation: { work: {displaced_hours:number;engaged_hours:number}; life: {displaced_hours:number;engaged_hours:number}; unallocated: {displaced_hours:number;engaged_hours:number} };
+  stats: { sessions: number };
+}
+
+/** Period key + canonical ISO start/end for a grain+date string. Exported for tests. */
+export function periodKeyBounds(grain: "week"|"month"|"quarter", dateStr: string): {key:string;start:string;end:string} {
+  if (grain === "week") {
+    const d=new Date(`${dateStr}T00:00:00Z`), dow=d.getUTCDay()||7; // Mon=1…Sun=7
+    const mon=new Date(d); mon.setUTCDate(d.getUTCDate()-dow+1);
+    const sun=new Date(mon); sun.setUTCDate(mon.getUTCDate()+6);
+    const thu=new Date(d); thu.setUTCDate(d.getUTCDate()-dow+4); // Thursday = ISO week anchor
+    const wn=Math.ceil(((thu.getTime()-Date.UTC(thu.getUTCFullYear(),0,1))/86400000+1)/7);
+    return {key:`${thu.getUTCFullYear()}-W${String(wn).padStart(2,"0")}`,start:mon.toISOString().slice(0,10),end:sun.toISOString().slice(0,10)};
+  }
+  const [y,mo]=dateStr.slice(0,7).split("-").map(Number);
+  if (grain === "month") return {key:dateStr.slice(0,7),start:`${y}-${String(mo).padStart(2,"0")}-01`,end:new Date(Date.UTC(y,mo,0)).toISOString().slice(0,10)};
+  const q=Math.ceil(mo/3), qm1=(q-1)*3+1;
+  return {key:`${y}-Q${q}`,start:`${y}-${String(qm1).padStart(2,"0")}-01`,end:new Date(Date.UTC(y,q*3,0)).toISOString().slice(0,10)};
+}
+
 export function registerAttentionRoutes(): void {
   // GET /api/v1/admin/needs-attention — list pending records (status=pending)
   // Optional query: ?include=all (return done/dispatched/skipped too — for the
@@ -1204,5 +1229,79 @@ export function registerAttentionRoutes(): void {
     } catch { handle = null; }
 
     sendJson(res, 202, { ok: true, handle, date, from, to });
+  });
+
+  // GET /api/v1/attention/trends — weekly/monthly/quarterly NAR rollups (#584).
+  // Reuses buildDayStatement per day; does NOT reimplement displacement/engaged logic.
+  addRoute("GET", "/api/v1/attention/trends", async ({ res, query }) => {
+    const grain=(query.get("grain")??"") as "week"|"month"|"quarter";
+    const from=query.get("from")??"", to=query.get("to")??"";
+    if (!["week","month","quarter"].includes(grain)) throw new ValidationError("grain must be week|month|quarter");
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(from)||!/^\d{4}-\d{2}-\d{2}$/.test(to)) throw new ValidationError("from and to must be YYYY-MM-DD");
+    const fromD=new Date(`${from}T00:00:00Z`), toD=new Date(`${to}T00:00:00Z`);
+    if (isNaN(fromD.getTime())||isNaN(toD.getTime())||fromD>toD) throw new ValidationError("from must be ≤ to");
+    const total=Math.round((toD.getTime()-fromD.getTime())/86400000)+1;
+    if (total>400) throw new ValidationError(`range ${total} days exceeds 400-day cap`);
+
+    const dates:string[]=[];
+    for (let d=new Date(fromD);d<=toD;d.setUTCDate(d.getUTCDate()+1)) dates.push(d.toISOString().slice(0,10));
+    const dayResults=dates.map(buildDayStatement) as DayStatement[];
+    const r3=(v:number)=>Math.round(v*1000)/1000;
+    type PG={key:string;start:string;end:string;indices:number[]};
+    const pm=new Map<string,PG>();
+    for (let i=0;i<dates.length;i++) {
+      const {key,start,end}=periodKeyBounds(grain,dates[i]);
+      if (!pm.has(key)) pm.set(key,{key,start,end,indices:[]});
+      pm.get(key)!.indices.push(i);
+    }
+
+    const db=getStateDb();
+    const cf=`${from}T00:00:00Z`, ct=`${to}T23:59:59.999Z`;
+    const firstJ=(db.prepare(`SELECT MIN(DATE(ts)) AS d FROM alfred_journal WHERE direction='outbound' AND ts>=? AND ts<=?`).get(cf,ct) as {d:string|null}).d;
+    const daysData=(db.prepare(`SELECT COUNT(DISTINCT DATE(occurred_at)) AS n FROM nar_entry WHERE occurred_at>=? AND occurred_at<=?`).get(cf,ct) as {n:number}).n;
+
+    const periods=[];
+    for (const pg of pm.values()) {
+      const drs=pg.indices.map(i=>dayResults[i]);
+      let nar=0,disp=0,eng=0,intr=0,sess=0;
+      const al:Record<"work"|"life"|"unallocated",{d:number;e:number}>={work:{d:0,e:0},life:{d:0,e:0},unallocated:{d:0,e:0}};
+      let cDisp=0,cEng=0,cCnt=0,aDisp=0,aCnt=0,eDisp=0,eCnt=0;
+      const bkt:Record<string,{count:number;displaced_hours:number}>={};
+      const oc={delivered:0,failed:0,unknown:0};
+      for (const dr of drs) {
+        nar+=dr.nar_hours; disp+=dr.displaced.total_hours;
+        // engaged_hours per period = SUM of daily burst-clustered values.
+        // Daily clustering is the defined measure; summing days is the only
+        // aggregation consistent with it — re-clustering would merge sessions.
+        eng+=dr.engaged.hours; intr+=dr.interruption.hours; sess+=dr.stats.sessions;
+        for (const a of (["work","life","unallocated"] as const)) { al[a].d+=dr.allocation[a].displaced_hours; al[a].e+=dr.allocation[a].engaged_hours; }
+        cDisp+=dr.displaced.inferred.hours; cCnt+=dr.displaced.inferred.items.length;
+        for (const it of dr.displaced.inferred.items) {
+          cEng+=(it.engaged_minutes??0)/60;
+          if (it.bucket) { bkt[it.bucket]??={count:0,displaced_hours:0}; bkt[it.bucket].count++; bkt[it.bucket].displaced_hours+=it.minutes/60; }
+          const o=it.outcome??null;
+          if (o==="delivered") oc.delivered++; else if (o==="failed") oc.failed++; else oc.unknown++;
+        }
+        aDisp+=dr.displaced.autonomous.hours; aCnt+=dr.displaced.autonomous.items.length;
+        for (const it of dr.displaced.autonomous.items)
+          if (it.bucket) { bkt[it.bucket]??={count:0,displaced_hours:0}; bkt[it.bucket].count++; bkt[it.bucket].displaced_hours+=it.minutes/60; }
+        eDisp+=dr.displaced.explicit.hours; eCnt+=dr.displaced.explicit.items.reduce((s,x)=>s+x.count,0);
+      }
+      // interruption_instrumented false = "nothing recorded" not "no interruptions occurred"
+      const pS=`${dates[pg.indices[0]]}T00:00:00Z`, pE=`${dates[pg.indices[pg.indices.length-1]]}T23:59:59.999Z`;
+      const jn=(db.prepare(`SELECT COUNT(*) AS n FROM alfred_journal WHERE direction='outbound' AND ts>=? AND ts<=?`).get(pS,pE) as {n:number}).n;
+      periods.push({
+        key:pg.key,start:pg.start,end:pg.end,days:pg.indices.length,
+        nar_hours:r3(nar),displaced_hours:r3(disp),engaged_hours:r3(eng),interruption_hours:r3(intr),
+        interruption_instrumented:jn>0,return_ratio:eng===0?null:r3(disp/eng),
+        allocation:{work:{displaced_hours:r3(al.work.d),engaged_hours:r3(al.work.e)},life:{displaced_hours:r3(al.life.d),engaged_hours:r3(al.life.e)},unallocated:{displaced_hours:r3(al.unallocated.d),engaged_hours:r3(al.unallocated.e)}},
+        by_class:{conversational:{displaced_hours:r3(cDisp),engaged_hours:r3(cEng),count:cCnt},autonomous:{displaced_hours:r3(aDisp),engaged_hours:0,count:aCnt},explicit:{displaced_hours:r3(eDisp),engaged_hours:0,count:eCnt}},
+        by_bucket:Object.fromEntries(Object.entries(bkt).map(([k,v])=>[k,{count:v.count,displaced_hours:r3(v.displaced_hours)}])),
+        outcomes:oc,sessions:sess,
+      });
+    }
+    sendJson(res,200,{grain,from,to,
+      coverage:{interruption_instrumented_from:firstJ??null,days_total:dates.length,days_with_data:daysData},
+      periods});
   });
 }
