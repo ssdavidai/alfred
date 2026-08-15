@@ -1,10 +1,11 @@
 // AttentionPage — Attention Statement redesign for /attention (#584).
 // Day view: canonical statement (header → 01 The Account → 02 Where It Went →
 // 03 The Ledger → rate card → footer). Range tab: unchanged.
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, Fragment } from "react";
+import type { CSSProperties } from "react";
 import { useQuery, useAction, getAttentionStatement, getAttentionStats, recomputeAttention, getAttentionTrends, interpretAttentionTrends } from "wasp/client/operations";
 import { Frame } from "../client/components/ab/Frame";
-import logoCurrentcolor from "../client/assets/brand/alfred-logo-currentcolor.svg";
+import logoWhite from "../client/assets/brand/alfred-logo-white.svg";
 import {
   normalizeAttentionDay, isEmptyDay, formatHours, formatWholeMinutes,
   formatHeaderDate, deriveLedger, deriveBarGeometry, deriveAllocationBarWidths,
@@ -34,14 +35,17 @@ const thirteenWeeksAgo = () => { const d = new Date(); d.setDate(d.getDate() - 9
 
 // ── Shared primitives ─────────────────────────────────────────────────────────
 
-/** Section-label: "N · TITLE" in brass letterspaced mono caps + hairline rule. */
-function SL({ n, title }: { n: string; title: string }) {
+/** Section-label: "N · TITLE" in brass letterspaced mono caps + hairline rule.
+ *  Matches the template's .sechead pattern exactly: baseline-aligned, 14px gap,
+ *  hairline (not rule) for the trailing line so the dark-document contrast holds. */
+function SL({ n, title, mt = 26 }: { n: string; title: string; mt?: number }) {
   return (
-    <div className="flex items-center gap-3" style={{ marginTop: 34, marginBottom: 18 }}>
-      <span className="font-mono text-[11px] uppercase tracking-[0.25em] shrink-0" style={{ color: "var(--brass)" }}>
+    <div style={{ display: "flex", alignItems: "baseline", gap: 14, marginTop: mt }}>
+      <span style={{ fontFamily: "var(--font-mono)", fontWeight: 800, fontSize: 10,
+        letterSpacing: "0.28em", textTransform: "uppercase", color: "var(--brass)", whiteSpace: "nowrap" }}>
         {n} · {title}
       </span>
-      <div className="flex-1" style={{ borderTop: "1px solid var(--rule)", opacity: 0.35 }} />
+      <span style={{ flex: 1, borderTop: `1px solid ${HAIR}` }} />
     </div>
   );
 }
@@ -65,62 +69,78 @@ function StatCell({ label, value }: { label: string; value: string }) {
   );
 }
 
-// ── Section 01 bar chart — waterfall layout ───────────────────────────────────
-// DISPLACED and NET share a baseline and grow upward (solid brass).
-// THE MESS (hatched) floats in the vertical band between NET's top and
-// DISPLACED's top — it never touches the baseline.
-// Visual equation: DISPLACED = NET + THE MESS.
+// ── Design-system constants (lifted verbatim from AttentionStatementDark.html) ─
+// Hair values are not in the product CSS vars — inlined to match the template exactly.
+const HAIR  = "oklch(0.94 0.012 80 / 0.16)";
+const HAIR2 = "oklch(0.94 0.012 80 / 0.24)";
+// Hatch from the template .hatch rule.
+const HATCH_BG = "repeating-linear-gradient(-45deg,oklch(0.94 0.012 80 / 0.3) 0 2.5px,transparent 2.5px 6px)";
+// Wool-page background — used for the 1px visual gap inside the DISPLACED bar.
+const WOOL_BG = "oklch(0.18 0.006 60)";
+// Dark-mode CSS variable overrides: keep these in sync with the template's :root block.
+// Spread into a wool wrapper so the day-view always renders with the dark palette
+// regardless of the user's system theme (the statement is always the dark document).
+const DARK_VARS: Record<string, string> = {
+  "--ink":        "oklch(0.94 0.012 80)",
+  "--rule":       "oklch(0.94 0.012 80 / 0.22)",
+  "--marginalia": "oklch(0.70 0.008 80)",
+  "--brass":      "oklch(0.62 0.09 75)",
+};
+
+// ── Section 01 bar chart — CSS-div waterfall matching the template ────────────
+// Three independent bars at proportional heights, matching AttentionStatementDark.html:
+//   DISPLACED — flex-end column: lighter-brass mess cap + 1px page-bg gap + solid-brass net body.
+//   THE MESS  — hatch div hanging from the TOP of its 104px container (not flex-end).
+//   NET       — flex-end column: solid-brass bar pushed to the baseline.
+// All three bars share the same 104px height; captions sit below.
 
 function AccountBars({ geo }: { geo: BarGeometry }) {
-  const H = 140; const BAR_W = 84; const GAP = 28;
-  const W = 3 * BAR_W + 2 * GAP;
-  // Baseline Y in SVG pixels — at the bottom for positive NAR; inside the chart
-  // for negative NAR (where NET extends below baseline and MESS crosses it).
-  const baselineY = (geo.baseline_pct / 100) * H;
-  // DISPLACED always starts at the SVG top (baseline_pct == displaced.height_pct).
-  const dispH = Math.max((geo.displaced.height_pct / 100) * H, 1);
-  const dispY = baselineY - dispH; // always 0 by construction
-  // MESS starts at the same top as DISPLACED; its height can exceed DISPLACED when NAR<0.
-  const messH = (geo.mess.height_pct / 100) * H;
-  const messY = dispY;
-  // NET: above baseline when NAR>=0, below when NAR<0.
-  const netH = Math.max((geo.net.height_pct / 100) * H, geo.net.value_hours === 0 ? 1 : 0);
-  const netY = geo.net.value_hours >= 0 ? baselineY - netH : baselineY;
-  const bars = [
-    { label: "DISPLACED", valH: geo.displaced.value_hours, y: dispY, barH: dispH,                 hatch: false },
-    { label: "THE MESS",  valH: geo.mess.value_hours,      y: messY, barH: Math.max(messH, 0),    hatch: true  },
-    { label: "NET",       valH: geo.net.value_hours,       y: netY,  barH: netH,                  hatch: false },
+  const H = 104, BW = 66, GAP = 26;
+  // When NAR >= 0 displaced.height_pct == 100 (displaced is the scale reference).
+  // When NAR < 0  all three pcts are < 100 and the chart clips gracefully.
+  const messH = Math.max(Math.round((geo.mess.height_pct / 100) * H), 0);
+  const netH  = Math.max(Math.round((geo.net.height_pct  / 100) * H), 0);
+  // DISPLACED internal split: lighter-brass mess cap + 1px gap + solid-brass net body.
+  // The 1px gap sits between the lighter and solid segments so the split is legible.
+  const gapPx = (messH > 0 && netH > 0) ? 1 : 0;
+  const netBodyH = Math.max(H - messH - gapPx, 0);
+
+  const captions = [
+    { label: "DISPLACED", val: geo.displaced.value_hours, labelColor: "var(--marginalia)" as const, valColor: "var(--ink)" as const },
+    { label: "THE MESS",  val: geo.mess.value_hours,      labelColor: "var(--marginalia)" as const, valColor: "var(--ink)" as const },
+    { label: "NET",       val: geo.net.value_hours,        labelColor: "var(--brass)"     as const, valColor: "var(--brass)"  as const },
   ];
   return (
-    <div className="flex flex-col items-start">
-      <svg viewBox={`0 0 ${W} ${H}`} width={W} height={H} style={{ display: "block", overflow: "visible" }}>
-        <defs>
-          <pattern id="hatch-mess" width="4" height="4" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
-            <line x1="0" y1="0" x2="0" y2="4" stroke="var(--brass)" strokeWidth="1.5" opacity="0.55" />
-          </pattern>
-        </defs>
-        {bars.map((bar, i) => {
-          const x = i * (BAR_W + GAP);
-          if (bar.barH <= 0) return null;
-          return (
-            <rect key={i} x={x} y={bar.y} width={BAR_W} height={bar.barH}
-              fill={bar.hatch ? "url(#hatch-mess)" : "var(--brass)"}
-              stroke={bar.hatch ? "var(--brass)" : "none"} strokeWidth={0.5}
-              opacity={bar.hatch ? 0.8 : 0.82} />
-          );
-        })}
-        {/* Baseline: at the bottom for positive NAR, inside the chart for negative NAR */}
-        <line x1={0} y1={baselineY} x2={W} y2={baselineY} stroke="var(--rule)" strokeWidth={0.5} />
-      </svg>
-      <div style={{ display: "flex", width: W, gap: GAP, marginTop: 8 }}>
-        {bars.map((bar, i) => (
-          <div key={i} style={{ width: BAR_W, textAlign: "center", flexShrink: 0 }}>
-            <p className="font-mono uppercase tracking-wide" style={{ fontSize: 9, color: "var(--marginalia)", lineHeight: 1.3 }}>
-              {bar.label}
-            </p>
-            <p className="font-mono tabular-nums font-bold" style={{ fontSize: 11, color: "var(--brass)", marginTop: 2 }}>
-              {bar.valH < 0 ? "−" : ""}{formatHours(Math.abs(bar.valH))}
-            </p>
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end" }}>
+      {/* Bar columns */}
+      <div style={{ display: "flex", alignItems: "flex-end", gap: GAP, height: H }}>
+        {/* DISPLACED: flex-end, full 104px — lighter cap + gap + solid body */}
+        <div style={{ display: "flex", flexDirection: "column", justifyContent: "flex-end", height: H, width: BW }}>
+          {messH > 0 && <div style={{ height: messH, background: "oklch(0.62 0.09 75 / 0.45)" }} />}
+          {gapPx > 0 && <div style={{ height: gapPx, background: WOOL_BG }} />}
+          {netBodyH > 0 && <div style={{ height: netBodyH, background: "var(--brass)" }} />}
+        </div>
+        {/* THE MESS: hatch hangs from the TOP of the 104px box */}
+        <div style={{ height: H, width: BW }}>
+          {messH > 0 && <div style={{ height: messH, background: HATCH_BG }} />}
+        </div>
+        {/* NET: solid brass pushed to the bottom */}
+        <div style={{ display: "flex", flexDirection: "column", justifyContent: "flex-end", height: H, width: BW }}>
+          {netH > 0 && <div style={{ height: netH, background: "var(--brass)" }} />}
+        </div>
+      </div>
+      {/* Captions: labels + values matching the template's caption block */}
+      <div style={{ display: "flex", gap: GAP, marginTop: 8 }}>
+        {captions.map(({ label, val, labelColor, valColor }, i) => (
+          <div key={i} style={{ width: BW, textAlign: "center" }}>
+            <div style={{ fontFamily: "var(--font-mono)", fontWeight: 800, fontSize: 7.5,
+              letterSpacing: "0.14em", color: labelColor, textTransform: "uppercase", lineHeight: 1.4 }}>
+              {label}
+            </div>
+            <div style={{ fontFamily: "var(--font-mono)", fontWeight: 800, fontSize: 9.5,
+              letterSpacing: "0.06em", color: valColor, marginTop: 3 }}>
+              {val < 0 ? "−" : ""}{formatHours(Math.abs(val))}
+            </div>
           </div>
         ))}
       </div>
@@ -148,17 +168,68 @@ function NarChart({ bars, scale }: { bars: ChartBar[]; scale: ChartScaleResult }
   );
 }
 
-// ── Day view — canonical Attention Statement ───────────────────────────────────
+// ── Day view — dark Attention Statement matching AttentionStatementDark.html ───
+// The entire day document renders on a wool-dark surface with forced dark CSS
+// variables so the statement looks the same regardless of system theme.
+// The letterhead (logo · date · double rule · title) lives inside this component
+// so the document is self-contained.
 
-function DayView({ day, recomp, running }: { day: AttentionDayViewModel; recomp(): void; running: boolean }) {
+function DayView({ day, date, recomp, running }: {
+  day: AttentionDayViewModel; date: string; recomp(): void; running: boolean;
+}) {
+  // ── shared formatters ──────────────────────────────────────────────────────
+  const NA = "—";
+  const fmtM = (v: number | null) => v !== null ? formatWholeMinutes(v) : NA;
+  // Section 02: negative figures render as "− X.XX" (Unicode minus + space).
+  const fmtNeg = (v: number) => v > 0 ? `− ${formatHours(v)}` : NA;
+  // Section 02: NET column always gets the "h" suffix.
+  const fmtNet = (v: number) => (v < 0 ? `−${formatHours(Math.abs(v))}` : formatHours(v)) + " h";
+
+  // ── letterhead ─────────────────────────────────────────────────────────────
+  const Letterhead = () => (
+    <>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 24 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 13 }}>
+          <img src={logoWhite} alt="Alfred Black" style={{ height: 34, width: "auto", display: "block" }} />
+          <span style={{ fontFamily: "var(--font-mono)", fontWeight: 800, fontSize: 11.5,
+            letterSpacing: "0.32em", textTransform: "uppercase", color: "var(--ink)" }}>
+            ALFRED&nbsp;BLACK
+          </span>
+        </div>
+        <div style={{ textAlign: "right", fontFamily: "var(--font-mono)", fontWeight: 700,
+          fontSize: 9.5, letterSpacing: "0.2em", color: "var(--marginalia)", lineHeight: 1.9 }}>
+          {formatHeaderDate(date)}
+        </div>
+      </div>
+      {/* Double rule: top and bottom 1px solid ink, height 4px — as in the template */}
+      <div style={{ borderTop: "1px solid var(--ink)", borderBottom: "1px solid var(--ink)",
+        height: 4, margin: "14px 0 20px" }} />
+      <h1 style={{ fontFamily: "var(--font-display)", fontWeight: 600, fontSize: 30,
+        letterSpacing: "-0.015em", lineHeight: 1.05, margin: 0 }}>
+        Attention Statement.
+      </h1>
+    </>
+  );
+
+  // ── wool wrapper (dark surface + forced dark-palette CSS vars) ─────────────
+  const wrapStyle = { padding: "36px 58px 30px", ...DARK_VARS } as CSSProperties;
+
   if (isEmptyDay(day)) {
     return (
-      <div className="py-16 text-center">
-        <p className="font-mono text-sm opacity-50">No attention data for {day.date}.</p>
-        <button type="button" onClick={recomp} disabled={running}
-          className="mt-6 font-mono text-[10px] uppercase tracking-[0.22em] border border-[var(--rule)] px-5 py-2 hover:border-[var(--brass)] disabled:opacity-30 transition-colors">
-          {running ? "Recomputing…" : "Recompute"}
-        </button>
+      <div className="wool" style={wrapStyle}>
+        <Letterhead />
+        <div style={{ paddingTop: 48, textAlign: "center" }}>
+          <p style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--marginalia)" }}>
+            No attention data for {date}.
+          </p>
+          <button type="button" onClick={recomp} disabled={running}
+            style={{ marginTop: 24, fontFamily: "var(--font-mono)", fontSize: 10, textTransform: "uppercase",
+              letterSpacing: "0.22em", border: "1px solid var(--rule)", padding: "8px 20px",
+              color: "var(--ink)", background: "transparent", cursor: running ? "not-allowed" : "pointer",
+              opacity: running ? 0.3 : 1 }}>
+            {running ? "Recomputing…" : "Recompute"}
+          </button>
+        </div>
       </div>
     );
   }
@@ -169,182 +240,232 @@ function DayView({ day, recomp, running }: { day: AttentionDayViewModel; recomp(
     day.engaged?.hours ?? 0,
     day.interruption?.hours ?? 0,
   );
-  const NA = "—";
-  // Formatter for nullable hour/minute values: null stays "—", never "0.00".
-  const fh = (v: number | null | undefined) => v != null ? formatHours(v) : NA;
-  const fmtM = (v: number | null) => v !== null ? formatWholeMinutes(v) : NA;
-  const barWidths = deriveAllocationBarWidths(day.allocation ?? undefined);
+  const totalDisp = Math.max(day.displaced?.total_hours ?? 0, 0.001);
+
+  // ── section 02 grid styles ─────────────────────────────────────────────────
+  // Grid: 96px label | 1fr bar track | 62px displaced | 58px engaged | 62px interrupt | 64px net
+  const GRID02: CSSProperties = {
+    display: "grid", gridTemplateColumns: "96px 1fr 62px 58px 62px 64px",
+    gap: "7px 12px", alignItems: "center",
+    fontFamily: "var(--font-mono)", fontWeight: 700, fontSize: 9, letterSpacing: "0.06em",
+  };
+  const COL_HEAD: CSSProperties = { fontFamily: "var(--font-mono)", fontWeight: 800,
+    fontSize: 7.5, letterSpacing: "0.18em", textTransform: "uppercase", textAlign: "right" };
+
+  // ── section 03 grid styles ─────────────────────────────────────────────────
+  const GRID03: CSSProperties = { display: "grid", gridTemplateColumns: "1fr 82px 82px 82px",
+    fontFamily: "var(--font-mono)", fontWeight: 700, fontSize: 11, letterSpacing: 0 };
+  // .h — column header: 7.5px dim, hair2 bottom border
+  const hSty: CSSProperties = { fontSize: 7.5, fontWeight: 800, letterSpacing: "0.16em",
+    color: "var(--marginalia)", borderBottom: `1px solid ${HAIR2}`, paddingBottom: 5 };
+  // .g — group row: 8px brass, no bottom border
+  const gSty: CSSProperties = { borderBottom: "none", padding: "9px 0 2px", fontSize: 8,
+    fontWeight: 800, letterSpacing: "0.24em", color: "var(--brass)" };
+  // regular item cell: faint bottom rule
+  const cSty: CSSProperties = { padding: "2.5px 0", borderBottom: "1px solid oklch(0.94 0.012 80 / 0.09)" };
+  // .t — total row: 2px brass top border
+  const tSty: CSSProperties = { borderBottom: "none", borderTop: "2px solid var(--brass)",
+    marginTop: 5, padding: "7px 0 0", color: "var(--brass)", fontWeight: 800,
+    fontSize: 9.5, letterSpacing: "0.06em" };
+
   const ALLOC_ROWS = [
-    { label: "Work",        key: "work"        as const },
-    { label: "Life",        key: "life"        as const },
-    { label: "Unallocated", key: "unallocated" as const },
+    { label: "Work",        key: "work"        as const, dim: false },
+    { label: "Life",        key: "life"        as const, dim: false },
+    { label: "Unallocated", key: "unallocated" as const, dim: true  },
   ];
 
   return (
-    <>
+    <div className="wool" style={wrapStyle}>
+      <Letterhead />
+
       {/* ── 01 THE ACCOUNT ─────────────────────────────────────────────── */}
-      <SL n="01" title="THE ACCOUNT" />
-      <div className="grid mb-6" style={{ gridTemplateColumns: "55% 45%", gap: "0 24px", alignItems: "start" }}>
-        {/* NAR hero — left; sits at top of section */}
+      <SL n="01" title="THE ACCOUNT" mt={24} />
+      <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between",
+        gap: 44, marginTop: 16 }}>
+        {/* NAR hero */}
         <div>
-          <div className="font-display tabular-nums leading-none" style={{ fontSize: 80, color: "var(--brass)" }}>
-            {formatHours(day.nar_hours)}<span style={{ fontSize: 40, opacity: 0.5, marginLeft: 5 }}>h</span>
+          <div style={{ fontFamily: "var(--font-display)", fontWeight: 600, fontSize: 76,
+            letterSpacing: "-0.02em", lineHeight: 1, color: "var(--brass)", margin: "0 0 12px" }}>
+            {day.nar_hours < 0 ? "−" : ""}{formatHours(Math.abs(day.nar_hours))} h
           </div>
-          <p className="font-mono uppercase tracking-[0.28em] mt-2" style={{ fontSize: 10, color: "var(--brass)" }}>
+          <div style={{ fontFamily: "var(--font-mono)", fontWeight: 800, fontSize: 8.5,
+            letterSpacing: "0.26em", textTransform: "uppercase", color: "var(--brass)" }}>
             NET ATTENTION RETURNED
-          </p>
+          </div>
         </div>
-        {/* Three bars — right */}
-        <div>
-          <AccountBars geo={barGeo} />
-        </div>
+        {/* Waterfall bars */}
+        <AccountBars geo={barGeo} />
       </div>
 
       {/* ── 02 WHERE IT WENT ───────────────────────────────────────────── */}
       <SL n="02" title="WHERE IT WENT" />
-      {/* Column headers — bar track column header is blank */}
-      <div className="grid font-mono text-[11px] uppercase tracking-[0.1em] pb-1 mb-0"
-        style={{ gridTemplateColumns: "1fr minmax(160px,300px) repeat(4,86px)", columnGap: 10, color: "var(--marginalia)", borderBottom: "1px solid var(--rule)", opacity: 0.7 }}>
-        <span />
-        <span />
-        {(["DISPLACED","ENGAGED","INTERRUPT","NET"] as const).map(c => (
-          <span key={c} className="text-right">{c}</span>
-        ))}
+      <div style={{ ...GRID02, marginTop: 10 }}>
+        {/* Header row */}
+        <span /><span />
+        <span style={{ ...COL_HEAD, color: "var(--marginalia)" }}>DISPLACED</span>
+        <span style={{ ...COL_HEAD, color: "var(--marginalia)" }}>ENGAGED</span>
+        <span style={{ ...COL_HEAD, color: "var(--marginalia)" }}>INTERRUPT</span>
+        <span style={{ ...COL_HEAD, color: "var(--brass)" }}>NET</span>
+        {/* Allocation rows */}
+        {ALLOC_ROWS.map(({ label, key, dim }) => {
+          const b = day.allocation?.[key] ?? null;
+          const fillW = b != null && b.displaced_hours > 0
+            ? Math.min((b.displaced_hours / totalDisp) * 100, 100) : 0;
+          const brassPct = b != null && b.displaced_hours > 0
+            ? (Math.max(b.nar_hours, 0) / b.displaced_hours) * 100 : 0;
+          const tc = dim ? "var(--marginalia)" : "var(--ink)";
+          return (
+            <Fragment key={key}>
+              {/* Row label: display italic per template */}
+              <span style={{ fontFamily: "var(--font-display)", fontStyle: "italic",
+                fontSize: 11.5, letterSpacing: "0.02em", color: tc }}>
+                {label}
+              </span>
+              {/* Bar track: faint container + brass/hatch fill */}
+              <div style={{ height: 8, background: "oklch(0.94 0.012 80 / 0.08)" }}>
+                {fillW > 0 && (
+                  <div style={{ width: `${fillW}%`, height: "100%", display: "flex" }}>
+                    <div style={{ width: `${brassPct}%`, background: "var(--brass)" }} />
+                    <div style={{ flex: 1, background: HATCH_BG }} />
+                  </div>
+                )}
+              </div>
+              <span style={{ textAlign: "right", color: tc }}>
+                {b != null ? formatHours(b.displaced_hours) : NA}
+              </span>
+              <span style={{ textAlign: "right", color: "var(--marginalia)" }}>
+                {b != null ? fmtNeg(b.engaged_hours) : NA}
+              </span>
+              <span style={{ textAlign: "right", color: "var(--marginalia)" }}>
+                {b != null ? fmtNeg(b.interruption_hours) : NA}
+              </span>
+              <span style={{ textAlign: "right", color: b != null && !dim ? "var(--brass)" : "var(--marginalia)" }}>
+                {b != null ? fmtNet(b.nar_hours) : NA}
+              </span>
+            </Fragment>
+          );
+        })}
       </div>
-      {/* Rows: Work / Life / Unallocated.
-          Bar track is proportional to each row's displaced hours, scaled
-          to the largest of the three. Empty track always drawn — absence is
-          legible, not invisible. Interruption is structurally zero for work
-          and life (all interruption lands in unallocated by construction). */}
-      {ALLOC_ROWS.map(({ label, key }) => {
-        const bucket = day.allocation?.[key] ?? null;
-        return (
-          <div key={key} className="grid items-center"
-            style={{ gridTemplateColumns: "1fr minmax(160px,300px) repeat(4,86px)", columnGap: 10, borderBottom: "1px solid var(--rule)", opacity: 0.75, minHeight: 21 }}>
-            <span className="font-sans italic" style={{ fontSize: 13 }}>{label}</span>
-            {/* bar track — faint container, brass fill proportional to displaced */}
-            <div style={{ height: 10, background: "var(--rule)", opacity: 0.18, borderRadius: 1, position: "relative", overflow: "hidden" }}>
-              {bucket != null && bucket.displaced_hours > 0 && (
-                <div style={{ position: "absolute", top: 0, left: 0, height: "100%",
-                  width: `${barWidths[key]}%`, background: "var(--brass)", opacity: 0.65, borderRadius: 1 }} />
-              )}
-            </div>
-            {[fh(bucket?.displaced_hours), fh(bucket?.engaged_hours),
-              fh(bucket?.interruption_hours), fh(bucket?.nar_hours)].map((v, ci) => (
-              <span key={ci} className="font-mono text-[14px] tabular-nums text-right" style={{ opacity: bucket != null ? 0.85 : 0.35 }}>{v}</span>
-            ))}
-          </div>
-        );
-      })}
-      {/* Reconciliation footnote: two honest measures of different scopes — not an error. */}
+      {/* Reconciliation footnote — per-session vs day-level clustering disagree by design */}
       {day.allocation_reconciliation != null && (
-        <p className="font-mono text-[10px] mt-2" style={{ color: "var(--marginalia)" }}>
+        <p style={{ fontFamily: "var(--font-mono)", fontSize: 9, color: "var(--marginalia)",
+          letterSpacing: "0.06em", marginTop: 7, lineHeight: 1.5 }}>
           Per-session attributed {formatHours(day.allocation_reconciliation.attributed_engaged_hours)} h engaged
           · day-level {formatHours(day.allocation_reconciliation.day_engaged_hours)} h
           · {formatHours(Math.abs(day.allocation_reconciliation.difference_hours))} h difference.
-          {" "}Per-session clustering and whole-day burst clustering measure different scopes and are not expected to match.
+          {" "}Per-session and whole-day burst clustering measure different scopes.
         </p>
       )}
 
       {/* ── 03 THE LEDGER ──────────────────────────────────────────────── */}
       <SL n="03" title="THE LEDGER" />
-      <p className="font-mono text-[10px] italic mb-3" style={{ color: "var(--marginalia)" }}>
-        {LEDGER_PER_ITEM_NOTE}
-      </p>
-      {/* Column headers */}
-      <div className="grid font-mono text-[11px] uppercase tracking-[0.1em] pb-1"
-        style={{ gridTemplateColumns: "1fr repeat(3,86px)", columnGap: 10, color: "var(--marginalia)", borderBottom: "1px solid var(--rule)" }}>
-        <span>WORK</span>
-        {(["DISPLACED","ENGAGED","NAR"] as const).map(c => (
-          <span key={c} className="text-right">{c}</span>
+      <div style={{ ...GRID03, marginTop: 10 }}>
+        {/* Column headers */}
+        <span style={hSty}>WORK</span>
+        <span style={{ ...hSty, textAlign: "right" }}>DISPLACED</span>
+        <span style={{ ...hSty, textAlign: "right", color: "var(--marginalia)" }}>ENGAGED</span>
+        <span style={{ ...hSty, textAlign: "right", color: "var(--brass)" }}>NAR</span>
+
+        {/* Groups: CONVERSATIONAL · EXPLICIT · AUTONOMOUS */}
+        {ledger.groups.map((grp) => (
+          <Fragment key={grp.name}>
+            {/* Group header row */}
+            <span style={gSty}>{grp.name}</span>
+            <span style={{ ...gSty, textAlign: "right" }}>{formatWholeMinutes(grp.subtotal_displaced_min)}</span>
+            <span style={{ ...gSty, textAlign: "right", color: "var(--marginalia)" }}>{fmtM(grp.subtotal_engaged_min)}</span>
+            <span style={{ ...gSty, textAlign: "right" }}>{fmtM(grp.subtotal_nar_min)}</span>
+            {/* Item rows */}
+            {grp.rows.length === 0
+              ? <span style={{ ...cSty, gridColumn: "1 / -1", color: "var(--marginalia)", fontSize: 10 }}>None.</span>
+              : grp.rows.map((row, i) => (
+                  <Fragment key={i}>
+                    <span style={cSty}>
+                      {row.label}
+                      {(row.count ?? 1) > 1 && (
+                        <span style={{ fontFamily: "var(--font-mono)", color: "var(--marginalia)",
+                          fontSize: 9, marginLeft: 6 }}>
+                          \xd7{row.count}
+                        </span>
+                      )}
+                    </span>
+                    <span style={{ ...cSty, textAlign: "right" }}>{formatWholeMinutes(row.displaced_min)}</span>
+                    <span style={{ ...cSty, textAlign: "right", color: "var(--marginalia)" }}>{fmtM(row.engaged_min)}</span>
+                    <span style={{ ...cSty, textAlign: "right", color: "var(--brass)" }}>{fmtM(row.nar_min)}</span>
+                  </Fragment>
+                ))}
+          </Fragment>
         ))}
-      </div>
-      {/* Groups: CONVERSATIONAL · EXPLICIT · AUTONOMOUS */}
-      {ledger.groups.map((grp) => (
-        <div key={grp.name}>
-          {/* Group header — brass ~8px mono caps; name + subtotals on same line */}
-          <div className="grid items-baseline" style={{ gridTemplateColumns: "1fr repeat(3,86px)", columnGap: 10, minHeight: 24, paddingTop: 4, paddingBottom: 4 }}>
-            <span className="font-mono text-[11px] uppercase tracking-[0.22em]" style={{ color: "var(--brass)" }}>{grp.name}</span>
-            <span className="font-mono text-[11px] tabular-nums text-right" style={{ color: "var(--brass)" }}>{formatWholeMinutes(grp.subtotal_displaced_min)}</span>
-            <span className="font-mono text-[11px] tabular-nums text-right" style={{ color: "var(--brass)" }}>{fmtM(grp.subtotal_engaged_min)}</span>
-            <span className="font-mono text-[11px] tabular-nums text-right" style={{ color: "var(--brass)" }}>{fmtM(grp.subtotal_nar_min)}</span>
-          </div>
-          {/* Item rows — 14px serif label, 14px mono numbers */}
-          {grp.rows.length === 0
-            ? <p className="font-mono text-[11px] opacity-35 pl-1 pb-1">None.</p>
-            : grp.rows.map((row, i) => (
-                <div key={i} className="grid items-baseline" style={{ gridTemplateColumns: "1fr repeat(3,86px)", columnGap: 10, minHeight: 24, paddingTop: 2, paddingBottom: 2 }}>
-                  <span className="font-sans" style={{ fontSize: 14 }}>
-                    {row.label}
-                    {(row.count ?? 1) > 1
-                      ? <span className="font-mono opacity-45 ml-1.5" style={{ fontSize: 11 }}>×{row.count}</span>
-                      : null}
-                  </span>
-                  <span className="font-mono tabular-nums text-right" style={{ fontSize: 14 }}>{formatWholeMinutes(row.displaced_min)}</span>
-                  <span className="font-mono tabular-nums text-right opacity-35" style={{ fontSize: 14 }}>{fmtM(row.engaged_min)}</span>
-                  <span className="font-mono tabular-nums text-right opacity-35" style={{ fontSize: 14 }}>{fmtM(row.nar_min)}</span>
-                </div>
-              ))}
-        </div>
-      ))}
-      {/* TOTAL rows — when some displacement is unmeasured, render two rows:
-           1. MEASURED — shows the scope that ENGAGED and NAR actually cover
-           2. TOTAL    — shows full displaced; ENGAGED/NAR show — (out of scope)
-           This prevents the reader from computing "DISPLACED − ENGAGED" and getting
-           a number different from NAR. When everything is measured, one row suffices. */}
-      {ledger.unmeasured_displaced_min > 0 ? (
-        <>
-          <div className="grid items-baseline mt-0.5" style={{ gridTemplateColumns: "1fr repeat(3,86px)", columnGap: 10, borderTop: "2px solid var(--rule)", minHeight: 24, paddingTop: 4, paddingBottom: 2 }}>
-            <span className="font-mono text-[11px] uppercase tracking-[0.22em]" style={{ color: "var(--brass)" }}>
-              MEASURED
-            </span>
-            <span className="font-mono text-[11px] tabular-nums text-right" style={{ color: "var(--brass)" }}>{formatWholeMinutes(ledger.measured_displaced_min)}</span>
-            <span className="font-mono text-[11px] tabular-nums text-right" style={{ color: "var(--brass)" }}>{fmtM(ledger.total_engaged_min)}</span>
-            <span className="font-mono text-[11px] tabular-nums text-right" style={{ color: "var(--brass)" }}>{fmtM(ledger.total_nar_min)}</span>
-          </div>
-          <div className="grid items-baseline" style={{ gridTemplateColumns: "1fr repeat(3,86px)", columnGap: 10, borderTop: "1px solid var(--rule)", minHeight: 24, paddingTop: 2, paddingBottom: 4 }}>
-            <span className="font-mono text-[11px] uppercase tracking-[0.22em]" style={{ color: "var(--brass)" }}>
+
+        {/* TOTAL / MEASURED+TOTAL rows — honesty: show the scope split when unmeasured exists */}
+        {ledger.unmeasured_displaced_min > 0 ? (
+          <>
+            <span style={{ ...tSty }}>MEASURED</span>
+            <span style={{ ...tSty, textAlign: "right" }}>{formatWholeMinutes(ledger.measured_displaced_min)}</span>
+            <span style={{ ...tSty, textAlign: "right", color: "var(--marginalia)" }}>{fmtM(ledger.total_engaged_min)}</span>
+            <span style={{ ...tSty, textAlign: "right" }}>{fmtM(ledger.total_nar_min)}</span>
+            {/* TOTAL row (second): full displaced, engaged/NAR out-of-scope */}
+            <span style={{ ...tSty, borderTop: "1px solid var(--brass)", marginTop: 2, fontSize: 9,
+              letterSpacing: "0.04em" }}>
               TOTAL
-              <span className="font-mono text-[10px] normal-case tracking-normal opacity-50 ml-1.5">
+              <span style={{ fontWeight: 700, fontSize: 8, letterSpacing: "0.08em",
+                color: "var(--marginalia)", marginLeft: 6 }}>
                 (+{formatWholeMinutes(ledger.unmeasured_displaced_min)} min no measurement)
               </span>
             </span>
-            <span className="font-mono text-[11px] tabular-nums text-right" style={{ color: "var(--brass)" }}>{formatWholeMinutes(ledger.total_displaced_min)}</span>
-            <span className="font-mono text-[11px] tabular-nums text-right opacity-35" style={{ color: "var(--brass)" }}>{NA}</span>
-            <span className="font-mono text-[11px] tabular-nums text-right opacity-35" style={{ color: "var(--brass)" }}>{NA}</span>
-          </div>
-        </>
-      ) : (
-        <div className="grid items-baseline mt-0.5" style={{ gridTemplateColumns: "1fr repeat(3,86px)", columnGap: 10, borderTop: "2px solid var(--rule)", minHeight: 24, paddingTop: 4, paddingBottom: 4 }}>
-          <span className="font-mono text-[11px] uppercase tracking-[0.22em]" style={{ color: "var(--brass)" }}>TOTAL</span>
-          <span className="font-mono text-[11px] tabular-nums text-right" style={{ color: "var(--brass)" }}>{formatWholeMinutes(ledger.total_displaced_min)}</span>
-          <span className="font-mono text-[11px] tabular-nums text-right" style={{ color: "var(--brass)" }}>{fmtM(ledger.total_engaged_min)}</span>
-          <span className="font-mono text-[11px] tabular-nums text-right" style={{ color: "var(--brass)" }}>{fmtM(ledger.total_nar_min)}</span>
-        </div>
-      )}
+            <span style={{ ...tSty, borderTop: "1px solid var(--brass)", marginTop: 2, textAlign: "right" }}>
+              {formatWholeMinutes(ledger.total_displaced_min)}
+            </span>
+            <span style={{ ...tSty, borderTop: "1px solid var(--brass)", marginTop: 2,
+              textAlign: "right", color: "var(--marginalia)" }}>{NA}</span>
+            <span style={{ ...tSty, borderTop: "1px solid var(--brass)", marginTop: 2,
+              textAlign: "right", color: "var(--marginalia)" }}>{NA}</span>
+          </>
+        ) : (
+          <>
+            <span style={tSty}>TOTAL</span>
+            <span style={{ ...tSty, textAlign: "right" }}>{formatWholeMinutes(ledger.total_displaced_min)}</span>
+            <span style={{ ...tSty, textAlign: "right", color: "var(--marginalia)" }}>{fmtM(ledger.total_engaged_min)}</span>
+            <span style={{ ...tSty, textAlign: "right" }}>{fmtM(ledger.total_nar_min)}</span>
+          </>
+        )}
+      </div>
+      {/* Honesty marker: name which classes carry no engagement measurement */}
+      <p style={{ fontFamily: "var(--font-mono)", fontSize: 8, letterSpacing: "0.1em",
+        color: "var(--marginalia)", marginTop: 7, lineHeight: 1.5 }}>
+        {LEDGER_PER_ITEM_NOTE}
+      </p>
 
-      {/* Unrated action classes — zero contribution, must not be omitted */}
+      {/* Unrated action classes — zero displaced contribution; must not be omitted */}
       {day.unrated.length > 0 && (
-        <div className="mt-6">
-          <p className="font-mono text-[10px] uppercase tracking-[0.22em] mb-1" style={{ color: "var(--marginalia)" }}>
+        <div style={{ marginTop: 22 }}>
+          <p style={{ fontFamily: "var(--font-mono)", fontSize: 8, fontWeight: 800,
+            letterSpacing: "0.22em", textTransform: "uppercase", color: "var(--marginalia)",
+            marginBottom: 6 }}>
             Unrated action classes — no rate established
           </p>
           {day.unrated.map((r) => (
-            <div key={r.action_class} className="flex justify-between items-baseline py-0.5">
-              <span className="font-mono text-[10px] opacity-55">{r.action_class}</span>
-              <span className="font-mono text-[10px] tabular-nums opacity-55">×{r.count}</span>
+            <div key={r.action_class}
+              style={{ display: "flex", justifyContent: "space-between", padding: "2px 0" }}>
+              <span style={{ fontFamily: "var(--font-mono)", fontSize: 9,
+                color: "var(--marginalia)" }}>{r.action_class}</span>
+              <span style={{ fontFamily: "var(--font-mono)", fontSize: 9,
+                color: "var(--marginalia)" }}>\xd7{r.count}</span>
             </div>
           ))}
         </div>
       )}
 
-      {/* Rate card — stay visible so every figure is recomputable by hand */}
+      {/* Rate card — every figure in the statement is recomputable from this */}
       {day.rates != null && (
-        <div className="mt-8 pt-4" style={{ borderTop: "1px solid var(--rule)" }}>
-          <p className="font-mono text-[10px] uppercase tracking-[0.22em] mb-1.5" style={{ color: "var(--marginalia)" }}>
+        <div style={{ marginTop: 22, paddingTop: 9, borderTop: `1px solid ${HAIR}` }}>
+          <p style={{ fontFamily: "var(--font-mono)", fontSize: 8, fontWeight: 800,
+            letterSpacing: "0.22em", textTransform: "uppercase",
+            color: "var(--marginalia)", marginBottom: 5 }}>
             Rate card in force
           </p>
-          <div className="flex flex-wrap gap-x-6 gap-y-0.5 font-mono text-[10px]" style={{ color: "var(--marginalia)" }}>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "0 24px",
+            fontFamily: "var(--font-mono)", fontSize: 9, color: "var(--marginalia)",
+            letterSpacing: "0.06em" }}>
             <span>Suppression {day.rates.suppression_minutes_per_item} min / item</span>
             <span>Interruption {day.rates.interruption_minutes} min</span>
             <span>S {day.rates.bucket_minutes.S} · M {day.rates.bucket_minutes.M} · L {day.rates.bucket_minutes.L} · XL {day.rates.bucket_minutes.XL} min</span>
@@ -352,21 +473,24 @@ function DayView({ day, recomp, running }: { day: AttentionDayViewModel; recomp(
         </div>
       )}
 
-      {/* FOOTER */}
-      <div className="flex justify-between items-center mt-10 pt-2" style={{ borderTop: "1px solid var(--rule)" }}>
-        <span className="font-mono text-[10px] uppercase tracking-[0.22em]" style={{ color: "var(--marginalia)" }}>
-          Alfred Black · Attention Statement · {day.date}
-        </span>
-        <span className="font-mono text-[10px] uppercase tracking-[0.22em]" style={{ color: "var(--marginalia)" }}>
-          Page 1 of 1
-        </span>
+      {/* Footer — matches the template's .foot */}
+      <div style={{ display: "flex", justifyContent: "space-between", marginTop: 40,
+        borderTop: `1px solid ${HAIR}`, paddingTop: 9,
+        fontFamily: "var(--font-mono)", fontWeight: 700, fontSize: 8,
+        letterSpacing: "0.22em", color: "var(--marginalia)" }}>
+        <span>ALFRED BLACK · ATTENTION STATEMENT · {day.date}</span>
+        <span>PAGE 1 OF 1</span>
       </div>
 
       <button type="button" onClick={recomp} disabled={running}
-        className="mt-6 font-mono text-[10px] uppercase tracking-[0.22em] border border-[var(--rule)] px-5 py-2 hover:border-[var(--brass)] disabled:opacity-30 transition-colors">
+        style={{ marginTop: 20, fontFamily: "var(--font-mono)", fontSize: 10,
+          textTransform: "uppercase", letterSpacing: "0.22em",
+          border: "1px solid var(--rule)", padding: "8px 20px",
+          color: "var(--ink)", background: "transparent",
+          cursor: running ? "not-allowed" : "pointer", opacity: running ? 0.3 : 1 }}>
         {running ? "Recomputing…" : "Recompute this day"}
       </button>
-    </>
+    </div>
   );
 }
 
@@ -762,28 +886,7 @@ export default function AttentionPage() {
     <Frame>
       <section className="mx-auto max-w-[900px] px-8 py-12">
 
-        {/* Day-tab statement letterhead — mark + wordmark once, date right.
-            Placed first so letterhead leads the document, controls follow (#1, #5). */}
-        {tab === "day" && (
-          <>
-            <div className="flex justify-between items-baseline mb-0">
-              <div className="flex items-center gap-2">
-                <img src={logoCurrentcolor} alt="" className="h-7 w-auto" />
-                <span className="font-mono text-[11px] uppercase tracking-[0.2em]" style={{ color: "var(--brass)" }}>Alfred Black</span>
-              </div>
-              <span className="font-mono text-[10px] uppercase tracking-[0.2em]" style={{ color: "var(--marginalia)" }}>
-                {formatHeaderDate(date)}
-              </span>
-            </div>
-            <div style={{ borderTop: "2px solid var(--brass)", marginTop: 6 }} />
-            <div style={{ borderTop: "1px solid var(--rule)", marginTop: 4, opacity: 0.45 }} />
-            <h2 className="font-display tracking-[-0.01em] mb-8" style={{ fontSize: 44, marginTop: 28 }}>
-              Attention Statement.
-            </h2>
-          </>
-        )}
-
-        {/* Page-level header — shown on range/trends tabs; day tab has its own statement header */}
+        {/* Page-level header — shown on range/trends tabs; day tab carries its own letterhead */}
         {tab === "range" && (
           <div className="mb-10">
             <p className="font-mono text-[10px] uppercase tracking-[0.32em] mb-3" style={{ color: "var(--marginalia)" }}>
@@ -829,7 +932,7 @@ export default function AttentionPage() {
         {tab === "day"
           ? dayQ.isLoading ? <p className="font-mono text-xs opacity-40">Loading…</p>
             : dayQ.error ? <p className="font-mono text-xs" style={{ color: "oklch(0.42 0.12 30)" }}>{String((dayQ.error as any)?.message ?? "Failed.")}</p>
-            : dayQ.data ? <DayView day={normalizeAttentionDay(dayQ.data)} recomp={handleRecompute} running={running} /> : null
+            : dayQ.data ? <DayView day={normalizeAttentionDay(dayQ.data)} date={date} recomp={handleRecompute} running={running} /> : null
           : tab === "range"
             ? statsQ.isLoading ? <p className="font-mono text-xs opacity-40">Loading…</p>
               : statsQ.error ? <p className="font-mono text-xs" style={{ color: "oklch(0.42 0.12 30)" }}>{String((statsQ.error as any)?.message ?? "Failed.")}</p>
