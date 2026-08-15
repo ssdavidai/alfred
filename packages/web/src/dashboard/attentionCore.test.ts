@@ -4,6 +4,8 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import {
   deriveUnratedRows, deriveInferredDisplay, deriveDisplacementGroups,
   isEmptyDay, formatHours, formatMinutes,
@@ -574,4 +576,25 @@ test("deriveLedger reads display_minutes from normalised items — never NaN", (
   assert.equal(conv.rows[1].displaced_min, 0, "blocked row credits zero");
   assert.equal(conv.subtotal_displaced_min, 60, "subtotal is the sum of displayed rows");
   assert.equal(l.total_displaced_min, 60);
+});
+
+// ─── JSX text is not a JS string (#584) ───────────────────────────────────────
+// The day-tab rebuild wrote `\xd7{row.count}` as JSX *text* intending the
+// multiplication sign. Escapes are not interpreted there, so the page rendered
+// the literal characters — "vigilance \xd724" instead of "vigilance ×24" — on
+// every collapsed row. It shipped green: no test reads the component's text, and
+// `wasp build` type-checks but does not evaluate JSX children.
+test("AttentionPage contains no un-evaluated backslash escapes in JSX text", () => {
+  const src = fs.readFileSync(
+    path.join(import.meta.dirname, "AttentionPage.tsx"), "utf8");
+  // Match a backslash escape that is NOT inside a quoted string on the same
+  // token — i.e. sitting bare in JSX children, where it renders literally.
+  const bare = src.split("\n")
+    .map((line, i) => ({ line, n: i + 1 }))
+    .filter(({ line }) => /(^|[>}\s])\\(x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4})/.test(line)
+                          && !/["'`]\\(x|u)/.test(line));
+  assert.deepEqual(
+    bare.map(b => `${b.n}: ${b.line.trim()}`), [],
+    "backslash escape in JSX text renders literally — wrap it as {\"\\u00d7\"}",
+  );
 });

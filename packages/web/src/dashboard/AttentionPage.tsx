@@ -384,7 +384,7 @@ function DayView({ day, date, recomp, running }: {
                       {(row.count ?? 1) > 1 && (
                         <span style={{ fontFamily: "var(--font-mono)", color: "var(--marginalia)",
                           fontSize: 9, marginLeft: 6 }}>
-                          \xd7{row.count}
+                          {"\u00d7"}{row.count}
                         </span>
                       )}
                     </span>
@@ -449,7 +449,7 @@ function DayView({ day, date, recomp, running }: {
               <span style={{ fontFamily: "var(--font-mono)", fontSize: 9,
                 color: "var(--marginalia)" }}>{r.action_class}</span>
               <span style={{ fontFamily: "var(--font-mono)", fontSize: 9,
-                color: "var(--marginalia)" }}>\xd7{r.count}</span>
+                color: "var(--marginalia)" }}>{"\u00d7"}{r.count}</span>
             </div>
           ))}
         </div>
