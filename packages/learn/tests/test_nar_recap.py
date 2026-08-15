@@ -117,13 +117,14 @@ class TestBucketConstants:
         assert SUPPRESSION_RATE_MINUTES == 0.5
 
     def test_human_sources_allowlist(self):
-        # cli is explicitly excluded by the method doc.
+        # cli is machine-authored (agent one-shots); explicitly excluded.
         assert "cli" not in HUMAN_SOURCES
         # api_server and cron are machine sources — must be absent.
         assert "api_server" not in HUMAN_SOURCES
         assert "cron" not in HUMAN_SOURCES
-        # At least one human source must be in the allowlist.
-        assert len(HUMAN_SOURCES) >= 1
+        # The two confirmed human sources must be present.
+        assert "slack" in HUMAN_SOURCES
+        assert "telegram" in HUMAN_SOURCES
 
 
 # ---------------------------------------------------------------------------
@@ -689,6 +690,62 @@ class TestGetHumanSessionsParentage:
         ])
         results = _get_human_sessions(db, self._day())
         assert results == []
+
+    def test_cli_session_excluded_by_query(self):
+        """cli sessions must not appear in the human-session results.
+
+        cli is machine-authored traffic — agent one-shots dispatched by cron or
+        subagents, not the principal at a keyboard.  Even with parent_session_id
+        IS NULL the source filter must reject them.
+        """
+        db = _make_session_db([
+            {"id": "s_cli", "source": "cli", "started_at": self._ts(10),
+             "ended_at": self._ts(10) + 30, "parent_session_id": None},
+        ])
+        results = _get_human_sessions(db, self._day())
+        assert results == [], (
+            "cli session with parent_session_id=NULL must be excluded by the "
+            "source allowlist — cli is machine traffic, not the principal typing"
+        )
+
+    def test_mixed_cli_and_slack_returns_only_slack(self):
+        """A day with both cli and slack sessions returns only the slack session.
+
+        This is the exact production pattern being fixed (#584): cli sessions
+        were inflating the recap by counting autonomous agent dispatches as
+        principal conversational work.
+        """
+        db = _make_session_db(
+            sessions=[
+                {"id": "s_slack", "source": "slack", "started_at": self._ts(10),
+                 "parent_session_id": None},
+                {"id": "s_cli_1", "source": "cli", "started_at": self._ts(9),
+                 "parent_session_id": None},
+                {"id": "s_cli_2", "source": "cli", "started_at": self._ts(11),
+                 "parent_session_id": None},
+            ],
+            messages=[
+                {"session_id": "s_slack", "role": "user", "content": "hello", "timestamp": self._ts(10) * 1000},
+                {"session_id": "s_cli_1", "role": "user",
+                 "content": "[Your active task list was preserved] - [>] gather...",
+                 "timestamp": self._ts(9) * 1000},
+                {"session_id": "s_cli_2", "role": "user",
+                 "content": "Use the vault read tool to read task/abc.md and return the body",
+                 "timestamp": self._ts(11) * 1000},
+            ],
+        )
+        results = _get_human_sessions(db, self._day())
+        assert len(results) == 1, (
+            f"expected 1 session (slack only), got {len(results)}: "
+            f"{[r['id'] for r in results]}"
+        )
+        assert results[0]["id"] == "s_slack"
+        assert results[0]["source"] == "slack"
+        # Verify the cli turn content is absent from the returned messages.
+        all_content = [m["content"] for r in results for m in r["messages"]]
+        assert not any("vault read tool" in c for c in all_content), (
+            "cli session message content must not appear in human-session results"
+        )
 
 
 # ---------------------------------------------------------------------------

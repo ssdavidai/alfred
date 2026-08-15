@@ -43,10 +43,25 @@ GAP_MS = 10 * 60 * 1000   # 10-minute gap ends a burst
 FLOOR_MS = 2 * 60 * 1000  # 2-minute floor per burst
 
 # Human session sources allowlist (§2 — never use a denylist).
-# `cli` is excluded per §2: "suspect and should be reviewed before being
-# trusted as human."  Add sources here only when we have evidence they
-# represent Sir typing, not a machine process.
-HUMAN_SOURCES: frozenset[str] = frozenset({"web", "telegram", "slack"})
+#
+# Each member must have evidence it represents the principal typing, not a
+# machine process.  Add a new source only when you can answer: "what human
+# authored these messages?"
+#
+#   web      — the Wasp dashboard chat surface; Sir types in the browser.
+#   slack    — the principal's own Slack account; text from Sir's keyboard.
+#   telegram — the principal's Telegram chat with Alfred; confirmed human-authored.
+#
+# Excluded sources (and why):
+#   cli  — inspected in production: first user turn reads like agent-authored
+#           one-shots ("gather…", "Use the vault read tool…").  177 cli sessions
+#           in June 2026, nearly all a single user turn, machine-dispatched.
+#           Any genuine cli work is already counted as autonomous artifact under
+#           §1c; crediting it here would double-count.
+#
+# Rule: if you cannot name the human who typed the session's first user turn,
+# the source does not belong here.
+HUMAN_SOURCES: frozenset[str] = frozenset({"web", "slack", "telegram"})
 
 # Path to the Hermes main profile session store.
 _DEFAULT_HERMES_CONFIG_DIR = "/hermes-state/profiles"
