@@ -248,22 +248,31 @@ class TestScheduleEntry:
 
 
 class TestWindowComputation:
-    """_window_for_grain must match the UI's sevenAgo()→now() default (#584)."""
+    """_window_for_grain must match the UI's thirteenWeeksAgo()→now() default.
+
+    AttentionPage.tsx line 32:
+        const thirteenWeeksAgo = () => {
+            const d = new Date(); d.setDate(d.getDate() - 91); ...
+        };
+        const [trendsFrom] = useState(thirteenWeeksAgo);  // today − 91 days
+        const [trendsTo]   = useState(now);
+
+    Grain changes period bucketing but NOT the window. Any grain maps to 91 days.
+    """
 
     def _w(self, ref: _dt.date) -> tuple[_dt.date, _dt.date]:
         from src.workflows.attention_trend_read import _window_for_grain
         return _window_for_grain("week", ref)
 
-    def test_week_shape_matches_seven_ago(self):
-        """from = ref − 6 (JS setDate(d.getDate()−6)), to = ref, span = 7 days."""
-        ref = _dt.date(2026, 8, 17)
+    def test_window_is_91_days_back(self):
+        """from = ref − 91 days (JS d.setDate(d.getDate() − 91)), to = ref."""
+        ref = _dt.date(2026, 8, 15)
         from_d, to_d = self._w(ref)
         assert to_d == ref
-        assert from_d == ref - _dt.timedelta(days=6)
-        assert (to_d - from_d).days + 1 == 7
+        assert from_d == ref - _dt.timedelta(days=91)
 
     def test_iso_serialisation(self):
-        """Dates are YYYY-MM-DD strings matching the UI's .toISOString().slice(0,10)."""
-        from_d, to_d = self._w(_dt.date(2026, 8, 10))
-        assert from_d.isoformat() == "2026-08-04"
-        assert to_d.isoformat() == "2026-08-10"
+        """from=2026-05-16 when ref=2026-08-15 (91-day JS arithmetic)."""
+        from_d, to_d = self._w(_dt.date(2026, 8, 15))
+        assert to_d.isoformat() == "2026-08-15"
+        assert from_d.isoformat() == "2026-05-16"

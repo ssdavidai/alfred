@@ -437,18 +437,19 @@ CALENDAR_SCHEDULES = [
         ),
     },
     {
-        # #584 — pre-compute the trailing-7-day attention trend so the
-        # Range tab on /attention is populated without a manual Recompute.
+        # #584 — pre-compute the weekly attention trend so the TRENDS tab
+        # on /attention shows a read without requiring the Generate button.
         #
-        # The UI's default window is sevenAgo()→now() (today − 6 days to
-        # today, computed at render time in AttentionPage.tsx), so the
-        # window cannot be encoded as a fixed string in the schedule.  The
-        # workflow derives from/to at run time; only the grain is passed.
+        # AttentionPage.tsx line 32/694:
+        #   const thirteenWeeksAgo = () => { d.setDate(d.getDate()-91) }
+        #   const [trendsFrom] = useState(thirteenWeeksAgo);   // today−91d
+        #   const [trendsTo]   = useState(now);
+        # The window is fixed at 91 days regardless of grain.  A hardcoded
+        # date in the schedule would be stale by next Monday, so only the
+        # grain is passed and the workflow derives from/to at run time.
         #
-        # Monday 04:00 LOCAL: nightly-maintenance (03:00) has settled and
-        # the morning briefing (05:00) hasn't fired yet, so a full week of
-        # fresh nar_entry data is ready when Sir opens /attention Monday
-        # morning.  day_of_week=1 is Monday (0=Sunday).
+        # Monday 04:00 LOCAL: nightly-maintenance (03:00) has settled, one
+        # hour before the morning briefing (05:00).  day_of_week=1=Monday.
         "id": "al-attention-trend-read",
         "workflow": "AttentionTrendReadWorkflow",
         "args": [{"grain": "week"}],
