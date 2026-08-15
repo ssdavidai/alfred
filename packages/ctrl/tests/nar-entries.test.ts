@@ -26,7 +26,7 @@ process.env.HERMES_CONFIG_DIR = path.join(tmp, "hermes-state");
 
 const { getStateDb } = await import("../src/db/state.js");
 const { registerStateRoutes } = await import("../src/api/routes/state.js");
-const { registerAttentionRoutes } = await import("../src/api/routes/attention.js");
+const { registerAttentionRoutes, HUMAN_SESSION_SOURCES } = await import("../src/api/routes/attention.js");
 const { matchRoute } = await import("../src/api/server.js");
 
 registerStateRoutes();
@@ -522,5 +522,98 @@ describe("GET /api/v1/attention/statement — interruption fallback (#580)", () 
     assert.strictEqual(p.interruption.count, 5,           "total = 2 + 3");
     assert.strictEqual(p.interruption.from_flag + p.interruption.from_source_kind,
                        p.interruption.count, "disclosure sub-counts must sum to total");
+  });
+});
+
+// ─── HUMAN_SESSION_SOURCES allowlist — cli removed (#584) ───────────────────
+// cli sessions are agent-driven one-shots, not principal attention.
+// These tests cover: (a) the constant shape; (b) cli-only day = zero engaged;
+// (c) mixed slack+cli day = only slack turns count.
+// The Hermes state.db fixture reuses the tmp dir from the parent_session_id
+// describe block above but in a fresh before() that re-creates the directory
+// (which that block's after() deletes).
+describe("HUMAN_SESSION_SOURCES allowlist — cli excluded (#584)", () => {
+  // Re-create the same hermes-state path that the parent_session_id block's
+  // after() cleaned up, so the route handler's fs.existsSync check passes.
+  const hsDir2 = path.join(tmp, "hermes-state");
+  const hsDbPath2 = path.join(hsDir2, "main", "state.db");
+
+  before(() => {
+    fs.mkdirSync(path.join(hsDir2, "main"), { recursive: true });
+    const hdb = new DatabaseSync(hsDbPath2);
+    hdb.exec(`
+      CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, parent_session_id TEXT);
+      CREATE TABLE messages (id TEXT PRIMARY KEY, session_id TEXT, role TEXT, timestamp REAL NOT NULL);
+    `);
+    hdb.close();
+  });
+
+  after(() => { fs.rmSync(hsDir2, { recursive: true, force: true }); });
+
+  beforeEach(() => {
+    db.prepare("DELETE FROM nar_entry").run();
+    const hdb = new DatabaseSync(hsDbPath2);
+    hdb.exec("DELETE FROM messages; DELETE FROM sessions;");
+    hdb.close();
+  });
+
+  it("constant contains slack and telegram and does NOT contain cli", () => {
+    assert.ok(
+      (HUMAN_SESSION_SOURCES as readonly string[]).includes("slack"),
+      "slack must be in HUMAN_SESSION_SOURCES",
+    );
+    assert.ok(
+      (HUMAN_SESSION_SOURCES as readonly string[]).includes("telegram"),
+      "telegram must be in HUMAN_SESSION_SOURCES",
+    );
+    assert.ok(
+      !(HUMAN_SESSION_SOURCES as readonly string[]).includes("cli"),
+      "cli must NOT be in HUMAN_SESSION_SOURCES — it is machine traffic",
+    );
+  });
+
+  it("cli-only sessions (parent IS NULL) yield zero engaged time", async () => {
+    const hdb = new DatabaseSync(hsDbPath2);
+    hdb.prepare("INSERT INTO sessions VALUES (?,?,?)").run("s-cli-1", "cli", null);
+    hdb.prepare("INSERT INTO messages VALUES (?,?,'user',?)").run(
+      "m-cli-1", "s-cli-1", new Date("2026-08-10T09:00:00Z").getTime() / 1000,
+    );
+    hdb.prepare("INSERT INTO sessions VALUES (?,?,?)").run("s-cli-2", "cli", null);
+    hdb.prepare("INSERT INTO messages VALUES (?,?,'user',?)").run(
+      "m-cli-2", "s-cli-2", new Date("2026-08-10T09:01:00Z").getTime() / 1000,
+    );
+    hdb.close();
+    const { p } = await getStatement("date=2026-08-10");
+    assert.strictEqual(p.engaged.hours, 0,
+      "cli sessions must not contribute to engaged — they are machine traffic");
+  });
+
+  it("mixed slack+cli day counts only the slack turns", async () => {
+    const hdb = new DatabaseSync(hsDbPath2);
+    // One human slack session.
+    hdb.prepare("INSERT INTO sessions VALUES (?,?,?)").run("s-slack-1", "slack", null);
+    hdb.prepare("INSERT INTO messages VALUES (?,?,'user',?)").run(
+      "m-slack-1", "s-slack-1", new Date("2026-08-11T10:00:00Z").getTime() / 1000,
+    );
+    // One agent cli session — same day.
+    hdb.prepare("INSERT INTO sessions VALUES (?,?,?)").run("s-cli-3", "cli", null);
+    hdb.prepare("INSERT INTO messages VALUES (?,?,'user',?)").run(
+      "m-cli-3", "s-cli-3", new Date("2026-08-11T10:30:00Z").getTime() / 1000,
+    );
+    hdb.close();
+    // The slack session contributes ≥ the 2-min floor; cli contributes 0.
+    // If cli were included the burst would be ~32 min; slack-only = 2 min floor.
+    const { p } = await getStatement("date=2026-08-11");
+    // The two timestamps are 30 min apart — two separate bursts if both counted.
+    // With cli excluded, only the slack turn remains → single burst at the floor.
+    assert.ok(p.engaged.hours > 0, "slack turn must be counted");
+    // 30-min gap > GAP_MS (10 min) → two bursts if both sources counted.
+    // Verify the cli turn did NOT add a second burst by checking hours < 2 × floor.
+    // floor = 2 min, so two bursts would yield ≥ 4 min = 0.0667 h.
+    // One burst (slack only) = 2 min = 0.0333 h.
+    assert.ok(
+      p.engaged.hours < 0.05,
+      `only the slack turn must be counted; expected < 0.05h but got ${p.engaged.hours}`,
+    );
   });
 });

@@ -48,6 +48,22 @@ import { dockerExec } from "../helpers.js";
 // right store.
 const ULID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/;
 
+// Human-authored Hermes session sources counted as principal attention in NAR.
+// Authorship rationale per docs/design/nar-method.md §2:
+//   slack    — messages arrive via the Slack channel integration; Sir typed them.
+//   telegram — messages arrive via the Telegram bot; Sir typed them.
+//   cli      — EXCLUDED: cli sessions are agent-driven one-shots (context-compressed
+//              task lists, vault reads, "gather…" instructions). Live data shows 177
+//              such sessions in June 2026, nearly all with a single user turn. Because
+//              clusterBursts applies a 2-minute floor per burst, isolated one-shot agent
+//              calls each became their own burst — inflating engaged by hours per month
+//              and pushing NAR down. Confirmed machine traffic; removed here.
+// Adding a new source requires confirming it is human-authored, not machine traffic.
+export const HUMAN_SESSION_SOURCES = ["slack", "telegram"] as const;
+
+// Precomputed IN-clause fragment — these are static string literals, safe to interpolate.
+const HUMAN_SOURCES_SQL = HUMAN_SESSION_SOURCES.map((s) => `'${s}'`).join(",");
+
 const NEEDS_ATTENTION_DIR = path.join(VAULT_PATH, "needs_attention");
 const EVENTS_DIR = path.join(VAULT_PATH, "event");
 
@@ -954,7 +970,7 @@ export function registerAttentionRoutes(): void {
         hsDb = new DatabaseSync(`file:${hsDbPath}?mode=ro`);
         hermesTs = (hsDb.prepare(
           `SELECT m.timestamp FROM messages m JOIN sessions s ON m.session_id=s.id
-           WHERE m.role='user' AND s.source IN ('slack','cli','telegram')
+           WHERE m.role='user' AND s.source IN (${HUMAN_SOURCES_SQL})
              AND s.parent_session_id IS NULL
              AND m.timestamp>=? AND m.timestamp<=?`,
         ).all(dayStartEp, dayEndEp) as Array<{ timestamp: number }>).map(r => r.timestamp);
