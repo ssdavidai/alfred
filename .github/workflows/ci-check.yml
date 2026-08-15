@@ -6,9 +6,12 @@
 #   * shellcheck         — scripts/bootstrap.sh
 #
 # Runs on every PR and on push to main. Does NOT build or deploy images
-# (that is the build-*.yml workflows' job). The Wasp web app is type-checked
-# by build-web.yml's `wasp build` — bare `tsc` cannot resolve the generated
-# `wasp/*` modules without Wasp codegen, so it is not checked here.
+# (that is the build-*.yml workflows' job). The Wasp web app is not checked
+# here — bare `tsc` cannot resolve the generated `wasp/*` modules without
+# Wasp codegen. It is type-checked on PRs by typecheck-web.yml, which runs
+# the real `wasp build`. Until #615 that check lived only in build-web.yml,
+# i.e. after the merge, so a type error could not be caught before it broke
+# main.
 name: ci-check
 
 on:

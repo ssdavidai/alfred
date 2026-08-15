@@ -1,0 +1,59 @@
+# Type-check the Wasp web app on pull requests.
+#
+# WHY THIS EXISTS (#615). `packages/web` had no type gate before merge. The
+# unit suites run under `tsx --test`, which STRIPS types rather than checking
+# them, so a file that cannot compile still reports every test green. The only
+# real type check was `wasp build` inside build-web.yml — and that runs on
+# PUSH TO MAIN, i.e. after the merge. The failure mode is therefore:
+#
+#   PR is green  →  merge  →  main goes red  →  no image is published
+#
+# which happened three times in one afternoon on a single feature (#584),
+# each time costing a build-and-deploy cycle and leaving main unable to ship.
+#
+# Bare `tsc --noEmit` is NOT a substitute: it cannot resolve the generated
+# `wasp/*` modules without Wasp codegen, which is exactly why ci-check.yml
+# skips web. `wasp build` is the only thing that type-checks this package, so
+# this workflow runs it — the same command, moved to where it can still
+# prevent the merge.
+#
+# It duplicates work build-web.yml does later. That is deliberate: a few
+# minutes of runner time per web PR is cheaper than a red main.
+#
+# To make this binding, add `typecheck-web` to the branch-protection required
+# checks for main. Without that it reports but does not block.
+name: typecheck-web
+
+on:
+  pull_request:
+    paths:
+      - "packages/web/**"
+      - ".github/workflows/typecheck-web.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: typecheck-web-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  typecheck-web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Wasp
+        # Keep this version pinned to the one build-web.yml uses. A drift here
+        # means the gate checks against a different compiler than the one that
+        # publishes the image, which would let the same class of error through.
+        run: curl -sSL https://get.wasp.sh/installer.sh | sh -s -- -v 0.19.0
+
+      - name: wasp build (type check)
+        working-directory: packages/web
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          wasp build
