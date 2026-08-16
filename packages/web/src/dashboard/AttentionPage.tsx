@@ -19,7 +19,7 @@ import {
   isReadGenerated, LOW_ENGAGEMENT_HOURS, trimEmptyEdgePeriods,
   READ_EMPTY_STATE_TEXT, POLL_GIVE_UP_MS, READ_POLL_PENDING_TEXT, READ_POLL_GAVE_UP_TEXT,
   f1, dir, deriveNarHeadline, deriveRatioHeadline,
-  deriveRatioPeak, deriveRatioLineSegmentsFromBars,
+  deriveRatioPeak, derivePeriodLabel, deriveRatioLineSegmentsFromBars,
   deriveReadHeadline, deriveReadPairData, deriveAllocationHeadline, deriveTrendsAllocTotals,
   type TrendsGrain, type AttentionTrendsResponse,
 } from "./attentionTrendsCore";
@@ -689,6 +689,10 @@ function TrendsView({ data, grain, setGrain, interpretingRead, onGenerateRead, r
   // against a week the engine itself refuses to price — W24 at 13.9x on 0.8h engaged.
   // peakValue null => deriveRatioHeadline omits the comparison clause entirely.
   const peak = deriveRatioPeak(ps, grain);
+  // The plot annotates the SAME peak the headline names, resolved from the chosen
+  // period — so the marker can never point at a week the sentence refuses to cite.
+  const peakIdx = peak ? ps.findIndex(pp => derivePeriodLabel(pp.key, grain) === peak.label) : -1;
+  const peakBar = peakIdx >= 0 ? rb[peakIdx] : undefined;
   const ratioHtml = deriveRatioHeadline({
     ratio: lastP.return_ratio, engaged: engNow,
     peakValue: peak?.value ?? null, peakMonth: peak?.label ?? "",
