@@ -397,6 +397,10 @@ test("AttentionPage computes the ratio peak via deriveRatioPeak, not inline", ()
     path.join(import.meta.dirname, "AttentionPage.tsx"), "utf8");
   assert.match(src, /deriveRatioPeak\(/,
     "AttentionPage must call deriveRatioPeak — an unfiltered inline peak reintroduces Bug 2");
-  assert.doesNotMatch(src, /const\s+peakIdx\s*=/,
-    "inline peakIdx computation is back; it does not apply the engagement floor");
+  // The defect was the unfiltered scan, not the identifier. peakIdx still exists —
+  // it is now derived FROM deriveRatioPeak's choice so the plot marker and the
+  // sentence name the same week. What must never come back is the reduce over all
+  // periods, which ignores the engagement floor.
+  assert.doesNotMatch(src, /rb\.reduce\(/,
+    "unfiltered peak scan over rb is back; it ignores the engagement floor");
 });
