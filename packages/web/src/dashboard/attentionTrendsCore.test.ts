@@ -11,7 +11,7 @@ import {
   isReadGenerated, BUCKET_KEYS, LOW_ENGAGEMENT_HOURS,
   trimEmptyEdgePeriods, READ_EMPTY_STATE_TEXT,
   POLL_GIVE_UP_MS, READ_POLL_PENDING_TEXT, READ_POLL_GAVE_UP_TEXT,
-  f1, dir, deriveNarHeadline, deriveRatioHeadline,
+  f1, dir, deriveNarHeadline, deriveRatioHeadline, deriveRatioPeak,
   deriveRatioLineSegmentsFromBars, deriveReadHeadline, deriveAllocationHeadline,
   type TrendsPeriod, type ReadHeadlineParams, type RatioBar,
 } from "./attentionTrendsCore";
@@ -320,4 +320,66 @@ test("allocation headline: unassigned > 25% → tail clause appended", () => {
   const s = deriveAllocationHeadline({ totalNar: 20, workFrac: 0.55, lifeFrac: 0.15, unassignedFrac: 0.30 });
   assert.ok(s.includes("still unassigned"), `tail clause expected, got: ${s}`);
   assert.ok(s.includes("30%"), `must include pct, got: ${s}`);
+});
+
+// ── Bug 1 — allocation sentence truth ─────────────────────────────────────────
+// Live home figures (91-day window): work 32% / life 20% / unassigned 48%.
+// Old code fell into else-clause → "mostly to life". Work was larger than life.
+
+test("allocation: unassigned leads (32/20/48) → names unassigned, NOT 'mostly to life'", () => {
+  // work=32%, life=20%, unassigned=48% — unassigned is the largest slice
+  const s = deriveAllocationHeadline({ totalNar: 176, workFrac: 0.32, lifeFrac: 0.20, unassignedFrac: 0.48 });
+  assert.ok(!s.includes("mostly to life"), `must not say 'mostly to life' when work > life, got: ${s}`);
+  assert.ok(s.includes("unassigned"), `must name unassigned as the leading slice, got: ${s}`);
+  assert.ok(s.includes("48%"), `must include the unassigned percentage, got: ${s}`);
+});
+test("allocation: work leads clearly (55/40/5) → 'mostly to work', not 'evenly'", () => {
+  // work 55% > life 40%, unassigned only 5% — work/life ratio 0.579, above 0.55 threshold
+  const s = deriveAllocationHeadline({ totalNar: 80, workFrac: 0.55, lifeFrac: 0.40, unassignedFrac: 0.05 });
+  assert.ok(s.includes("mostly to work"), `got: ${s}`);
+  assert.ok(!s.includes("evenly"), `should not say evenly when work clearly leads, got: ${s}`);
+});
+test("allocation: life leads (20/70/10) → 'mostly to life' is correct", () => {
+  const s = deriveAllocationHeadline({ totalNar: 60, workFrac: 0.20, lifeFrac: 0.70, unassignedFrac: 0.10 });
+  assert.ok(s.includes("mostly to life"), `got: ${s}`);
+});
+test("allocation: unassigned leads — tail clause NOT repeated separately", () => {
+  // When unassigned headlines, it must not also appear as a tail clause (double-mention)
+  const s = deriveAllocationHeadline({ totalNar: 100, workFrac: 0.25, lifeFrac: 0.15, unassignedFrac: 0.60 });
+  // "unassigned" appears once (in the headline clause), never twice
+  assert.equal((s.match(/unassigned/g) ?? []).length, 1, `unassigned must appear exactly once, got: ${s}`);
+});
+
+// ── Bug 2 — peak selection skips thin periods ─────────────────────────────────
+// Live: W24 had engaged=0.8h and ratio=13.9. The engine refuses to price weeks
+// with engaged < 1h, yet the old code used W24 as the benchmark comparison.
+
+test("deriveRatioPeak: skips W24 (0.8h < floor) and returns W22 (3.7h, ratio 4.4)", () => {
+  // W22: engaged=3.7h, ratio=4.4  W24: engaged=0.8h, ratio=13.9  W32: engaged=6.8h, ratio=3.6
+  const peak = deriveRatioPeak([W22, W24, W32], "week");
+  assert.ok(peak !== null, "a qualifying peak must be found");
+  assert.equal(peak!.value, 4.4, "W24 must be excluded; W22 (ratio 4.4) is the highest qualifying");
+  assert.equal(peak!.label, "W22");
+});
+test("deriveRatioPeak: all periods below floor → null (comparison clause omitted)", () => {
+  const thinOnly = mkP("2026-W01", 7, 10, 0.5, 9.5, 8.0); // engaged=0.5h < LOW_ENGAGEMENT_HOURS
+  assert.strictEqual(deriveRatioPeak([thinOnly], "week"), null);
+});
+test("deriveRatioPeak: null-safe on empty input", () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  assert.strictEqual(deriveRatioPeak(null as any, "week"), null);
+  assert.strictEqual(deriveRatioPeak([], "week"), null);
+});
+test("floor constants are identical — both rules use LOW_ENGAGEMENT_HOURS, not independent literals", () => {
+  // Pinning LOW_ENGAGEMENT_HOURS = 1 here makes a silent split of the constant a test failure.
+  // deriveRatioHeadline refuses at engaged < LOW_ENGAGEMENT_HOURS.
+  // deriveRatioPeak excludes periods with engaged_hours < LOW_ENGAGEMENT_HOURS.
+  assert.strictEqual(LOW_ENGAGEMENT_HOURS, 1,
+    "LOW_ENGAGEMENT_HOURS pinned; if you change the value, update both sites together");
+});
+test("deriveRatioHeadline: null peakValue → comparison clause omitted, sentence still grammatical", () => {
+  const s = deriveRatioHeadline({ ratio: 3.2, engaged: 4, peakValue: null, peakMonth: "", ratioSeries: [3.2] });
+  assert.ok(s !== null, "must return a string even with no peak");
+  assert.ok(!s!.includes("it bought"), `comparison clause must be absent when peak is null, got: ${s}`);
+  assert.ok(s!.includes("hours") && s!.includes("work"), `sentence must still be grammatical, got: ${s}`);
 });

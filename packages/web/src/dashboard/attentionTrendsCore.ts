@@ -217,14 +217,19 @@ export function deriveNarHeadline(p: NarHeadlineParams): string {
 
 export interface RatioHeadlineParams {
   ratio: number | null; engaged: number | null;
-  peakValue: number; peakMonth: string;
+  /** null when no qualifying period clears the engagement floor — see deriveRatioPeak.
+   *  NOTE: the design-system template omits this filter; re-syncing from it would reintroduce Bug 2. */
+  peakValue: number | null; peakMonth: string;
   ratioSeries: (number | null)[];
 }
 /** HTML string for the RETURN RATIO h2.
- *  Returns null when engaged is null — no ratio claimed. */
+ *  Returns null when engaged is null — no ratio claimed.
+ *  Uses LOW_ENGAGEMENT_HOURS for the refuse-to-price floor (same constant as deriveRatioPeak). */
 export function deriveRatioHeadline(p: RatioHeadlineParams): string | null {
   if (p.engaged == null) return null;
-  if (p.engaged < 1) return "Too little of your time was logged this week to price it.";
+  // Bug 2 fix: use the shared constant so the refuse-to-price floor and peak-selection
+  // floor are always identical. The design-system template had < 1 hardcoded.
+  if (p.engaged < LOW_ENGAGEMENT_HOURS) return "Too little of your time was logged this week to price it.";
   if (p.ratio == null) return "No engagement data this week — return ratio unavailable.";
   const rs = (p.ratioSeries ?? []).filter((v): v is number => v != null);
   let streak = 1;
@@ -232,10 +237,13 @@ export function deriveRatioHeadline(p: RatioHeadlineParams): string | null {
     if (rs[i - 1] > 0 && Math.abs(rs[i] - rs[i - 1]) / rs[i - 1] < 0.05) streak++;
     else break;
   }
-  if (p.ratio >= p.peakValue)
+  if (p.peakValue != null && p.ratio >= p.peakValue)
     return `An hour of you now buys <em>${f1(p.ratio)} hours</em> of work — the best yet.`;
   if (streak >= 3)
     return `An hour of you buys <em>${f1(p.ratio)} hours</em> of work — steady for ${streak} weeks.`;
+  // When no qualifying peak exists, the comparison clause is omitted — the first half stands alone.
+  if (p.peakValue == null)
+    return `An hour of you now buys <em>${f1(p.ratio)} hours</em> of work.`;
   return `An hour of you now buys <em>${f1(p.ratio)} hours</em> of work. In ${p.peakMonth} it bought ${f1(p.peakValue)}.`;
 }
 
@@ -252,6 +260,21 @@ export function deriveRatioLineSegmentsFromBars(bars: RatioBar[]): LineSegment[]
     }
   }
   return segs;
+}
+
+/** Peak return-ratio period from a qualifying set. */
+export interface RatioPeak { value: number; label: string }
+/** Select the peak ratio period, excluding any period below LOW_ENGAGEMENT_HOURS.
+ *  Reuses the same floor constant as the refuse-to-price rule in deriveRatioHeadline —
+ *  a single threshold governs both sites; do not introduce a second literal here.
+ *  Returns null when no period clears the floor (caller must omit the comparison clause). */
+export function deriveRatioPeak(periods: TrendsPeriod[], grain: TrendsGrain): RatioPeak | null {
+  const qualifying = (periods ?? []).filter(p =>
+    (p.engaged_hours ?? 0) >= LOW_ENGAGEMENT_HOURS && p.return_ratio != null
+  );
+  if (!qualifying.length) return null;
+  const peak = qualifying.reduce((best, p) => (p.return_ratio! > best.return_ratio!) ? p : best);
+  return { value: peak.return_ratio!, label: derivePeriodLabel(peak.key, grain) };
 }
 
 // Panel 3 — ALFRED'S READ
@@ -313,15 +336,36 @@ export interface AllocationHeadlineParams {
   totalNar: number; workFrac: number; lifeFrac: number; unassignedFrac: number;
 }
 /** HTML string for the ALLOCATION h2.
- *  Banded at 0.85/0.60/0.40; tail clause when unassigned > 25%. */
+ *  Bug 1 fix: the old else-clause assumed work+life ≈ 1, so a large unassigned slice
+ *  could flip the sentence to "mostly to life" even when work > life (live: 32/20/48%).
+ *  Fix: (a) when unassigned leads all three, name it as the honest headline;
+ *       (b) otherwise compare work vs life directly via each side's share of (work+life).
+ *  Tail clause for unassigned > 25% is suppressed when unassigned already leads the headline.
+ *  NOTE: the design-system template has the same bug; re-syncing from it reintroduces it. */
 export function deriveAllocationHeadline(p: AllocationHeadlineParams): string {
-  const phrase = p.workFrac >= 0.85 ? "almost entirely to work"
-    : p.workFrac >= 0.60 ? "mostly to work"
-    : p.workFrac >= 0.40 ? "to work and life evenly"
-    : "mostly to life";
-  const tail = p.unassignedFrac > 0.25
-    ? ` — ${Math.round(p.unassignedFrac * 100)}% still unassigned` : "";
-  return `<em>${f1(p.totalNar)} returned hours</em> have gone ${phrase}.${tail}`;
+  const { totalNar, workFrac, lifeFrac, unassignedFrac } = p;
+  // When unassigned is the largest slice, the work/life split is genuinely unknown.
+  if (unassignedFrac > workFrac && unassignedFrac > lifeFrac) {
+    const pct = Math.round(unassignedFrac * 100);
+    return `<em>${f1(totalNar)} returned hours</em> have gone across work and life — ${pct}% is still unassigned.`;
+  }
+  // Compare work vs life directly; apply bands on each side's share of (work+life).
+  const wlTotal = Math.max(workFrac + lifeFrac, 0.001);
+  let phrase: string;
+  if (workFrac >= lifeFrac) {
+    const wShare = workFrac / wlTotal;
+    phrase = wShare >= 0.85 ? "almost entirely to work"
+      : wShare >= 0.55 ? "mostly to work"
+      : "to work and life evenly";
+  } else {
+    const lShare = lifeFrac / wlTotal;
+    phrase = lShare >= 0.85 ? "almost entirely to life"
+      : lShare >= 0.55 ? "mostly to life"
+      : "to work and life evenly";
+  }
+  const tail = unassignedFrac > 0.25
+    ? ` — ${Math.round(unassignedFrac * 100)}% still unassigned` : "";
+  return `<em>${f1(totalNar)} returned hours</em> have gone ${phrase}.${tail}`;
 }
 
 /** Cumulative allocation totals across all periods in the window. */
