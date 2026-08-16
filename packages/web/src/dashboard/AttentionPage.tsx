@@ -18,7 +18,8 @@ import {
   deriveNarBars, deriveSeriesMax, deriveRatioBars, deriveBucketBars,
   isReadGenerated, LOW_ENGAGEMENT_HOURS, trimEmptyEdgePeriods,
   READ_EMPTY_STATE_TEXT, POLL_GIVE_UP_MS, READ_POLL_PENDING_TEXT, READ_POLL_GAVE_UP_TEXT,
-  f1, dir, deriveNarHeadline, deriveRatioHeadline, deriveRatioLineSegmentsFromBars,
+  f1, dir, deriveNarHeadline, deriveRatioHeadline,
+  deriveRatioPeak, deriveRatioLineSegmentsFromBars,
   deriveReadHeadline, deriveReadPairData, deriveAllocationHeadline, deriveTrendsAllocTotals,
   type TrendsGrain, type AttentionTrendsResponse,
 } from "./attentionTrendsCore";
@@ -683,13 +684,14 @@ function TrendsView({ data, grain, setGrain, interpretingRead, onGenerateRead, r
   const engNow = lastP.engaged_hours > 0 ? lastP.engaged_hours : null;
   const narHtml = deriveNarHeadline({ nar: lastP.nar_hours, engaged: engNow, displaced: lastP.displaced_hours });
 
-  const peakIdx = rb.reduce((bi, b, i) => (b.ratio ?? 0) > (rb[bi].ratio ?? 0) ? i : bi, 0);
-  const peakBar = rb[peakIdx];
-  const peakMonth = ps[peakIdx]?.start
-    ? new Date(ps[peakIdx].start).toLocaleString("en", { month: "short" }) : "";
+  // deriveRatioPeak excludes periods under LOW_ENGAGEMENT_HOURS. Computing the peak
+  // inline here (the previous code) reintroduced Bug 2: the headline benchmarked
+  // against a week the engine itself refuses to price — W24 at 13.9x on 0.8h engaged.
+  // peakValue null => deriveRatioHeadline omits the comparison clause entirely.
+  const peak = deriveRatioPeak(ps, grain);
   const ratioHtml = deriveRatioHeadline({
     ratio: lastP.return_ratio, engaged: engNow,
-    peakValue: peakBar?.ratio ?? 1, peakMonth,
+    peakValue: peak?.value ?? null, peakMonth: peak?.label ?? "",
     ratioSeries: rb.map(b => b.ratio),
   });
 
