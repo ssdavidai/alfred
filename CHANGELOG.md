@@ -89,7 +89,7 @@ update for a month. A second was in the config-sync list but no image rollout
 ever reached it. **The fleet is seven tenants; most of the tooling believed it
 was five.**
 
-- `.github/fleet-hosts.txt` is now the single list every fleet workflow reads.
+- the fleet list is now held in one place every fleet workflow reads.
 - `fleet-drift` runs daily and read-only, failing when a tenant has services
   down, a container in a restart loop, or images behind the registry — the three
   checks that found everything above.
@@ -793,7 +793,7 @@ principal could neither name nor manage from the dashboard — `main`
 (the isolated PR-author runtime). If Sir wanted a second persona — a
 `cratchit` bookkeeper, a `field-foreman` site lead, an evening reading
 companion — the only path was the same one Joe took on
-`joe.alfred.black`: ssh in, write a sibling container into
+`a client tenant`: ssh in, write a sibling container into
 `/opt/alfred/docker-compose.override.yaml` by hand, and live with the
 fact that `docker compose pull` could overwrite the persona file on
 the next image refresh. After this release the principal can spin up a
@@ -1049,7 +1049,7 @@ meeting bot's transcript, not just listen. The persona is locked: the
 bot speaks **as Alfred, never as the principal** — four guards
 enforce this from the prompt down through the Twilio Streams layer.
 
-**New fleet member: `rami.alfred.black`** provisioned to a fresh
+**New fleet member: `a client tenant`** provisioned to a fresh
 Hetzner cx53 in nbg1-dc3 (178.105.224.71) with the full 23/31 container
 stack healthy and all nine Let's Encrypt certs valid. Eight provider
 keys (Hetzner, Cloudflare Global API Key, OpenRouter, Composio, OpenAI,
@@ -1164,7 +1164,7 @@ the principal at runtime*. The lever exists.
   `bot.fatal`) (#172).
 
 **Operational**
-- `rami.alfred.black` fleet tenant — full provisioning landed on
+- `a client tenant` fleet tenant — full provisioning landed on
   Hetzner cx53 nbg1-dc3 IPv4 178.105.224.71, 9 Cloudflare A-records,
   all 9 LE certs valid, 23/31 healthy services.
 - 8 provider API keys lifted into `home.alfred.black` Vaultwarden
