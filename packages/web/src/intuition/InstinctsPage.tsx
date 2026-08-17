@@ -51,6 +51,7 @@ import {
   tierCaption,
   type Stage,
 } from "./instinctTierCore";
+import { observationProseFromRow } from "./instinctOpsCore";
 
 // The stage is read straight off `frontmatter.tier` (#447). The old
 // derivation — `classifyStage` / `earnedCeiling` / a local
@@ -159,34 +160,28 @@ function fmtRelativeDay(value: unknown): string {
 }
 
 function observationProse(o: any): string {
-  // Each observation carries a human-readable `fact` written by
-  // extract_observation_from_decision / extract_obs_from_signal. That
-  // is the line we want on the page — the body content
-  // ("Extracted from signal `signal/...`" boilerplate) is junk for the
-  // principal. Fall back through name → "—" only if the writer was
-  // broken when this record was created.
-  const fm = o?.frontmatter ?? {};
-  const fact = String(fm.fact ?? "").trim();
-  if (fact) return fact;
-  const name = String(fm.name ?? o?.name ?? "").trim();
-  if (name && !/^\d{4}-\d{2}-\d{2}T/.test(name)) return name;
-  return "—";
+  // Delegate to the testable core. State DB rows carry `summary`; legacy
+  // vault records carry `frontmatter.fact`. Returns "" (not "—") when the
+  // row has no text — ObservationRow uses this to suppress the row entirely.
+  return observationProseFromRow(o);
 }
 
 function ObservationRow({ obs }: { obs: any }) {
-  const fm = obs?.frontmatter ?? {};
-  const when = fmtRelativeDay(fm.created);
   const prose = observationProse(obs);
+  // Empty prose → render nothing. "A row whose text field is missing must
+  // render as nothing, not as `undefined` or an empty bullet." (#459)
+  if (!prose) return null;
+
+  // State DB rows: created_at / ts  (vault rows: frontmatter.created)
+  const fm = obs?.frontmatter ?? {};
+  const when = fmtRelativeDay(obs?.created_at ?? obs?.ts ?? fm.created);
+  // State DB rows: kind is the tag pill (pattern_proposal, signal, decision…)
+  // Vault rows: source_kind=decision → intent; else source_type.
+  const tag = obs?.kind
+    ?? (String(fm.source_kind ?? "") === "decision" && String(fm.intent ?? "").trim()
+        ? String(fm.intent ?? "").trim()
+        : String(fm.source_type ?? ""));
   const sender = String(fm.sender ?? "").trim();
-  const intent = String(fm.intent ?? "").trim();
-  // For decision-sourced observations, the intent IS the gesture
-  // ("delegate", "noise", etc.). For signal-sourced ones the gesture
-  // is "received" — already implied in the fact. Keep the metadata
-  // pill thin: source-type if signal, intent if decision.
-  const tag =
-    String(fm.source_kind ?? "") === "decision" && intent
-      ? intent
-      : String(fm.source_type ?? "");
   return (
     <li className="py-3 grid grid-cols-[100px_1fr_100px] gap-4 items-baseline">
       <span
@@ -247,7 +242,8 @@ export default function InstinctsPage() {
   });
 
   const instincts = (instinctsData?.items ?? []) as any[];
-  const observations = (observationsData?.results ?? []) as any[];
+  // State DB response: { observations: [...], results: [...] (alias), count, total }
+  const observations = ((observationsData as any)?.observations ?? []) as any[];
 
   const [open, setOpen] = useState<string | null>(null);
   const [toggling, setToggling] = useState(false);
@@ -296,13 +292,17 @@ export default function InstinctsPage() {
     }
   }
 
-  // Group observations by which instinct they reference. Observations
-  // carry frontmatter.instinct (path) when matched.
+  // Group observations by which instinct they reference.
+  // State DB rows: o.instinct_ref  (vault path like "instinct/foo-bar.md")
+  // Legacy vault rows: o.frontmatter.instinct or o.frontmatter.matched_instinct
   const observationsByInstinct = useMemo(() => {
     const map: Record<string, any[]> = {};
     for (const o of observations) {
       const ref = String(
-        o?.frontmatter?.instinct ?? o?.frontmatter?.matched_instinct ?? "",
+        o?.instinct_ref ??
+        o?.frontmatter?.instinct ??
+        o?.frontmatter?.matched_instinct ??
+        "",
       );
       if (!ref) continue;
       (map[ref] ??= []).push(o);
@@ -324,10 +324,10 @@ export default function InstinctsPage() {
               className="font-mono text-[10px] uppercase tracking-[0.28em]"
               style={{ color: "var(--brass)" }}
             >
-              Patterns
+              Instincts
             </div>
             <h1 className="font-display text-5xl tracking-tight">
-              Patterns Alfred has learned.
+              Instincts Alfred has formed.
             </h1>
           </div>
           <button
@@ -339,8 +339,8 @@ export default function InstinctsPage() {
             {toggling
               ? "…"
               : enabled
-                ? "Patterns: on"
-                : "Patterns: off"}
+                ? "Instincts: on"
+                : "Instincts: off"}
           </button>
         </div>
         <p

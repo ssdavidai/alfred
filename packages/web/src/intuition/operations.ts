@@ -12,6 +12,7 @@ import type {
   ResolveInstinctPromotion,
 } from "wasp/server/operations";
 import { getUserInstance, proxyToTenant } from "../server/tenantProxy";
+import { deriveInstinctSlug, OBSERVATION_PATH } from "./instinctOpsCore";
 
 export const getIntuitionStatus: GetIntuitionStatus<void, any> = async (_args, context) => {
   const instance = await getUserInstance(context);
@@ -45,20 +46,28 @@ export const disableIntuition: DisableIntuition<void, any> = async (_args, conte
 
 export const getObservations: GetObservations<void, any> = async (_args, context) => {
   const instance = await getUserInstance(context);
-  return proxyToTenant(instance, {
+  // Observations are a demoted type (§5.1) — they live in alfred-state.db,
+  // not in vault/observation/. The vault directory is empty on live tenants.
+  // Frozen contract (Lane I parallel): GET /api/v1/state/observations?instinct=<slug>&limit=20
+  const data = await proxyToTenant(instance, {
     method: "GET",
-    path: "/api/v1/vault/list/observation",
-    query: { limit: "10", sort: "date_desc" },
+    path: OBSERVATION_PATH,
+    query: { limit: "20" },
   });
+  // Normalise: add `results` alias so legacy callers (IntuitionPage) still
+  // find their array at data.results while InstinctsPage reads data.observations.
+  return { ...data, results: (data as any)?.observations ?? [] };
 };
 
 export const getRecentJudgments: GetRecentJudgments<void, any> = async (_args, context) => {
   const instance = await getUserInstance(context);
-  return proxyToTenant(instance, {
+  // Same demoted-type fix as getObservations — state DB, not the empty vault dir.
+  const data = await proxyToTenant(instance, {
     method: "GET",
-    path: "/api/v1/vault/list/observation",
-    query: { limit: "20", sort: "date_desc" },
+    path: OBSERVATION_PATH,
+    query: { limit: "20" },
   });
+  return { ...data, results: (data as any)?.observations ?? [] };
 };
 
 export const getSessions: GetSessions<void, any> = async (_args, context) => {
@@ -86,7 +95,10 @@ export const resolveInstinctPromotion: ResolveInstinctPromotion<
   any
 > = async (args, context) => {
   const instance = await getUserInstance(context);
-  const slug = args.path.split("/").pop() ?? args.path;
+  // deriveInstinctSlug strips the directory prefix AND the trailing ".md" so
+  // "instinct/close-stale-cards.md" → "close-stale-cards" rather than the
+  // double-extension "close-stale-cards.md" that caused 404s (#459).
+  const slug = deriveInstinctSlug(args.path);
   return proxyToTenant(instance, {
     method: "POST",
     path: `/api/v1/learning/instincts/${encodeURIComponent(slug)}/promotion`,
