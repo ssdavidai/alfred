@@ -413,6 +413,11 @@ services:
     environment:
       - HERMES_API_SERVER_KEY=${HERMES_API_SERVER_KEY}
       - HERMES_HOME=/hermes-state
+      # Opt a tenant out of the hermes-relay (:8767) + dashboard (:9119)
+      # block in supervisor.sh. Documented there as the per-tenant switch
+      # since it shipped, but never plumbed through compose — so setting it
+      # in .env silently did nothing (found 2026-08-17). Defaults on.
+      - HERMES_RELAY_ENABLED=${HERMES_RELAY_ENABLED:-true}
       - OPENCLAW_GATEWAY_TOKEN_FILE=/alfred-data/.gateway-token
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}

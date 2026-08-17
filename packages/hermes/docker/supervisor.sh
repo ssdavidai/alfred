@@ -968,12 +968,28 @@ while true; do
             RESTARTS["$name"]=$(( ${RESTARTS["$name"]:-0} + 1 ))
             log "process '$name' exited (code ${code}, restart #${RESTARTS[$name]})"
 
-            # Crash-loop guard: after 5 restarts in quick succession the
-            # process is broken — surface it by exiting so compose's
-            # restart policy / an operator can react, rather than spinning.
+            # Crash-loop guard. For a GATEWAY (hermes-*) a persistent crash
+            # loop means the tenant has no working runtime, so exit and let
+            # compose's restart policy / an operator react.
+            #
+            # For anything else (relay, dashboard) it must NOT be fatal: those
+            # are auxiliary, the gateways keep serving without them, and taking
+            # the container down over one is strictly worse than losing the
+            # feature. 2026-08-17: the 0.19 dashboard refuses to bind 0.0.0.0
+            # without an auth provider, exited on a ~10s cycle, hit this guard,
+            # and killed the whole container — on 4 of 6 tenants, ~5000 restarts
+            # each over 10 days, every cycle spamming a shutdown notice to the
+            # tenant's chat surface. The three gateways were healthy the entire
+            # time. Abandon the process instead and keep serving.
             if (( ${RESTARTS[$name]} > 20 )); then
-                log "FATAL: '$name' restarted >20 times — giving up, exiting container"
-                shutdown
+                if [[ "$name" == hermes-* ]]; then
+                    log "FATAL: gateway '$name' restarted >20 times — giving up, exiting container"
+                    shutdown
+                else
+                    log "WARN: auxiliary process '$name' restarted >20 times — abandoning it; gateways stay up"
+                    unset "PIDS[$name]"
+                    continue
+                fi
             fi
 
             sleep "$RESTART_DELAY"
