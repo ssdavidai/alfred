@@ -1,0 +1,102 @@
+# Ship a published GitHub release to the ENTIRE fleet.
+#
+# Why this exists
+# ---------------
+# Day-to-day image rollout is deliberately narrow: deploy-fleet ships only to
+# the canary (ALFRED_FLEET_HOSTS, default `home`) so a bad merge cannot reach a
+# client tenant by itself. Nothing then moved the rest of the fleet, so client
+# tenants only advanced when somebody rolled them by hand — which, as of
+# 2026-08-17, nobody had for long enough that four of them were ten days into a
+# restart loop and one was a month behind on everything.
+#
+# A tagged release is the deliberate act that was missing. Cutting one means
+# "this is good enough for clients", so that is when the fleet moves.
+#
+# Order is canary-then-fleet, not all-at-once:
+#   1. home deploys and is verified. If home fails, NOTHING else is touched.
+#   2. the remaining tenants deploy serially, each verified before the next.
+# One failing tenant does not abort the others at that point — a partial
+# rollout with a loud summary beats a fleet frozen halfway.
+#
+# Each tenant is verified with the same read-only check fleet-drift runs, so a
+# deploy that silently fails to converge is reported rather than assumed good.
+name: deploy-release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      hosts:
+        description: 'Comma-separated hosts (default: the whole fleet)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  hosts:
+    runs-on: ubuntu-latest
+    outputs:
+      canary: ${{ steps.read.outputs.canary }}
+      rest: ${{ steps.read.outputs.rest }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: read
+        run: |
+          set -euo pipefail
+          if [ -n "${{ github.event.inputs.hosts }}" ]; then
+            all=$(echo "${{ github.event.inputs.hosts }}" | tr ',' '\n' | sed 's/[[:space:]]//g' | grep -v '^$')
+          else
+            all=$(grep -vE '^[[:space:]]*(#|$)' .github/fleet-hosts.txt)
+          fi
+          canary=$(echo "$all" | grep -x home || true)
+          rest=$(echo "$all" | grep -vx home || true)
+          echo "canary=${canary}" >> "$GITHUB_OUTPUT"
+          echo "rest=$(echo "$rest" | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Release rollout"
+            echo "- canary: \`${canary:-<none>}\`"
+            echo "- then: \`$(echo "$rest" | tr '\n' ' ')\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  canary:
+    needs: hosts
+    if: needs.hosts.outputs.canary != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/fleet-ssh
+        with:
+          key: ${{ secrets.FLEET_SSH_KEY }}
+      - name: Deploy + verify the canary
+        run: .github/scripts/deploy-tenant.sh "${{ needs.hosts.outputs.canary }}.alfred.black"
+
+  fleet:
+    needs: [hosts, canary]
+    # Runs only if the canary was clean. If home cannot take the release,
+    # no client tenant should.
+    if: needs.hosts.outputs.rest != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/fleet-ssh
+        with:
+          key: ${{ secrets.FLEET_SSH_KEY }}
+      - name: Deploy + verify the rest, serially
+        run: |
+          set -uo pipefail
+          failed=""
+          for h in ${{ needs.hosts.outputs.rest }}; do
+            if .github/scripts/deploy-tenant.sh "${h}.alfred.black"; then
+              echo "  OK $h"
+            else
+              echo "  FAILED $h"; failed="$failed $h"
+            fi
+          done
+          if [ -n "$failed" ]; then
+            echo "### :x: failed:$failed" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "### :white_check_mark: whole fleet on the release" >> "$GITHUB_STEP_SUMMARY"

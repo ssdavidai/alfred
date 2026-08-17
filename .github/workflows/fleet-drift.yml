@@ -1,0 +1,91 @@
+# Detect fleet drift. REPORTS, never deploys.
+#
+# Why this exists
+# ---------------
+# Image rollout is deliberately narrow: deploy-fleet ships only to the canary
+# (ALFRED_FLEET_HOSTS, default `home`) so a bad merge cannot reach a client
+# tenant on its own. That is the right default. But narrow rollout with no
+# detection means every other tenant rots silently, and on 2026-08-17 we found
+# out how far it had gone:
+#
+#   * one tenant appeared in NO workflow and had received nothing for a month.
+#     Its compose still carried a caddy healthcheck removed weeks earlier,
+#     leaking one PID slot per probe.
+#   * another was in the config-sync list but no image rollout ever reached it.
+#   * four tenants had been restarting their hermes container every ~3 minutes
+#     for TEN DAYS — 4,600-5,700 restarts each — and nothing said a word.
+#
+# None of it was hard to find. Nothing was looking. This job looks, daily, and
+# fails loudly when a tenant has fallen behind; notify-telegram picks the
+# failure up, so drift reaches Sir instead of waiting to be stumbled over.
+#
+# Strictly read-only. Fixing drift stays a deliberate human act.
+name: fleet-drift
+
+on:
+  schedule:
+    - cron: '0 7 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  hosts:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.read.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: read
+        name: Read the canonical fleet list
+        run: |
+          set -euo pipefail
+          matrix=$(grep -vE '^[[:space:]]*(#|$)' .github/fleet-hosts.txt \
+                   | sed 's/$/.alfred.black/' | jq -R . | jq -sc .)
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "Fleet under check: \`$matrix\`" >> "$GITHUB_STEP_SUMMARY"
+
+  check:
+    needs: hosts
+    runs-on: ubuntu-latest
+    strategy:
+      # One drifted tenant must not hide the state of the others.
+      fail-fast: false
+      matrix:
+        tenant: ${{ fromJSON(needs.hosts.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/fleet-ssh
+        with:
+          key: ${{ secrets.FLEET_SSH_KEY }}
+
+      - name: Check ${{ matrix.tenant }}
+        run: |
+          set -uo pipefail
+          host='${{ matrix.tenant }}'
+
+          if ! ssh -o BatchMode=yes "$host" 'echo ok' >/dev/null 2>&1; then
+            echo "### :x: $host — UNREACHABLE" >> "$GITHUB_STEP_SUMMARY"
+            echo "$host unreachable" >&2
+            exit 1
+          fi
+
+          report=$(ssh -o BatchMode=yes "$host" 'bash -s' < .github/scripts/tenant-drift-check.sh 2>&1)
+          rc=$?
+
+          if [ "$rc" -eq 0 ]; then
+            echo "### :white_check_mark: $host — clean" >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "### :warning: $host — DRIFT"
+              echo '```'
+              echo "$report"
+              echo '```'
+              echo "Roll it with: \`ssh root@$host 'cd /opt/alfred && docker compose pull && docker compose up -d'\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          echo "$report"
+          exit "$rc"

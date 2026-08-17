@@ -48,28 +48,31 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # The tenant list lives in .github/fleet-hosts.txt — ONE list, read by every
+  # workflow that touches tenants. It used to be hard-coded here; cratchit was
+  # never added to it and silently received nothing for a month.
+  hosts:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.read.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: read
+        run: |
+          set -euo pipefail
+          matrix=$(grep -vE '^[[:space:]]*(#|$)' .github/fleet-hosts.txt \
+                   | sed 's/$/.alfred.black/' | jq -R . | jq -sc .)
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
   sync:
+    needs: hosts
     runs-on: ubuntu-latest
     strategy:
       # Don't abort the other tenants if one fails — partial rollout is
       # better than no rollout, and the summary makes the gap obvious.
       fail-fast: false
       matrix:
-        tenant:
-          - home.alfred.black
-          - rj.alfred.black
-          - joe.alfred.black
-          - zsolt.alfred.black
-          - miguel.alfred.black
-          - rami.alfred.black
-          # cratchit is its own VM, not a profile on joe (the `hermes-cratchit`
-          # container ON joe is a different thing). It was absent from every
-          # workflow until 2026-08-17, so it never received a compose, Caddyfile
-          # or .env.example update and silently fell behind on every merge —
-          # far enough that it was still running the caddy healthcheck #661
-          # removed, and its .env was missing TRUST_PROXY_HOPS, which crash-looped
-          # mcp-server the moment its images were brought current.
-          - cratchit.alfred.black
+        tenant: ${{ fromJSON(needs.hosts.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
 

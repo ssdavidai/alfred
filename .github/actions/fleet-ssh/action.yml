@@ -1,0 +1,38 @@
+# Write the fleet SSH key and a matching ssh_config. Used by every workflow
+# that reaches a tenant, so key handling lives in exactly one place.
+#
+# The key is an explicit input, not read from the caller's env: composite
+# actions do not reliably inherit the calling job's env into `${{ env.* }}`.
+name: fleet-ssh
+description: Configure SSH for alfred-black tenants
+inputs:
+  key:
+    description: Private half of ~/.ssh/alfred-black-verify (pass secrets.FLEET_SSH_KEY)
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        FLEET_SSH_KEY: ${{ inputs.key }}
+      run: |
+        set -euo pipefail
+        if [ -z "${FLEET_SSH_KEY:-}" ]; then
+          echo "FAIL: fleet-ssh needs the 'key' input (secrets.FLEET_SSH_KEY)." >&2
+          exit 1
+        fi
+        mkdir -p ~/.ssh
+        printf '%s\n' "$FLEET_SSH_KEY" > ~/.ssh/alfred-black-verify
+        chmod 600 ~/.ssh/alfred-black-verify
+        # accept-new rather than a pinned host key: tenant host keys rotate
+        # whenever a VM is reprovisioned.
+        {
+          echo "Host *.alfred.black"
+          echo "  User root"
+          echo "  IdentityFile ~/.ssh/alfred-black-verify"
+          echo "  IdentitiesOnly yes"
+          echo "  StrictHostKeyChecking accept-new"
+          echo "  ConnectTimeout 20"
+          echo "  ServerAliveInterval 15"
+        } > ~/.ssh/config
+        chmod 600 ~/.ssh/config
