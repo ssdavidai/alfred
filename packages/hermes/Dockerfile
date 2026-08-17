@@ -188,6 +188,23 @@ RUN pip install --no-cache-dir \
         "boto3==1.42.89" \
     && python3 -c "import faster_whisper, playwright, segno, fitz, pytesseract, docx, openpyxl, boto3; print('extra relay/voice/doc deps OK')"
 
+# -----------------------------------------------------------------------------
+# SVG rasterisation + ElevenLabs TTS. Same story as the block above: these were
+# hand-`pip install`ed on home (into /root/.local, so `--force-recreate` would
+# have silently dropped them) and never baked. Two shipped things import them:
+#   cairosvg ..... hermes-agent's own tools/vision_tools.py
+#   elevenlabs ... the shipped alfred-channel-delivery skill's voice-note path
+# Without these a fresh deploy ships the skill and the tool but not the import,
+# so both fail at first use rather than at build time. libcairo is already in
+# the base layer (verified: `ldconfig -p | grep libcairo` → 2 entries), so this
+# is pip-only. Pinned to the versions home runs.
+RUN pip install --no-cache-dir \
+        "cairosvg==2.9.0" "cairocffi==1.7.1" "cffi==2.1.1" "pycparser==3.0" \
+        "cssselect2==0.9.0" "tinycss2==1.5.1" "webencodings==0.6.1" \
+        "defusedxml==0.7.1" \
+        "elevenlabs==1.59.0" \
+    && python3 -c "import cairosvg, cairocffi, cssselect2, tinycss2, defusedxml, elevenlabs; print('svg/tts deps OK')"
+
 # =============================================================================
 # (removed 2026-08-05) The HTML-attachment patch (patch_upstream_hermes.py) is
 # obsolete as of Hermes 0.19.0: upstream now ships .html/.htm in base.py's

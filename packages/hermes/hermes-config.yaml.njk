@@ -869,8 +869,11 @@ context:
 # =============================================================================
 display:
   compact: false
-  tool_progress: {% if is_main %}all{% else %}new{% endif %}
+  # 'off' must stay quoted: bare `off` is a YAML boolean, not the string.
+  # main shows the final answer only (no tool-call stream); background
+  # profiles keep `new` so their progress is still greppable in logs.
+  tool_progress: {% if is_main %}'off'{% else %}new{% endif %}
 
-  interim_assistant_messages: {% if is_main %}true{% else %}false{% endif %}
+  interim_assistant_messages: false
 
   streaming: true
