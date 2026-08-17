@@ -37,7 +37,7 @@ export interface PendingRow {
    * The local mirror of Composio's connection status. Historically the
    * reconciler only looked at rows whose status was already `ACTIVE`, but
    * the inbound webhook can silently fail to flip the row from `INITIATED`
-   * (see the joe.alfred.black incident, 2026-05-27 — Gmail sat at
+   * (see the client-tenant incident, 2026-05-27 — Gmail sat at
    * INITIATED for 36 minutes while Composio reported ACTIVE). The
    * reconciler now picks up `INITIATED` rows too and resolves their
    * status from Composio's API as ground truth.
@@ -223,7 +223,7 @@ export async function reconcileOne(
  * predicate against the same fake-row inputs.
  *
  * - `status in {ACTIVE, INITIATED}` — ACTIVE is the common case; INITIATED
- *   covers the joe.alfred.black incident where the inbound webhook failed
+ *   covers the client-tenant incident where the inbound webhook failed
  *   to flip the row and Composio's API was the only source of truth.
  *   `reconcileOne` consults Composio for INITIATED rows and lifts them
  *   in-band before continuing to auto-config.

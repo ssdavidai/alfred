@@ -285,7 +285,7 @@ const VOICE_ALLOWED_MCP_TOOLS = new Set<string>([
  * shape `getMcpToolDefs()` uses; same dispatch path (`dispatchMcp` via
  * `isMcpToolName`).
  *
- * External servers wired via `MCP_EXTERNAL_SERVERS` (e.g. joe.alfred.black's
+ * External servers wired via `MCP_EXTERNAL_SERVERS` (e.g. a client tenant's
  * `cdsk` Contractor's Desk) are passed through unfiltered — voice surfaces a
  * tenant-specific external server in full, because the tenant chose to wire
  * it specifically for voice use cases. Built-in servers (the 6 standard apps)

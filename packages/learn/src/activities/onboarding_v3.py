@@ -1032,7 +1032,7 @@ BEHAVIORAL ANALYSIS (pre-computed from email metadata — use as ground truth):
     # wall-time of the loop exceeds ``start_to_close_timeout`` (15 min).
     # Pre-fix, ``onboard["facts"]`` was persisted ONLY after the full
     # loop, so any of these failure modes discarded ALL chunks' work
-    # on the activity-level retry. On miguel.alfred.black 2026-05-27,
+    # on the activity-level retry. On a client tenant 2026-05-27,
     # 4 chunks at ~8 min each blew the 15-min budget after chunk 2 and
     # every retry restarted from chunk 0 with no progress.
     #

@@ -21,7 +21,7 @@ tuned the schedule or command), it is preserved verbatim. Any OTHER operator
 cron job is preserved. `cron.wrap_response` is set to false only if the key is
 absent (these profiles have no channel consumer).
 
-Motivating regression (2026-06-19): zsolt.alfred.black workers state.db = 111 G
+Motivating regression (2026-06-19): a client tenant workers state.db = 111 G
 and sessions/ = 140 G across 312,875 files filled the host disk to 100% and
 took the whole tenant down. The bloat is fleet-wide (joe state.db 52 G, rj
 59 G, rami sessions 37 G/92 k files, home 19 G/54 k files); nothing prunes

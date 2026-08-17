@@ -346,7 +346,7 @@ gateway; `notify_principal` bridges ephemeral agents → main message tool.
   profile does NOT use the SQLite SessionStore for transcripts: it writes one
   `sessions/session_*.json` (+ `request_dump_*.json` on tool error) file per run
   AND an unbounded `state.db`, and nothing pruned either. The exact "verify under
-  load" failure landed: `zsolt.alfred.black` hit 100% disk (workers state.db
+  load" failure landed: `a client tenant` hit 100% disk (workers state.db
   111G, sessions/ 140G across 312,875 files) and took the whole tenant down
   (docker exec failed → all healthchecks unhealthy → sure-web 500). Fleet-wide:
   joe state.db 52G, rj 59G, rami sessions 37G/92k files, home 19G/54k files.

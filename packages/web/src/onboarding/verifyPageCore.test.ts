@@ -4,7 +4,7 @@
  * The wedge being fixed: /verify polled `getOnboardingProgress` every 8s
  * and gated its "loading" message on whether key_identity_facts was empty.
  * When extract_facts_opus degraded (e.g. a 402 credit dip during fact
- * extraction on miguel.alfred.black on 2026-05-27), key_identity_facts
+ * extraction on a client tenant on 2026-05-27), key_identity_facts
  * stayed empty FOREVER and the page sat on
  * "A moment — Alfred is sorting his observations."
  *
@@ -50,7 +50,7 @@ test("non-zero facts BEFORE settle (early hydrate) → list", () => {
 });
 
 test("awaiting_verification + 0 facts → empty (the wedge fix)", () => {
-  // Live miguel.alfred.black state on 2026-05-27 18:00Z:
+  // Live client-tenant state on 2026-05-27 18:00Z:
   //   stage=awaiting_verification, key_identity_facts=[]
   // The old code showed "Alfred is sorting his observations" forever.
   const state = verifyViewState({

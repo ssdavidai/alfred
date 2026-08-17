@@ -4,7 +4,7 @@ Signal extraction routes the entire inbound stream through one synthetic
 ``matter_path="signal-extract"``. Before this fix the per_matter_per_day
 noise-control cap (50) applied to it, throttling ALL extraction fleet-wide to
 50 LLM calls/day and then pinning at 50/50 (deferred events re-list every tick
-and re-burn the window) — observed live on miguel.alfred.black (2026-07-03):
+and re-burn the window) — observed live on a client tenant (2026-07-03):
 ``signal_extract.done listed=200 extracted=100 written=0 errors=100`` with
 ``cap per_matter_per_day hit (50/50)`` and ZERO real provider 429s.
 

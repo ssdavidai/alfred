@@ -276,7 +276,7 @@ test("buildPendingRowsWhere: status filter accepts both ACTIVE and INITIATED", (
   assert.ok(where.status.in.includes("ACTIVE"), "ACTIVE must remain in the filter");
   assert.ok(
     where.status.in.includes("INITIATED"),
-    "INITIATED must be in the filter so the safety net picks up rows where the webhook never fired (joe.alfred.black, 2026-05-27)",
+    "INITIATED must be in the filter so the safety net picks up rows where the webhook never fired (a client tenant, 2026-05-27)",
   );
 });
 
@@ -297,7 +297,7 @@ test("buildPendingRowsWhere: error rows must be older than the backoff window", 
 // ---------------------------------------------------------------------------
 // INITIATED → ACTIVE safety net
 //
-// Regression coverage for the joe.alfred.black incident (2026-05-27): the
+// Regression coverage for the client-tenant incident (2026-05-27): the
 // inbound Composio webhook failed to flip the local row from INITIATED to
 // ACTIVE for 36 minutes while Composio's API was reporting ACTIVE the whole
 // time. The reconciler now consults Composio directly for INITIATED rows

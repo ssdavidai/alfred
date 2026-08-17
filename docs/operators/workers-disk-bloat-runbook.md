@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-19
 **Severity:** S1 (single-VM, no HA — a full disk takes the whole tenant down)
-**Trigger tenant:** `zsolt.alfred.black` (disk 100%, all healthchecks unhealthy,
+**Trigger tenant:** `a client tenant` (disk 100%, all healthchecks unhealthy,
 sure-web 500). Stopgap already applied on zsolt (curator disabled + restart +
 cleanup); zsolt is now healthy (state.db 57M, sessions/ 211M).
 

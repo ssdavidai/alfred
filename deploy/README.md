@@ -9,17 +9,15 @@ this directory is for cross-tenant ops.
 The known live tenants as of 2026-05-29 (each is a single-VM, single-tenant
 deployment — no shared infrastructure):
 
-| Hostname               | Principal       |
-| ---------------------- | --------------- |
-| `home.alfred.black`    | Sir (operator)  |
-| `rj.alfred.black`      | RJ              |
-| `joe.alfred.black`     | Joe             |
-| `zsolt.alfred.black`   | Zsolt           |
-| `miguel.alfred.black`  | Miguel          |
+The fleet roster — hostnames and who each tenant belongs to — is deliberately
+NOT in this repository. This repo is public and a tenant hostname identifies a
+client. The canonical list lives in the `ALFRED_FLEET_HOSTS` repo secret; every
+workflow that touches tenants reads it from there and refers to tenants by
+index in any output.
 
-These are hard-coded in two places that must stay in sync:
+The list is held in one place:
 
-- `.github/workflows/deploy-compose.yml` (matrix)
+- the `ALFRED_FLEET_HOSTS` repo secret
 - `Makefile` (`FLEET` variable, `sync-compose-fleet` target)
 
 When a tenant is added or retired, update both. There is no tenant directory
@@ -58,7 +56,7 @@ local edit without rolling main:
 make sync-compose-fleet
 
 # A single tenant:
-make FLEET="zsolt.alfred.black" sync-compose-fleet
+make FLEET="a client tenant" sync-compose-fleet
 
 # Override the SSH key:
 make SSH_KEY=~/.ssh/id_ed25519 sync-compose-fleet

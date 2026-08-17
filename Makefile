@@ -111,10 +111,13 @@ config:
 #
 # Example:
 #   make sync-compose-fleet
-#   make FLEET="zsolt.alfred.black" sync-compose-fleet
+#   make FLEET="<host>" sync-compose-fleet
 #   make SSH_KEY=~/.ssh/id_ed25519 sync-compose-fleet
 
-FLEET   ?= home.alfred.black rj.alfred.black joe.alfred.black zsolt.alfred.black miguel.alfred.black
+# The fleet roster is deliberately NOT tracked here: this repo is public and a
+# tenant hostname identifies a client. The canonical list is the
+# ALFRED_FLEET_HOSTS repo secret. Pass FLEET explicitly for a local run.
+FLEET   ?=
 SSH_KEY ?= $(HOME)/.ssh/alfred-black-verify
 
 .PHONY: sync-compose-fleet

@@ -192,7 +192,7 @@ cron:
 # debug dumps on, a `sessions/request_dump_*.json`), and appends to the
 # profile's `state.db`. Nothing prunes either, so they grow without bound.
 #
-# Live evidence (2026-06-19): zsolt.alfred.black workers state.db = 111 G and
+# Live evidence (2026-06-19): a client tenant workers state.db = 111 G and
 # sessions/ = 140 G across 312,875 files filled the disk to 100% and took the
 # whole tenant down. joe state.db 52 G, rj 59 G, rami sessions 37 G/92 k files,
 # home sessions 19 G/54 k files — the bloat is fleet-wide.

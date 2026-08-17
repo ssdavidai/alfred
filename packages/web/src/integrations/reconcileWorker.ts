@@ -26,7 +26,7 @@
  *   idempotent — re-running it on a `configured` row is a no-op (filtered
  *   out by the autoConfigState predicate).
  *
- *   Webhook safety net (joe.alfred.black, 2026-05-27): for INITIATED rows
+ *   Webhook safety net (client tenant, 2026-05-27): for INITIATED rows
  *   the reconciler ALSO queries Composio's API directly. If Composio
  *   reports the connection as ACTIVE, the reconciler flips the local row
  *   in-band and continues with auto-config exactly as it would after a
@@ -82,7 +82,7 @@ export async function reconcileComposioAutoConfigJob(
   }
   // Pull rows that need auto-config. `buildPendingRowsWhere` includes both
   // ACTIVE rows and INITIATED rows — the latter so `reconcileOne` can
-  // catch the joe.alfred.black case where the inbound webhook never flipped
+  // catch the client-tenant case where the inbound webhook never flipped
   // the local row and Composio's API was the only source of truth.
   // Errored rows wait out the ERROR_BACKOFF_MS window via lastSyncedAt;
   // pending rows go through immediately.

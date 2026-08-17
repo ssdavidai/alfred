@@ -3,7 +3,7 @@
 //
 // The incident this fixes
 // -----------------------
-// On joe.alfred.black (2026-05-27) Composio finished authenticating Gmail
+// On a client tenant (2026-05-27) Composio finished authenticating Gmail
 // on their side, but our local ComposioConnection row stuck at status=
 // INITIATED for ~36 minutes. The existing 1-minute reconciler
 // (`reconcileComposioAutoConfigJob` → `buildPendingRowsWhere`, web side)

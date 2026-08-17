@@ -72,7 +72,7 @@ export const config = {
   mcpApprovalSecret: optional("MCP_APPROVAL_SECRET", ""),
 
   // OPTIONAL external MCP servers, beyond the 6 baked-in mcp-server apps.
-  // Used for tenant-specific surfaces — e.g. joe.alfred.black wires in a
+  // Used for tenant-specific surfaces — e.g. a client tenant wires in a
   // 7th server `cdsk` (Contractor's Desk) at https://joe.ngrok.pizza/mcp/mcp.
   // Format: comma-separated `name=url` pairs; optional `=bearer` if the
   // external server needs an Authorization header.
