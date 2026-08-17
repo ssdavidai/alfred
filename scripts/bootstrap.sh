@@ -263,10 +263,13 @@ if [[ -f "${WATCHDOG_SRC}" ]]; then
 	install -m 0755 "${WATCHDOG_SRC}" /usr/local/bin/alfred-watchdog 2>/dev/null || true
 	if command -v crontab >/dev/null 2>&1; then
 		# Idempotent: drop any previous line, re-add exactly one.
-		{ crontab -l 2>/dev/null | grep -v 'alfred-watchdog' || true; \
-		  echo '*/5 * * * * /usr/local/bin/alfred-watchdog >/dev/null 2>&1'; } | crontab - 2>/dev/null \
-		  && green "Installed alfred-watchdog cron (every 5 min)." \
-		  || red "Could not install alfred-watchdog cron — add it by hand."
+		if { crontab -l 2>/dev/null | grep -v 'alfred-watchdog' || true; \
+		     echo '*/5 * * * * /usr/local/bin/alfred-watchdog >/dev/null 2>&1'; } \
+		     | crontab - 2>/dev/null; then
+			green "Installed alfred-watchdog cron (every 5 min)."
+		else
+			red "Could not install alfred-watchdog cron — add it by hand."
+		fi
 	fi
 fi
 
