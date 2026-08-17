@@ -151,6 +151,7 @@ AUTO_SECRETS=(
 	SURE_API_KEY
 	PAPERCLIP_BETTER_AUTH_SECRET
 	PAPERCLIP_HEARTBEAT_SECRET
+	VOICE_BRIDGE_INTERNAL_TOKEN
 	# PAPERCLIP_API_KEY is NOT auto-generated — Paperclip's better-auth
 	# issues API keys through its own UI flow (signup → settings → keys),
 	# and the value must be one Paperclip itself recognises. Leave the
@@ -217,6 +218,27 @@ if [[ -z "${existing_uid}" || "${existing_uid}" == "default" ]]; then
 fi
 
 green "Auto-secrets: ${GENERATED} generated, ${KEPT} kept (already set)."
+
+# ── TRUST_PROXY_HOPS ────────────────────────────────────────────────
+# Not a secret — the number of reverse proxies in front of mcp-server, used
+# to pick the right client IP out of X-Forwarded-For. mcp-server REFUSES TO
+# START in production without it (`TRUST_PROXY_HOPS must be set in
+# production`), so an unset value is not a soft default: it is a crash loop
+# on a fresh deploy. Found 2026-08-17 on a tenant that had never been through
+# this script. The stack puts exactly one proxy in front — Caddy — so 1 is
+# correct for every standard deploy; raise it only if you front Caddy with
+# another proxy or a CDN that appends its own hop.
+existing_hops="$(trim "$(env_get TRUST_PROXY_HOPS)")"
+if [[ -z "${existing_hops}" ]]; then
+	if grep -qE "^#?TRUST_PROXY_HOPS=" "${ENV_FILE}" 2>/dev/null; then
+		tmp="$(mktemp)"
+		awk '$0 ~ "^#?TRUST_PROXY_HOPS=" && !d { print "TRUST_PROXY_HOPS=1"; d=1; next } { print }' "${ENV_FILE}" > "${tmp}"
+		mv "${tmp}" "${ENV_FILE}"
+	else
+		printf 'TRUST_PROXY_HOPS=1\n' >> "${ENV_FILE}"
+	fi
+	green "Set TRUST_PROXY_HOPS=1 (one proxy in front: Caddy)."
+fi
 
 # ── 4. TAILSCALE_HOSTNAME_PREFIX (issue #109 PR 1) ──────────────────
 # The Tailscale sidecar runs only with `--profile tailscale` and is OFF on
