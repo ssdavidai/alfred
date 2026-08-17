@@ -36,42 +36,53 @@ permissions:
   contents: read
 
 jobs:
+  # The fleet list lives in the ALFRED_FLEET_HOSTS repo secret, never in a
+  # tracked file: this repository is public and tenant hostnames identify
+  # clients. Index 0 is the canary; everything after it is the rest of the
+  # fleet. Nothing here emits a hostname.
   hosts:
     runs-on: ubuntu-latest
     outputs:
-      canary: ${{ steps.read.outputs.canary }}
+      count: ${{ steps.read.outputs.count }}
       rest: ${{ steps.read.outputs.rest }}
     steps:
-      - uses: actions/checkout@v4
       - id: read
+        env:
+          FLEET_HOSTS: ${{ secrets.ALFRED_FLEET_HOSTS }}
         run: |
           set -euo pipefail
-          if [ -n "${{ github.event.inputs.hosts }}" ]; then
-            all=$(echo "${{ github.event.inputs.hosts }}" | tr ',' '\n' | sed 's/[[:space:]]//g' | grep -v '^$')
-          else
-            all=$(grep -vE '^[[:space:]]*(#|$)' .github/fleet-hosts.txt)
+          n=$(printf '%s\n' "$FLEET_HOSTS" | grep -cE '[^[:space:]]' || true)
+          if [ "${n:-0}" -lt 1 ]; then
+            echo "FAIL: ALFRED_FLEET_HOSTS is empty or unset." >&2
+            exit 1
           fi
-          canary=$(echo "$all" | grep -x home || true)
-          rest=$(echo "$all" | grep -vx home || true)
-          echo "canary=${canary}" >> "$GITHUB_OUTPUT"
-          echo "rest=$(echo "$rest" | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
+          echo "count=$n" >> "$GITHUB_OUTPUT"
+          if [ "$n" -gt 1 ]; then
+            rest=$(seq 1 $((n - 1)) | tr '\n' ' ')
+          else
+            rest=""
+          fi
+          echo "rest=$rest" >> "$GITHUB_OUTPUT"
           {
             echo "## Release rollout"
-            echo "- canary: \`${canary:-<none>}\`"
-            echo "- then: \`$(echo "$rest" | tr '\n' ' ')\`"
+            echo "- canary: tenant #0"
+            echo "- then: $((n - 1)) further tenant(s)"
           } >> "$GITHUB_STEP_SUMMARY"
 
   canary:
     needs: hosts
-    if: needs.hosts.outputs.canary != ''
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/fleet-host
+        with:
+          hosts: ${{ secrets.ALFRED_FLEET_HOSTS }}
+          index: 0
       - uses: ./.github/actions/fleet-ssh
         with:
           key: ${{ secrets.FLEET_SSH_KEY }}
       - name: Deploy + verify the canary
-        run: .github/scripts/deploy-tenant.sh "${{ needs.hosts.outputs.canary }}.alfred.black"
+        run: .github/scripts/deploy-tenant.sh "$HOST" "0"
 
   fleet:
     needs: [hosts, canary]
@@ -85,14 +96,19 @@ jobs:
         with:
           key: ${{ secrets.FLEET_SSH_KEY }}
       - name: Deploy + verify the rest, serially
+        env:
+          FLEET_HOSTS: ${{ secrets.ALFRED_FLEET_HOSTS }}
         run: |
           set -uo pipefail
+          list=$(printf '%s\n' "$FLEET_HOSTS" | grep -E '[^[:space:]]')
           failed=""
-          for h in ${{ needs.hosts.outputs.rest }}; do
-            if .github/scripts/deploy-tenant.sh "${h}.alfred.black"; then
-              echo "  OK $h"
+          for i in ${{ needs.hosts.outputs.rest }}; do
+            h=$(printf '%s\n' "$list" | sed -n "$((i + 1))p")
+            echo "::add-mask::$h"
+            if .github/scripts/deploy-tenant.sh "$h" "$i"; then
+              echo "  OK tenant #$i"
             else
-              echo "  FAILED $h"; failed="$failed $h"
+              echo "  FAILED tenant #$i"; failed="$failed #$i"
             fi
           done
           if [ -n "$failed" ]; then

@@ -64,7 +64,7 @@ jobs:
           echo "Add a section to the PR body with verbatim smoke output."
           echo "Minimum shape:"
           echo "  ## Smoke evidence"
-          echo "  Tested on home.alfred.black at <UTC>."
+          echo "  Tested on the dev tenant at <UTC>."
           echo "  \`\`\`"
           echo "  §1 baseline: …"
           echo "  §2 mutation: …"

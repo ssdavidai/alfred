@@ -31,20 +31,27 @@ permissions:
   contents: read
 
 jobs:
+  # The fleet list lives in the ALFRED_FLEET_HOSTS repo secret, never in a
+  # tracked file: this repository is public and tenant hostnames identify
+  # clients. Jobs fan out over indices so no hostname reaches a job name.
   hosts:
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ steps.read.outputs.matrix }}
+      indices: ${{ steps.read.outputs.indices }}
     steps:
-      - uses: actions/checkout@v4
       - id: read
-        name: Read the canonical fleet list
+        env:
+          FLEET_HOSTS: ${{ secrets.ALFRED_FLEET_HOSTS }}
         run: |
           set -euo pipefail
-          matrix=$(grep -vE '^[[:space:]]*(#|$)' .github/fleet-hosts.txt \
-                   | sed 's/$/.alfred.black/' | jq -R . | jq -sc .)
-          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
-          echo "Fleet under check: \`$matrix\`" >> "$GITHUB_STEP_SUMMARY"
+          n=$(printf '%s\n' "$FLEET_HOSTS" | grep -cE '[^[:space:]]' || true)
+          if [ "${n:-0}" -lt 1 ]; then
+            echo "FAIL: ALFRED_FLEET_HOSTS is empty or unset." >&2
+            exit 1
+          fi
+          indices=$(seq 0 $((n - 1)) | jq -R 'tonumber' | jq -sc .)
+          echo "indices=$indices" >> "$GITHUB_OUTPUT"
+          echo "Fleet: ${n} tenants" >> "$GITHUB_STEP_SUMMARY"
 
   check:
     needs: hosts
@@ -53,22 +60,27 @@ jobs:
       # One drifted tenant must not hide the state of the others.
       fail-fast: false
       matrix:
-        tenant: ${{ fromJSON(needs.hosts.outputs.matrix) }}
+        index: ${{ fromJSON(needs.hosts.outputs.indices) }}
     steps:
       - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/fleet-host
+        with:
+          hosts: ${{ secrets.ALFRED_FLEET_HOSTS }}
+          index: ${{ matrix.index }}
 
       - uses: ./.github/actions/fleet-ssh
         with:
           key: ${{ secrets.FLEET_SSH_KEY }}
 
-      - name: Check ${{ matrix.tenant }}
+      - name: Check tenant #${{ matrix.index }}
         run: |
           set -uo pipefail
-          host='${{ matrix.tenant }}'
+          host="$HOST"
 
           if ! ssh -o BatchMode=yes "$host" 'echo ok' >/dev/null 2>&1; then
-            echo "### :x: $host — UNREACHABLE" >> "$GITHUB_STEP_SUMMARY"
-            echo "$host unreachable" >&2
+            echo "### :x: tenant #${{ matrix.index }} — UNREACHABLE" >> "$GITHUB_STEP_SUMMARY"
+            echo "tenant #${{ matrix.index }} unreachable" >&2
             exit 1
           fi
 
@@ -76,14 +88,14 @@ jobs:
           rc=$?
 
           if [ "$rc" -eq 0 ]; then
-            echo "### :white_check_mark: $host — clean" >> "$GITHUB_STEP_SUMMARY"
+            echo "### :white_check_mark: tenant #${{ matrix.index }} — clean" >> "$GITHUB_STEP_SUMMARY"
           else
             {
-              echo "### :warning: $host — DRIFT"
+              echo "### :warning: tenant #${{ matrix.index }} — DRIFT"
               echo '```'
               echo "$report"
               echo '```'
-              echo "Roll it with: \`ssh root@$host 'cd /opt/alfred && docker compose pull && docker compose up -d'\`"
+              echo "Resolve the host from the ALFRED_FLEET_HOSTS secret, then: \`docker compose pull && docker compose up -d\`"
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 

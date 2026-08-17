@@ -1,0 +1,49 @@
+# Resolve one tenant hostname from the ALFRED_FLEET_HOSTS secret by index,
+# and register it for log masking.
+#
+# Why by index: a matrix value becomes the job's display name, and this
+# repository is public — a matrix over hostnames would publish the fleet in
+# every run's job list. Jobs fan out over 0..N-1 instead and resolve their own
+# host here. `::add-mask::` then means an accidental echo prints ***.
+#
+# Tenant hostnames must never appear in a log, a job name, a step summary, or
+# a tracked file.
+name: fleet-host
+description: Resolve a tenant host from the fleet secret, masked
+inputs:
+  hosts:
+    description: Newline-separated fleet list (pass secrets.ALFRED_FLEET_HOSTS)
+    required: true
+  index:
+    description: Zero-based index into the list
+    required: true
+outputs:
+  count:
+    description: Number of hosts in the list
+    value: ${{ steps.pick.outputs.count }}
+runs:
+  using: composite
+  steps:
+    - id: pick
+      shell: bash
+      env:
+        FLEET_HOSTS: ${{ inputs.hosts }}
+        IDX: ${{ inputs.index }}
+      run: |
+        set -euo pipefail
+        if [ -z "${FLEET_HOSTS:-}" ]; then
+          echo "FAIL: ALFRED_FLEET_HOSTS is empty or unset." >&2
+          exit 1
+        fi
+        list=$(printf '%s\n' "$FLEET_HOSTS" | grep -E '[^[:space:]]' || true)
+        count=$(printf '%s\n' "$list" | wc -l | tr -d ' ')
+        host=$(printf '%s\n' "$list" | sed -n "$((IDX + 1))p")
+        if [ -z "$host" ]; then
+          echo "FAIL: no host at index ${IDX} (list has ${count})." >&2
+          exit 1
+        fi
+        # Mask before the value can reach any later log line.
+        echo "::add-mask::$host"
+        echo "HOST=$host" >> "$GITHUB_ENV"
+        echo "count=$count" >> "$GITHUB_OUTPUT"
+        echo "Resolved tenant #${IDX} of ${count}"

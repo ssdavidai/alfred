@@ -37,7 +37,7 @@ on:
         required: false
       hosts:
         description: 'Comma-separated hosts (default: full fleet)'
-        default: 'home,rj,joe,zsolt,miguel,rami'
+        default: ''   # empty = the workflow's own default host
         required: false
 
 permissions:

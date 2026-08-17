@@ -13,7 +13,7 @@
 # Consequence: any PR that adds a new service (e.g. #121, which added the
 # `tailscale` profile) ships its image but never reaches a tenant — the
 # service literally isn't in the compose file on disk. Live evidence from
-# 2026-05-29 on home.alfred.black: `/opt/alfred/docker-compose.yaml` was
+# 2026-05-29 on the dev tenant: `/opt/alfred/docker-compose.yaml` was
 # dated May 28 and `docker compose --profile tailscale config --services`
 # returned nothing because the service block was missing.
 #
@@ -38,9 +38,9 @@ on:
   workflow_dispatch:
     inputs:
       tenants:
-        description: "Comma-separated tenant hostnames (default: all 6)"
+        description: "Unused — the fleet comes from the ALFRED_FLEET_HOSTS secret"
         required: false
-        default: "home.alfred.black,rj.alfred.black,joe.alfred.black,zsolt.alfred.black,miguel.alfred.black,rami.alfred.black"
+        default: ""
 
 concurrency:
   # Serialise per-branch so two pushes don't race on the same tenant.
@@ -48,21 +48,27 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # The tenant list lives in .github/fleet-hosts.txt — ONE list, read by every
-  # workflow that touches tenants. It used to be hard-coded here; cratchit was
-  # never added to it and silently received nothing for a month.
+  # The fleet list lives in the ALFRED_FLEET_HOSTS repo secret, never in a
+  # tracked file: this repository is public and tenant hostnames identify
+  # clients. Jobs fan out over indices so no hostname reaches a job name.
   hosts:
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ steps.read.outputs.matrix }}
+      indices: ${{ steps.read.outputs.indices }}
     steps:
-      - uses: actions/checkout@v4
       - id: read
+        env:
+          FLEET_HOSTS: ${{ secrets.ALFRED_FLEET_HOSTS }}
         run: |
           set -euo pipefail
-          matrix=$(grep -vE '^[[:space:]]*(#|$)' .github/fleet-hosts.txt \
-                   | sed 's/$/.alfred.black/' | jq -R . | jq -sc .)
-          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          n=$(printf '%s\n' "$FLEET_HOSTS" | grep -cE '[^[:space:]]' || true)
+          if [ "${n:-0}" -lt 1 ]; then
+            echo "FAIL: ALFRED_FLEET_HOSTS is empty or unset." >&2
+            exit 1
+          fi
+          indices=$(seq 0 $((n - 1)) | jq -R 'tonumber' | jq -sc .)
+          echo "indices=$indices" >> "$GITHUB_OUTPUT"
+          echo "Fleet: ${n} tenants" >> "$GITHUB_STEP_SUMMARY"
 
   sync:
     needs: hosts
@@ -72,9 +78,14 @@ jobs:
       # better than no rollout, and the summary makes the gap obvious.
       fail-fast: false
       matrix:
-        tenant: ${{ fromJSON(needs.hosts.outputs.matrix) }}
+        index: ${{ fromJSON(needs.hosts.outputs.indices) }}
     steps:
       - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/fleet-host
+        with:
+          hosts: ${{ secrets.ALFRED_FLEET_HOSTS }}
+          index: ${{ matrix.index }}
 
       - name: Configure SSH
         # The FLEET_SSH_KEY secret holds the private half of
@@ -113,7 +124,7 @@ jobs:
         id: preflight
         run: |
           set -euo pipefail
-          host='${{ matrix.tenant }}'
+          host="$HOST"
           if ssh -o BatchMode=yes "${host}" 'echo ok' >/dev/null 2>&1; then
             echo "reachable=true" >> "$GITHUB_OUTPUT"
           else
@@ -127,7 +138,7 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          host='${{ matrix.tenant }}'
+          host="$HOST"
           short_sha="${SHA:0:12}"
 
           # 1. Back up the existing copies so a bad deploy is one `mv` away.
@@ -164,7 +175,7 @@ jobs:
         if: steps.preflight.outputs.reachable == 'true'
         run: |
           set -euo pipefail
-          host='${{ matrix.tenant }}'
+          host="$HOST"
           # Compose is idempotent — only services whose hash changed restart.
           # The `name: alfred-black` at the top of docker-compose.yaml sets
           # the project name, but we pass -p explicitly for clarity and so
@@ -185,7 +196,7 @@ jobs:
         # connections.
         run: |
           set -euo pipefail
-          host='${{ matrix.tenant }}'
+          host="$HOST"
           ssh "${host}" '
             cd /opt/alfred
             if docker compose -p alfred-black ps caddy --status running --quiet | grep -q .; then
@@ -200,7 +211,7 @@ jobs:
         env:
           SHA: ${{ github.sha }}
         run: |
-          host='${{ matrix.tenant }}'
+          host="$HOST"
           short_sha="${SHA:0:12}"
           {
             echo "### ${host}"
