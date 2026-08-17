@@ -62,6 +62,14 @@ jobs:
           - zsolt.alfred.black
           - miguel.alfred.black
           - rami.alfred.black
+          # cratchit is its own VM, not a profile on joe (the `hermes-cratchit`
+          # container ON joe is a different thing). It was absent from every
+          # workflow until 2026-08-17, so it never received a compose, Caddyfile
+          # or .env.example update and silently fell behind on every merge —
+          # far enough that it was still running the caddy healthcheck #661
+          # removed, and its .env was missing TRUST_PROXY_HOPS, which crash-looped
+          # mcp-server the moment its images were brought current.
+          - cratchit.alfred.black
     steps:
       - uses: actions/checkout@v4
 
