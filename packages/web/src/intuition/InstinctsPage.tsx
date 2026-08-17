@@ -27,7 +27,7 @@
 // The discretion bar is still shown — as progress toward the next
 // promotion, not as the thing that names the stage.
 // (`deprecated` still collapses the row out of the index.)
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import {
   useQuery,
   getIntuitionInstincts,
@@ -236,14 +236,7 @@ export default function InstinctsPage() {
     undefined,
     { refetchInterval: 60_000, retry: false },
   );
-  const { data: observationsData } = useQuery(getObservations, undefined, {
-    refetchInterval: 60_000,
-    retry: false,
-  });
-
   const instincts = (instinctsData?.items ?? []) as any[];
-  // State DB response: { observations: [...], results: [...] (alias), count, total }
-  const observations = ((observationsData as any)?.observations ?? []) as any[];
 
   const [open, setOpen] = useState<string | null>(null);
   const [toggling, setToggling] = useState(false);
@@ -292,23 +285,16 @@ export default function InstinctsPage() {
     }
   }
 
-  // Group observations by which instinct they reference.
-  // State DB rows: o.instinct_ref  (vault path like "instinct/foo-bar.md")
-  // Legacy vault rows: o.frontmatter.instinct or o.frontmatter.matched_instinct
-  const observationsByInstinct = useMemo(() => {
-    const map: Record<string, any[]> = {};
-    for (const o of observations) {
-      const ref = String(
-        o?.instinct_ref ??
-        o?.frontmatter?.instinct ??
-        o?.frontmatter?.matched_instinct ??
-        "",
-      );
-      if (!ref) continue;
-      (map[ref] ??= []).push(o);
-    }
-    return map;
-  }, [observations]);
+  // Fetch observations for the currently expanded instinct card (#584).
+  // Fires once per open; ?instinct=<path> filters ctrl-api to that
+  // instinct_ref so the panel shows the full per-instinct slice, not a
+  // truncated global top-20 that may not include older rows.
+  const { data: openObsData } = useQuery(
+    getObservations,
+    { instinct: open ?? "" },
+    { retry: false, enabled: !!open },
+  );
+  const openObs = ((openObsData as any)?.observations ?? []) as any[];
 
   const visible = instincts.filter((i: any) => {
     const status = String(i?.status ?? i?.frontmatter?.status ?? "");
@@ -364,7 +350,7 @@ export default function InstinctsPage() {
             {visible.map((p) => {
               const path = String(p?.path ?? p?.id ?? p?.name ?? "");
               const isOpen = open === path;
-              const obs = observationsByInstinct[path] ?? [];
+              const obs = isOpen ? openObs : [];
               // Two distinct counts deliberately separated:
               //
               //   firedCount  — actual firings the runtime has recorded

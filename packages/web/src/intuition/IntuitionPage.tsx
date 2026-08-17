@@ -68,7 +68,7 @@ export function LearningContent() {
   const {
     data: observations,
     isLoading: observationsLoading,
-  } = useQuery(getObservations, undefined, {
+  } = useQuery(getObservations, {}, {
     refetchInterval: 30_000,
     retry: false,
     enabled: !statusError,
@@ -678,7 +678,7 @@ function LegacyIntuitionPage() {
   const {
     data: observations,
     isLoading: observationsLoading,
-  } = useQuery(getObservations, undefined, {
+  } = useQuery(getObservations, {}, {
     refetchInterval: 30_000,
     retry: false,
     enabled: !statusError,

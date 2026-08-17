@@ -45,3 +45,24 @@ export function observationProseFromRow(o: unknown): string {
   if (fact) return fact;
   return "";
 }
+
+/**
+ * Build the query-string object for GET /api/v1/state/observations.
+ *
+ * When `instinct` is present the ?instinct= filter is included so
+ * ctrl-api returns only rows linked to that instinct_ref.  ctrl normalises
+ * the value (bare slug, path-without-.md, or full canonical path all work),
+ * so pass whichever form you have — but do so consistently.
+ *
+ * When absent the filter is omitted (no `instinct` key in the returned
+ * object) and the endpoint returns the global top-N, preserving the
+ * existing behaviour for callers that pass no slug.
+ */
+export function buildObservationQuery(
+  instinct?: string,
+  limit = 20,
+): Record<string, string> {
+  const q: Record<string, string> = { limit: String(limit) };
+  if (instinct) q.instinct = instinct;
+  return q;
+}

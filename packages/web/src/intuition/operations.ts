@@ -12,7 +12,7 @@ import type {
   ResolveInstinctPromotion,
 } from "wasp/server/operations";
 import { getUserInstance, proxyToTenant } from "../server/tenantProxy";
-import { deriveInstinctSlug, OBSERVATION_PATH } from "./instinctOpsCore";
+import { buildObservationQuery, deriveInstinctSlug, OBSERVATION_PATH } from "./instinctOpsCore";
 
 export const getIntuitionStatus: GetIntuitionStatus<void, any> = async (_args, context) => {
   const instance = await getUserInstance(context);
@@ -44,15 +44,17 @@ export const disableIntuition: DisableIntuition<void, any> = async (_args, conte
   return proxyToTenant(instance, { method: "POST", path: "/api/v1/learning/disable" });
 };
 
-export const getObservations: GetObservations<void, any> = async (_args, context) => {
+export const getObservations: GetObservations<{ instinct?: string; limit?: number }, any> = async (args, context) => {
   const instance = await getUserInstance(context);
   // Observations are a demoted type (§5.1) — they live in alfred-state.db,
   // not in vault/observation/. The vault directory is empty on live tenants.
   // Frozen contract (Lane I parallel): GET /api/v1/state/observations?instinct=<slug>&limit=20
+  // When args.instinct is present the endpoint filters on instinct_ref; when
+  // absent the filter is omitted and global top-N is returned (IntuitionPage).
   const data = await proxyToTenant(instance, {
     method: "GET",
     path: OBSERVATION_PATH,
-    query: { limit: "20" },
+    query: buildObservationQuery(args?.instinct, args?.limit),
   });
   // Normalise: add `results` alias so legacy callers (IntuitionPage) still
   // find their array at data.results while InstinctsPage reads data.observations.

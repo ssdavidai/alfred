@@ -5,7 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { deriveInstinctSlug, observationProseFromRow, OBSERVATION_PATH } from "./instinctOpsCore.js";
+import { buildObservationQuery, deriveInstinctSlug, observationProseFromRow, OBSERVATION_PATH } from "./instinctOpsCore.js";
 
 // ── 1. slug derivation ────────────────────────────────────────────────────────
 
@@ -84,4 +84,59 @@ test("InstinctsPage.tsx has no Patterns JSX label or toggle", () => {
   const src = fs.readFileSync(path.join(import.meta.dirname, "./InstinctsPage.tsx"), "utf8");
   assert.ok(!/>\s*Patterns\s*</.test(src), "still renders >Patterns< JSX label");
   assert.ok(!src.includes('"Patterns:'), 'still has "Patterns:" toggle label');
+});
+
+// ── 5. buildObservationQuery — query object sent to ctrl-api ──────────────────
+
+test("query: instinct key is present when a slug is provided", () => {
+  const q = buildObservationQuery("foo-bar");
+  assert.equal(q.instinct, "foo-bar");
+});
+
+test("query: no instinct key when slug is absent", () => {
+  const q = buildObservationQuery();
+  assert.ok(!("instinct" in q), "instinct key must be absent with no slug");
+});
+
+test("query: no instinct key when slug is undefined", () => {
+  const q = buildObservationQuery(undefined);
+  assert.ok(!("instinct" in q));
+});
+
+test("query: default limit is 20", () => {
+  const q = buildObservationQuery();
+  assert.equal(q.limit, "20");
+});
+
+test("query: custom limit is honoured", () => {
+  const q = buildObservationQuery("foo", 50);
+  assert.equal(q.limit, "50");
+});
+
+test("query: slug with a dot survives unmangled", () => {
+  // ctrl normalises the value; we pass the canonical vault-path form
+  // including any dots so it reaches the endpoint intact.
+  const q = buildObservationQuery("instinct/foo.bar.md");
+  assert.equal(q.instinct, "instinct/foo.bar.md");
+});
+
+test("operations.ts calls buildObservationQuery and forwards args.instinct", () => {
+  const src = fs.readFileSync(path.join(import.meta.dirname, "./operations.ts"), "utf8");
+  assert.ok(src.includes("buildObservationQuery"), "must call buildObservationQuery");
+  // The previous fix passed its tests while the parameter was omitted (#584).
+  // Assert the arg is actually forwarded — not just that the function exists.
+  assert.ok(
+    src.includes("args?.instinct") || src.includes("args.instinct"),
+    "must forward args.instinct to buildObservationQuery",
+  );
+});
+
+test("InstinctsPage passes the open card path as instinct to getObservations", () => {
+  const src = fs.readFileSync(path.join(import.meta.dirname, "./InstinctsPage.tsx"), "utf8");
+  // The per-open query must include the open card's path as the instinct
+  // filter so ctrl-api returns only that instinct's rows (#584).
+  assert.ok(
+    src.includes("instinct: open") || src.includes("instinct:open"),
+    "InstinctsPage must pass { instinct: open } to getObservations",
+  );
 });
