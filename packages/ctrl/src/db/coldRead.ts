@@ -275,6 +275,13 @@ export interface GenericQuery {
   // match on it returns nothing. This expresses the real intent: "everything
   // reflection hasn't processed yet."
   not?: { col: string; value: string } | null;
+  // Equality filters applied ONLY to the hot tier. Columns listed here must
+  // exist in state.db's hot table but need NOT be bare columns in the cold
+  // archive (which stores the full row in a compressed body blob). When any
+  // value is non-empty, the cold tier is skipped entirely — it cannot filter
+  // by these columns without decompressing every body row.
+  // Used by: GET /state/observations?instinct=<slug> (instinct_ref column).
+  hotOnlyFilters?: Record<string, string | null | undefined> | null;
   limit: number;
   offset: number;
 }
@@ -290,8 +297,11 @@ export function queryCrossTier(table: string, q: GenericQuery): CrossTierResult 
   if (!cfg) throw new Error(`queryCrossTier: unknown table ${table}`);
   const hot = getStateDb();
 
-  // ── shared WHERE builder (same column names hot + cold) ───────────────────
-  function buildWhere(): { sql: string; args: unknown[] } {
+  // ── WHERE builder ─────────────────────────────────────────────────────────
+  // `includeHotOnly=true` appends hotOnlyFilters — columns that exist in the
+  // hot state.db table but NOT as bare columns in the cold archive. When false
+  // (the cold-tier path) those columns are omitted so the query stays valid.
+  function buildWhere(includeHotOnly = false): { sql: string; args: unknown[] } {
     const where: string[] = [];
     const args: unknown[] = [];
     for (const col of cfg.filterCols) {
@@ -324,13 +334,25 @@ export function queryCrossTier(table: string, q: GenericQuery): CrossTierResult 
       where.push(`COALESCE(${q.not.col}, '') != ?`);
       args.push(q.not.value);
     }
+    if (includeHotOnly && q.hotOnlyFilters) {
+      for (const [col, val] of Object.entries(q.hotOnlyFilters)) {
+        if (val) { where.push(`${col} = ?`); args.push(val); }
+      }
+    }
     return { sql: where.length ? "WHERE " + where.join(" AND ") : "", args };
   }
-  const { sql: whereSql, args: whereArgs } = buildWhere();
+  // Cold WHERE: shared columns only — hot-only columns may not exist in archive.
+  const { sql: coldWhereSql, args: coldWhereArgs } = buildWhere();
+  // Hot WHERE: same as cold plus any hot-only filter columns.
+  const { sql: hotWhereSql, args: hotWhereArgs } = buildWhere(true);
+  // Skip cold entirely when a hot-only filter is active — the archive table
+  // stores those columns only inside the compressed body blob, so equality
+  // filtering without full decompression would silently return wrong results.
+  const skipCold = Object.values(q.hotOnlyFilters ?? {}).some((v) => !!v);
 
   // ── hot tier ──────────────────────────────────────────────────────────────
   const hotTotal = (
-    hot.prepare(`SELECT COUNT(*) AS n FROM ${cfg.hot} ${whereSql}`).get(...whereArgs) as {
+    hot.prepare(`SELECT COUNT(*) AS n FROM ${cfg.hot} ${hotWhereSql}`).get(...hotWhereArgs) as {
       n: number;
     }
   ).n;
@@ -341,22 +363,22 @@ export function queryCrossTier(table: string, q: GenericQuery): CrossTierResult 
   let coldTotal = 0;
   let overlap = 0;
   let coldRows: Array<Record<string, unknown>> = [];
-  if (coldInScope(table, q.since ?? null)) {
+  if (!skipCold && coldInScope(table, q.since ?? null)) {
     const cold = getColdDb();
     coldTotal = (
       cold
-        .prepare(`SELECT COUNT(*) AS n FROM ${cfg.archive} ${whereSql}`)
-        .get(...whereArgs) as { n: number }
+        .prepare(`SELECT COUNT(*) AS n FROM ${cfg.archive} ${coldWhereSql}`)
+        .get(...coldWhereArgs) as { n: number }
     ).n;
     if (coldTotal > 0) {
       tiers.push("cold");
-      overlap = crossTierOverlap(hot, cold, cfg.hot, cfg.archive, whereSql, whereArgs);
+      overlap = crossTierOverlap(hot, cold, cfg.hot, cfg.archive, coldWhereSql, coldWhereArgs);
       const coldRaw = cold
         .prepare(
-          `SELECT id, ts, codec, body FROM ${cfg.archive} ${whereSql} ` +
+          `SELECT id, ts, codec, body FROM ${cfg.archive} ${coldWhereSql} ` +
             `ORDER BY ts DESC LIMIT ?`,
         )
-        .all(...whereArgs, q.limit + q.offset) as Array<{
+        .all(...coldWhereArgs, q.limit + q.offset) as Array<{
         id: string;
         ts: string;
         codec: string;
@@ -375,8 +397,8 @@ export function queryCrossTier(table: string, q: GenericQuery): CrossTierResult 
 
   // ── hot rows (paged) ──────────────────────────────────────────────────────
   const hotRows = hot
-    .prepare(`SELECT * FROM ${cfg.hot} ${whereSql} ORDER BY ts DESC LIMIT ?`)
-    .all(...whereArgs, q.limit + q.offset) as Array<Record<string, unknown>>;
+    .prepare(`SELECT * FROM ${cfg.hot} ${hotWhereSql} ORDER BY ts DESC LIMIT ?`)
+    .all(...hotWhereArgs, q.limit + q.offset) as Array<Record<string, unknown>>;
 
   // ── merge + de-dupe by id + global ts-DESC order + page ───────────────────
   const seen = new Set<string>();

@@ -12,7 +12,7 @@
 //   GET    /signals/:id              one signal
 //   PATCH  /signals/:id              partial update (status, salience, payload)
 //   POST   /observations             create an observation
-//   GET    /observations             list (filter: kind, subject, status, since, limit)
+//   GET    /observations             list (filter: kind, subject, status, instinct, since, limit)
 //   GET    /observations/:id         one observation
 //   PATCH  /observations/:id         partial update
 //   POST   /routing-decisions        create a routing decision
@@ -49,6 +49,25 @@ import { COLD_TTL_DAYS, COLD_CODEC, getColdDb } from "../../db/cold.js";
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+/**
+ * Normalise an `?instinct=` query-param to the canonical vault-path form that
+ * is stored in observation.instinct_ref: "instinct/<slug>.md".
+ *
+ * Live data (home.alfred.black, 2026-08-17): all 699 instinct_ref values use
+ * the "instinct/<slug>.md" path form — bare slugs and wikilinks are not stored.
+ * We nonetheless accept all three call forms so callers don't have to know the
+ * internal shape:
+ *   "suppress-ci"                → "instinct/suppress-ci.md"
+ *   "instinct/suppress-ci"       → "instinct/suppress-ci.md"
+ *   "instinct/suppress-ci.md"    → "instinct/suppress-ci.md"  (no-op)
+ */
+function normalizeInstinctRef(param: string): string {
+  let slug = param.trim();
+  if (slug.startsWith("instinct/")) slug = slug.slice("instinct/".length);
+  if (slug.endsWith(".md")) slug = slug.slice(0, -3);
+  return `instinct/${slug}.md`;
 }
 
 /**
@@ -284,6 +303,14 @@ export function registerStateRoutes(): void {
     // not yet processed" so producer (open) and consumer (unprocessed) agree.
     const statusParam = query.get("status");
     const unprocessed = statusParam === "unprocessed";
+    // `?instinct=<slug|path>` — filter by instinct_ref. The column stores the
+    // vault path form (confirmed on live data: always "instinct/<slug>.md").
+    // Accept a bare slug, a path without the .md suffix, or the full canonical
+    // path — all normalise to "instinct/<slug>.md" for the equality match.
+    // instinct_ref is hot-only (no bare column in archive_observation), so this
+    // uses GenericQuery.hotOnlyFilters which skips the cold tier automatically.
+    const instinctParam = query.get("instinct");
+    const instinctRef = instinctParam ? normalizeInstinctRef(instinctParam) : null;
     const r = queryCrossTier("observation", {
       filters: {
         kind: query.get("kind"),
@@ -291,6 +318,7 @@ export function registerStateRoutes(): void {
         status: unprocessed ? null : statusParam,
       },
       not: unprocessed ? { col: "status", value: "processed" } : null,
+      hotOnlyFilters: instinctRef ? { instinct_ref: instinctRef } : null,
       since: query.get("since"),
       until: query.get("until"),
       limit,
