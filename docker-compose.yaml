@@ -591,6 +591,17 @@ services:
 
   # ── ctrl-api — the dashboard backend / tenant API (:3100) ───────────
   ctrl-api:
+    # tini as PID 1 so orphaned processes get reaped. Docker execs the
+    # healthcheck into the container; when it exits its parent is outside
+    # this PID namespace, so it reparents to PID 1 — and `node` has no
+    # reason to reap a child it never spawned. Each corpse holds a PID slot.
+    # 2026-08-17: found 14 zombie `curl` processes here and rising; the same
+    # accumulation had filled the 1024 budget for 2.5 days, at which point
+    # ctrl-api could no longer fork — so vault WRITES (which shell out to the
+    # vault daemon) failed while READS (in-process) kept working. Silent, and
+    # the only outward sign was Alfred quietly not recording things.
+    # hermes already runs tini for this reason; this brings ctrl-api in line.
+    init: true
     logging: *default-logging
     image: ssdavidai00/alfred-ctrl-api:latest
     depends_on:

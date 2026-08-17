@@ -247,6 +247,29 @@ if [[ -z "${existing_prefix}" ]]; then
 	fi
 fi
 
+# ── host watchdog cron ───────────────────────────────────────────────────────
+# Installs scripts/ops/alfred-watchdog.sh on a 5-minute cron. It records
+# pids.current vs live threads per container (the number that diagnoses a PID
+# exhaustion) and restarts containers Docker has flagged unhealthy.
+#
+# Why: on 2026-08-17 ctrl-api filled its 1024-PID budget with unreaped
+# healthcheck zombies. Docker flagged it `unhealthy` for 2.5 days and did
+# nothing, while vault WRITES silently degraded (writes fork a helper; reads do
+# not) — ~50/day down to 20-30 with no error anywhere the principal could see.
+# `init: true` now prevents the zombies; this catches the next one of whatever
+# shape it takes.
+WATCHDOG_SRC="${SCRIPT_DIR}/ops/alfred-watchdog.sh"
+if [[ -f "${WATCHDOG_SRC}" ]]; then
+	install -m 0755 "${WATCHDOG_SRC}" /usr/local/bin/alfred-watchdog 2>/dev/null || true
+	if command -v crontab >/dev/null 2>&1; then
+		# Idempotent: drop any previous line, re-add exactly one.
+		{ crontab -l 2>/dev/null | grep -v 'alfred-watchdog' || true; \
+		  echo '*/5 * * * * /usr/local/bin/alfred-watchdog >/dev/null 2>&1'; } | crontab - 2>/dev/null \
+		  && green "Installed alfred-watchdog cron (every 5 min)." \
+		  || red "Could not install alfred-watchdog cron — add it by hand."
+	fi
+fi
+
 bold ""
 green "Bootstrap complete. Next:  docker compose up -d"
 green "(Tailscale is opt-in:      docker compose --profile tailscale up -d tailscale"
