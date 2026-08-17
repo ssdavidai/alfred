@@ -5,6 +5,117 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the `alfred-vault` package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-08-17]
+
+41 commits since `v2026.08.11`. Two halves: a new principal surface, and then
+the discovery that **what this repo ships and what the fleet runs had quietly
+stopped being the same thing.**
+
+One pattern runs through nearly every fix. Both sides of a boundary were
+correct; the join between them was not. A derivation shipped fully tested and
+nothing called it. A filter existed and the caller omitted it. A dependency was
+installed by hand and never baked. A key was documented and never generated. A
+healthcheck ran on a schedule and could not fail. A tenant existed and no
+workflow knew about it. Tests cover the parts. Nothing covered the seams.
+
+---
+
+### /attention — the principal can see what Alfred gave back (#584)
+
+A new surface answering a question the system could not previously answer: how
+much attention did this cost, and how much came back. Net Attention Returned is
+`displaced − engaged − interruption`, computed per day, per range, and as a
+trend.
+
+- **Three tabs** — DAY (#646), RANGE (#648) and TRENDS (#649, #653), all built
+  to the Attention Statement template rather than approximating it.
+- **The trend rollups** (#634, #636) — weekly, monthly and quarterly, with a
+  clerk-written read of what the movement means (#633, #639).
+- **A sentence engine** (#652, #655) that will not let prose contradict the
+  figures: below an hour of logged time it declines to price the day rather
+  than divide by a number it does not trust.
+
+Two of its own bugs were the seam pattern exactly. `deriveRatioPeak` shipped
+with full test coverage and **the page never called it** — the old inline scan
+was still there (#656). The ledger's multiplier rendered as a literal `\xd7` on
+every collapsed row, in production, because JSX text is not a JS string (#647);
+the type-check added in the same cycle (#627) is structurally blind to that
+class and would never have caught it.
+
+### The brand system is in the repo (#645, #654)
+
+`design-system/` now carries the tokens, rules and templates, so anyone cloning
+Alfred can build in-brand surfaces. The Attention Trends template ships with it
+— and its inline script is specification, not scaffolding: the rules that keep
+the report honest when data is thin live in that script.
+
+### /instincts stopped under-reporting itself (#459)
+
+"What I've seen" read zero on every instinct. Three distinct causes: a slug
+carrying `.md` that ctrl-api appends itself, a query pointed at an empty vault
+directory instead of the table holding 5,904 rows, and — after the first fix —
+the new `?instinct=` filter defined but not passed (#657, #659, #660).
+
+---
+
+### The fleet had drifted from the repo, and nothing was watching
+
+A `git clone` and `docker compose up -d` did not reproduce a working stack, and
+the running fleet did not match what CI publishes.
+
+- **Hermes shipped without deps it needs** (#662) — seven Python packages had
+  been `pip install`ed by hand into a running container and never baked. The
+  published image could not import any of them, while two shipped things
+  required them. The box carrying them was one `--force-recreate` from losing
+  them silently.
+- **A healthcheck that could never fail** (#661) — a trailing `|| exit 0`
+  swallowed every non-zero exit, and each probe leaked one PID slot. After
+  ~8.4 hours the container could not fork at all.
+- **An auxiliary process could kill the gateway** (#664) — four tenants had been
+  restarting their runtime container every three minutes **for ten days**,
+  4,600–5,700 restarts each, entirely unremarked. Confirmed fixed: zero restarts
+  where the old rate predicted twenty-two.
+- **Zombie reaping and a host watchdog** (#666).
+- **Keys the stack requires but never created** (#663, #667) — two services
+  refuse to start in production without values `bootstrap.sh` did not generate.
+  Documenting them made them discoverable; it did not make them exist. Both
+  crash-looped a tenant the moment its images were brought current.
+
+### One tenant list, daily detection, releases that reach the fleet (#665, #668)
+
+The tenant list was hard-coded separately in each workflow, and one tenant had
+been added to none of them — no image, compose, Caddyfile or `.env.example`
+update for a month. A second was in the config-sync list but no image rollout
+ever reached it. **The fleet is seven tenants; most of the tooling believed it
+was five.**
+
+- `.github/fleet-hosts.txt` is now the single list every fleet workflow reads.
+- `fleet-drift` runs daily and read-only, failing when a tenant has services
+  down, a container in a restart loop, or images behind the registry — the three
+  checks that found everything above.
+- `deploy-release` fires on a published release and ships to the whole fleet,
+  canary first: if the dev tenant cannot take the release, no client tenant is
+  touched.
+
+Narrow rollout was never the mistake. Narrow rollout with nothing watching was.
+
+---
+
+### Stated plainly
+
+- **The learning loop is down on two client tenants.** Their Codex OAuth has no
+  access token, so reflection fails nightly and every clerk call with it. Not
+  fixed here — it needs a human through the OAuth flow.
+- **Two reflection bugs were found and deliberately left.** An uncapped retry
+  wedged one tenant's nightly reflection for 27 days against a permanent 422
+  (23,492 attempts); the neighbouring call site had been capped for that exact
+  reason. Separately, `ReflectionWorkflow.run()` takes no arguments and
+  something starts it with one, failing forever. Both are still in the tree.
+- **`fleet-drift` and `deploy-release` have not run on their real triggers.**
+  Both are green on manual dispatch across all seven tenants. The daily cron
+  proves itself tomorrow; the release path proves itself with this release.
+- The twelve surfaces other than /attention are still pre-design-system.
+
 ## [2026-08-11]
 
 47 commits since `v2026.08.07`, across 24 closed issues. One theme, and it is
