@@ -73,22 +73,57 @@ services:
       # no-op because the glob matches zero files.
       - ./caddy/tailscale-certs:/tailscale-certs
       - ./caddy/tailscale-snippets:/tailscale-snippets
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/ >/dev/null 2>&1 || exit 0"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
+    # NO healthcheck — deliberate. Do not re-add one here.
+    #
+    # Removed 2026-08-17. It was:
+    #   test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/ >/dev/null 2>&1 || exit 0"]
+    #   interval: 30s
+    #
+    # Two problems, either one fatal:
+    #
+    # 1. It could never fail. The trailing `|| exit 0` swallowed every
+    #    non-zero exit, so the probe reported success unconditionally —
+    #    including when caddy was down. Zero diagnostic value, ever.
+    #    (`wget` to :80 gets a 308 redirect to https and exits non-zero on
+    #    this image, so the `|| exit 0` was masking a broken probe.)
+    #
+    # 2. It leaked exactly one PID slot per run, permanently — an ACCOUNTING
+    #    leak, not a process leak. `pids.current` climbs by 1 per probe while
+    #    `cgroup.threads` stays flat at ~16, with zero descendant cgroups and
+    #    zero zombies. (So `init: true` does NOT fix this: there is nothing
+    #    to reap. The charge is simply never released on task exit.) After
+    #    ~8.4h the 1024 ceiling is reached and *every* fork inside the
+    #    container fails: `docker exec` returns `procReady not received`,
+    #    `caddy reload` returns `failed to create new OS thread; errno=11`
+    #    (EAGAIN), and the probe itself can no longer run — so the container
+    #    reports `unhealthy` forever while still serving traffic perfectly
+    #    (Go needs no fork per request; ACME renewal is in-process).
+    #
+    # Measured on a live tenant 2026-08-17, 13 min after a clean recreate:
+    #   caddy        pids= 42/1024  threads=16  -> +26 phantom, ~26 probes
+    #   web-client   pids= 17/256   threads=17  -> 0   (same wget probe, 15s)
+    #   vaultwarden  pids= 42/256   threads=42  -> 0   (10s)
+    #   temporal     pids= 24/1024  threads=24  -> 0   (10s)
+    # i.e. 1 leaked slot per probe, 1:1, and ONLY on caddy. Every other
+    # service has pids == threads exactly, so this is NOT a blanket
+    # docker/containerd healthcheck bug and the other 13 probes are fine
+    # (they are deliberately left in place). Why caddy specifically is
+    # undetermined — the trigger is unambiguous, so the trigger is what we
+    # remove. All six tenants were found pinned at ~1023/1024 with ~20 live
+    # threads, i.e. every tenant re-saturates within ~8.4h of any restart.
+    #
+    # This is also the true cause of the 2026-05-29 incident that prompted
+    # the pids_limit 256 -> 1024 bump below: that raised the ceiling, which
+    # only delayed saturation from ~2h to ~8.4h. Removing the probe removes
+    # the leak's only trigger. If a real healthcheck is ever wanted here it
+    # must not exec per-interval until the runtime bug is fixed upstream.
     mem_limit: 256m
-    # Bumped 256 -> 1024 on 2026-05-29. Caddy's runtime is small but every
-    # operator `caddy validate` / `caddy reload` (e.g. ctrl-api's tailscale
-    # cert route, an interactive shell-out during incident response, or the
-    # deploy-compose.yml graceful-reload step) forks a fresh Go runtime —
-    # which spawns ~30-50 OS threads per invocation. On home.alfred.black
-    # the cap was hit live during HA wiring: `caddy reload` returned
-    # `runtime: failed to create new OS thread; errno=11` (EAGAIN) and
-    # every shell-out inside the container failed. 1024 is well clear of
-    # the steady-state ~80-100 threads + room for concurrent reloads.
+    # Bumped 256 -> 1024 on 2026-05-29. Caddy's steady state is ~16-20
+    # threads; the headroom is for operator `caddy validate` / `caddy reload`
+    # (ctrl-api's tailscale cert route, an interactive shell-out during
+    # incident response, the deploy-compose.yml graceful-reload step), each
+    # of which forks a fresh Go runtime spawning ~30-50 OS threads. Kept at
+    # 1024 as a safety margin now that the per-interval leak above is gone.
     pids_limit: 1024
 
   # ── web-db — Postgres for the Wasp web app (auth, ApiKey, OAuth) ────
