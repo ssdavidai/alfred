@@ -179,14 +179,17 @@ copy those shapes, not invent a parallel channel API.
 ctrl-api remains the sole canonical writer. An installation bearer is a
 90-day, one-installation ingestion/health/continuity credential, stored only as
 a SHA-256 hash, expiry-checked and immediately invalid after rotation or
-explicit revocation. An installation-scope redaction/deletion immediately
-restricts it to the payload-free health cleanup exchange, with no ingestion or
-continuity authority, and atomically revokes it only after the adapter reports
-the installation-wide wipe; explicit revocation cannot race and strand that
-directive. It grants no MCP capability. Enrollment, rotation, revocation,
-redaction, and deletion require the normal operator bearer. Raw credentials,
-authorization headers, and hashes never enter logs, error details, ingest
-payloads, journal metadata, or request-body storage.
+explicit revocation. Any pending session- or installation-scope cleanup
+immediately restricts the current token to the payload-free health exchange,
+with no ingestion or continuity authority, and blocks rotation and explicit
+revocation. When the token is expired while cleanup remains pending, its stored
+hash is only a tombstone-bounded health cleanup verifier; it grants no active
+installation or MCP capability and stops working after terminal acknowledgement
+or tombstone expiry. Installation cleanup atomically revokes the token only
+after the adapter reports the installation-wide wipe. Enrollment, rotation,
+revocation, redaction, and deletion require the normal operator bearer. Raw
+credentials, authorization headers, and hashes never enter logs, error details,
+ingest payloads, journal metadata, or request-body storage.
 
 Accepted revision-1 `agent-turn-complete` events are transactionally projected
 into the existing ingest and One Alfred journal paths with stable source-event

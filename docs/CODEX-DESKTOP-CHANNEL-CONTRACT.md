@@ -126,20 +126,32 @@ An installation token is `cdi_` followed by 43 unpadded base64url characters
 encoding 32 random bytes from the operating-system CSPRNG. It is scoped to one
 installation, expires exactly 90 days after mint/rotation, and is returned
 only by enrollment or rotation. ctrl-api stores only lowercase SHA-256 of the
-complete token, expiry-checks every request, and rejects an expired, rotated,
-explicitly revoked, or fully redacted/deleted credential before reading a body.
-Rotation and explicit revocation invalidate the prior token immediately.
+complete token. ctrl-api matches that hash and installation id, checks rotation,
+explicit revocation, expiry, and pending cleanup before reading a body, and
+normally rejects an expired, rotated, explicitly revoked, or fully
+redacted/deleted credential. Rotation and explicit revocation invalidate the
+prior token immediately.
 
-An accepted installation-scope redaction/deletion is not fully
-redacted/deleted or revoked until its local cleanup is acknowledged. While its
-`codex_desktop_deletion.client_cleanup_pending` row is true, the existing token
-is restricted to `POST /api/v1/codex-desktop/health`: chunk ingestion and
-continuity fail `403 FORBIDDEN` before their bodies are read. This health-only
-cleanup state is derived from the deletion row, grants no ingestion,
-continuity, MCP, or content-read capability, and cannot be rotated or explicitly
-revoked before the §5.6 terminal acknowledgement. The request carrying that
-acknowledgement remains authorized through its response; the same transaction
-then revokes the token, and every later request is rejected before body parsing.
+An accepted session- or installation-scope redaction/deletion is not
+client-complete until its local cleanup is acknowledged. While any unexpired
+`codex_desktop_deletion.client_cleanup_pending` row is true, the current
+unrotated, unrevoked token hash is restricted to
+`POST /api/v1/codex-desktop/health`: chunk ingestion and continuity fail
+`403 FORBIDDEN` before their bodies are read. Rotation and explicit revocation
+fail with §5.2/§5.3 `409 REDACTION_RACE` while this state exists.
+
+Expiry is still checked on every request and never restores an installation
+credential. Whenever the current token is at or beyond `token_expires_at` and
+cleanup is pending, its stored hash may be used only as a cleanup verifier on
+the health route until the last pending directive is acknowledged or its
+90-day tombstone expires, whichever occurs first. Every other route returns
+non-retryable `401 TOKEN_EXPIRED`, and health also returns that error as soon as
+no unexpired pending directive remains. This bounded exception does not extend
+the token's 90-day credential lifetime and grants no ingestion, continuity,
+MCP, or content-read capability. A rotated or explicitly revoked token never
+qualifies.
+The request carrying the terminal acknowledgement remains authorized through
+its response; §5.6 freezes what happens after that response for each scope.
 Tokens, authorization headers, and token hashes are excluded from application
 logs, error details, analytics, ingest payloads, journal metadata, and
 request-body storage.
@@ -148,7 +160,7 @@ request-body storage.
 
 | Limit | Frozen value/behavior |
 |---|---|
-| Credential lifetime | 90 days; health becomes `degraded` at 7 days remaining; expiry is a non-retryable 401. |
+| Credential lifetime | 90 days; health becomes `degraded` at 7 days remaining; expiry is a non-retryable 401 except for the payload-free, tombstone-bounded cleanup verifier state in §3.1. |
 | JSON request body | 1,048,576 bytes, UTF-8, uncompressed; compressed transfer encoding is rejected with 415. |
 | Chunk | 1–256 ordered events; contiguous sequence span of 1–256; one installation and one opaque session. |
 | Normalized event payload | 65,536 UTF-8 bytes after RFC 8785 canonicalization. |
@@ -274,7 +286,7 @@ auth. Exact body: `{}`. Success is HTTP 200 with exactly:
 ```
 
 As in enrollment, `REDACTED` represents the actual freshly generated token,
-which is returned only in this response. If an installation-scope
+which is returned only in this response. If any session- or installation-scope
 redaction/deletion has `client_cleanup_pending=true`, rotation instead returns
 non-retryable `409 REDACTION_RACE` and changes nothing.
 
@@ -300,10 +312,10 @@ Success is HTTP 200 with exactly:
 
 The revocation write commits before the response. Every later installation
 request fails `401 INSTALLATION_REVOKED`; cached successful auth may not be
-used. If an installation-scope redaction/deletion has
+used. If any session- or installation-scope redaction/deletion has
 `client_cleanup_pending=true`, this endpoint instead returns non-retryable
 `409 REDACTION_RACE` and changes nothing; explicit revocation cannot strand the
-only channel that can deliver and acknowledge the local cleanup directive.
+only channel that can deliver and acknowledge local cleanup.
 
 ### 5.4 Chunk ingestion
 
@@ -554,22 +566,31 @@ the next response page occur in one server transaction. Each valid report sets
 re-reporting it leaves those values unchanged. A response with no eligible
 directive uses `"deletion_directives":[]`.
 
-The health route remains available in the §3.1 health-only cleanup state. Its
-HTTP 200 response uses exactly the success shape above with
+The health route remains available in the §3.1 health-only cleanup state for
+session- and installation-scope directives, including when the current token
+has expired and is accepted only as the bounded cleanup verifier. Its HTTP 200
+response uses exactly the success shape above with
 `status="blocked"`, `reason_codes=["cleanup_pending"]`, and continuity
 `status="unavailable"` / `last_error_code="FORBIDDEN"`; it returns no journal
-entry or other content. It repeats the pending installation-scope directive
-until a request reports that deletion id. On that request, ctrl-api
-transactionally records the report, sets `client_cleanup_pending=false` and
-`client_applied_at` on every still-pending directive for the installation (the
+entry or other content. It repeats pending directives in the frozen order until
+a request reports their deletion ids.
+
+For session-scope reports, ctrl-api transactionally sets only those directives'
+`client_cleanup_pending=false` and `client_applied_at`; the already authorized
+request returns the same exact HTTP 200 shape. If no directive remains, the next
+request uses ordinary authentication and an already expired token returns
+`401 TOKEN_EXPIRED`. For an installation-scope report, ctrl-api additionally
+sets those fields on every still-pending directive for the installation (the
 installation-wide local wipe subsumes every session selector), marks the
 installation redacted/deleted as requested, and sets `revoked_at`. That already
-authorized request returns the same exact HTTP 200 shape with
-`deletion_directives=[]`; every later request returns
-`401 INSTALLATION_REVOKED`. The adapter retains the token only for this final
-report, erases it after the 200, and treats a subsequent
-`INSTALLATION_REVOKED` after a lost response as confirmation; a network, 429,
-or 5xx failure retains the payload-free local tombstone and retries health.
+authorized request returns HTTP 200 with `deletion_directives=[]`; every later
+request returns `401 INSTALLATION_REVOKED`.
+
+The adapter retains an expired token only while it has a payload-free local
+cleanup tombstone awaiting acknowledgement and erases it after the terminal
+200. After a lost terminal response it treats the corresponding
+`TOKEN_EXPIRED` or `INSTALLATION_REVOKED` as confirmation. A network, 429, or
+5xx failure retains the payload-free local tombstone and retries health.
 
 ### 5.7 Session/installation redaction or deletion
 
@@ -647,11 +668,11 @@ Effects are ordered and idempotent:
    retry can never recreate deleted content. The deletion receipt remains the
    stable deletion-id link while matching existing chunk/event redaction states
    are updated in the same transaction.
-2. For installation scope, immediately restrict the credential to the
-   health-only cleanup state in §3.1; do not set `revoked_at` until the adapter
-   reports the installation-wide directive. Chunk ingestion and continuity are
-   unavailable during this state. For session scope, keep the credential but
-   reject/suppress matching chunks.
+2. For either scope, immediately restrict the current token to the health-only
+   cleanup state in §3.1. Do not set `revoked_at` for installation scope until
+   the adapter reports the installation-wide directive. Chunk ingestion and
+   continuity are unavailable while any cleanup is pending; matching chunks
+   remain rejected/suppressed by the tombstone after normal auth resumes.
 3. Redact or delete matching existing ingest payloads and every derived row
    reachable by the stable ingest/source provenance. Redaction retains only a
    `redacted` marker and deletion id; deletion removes content. Neither creates
@@ -670,11 +691,14 @@ Effects are ordered and idempotent:
    quarantined payloads. It retains only the deletion id, selector, operation,
    and `tombstone_expires_at` in the 90-day local tombstone, then reports the
    deletion id in the next health request's `applied_deletion_ids`.
-6. `client_cleanup_pending` remains true until that report. For installation
-   scope, the report and terminal credential revocation follow the single
-   transaction and final-response rule in §5.6. An offline client can therefore
-   receive and acknowledge its mandatory local wipe at its next health, and
-   cannot recreate data because the server tombstone predates content removal.
+6. `client_cleanup_pending` remains true until that report. Rotation and
+   explicit revocation are barred for every scope while it is true, and expiry
+   leaves only the bounded cleanup-verifier path in §3.1. Session reports return
+   the token to ordinary auth if it is still current; installation reports use
+   the terminal revocation rule in §5.6. An offline client can therefore receive
+   and acknowledge mandatory local cleanup at its next health without regaining
+   ingestion or continuity authority, and cannot recreate data because the
+   server tombstone predates content removal.
 
 Acknowledged local chunks are never removed early merely because a server
 receipt exists: the fixed 24-hour local retention applies unless a redaction or
