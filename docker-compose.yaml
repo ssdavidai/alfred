@@ -1387,7 +1387,10 @@ services:
     entrypoint: ["/bin/sh", "-lc"]
     # --skip-build: web_dist is baked into the image, so never shell out to
     # npm at runtime (the git-installed tree ships no bundle of its own).
-    command: exec hermes dashboard --host 0.0.0.0 --port 9121 --no-open --skip-build
+    # MUST be a single-element list. A plain string here is shlex-split by
+    # compose, so `sh -lc` would receive only the first token as its script
+    # ("exec") and exit 0 immediately.
+    command: ["exec hermes dashboard --host 0.0.0.0 --port 9121 --no-open --skip-build"]
     depends_on:
       hermes:
         condition: service_started
@@ -1415,7 +1418,10 @@ services:
     # a killed container would otherwise never start again. `tasks unlock`
     # refuses to clear a lock held by a LIVE same-host process, so this is safe
     # to run unconditionally on every start.
-    command: "hermes-live tasks unlock --confirm-no-gateway >/dev/null 2>&1 || true; exec hermes-live serve"
+    # Single-element list for the same reason as the dashboard above: as a
+    # plain string compose splits it and everything from the redirect onward
+    # is lost, taking the `|| true` and the `exec ... serve` with it.
+    command: ["hermes-live tasks unlock --confirm-no-gateway >/dev/null 2>&1 || true; exec hermes-live serve"]
     depends_on:
       hermes:
         condition: service_started
