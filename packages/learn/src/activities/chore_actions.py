@@ -82,49 +82,50 @@ def _composio_gate_enforced() -> bool:
 
 @activity.defn
 async def fetch_financial_events(matter_domains: list[str], days: int) -> list[dict[str, Any]]:
-    """Pull events from the last N days where matter is in the watched domain set.
+    """Recent recorded actions whose target matches one of ``matter_domains``.
 
-    Pure Python — no LLM calls. Walks the vault event listing, reads each
-    record's frontmatter, filters by matter and date.
+    Reads the `audit` table, not the event/ markdown.
+
+    What it used to do, and why it never worked: list up to 1,000 event/
+    records, issue a SEPARATE read_record HTTP call for each one, then keep
+    those whose frontmatter `matter` contained a domain and whose `date` fell
+    inside the window. Not one of the 1,468 event records on the canonical
+    tenant carries a `matter` or a `date` field — they are state-change and
+    needs_attention_action audit mirrors, whose keys are target/source/action.
+    So this made up to a thousand round-trips and returned [] every time.
+
+    The audit table holds the same actions with the fields this actually
+    wants: `ts` for the window (filtered server-side), `target_path` for the
+    subject, `summary` for the description.
     """
-    config = load_config()
-    client = VaultClient(config)
+    from src.utils.signal_state import StateClient
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    domains = [d.lower() for d in (matter_domains or []) if d]
     try:
-        all_events = await client.list_records("event", limit=1000)
-        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-        out: list[dict[str, Any]] = []
-        for e in all_events:
-            try:
-                record = await client.read_record(e["path"])
-            except Exception:
-                continue
-            fm = record.get("frontmatter", {}) or {}
-            matter = (fm.get("matter") or "").lower()
-            if not any(d.lower() in matter for d in matter_domains):
-                continue
-            try:
-                event_date = datetime.fromisoformat(
-                    str(fm.get("date", "")).replace("Z", "+00:00")
-                )
-                # Some events come without tz info — assume UTC
-                if event_date.tzinfo is None:
-                    event_date = event_date.replace(tzinfo=timezone.utc)
-            except Exception:
-                continue
-            if event_date < cutoff:
-                continue
-            out.append({
-                "path": e["path"],
-                "matter": matter,
-                "amount": fm.get("amount"),
-                "service": fm.get("service") or fm.get("name"),
-                "date": fm.get("date"),
-                "summary": (record.get("body") or "")[:500],
-            })
-            activity.heartbeat(f"scanned {len(out)} events")
-        return out
-    finally:
-        await client.close()
+        config = load_config()
+        async with StateClient(config) as sc:
+            envelope = await sc.list_audit(since=cutoff.isoformat(), limit=500)
+        rows = envelope.get("entries") or []
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_financial_events: audit query failed err=%s", exc)
+        return []
+
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        target = str(row.get("target_path") or "")
+        if domains and not any(d in target.lower() for d in domains):
+            continue
+        out.append({
+            "path": target,
+            "name": target.rsplit("/", 1)[-1].removesuffix(".md"),
+            "date": row.get("ts"),
+            "summary": str(row.get("summary") or "")[:500],
+        })
+        activity.heartbeat(f"matched {len(out)} events")
+    return out
 
 
 @activity.defn
@@ -237,44 +238,49 @@ async def ask_alfred_to_judge_anomalies(
 
 @activity.defn
 async def fetch_matter_events_last_week(matter_slug: str) -> list[dict[str, Any]]:
-    """Pull all events from the last 7 days that reference the given matter.
+    """Recorded actions on this matter in the last 7 days.
 
-    Pure Python — no LLM calls.
+    Reads the `audit` table, not the event/ markdown — same reason as
+    fetch_financial_events above: it filtered on a frontmatter `matter` field
+    that no event record has, after issuing 500 individual read_record calls.
+    It has returned [] on every run of the weekly-matter-digest chore since
+    the four-store cutover, at a cost of 500 round-trips a time.
+
+    `target` is a prefix match on the audit endpoint, so the matter's own path
+    filters server-side.
     """
-    config = load_config()
-    client = VaultClient(config)
+    from src.utils.signal_state import StateClient
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+    slug = (matter_slug or "").strip()
+    if not slug:
+        return []
     try:
-        all_events = await client.list_records("event", limit=500)
-        cutoff = datetime.now(timezone.utc) - timedelta(days=7)
-        out: list[dict[str, Any]] = []
-        for e in all_events:
-            try:
-                record = await client.read_record(e["path"])
-            except Exception:
-                continue
-            fm = record.get("frontmatter", {}) or {}
-            if (fm.get("matter") or "").lower() != matter_slug.lower():
-                continue
-            try:
-                event_date = datetime.fromisoformat(
-                    str(fm.get("date", "")).replace("Z", "+00:00")
-                )
-                if event_date.tzinfo is None:
-                    event_date = event_date.replace(tzinfo=timezone.utc)
-            except Exception:
-                continue
-            if event_date < cutoff:
-                continue
-            out.append({
-                "path": e["path"],
-                "name": fm.get("name", ""),
-                "date": fm.get("date"),
-                "summary": (record.get("body") or "")[:500],
-            })
-            activity.heartbeat(f"matched {len(out)} events")
-        return out
-    finally:
-        await client.close()
+        config = load_config()
+        async with StateClient(config) as sc:
+            envelope = await sc.list_audit(
+                target=f"matter/{slug}",
+                since=cutoff.isoformat(),
+                limit=200,
+            )
+        rows = envelope.get("entries") or []
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_matter_events_last_week: audit query failed err=%s", exc)
+        return []
+
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        target = str(row.get("target_path") or "")
+        out.append({
+            "path": target,
+            "name": target.rsplit("/", 1)[-1].removesuffix(".md"),
+            "date": row.get("ts"),
+            "summary": str(row.get("summary") or "")[:500],
+        })
+        activity.heartbeat(f"matched {len(out)} events")
+    return out
 
 
 @activity.defn
