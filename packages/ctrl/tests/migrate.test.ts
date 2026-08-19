@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import schema from "../src/db/schema.sql";
 import { runMigrations } from "../src/db/migrate.js";
-import { readdirSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -35,6 +35,12 @@ function latestMigrationVersion(): number {
 
 function userVersion(db: DatabaseSync): number {
   return (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
+}
+
+function indexColumns(db: DatabaseSync, index: string): string[] {
+  return (db.prepare(`PRAGMA index_info(${index})`).all() as { name: string }[]).map(
+    (r) => r.name,
+  );
 }
 
 describe("state.db migration runner", () => {
@@ -398,5 +404,201 @@ describe("state.db migration runner", () => {
     ).n;
     assert.equal(ownerCount, 1, "owner principal is inserted once, not duplicated");
     db.close();
+  });
+
+  it("0021 creates bounded Codex Desktop receipt/provenance tables and constraints", () => {
+    const db = new DatabaseSync(":memory:");
+    db.exec("PRAGMA foreign_keys = ON");
+    db.exec(schema);
+    runMigrations(db);
+
+    const tables = new Set(
+      (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[])
+        .map((r) => r.name),
+    );
+    for (const table of [
+      "codex_desktop_installation",
+      "codex_desktop_delivery_chunk",
+      "codex_desktop_source_event",
+    ]) {
+      assert.ok(tables.has(table), `0021: ${table} created`);
+    }
+
+    const requiredColumns: Record<string, string[]> = {
+      codex_desktop_installation: [
+        "id", "product", "product_version", "adapter_version", "token_hash",
+        "token_expires_at", "credential_rotated_at", "revoked_at",
+        "health_state", "redaction_state", "retention_until",
+      ],
+      codex_desktop_delivery_chunk: [
+        "id", "installation_id", "opaque_session_id", "sequence_start",
+        "sequence_end", "idempotency_key", "canonical_payload_hash",
+        "event_count", "projection_status", "existing_ingest_ref",
+        "acknowledgement_at", "redaction_state", "retention_until",
+      ],
+      codex_desktop_source_event: [
+        "id", "installation_id", "delivery_chunk_id", "source_event_id",
+        "opaque_session_id", "opaque_turn_id", "event_sequence", "event_kind",
+        "event_revision", "canonical_payload_hash", "projection_status",
+        "existing_ingest_ref", "existing_journal_ref", "redaction_state",
+        "retention_until",
+      ],
+    };
+    for (const [table, required] of Object.entries(requiredColumns)) {
+      const actual = cols(db, table);
+      for (const column of required) {
+        assert.ok(actual.includes(column), `0021: ${table}.${column} present`);
+      }
+    }
+    assert.equal(
+      cols(db, "codex_desktop_installation").includes("token"),
+      false,
+      "0021: plaintext installation token is not stored",
+    );
+
+    const expectedIndexes: Record<string, string[]> = {
+      uq_codex_desktop_chunk_idempotency: ["installation_id", "idempotency_key"],
+      uq_codex_desktop_chunk_sequence: [
+        "installation_id", "opaque_session_id", "sequence_start", "sequence_end",
+      ],
+      uq_codex_desktop_source_identity: ["installation_id", "source_event_id"],
+      uq_codex_desktop_event_sequence: [
+        "installation_id", "opaque_session_id", "event_sequence",
+      ],
+    };
+    for (const [index, expected] of Object.entries(expectedIndexes)) {
+      const row = db.prepare(
+        "SELECT name FROM sqlite_master WHERE type='index' AND name = ?",
+      ).get(index) as { name: string } | undefined;
+      assert.equal(row?.name, index, `0021: ${index} exists`);
+      assert.deepEqual(indexColumns(db, index), expected, `0021: ${index} columns`);
+    }
+    for (const index of [
+      "idx_codex_desktop_installation_expiry",
+      "idx_codex_desktop_installation_revoked",
+      "idx_codex_desktop_installation_retention",
+      "idx_codex_desktop_chunk_session",
+      "idx_codex_desktop_chunk_projection",
+      "idx_codex_desktop_chunk_retention",
+      "idx_codex_desktop_source_chunk",
+      "idx_codex_desktop_source_turn",
+      "idx_codex_desktop_source_projection",
+      "idx_codex_desktop_source_retention",
+    ]) {
+      const row = db.prepare(
+        "SELECT name FROM sqlite_master WHERE type='index' AND name = ?",
+      ).get(index) as { name: string } | undefined;
+      assert.equal(row?.name, index, `0021: ${index} exists`);
+    }
+
+    const chunkFkTargets = new Set(
+      (db.prepare("PRAGMA foreign_key_list(codex_desktop_delivery_chunk)").all() as { table: string }[])
+        .map((r) => r.table),
+    );
+    assert.deepEqual(chunkFkTargets, new Set(["codex_desktop_installation"]));
+    const sourceFkTargets = new Set(
+      (db.prepare("PRAGMA foreign_key_list(codex_desktop_source_event)").all() as { table: string }[])
+        .map((r) => r.table),
+    );
+    assert.ok(sourceFkTargets.has("codex_desktop_installation"));
+    assert.ok(sourceFkTargets.has("codex_desktop_delivery_chunk"));
+
+    const hashA = "a".repeat(64);
+    const hashB = "b".repeat(64);
+    db.prepare(
+      `INSERT INTO codex_desktop_installation
+        (id, label, product, product_version, platform, adapter_version,
+         token_hash, token_expires_at, retention_until)
+       VALUES (?, ?, ?, ?, 'macos', ?, ?, ?, ?)`,
+    ).run(
+      "cdi_01JTESTINSTALLATION0000000", "Test Mac", "codex-cli", "0.135.0", "1",
+      hashA, "2026-11-17T00:00:00.000Z", "2027-02-15T00:00:00.000Z",
+    );
+
+    const insertChunk = db.prepare(
+      `INSERT INTO codex_desktop_delivery_chunk
+        (id, installation_id, opaque_session_id, sequence_start, sequence_end,
+         idempotency_key, canonical_payload_hash, event_count,
+         acknowledgement_at, retention_until)
+       VALUES (?, 'cdi_01JTESTINSTALLATION0000000', 'thread-opaque', ?, ?, ?, ?, 1, ?, ?)`,
+    );
+    insertChunk.run(
+      "ack-1", 1, 1, "0191d4a0-0000-7000-8000-000000000001", hashA,
+      "2026-08-19T12:00:00.000Z", "2026-09-18T12:00:00.000Z",
+    );
+    assert.throws(
+      () => insertChunk.run(
+        "ack-idem-collision", 2, 2, "0191d4a0-0000-7000-8000-000000000001", hashA,
+        "2026-08-19T12:00:01.000Z", "2026-09-18T12:00:01.000Z",
+      ),
+      /UNIQUE constraint failed/i,
+      "0021: installation-scoped idempotency key collision rejected",
+    );
+    assert.throws(
+      () => insertChunk.run(
+        "ack-sequence-collision", 1, 1, "0191d4a0-0000-7000-8000-000000000002", hashA,
+        "2026-08-19T12:00:02.000Z", "2026-09-18T12:00:02.000Z",
+      ),
+      /UNIQUE constraint failed/i,
+      "0021: installation/session/chunk sequence collision rejected",
+    );
+
+    const insertEvent = db.prepare(
+      `INSERT INTO codex_desktop_source_event
+        (id, installation_id, delivery_chunk_id, source_event_id,
+         opaque_session_id, opaque_turn_id, event_sequence, event_kind,
+         event_revision, canonical_payload_hash, observed_at, retention_until)
+       VALUES (?, 'cdi_01JTESTINSTALLATION0000000', 'ack-1', ?,
+               'thread-opaque', ?, ?, 'agent-turn-complete', 1, ?, ?, ?)`,
+    );
+    insertEvent.run(
+      "event-row-1", "0191d4a0-0000-7000-8000-000000000010", "turn-opaque-1", 1,
+      hashB, "2026-08-19T11:59:59.000Z", "2026-08-26T12:00:00.000Z",
+    );
+    assert.throws(
+      () => insertEvent.run(
+        "event-row-source-collision", "0191d4a0-0000-7000-8000-000000000010",
+        "turn-opaque-2", 2, hashB, "2026-08-19T12:00:03.000Z",
+        "2026-08-26T12:00:03.000Z",
+      ),
+      /UNIQUE constraint failed/i,
+      "0021: installation/source-event identity collision rejected",
+    );
+    assert.throws(
+      () => insertEvent.run(
+        "event-row-sequence-collision", "0191d4a0-0000-7000-8000-000000000011",
+        "turn-opaque-3", 1, hashB, "2026-08-19T12:00:04.000Z",
+        "2026-08-26T12:00:04.000Z",
+      ),
+      /UNIQUE constraint failed/i,
+      "0021: installation/session/event sequence collision rejected",
+    );
+
+    assert.equal(userVersion(db), latestMigrationVersion());
+    runMigrations(db);
+    for (const table of Object.keys(requiredColumns)) {
+      const count = db.prepare(
+        "SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name = ?",
+      ).get(table) as { n: number };
+      assert.equal(count.n, 1, `0021: ${table} remains single after second run`);
+    }
+    db.close();
+  });
+
+  it("0021 is statically imported and registered exactly once", () => {
+    const migratePath = join(
+      dirname(fileURLToPath(import.meta.url)), "..", "src", "db", "migrate.ts",
+    );
+    const source = readFileSync(migratePath, "utf8");
+    assert.equal(
+      source.match(/import m0021 from "\.\/migrations\/0021_codex_desktop\.sql";/g)?.length,
+      1,
+      "0021 SQL has one static import",
+    );
+    assert.equal(
+      source.match(/\{\s*version:\s*21,\s*name:\s*"codex_desktop",\s*sql:\s*m0021\s*\}/g)?.length,
+      1,
+      "version 21 has one MIGRATIONS entry",
+    );
   });
 });

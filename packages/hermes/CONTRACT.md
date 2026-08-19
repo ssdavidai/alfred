@@ -12,6 +12,11 @@
 > remains boot-only, main-as-source, and size-based. Lane V must close those
 > named gaps before consumers or operators treat the target clauses as live.
 
+> **Issue #684 phase-0 target (revision 684-r2):** The Codex Desktop clause
+> below freezes Lane V's future boundary; it is not a claim that this pinned
+> head ships a desktop adapter or a supported LCM read/erase API. The canonical
+> wire contract is `docs/CODEX-DESKTOP-CHANNEL-CONTRACT.md`.
+
 `packages/hermes` is the AI runtime of alfred-black. It produces the
 **Hermes runtime image** (one container supervising one Hermes gateway per
 registered profile — `main` :18789 / `workers` :18790 / `heavy` :18791, plus
@@ -297,6 +302,30 @@ envelope). The daemon shares `alfred_data` (mounted at `/app/data`) with the
 stack so the wrapper can read prompt/manifest files. Provider keys are
 deliberately blanked in this container — Hermes is the sole key holder.
 
+### 9. Codex Desktop continuity boundary (#684)
+
+**#684 target (Lane V; not implemented at this phase-0 head).** The production
+adapter may consume only OpenAI's version-pinned external
+`agent-turn-complete` notification. Screen scraping, UI automation, transcript
+or log watching, app modification, undocumented database access, and
+experimental app-server interfaces are forbidden. The local adapter owns a
+bounded durable outbox; it is not a Hermes profile or MCP client and receives
+no MCP grant.
+
+Hermes remains a continuity runtime, not the Codex ingestion writer. ctrl-api
+projects accepted Codex events into the existing ingest and One Alfred journal
+path with stable provenance. Hermes never reads or writes migration-0021
+receipt tables. Those payload-free, retention-bounded rows are transport
+provenance, not a transcript, session store, memory store, or second LCM.
+
+The main-profile VPS LCM and ctrl-owned One Alfred journal remain the only
+continuity authorities. The pinned hermes-lcm plugin exposes no supported
+cross-service read or erase contract evidenced for #684. Until a later phase-0
+revision cites one, Codex continuity reads only ctrl-owned journal/state,
+returns `mode="journal_only"`, and **never opens an LCM or Hermes SQLite file
+directly**, including read-only access. Timeout, unavailability, stale
+revision, or redaction races degrade visibly and cannot block the Codex turn.
+
 ---
 
 ## Requires
@@ -401,6 +430,11 @@ deliberately blanked in this container — Hermes is the sole key holder.
    workers/heavy `state.db` TTL + compaction. A rendered Hermes cron may remain
    as rollout compatibility, but callers and operators must not rely on it as
    the only guard.
+14. **#684 target — no shadow Codex continuity store.** Codex source-event rows
+    stay bounded, payload-free transport provenance under ctrl ownership.
+    Hermes/LCM SQLite is never opened by the channel provider or adapter; the
+    One Alfred journal and main VPS LCM remain the only authorities, with
+    explicit `journal_only` degradation until a supported LCM API is frozen.
 
 ---
 
