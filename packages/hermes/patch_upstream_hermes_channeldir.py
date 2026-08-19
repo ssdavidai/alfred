@@ -200,7 +200,13 @@ def patch_file(path: str, helper: str) -> None:
 
 
 def main() -> None:
-    patch_file(CHANNELDIR_PY, HELPER)
+    # Optional argv[1] target. The image installs Hermes twice: the pip wheel
+    # into site-packages, AND the pinned 0.20.x tree under
+    # /usr/local/lib/hermes-agent, which runs from its OWN venv with
+    # PYTHONPATH/PYTHONHOME unset — so a site-packages-only patch never
+    # reaches the code that actually runs. Both trees get patched; the
+    # default keeps existing callers unchanged.
+    patch_file(sys.argv[1] if len(sys.argv) > 1 else CHANNELDIR_PY, HELPER)
 
 
 if __name__ == "__main__":

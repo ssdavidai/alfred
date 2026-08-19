@@ -64,14 +64,21 @@ REPLACEMENT = (
 
 
 def main() -> None:
-    p = pathlib.Path(TARGET)
+    # Optional argv[1] target. The image installs Hermes twice: the pip wheel
+    # into site-packages, AND the pinned 0.20.x tree under
+    # /usr/local/lib/hermes-agent, which runs from its OWN venv with
+    # PYTHONPATH/PYTHONHOME unset — so a site-packages-only patch never
+    # reaches the code that actually runs. Both trees get patched; the
+    # default keeps existing callers unchanged.
+    target = sys.argv[1] if len(sys.argv) > 1 else TARGET
+    p = pathlib.Path(target)
     src = p.read_text()
     if SENTINEL in src:
         print("secure_parent_dir: already patched, skipping")
         return
     if NEEDLE not in src:
         print(
-            f"secure_parent_dir: NEEDLE_NOT_FOUND in {TARGET} — upstream Hermes "
+            f"secure_parent_dir: NEEDLE_NOT_FOUND in {target} — upstream Hermes "
             f"may have moved this hunk; re-author the patch.",
             file=sys.stderr,
         )

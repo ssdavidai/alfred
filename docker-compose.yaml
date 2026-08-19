@@ -386,6 +386,11 @@ services:
     # the internet, and the gateway still requires the Bearer API_SERVER_KEY.
     ports:
       - "127.0.0.1:18789:18789"
+      # Live Voice dashboard (profile: live-voice). Published here because
+      # hermes-dashboard runs in THIS service's network namespace, so the port
+      # must be declared on the namespace owner. Loopback-only: reach it with
+      # `ssh -L 9121:127.0.0.1:9121 root@<host>`.
+      - "127.0.0.1:9121:9121"
     depends_on:
       init:
         condition: service_completed_successfully
@@ -1353,6 +1358,69 @@ services:
   # PR 2 lands the ctrl-api routes that drive `tailscale up / status /
   # logout / down` via `docker exec`; PR 3 the /connections card; PR 4
   # `tailscale cert` + `tailscale serve` for inbound from the tailnet.
+  # ---------------------------------------------------------------------------
+  # Live Voice (opt-in) — `docker compose --profile live-voice up -d`
+  #
+  # OFF by default. Both services need the `hermes-live` PLUGIN installed into
+  # the profile's plugins/ dir (it lives in the hermes_data volume, not the
+  # image) plus its config.env carrying the provider keys. A tenant without the
+  # plugin would restart-loop on a missing command, which is exactly what
+  # happened on the dev tenant on 2026-08-19 — so this stays behind a profile
+  # rather than defaulting on.
+  #
+  # Both share hermes' network namespace so they can reach the private gateway
+  # on 127.0.0.1:18789 and the live gateway on 127.0.0.1:8788 without either
+  # being published. The only exposed port is the dashboard, bound to loopback
+  # on the host — reach it from a laptop with `ssh -L 9121:127.0.0.1:9121`.
+  #
+  # Requires Hermes >= 0.20: the plugin registers its `hermes-live` command
+  # through the 0.20 plugin loader. On 0.19 the command does not exist.
+  hermes-dashboard:
+    profiles: ["live-voice"]
+    logging: *default-logging
+    image: ssdavidai00/alfred-black-hermes:latest
+    network_mode: "service:hermes"
+    volumes_from:
+      - hermes
+    environment:
+      - HERMES_HOME=/hermes-state/profiles/main
+    entrypoint: ["/bin/sh", "-lc"]
+    # --skip-build: web_dist is baked into the image, so never shell out to
+    # npm at runtime (the git-installed tree ships no bundle of its own).
+    command: exec hermes dashboard --host 0.0.0.0 --port 9121 --no-open --skip-build
+    depends_on:
+      hermes:
+        condition: service_started
+    restart: unless-stopped
+
+  hermes-live:
+    profiles: ["live-voice"]
+    logging: *default-logging
+    image: ssdavidai00/alfred-black-hermes:latest
+    network_mode: "service:hermes"
+    volumes_from:
+      - hermes
+    # uid 10000 is not a passwd user, it is the uid the init container chowns
+    # the whole hermes volume to (init/entrypoint.sh: `chown -R 10000:10000`).
+    # hermes-live REFUSES to read a config.env it does not own ("Managed config
+    # must be owned by the current user"), so running as root here silently
+    # loses every provider key. HOME must also point somewhere uid 10000 can
+    # write, or the CLI dies on `mkdir /.hermes`.
+    user: "10000:10000"
+    environment:
+      - HERMES_HOME=/hermes-state/profiles/main
+      - HOME=/hermes-state
+    entrypoint: ["/bin/sh", "-lc"]
+    # The task store is single-owner and its lock outlives an unclean stop, so
+    # a killed container would otherwise never start again. `tasks unlock`
+    # refuses to clear a lock held by a LIVE same-host process, so this is safe
+    # to run unconditionally on every start.
+    command: "hermes-live tasks unlock --confirm-no-gateway >/dev/null 2>&1 || true; exec hermes-live serve"
+    depends_on:
+      hermes:
+        condition: service_started
+    restart: unless-stopped
+
   tailscale:
     logging: *default-logging
     image: tailscale/tailscale:stable

@@ -291,6 +291,84 @@ RUN python3 /tmp/patch_upstream_hermes_channeldir.py \
  && rm /tmp/patch_upstream_hermes_channeldir.py
 
 # =============================================================================
+# Hermes 0.20.4 — the runtime the fleet actually executes.  (2026-08-19)
+# =============================================================================
+# 0.20.x is git-only: there is no PyPI wheel. So the pip install above stays as
+# the base layer (it resolves the Python dep tree and gives the patched
+# site-packages copy), and the vendor installer overlays 0.20.4 into
+# /usr/local/lib/hermes-agent — which ships its OWN venv and its OWN launchers
+# in /usr/local/bin. Every `hermes` invocation therefore runs the 0.20.x tree.
+#
+# Three consequences, each of which bit us on home before being handled here:
+#
+#  1. web_dist. The git tree ships no dashboard bundle — that is the original
+#     reason HERMES_VERSION was pinned to the wheel (see the note above). Left
+#     alone, `hermes dashboard` attempts an npm build on FIRST RUN, inside a
+#     container that may have no writable npm cache. Pre-build it exactly as
+#     `hermes dashboard --skip-build` documents: `cd web && npm run build`.
+#
+#  2. The upstream patches. The 0.20.x launcher execs its own venv with
+#     PYTHONPATH/PYTHONHOME unset, so the three site-packages patches above
+#     never reach the code that actually runs. They are re-applied to the
+#     0.20.x tree below. The tripwires are per-invocation, so a needle that
+#     moves in a future bump still fails the build loudly instead of silently
+#     no-op'ing. NB 0.20.4 has FOUR fd-open sites in utils.py, not the
+#     historical three — the channeldir patch warns and patches all of them.
+#
+#  3. hermes-live. The live-voice gateway is a SEPARATE npm package, not part
+#     of Hermes; the Hermes-side plugin only talks to it. The plugin half is
+#     tenant state (it lives in the hermes volume), but the `hermes-live`
+#     binary is an image artifact — so it vanishes on every container recreate
+#     unless it is baked. Pinned to the version matching the plugin (0.9.5).
+#
+# --skip-browser / --skip-computer-use: the installer would otherwise pull
+# ~620 MB of Playwright/Chromium that no fleet image has ever shipped (the base
+# image installs the playwright *library* only). Skipping keeps fleet parity
+# and keeps the image near 1 GB rather than 2.5 GB.
+ARG HERMES_GIT_COMMIT=13ce0c5c675e843af70d19c9e5144249cd51c8d1
+ARG HERMES_GIT_VERSION=0.20.4
+ARG HERMES_LIVE_VERSION=0.9.5
+RUN curl -fsSL https://hermes-agent.nousresearch.com/install.sh -o /tmp/hermes-install.sh \
+ && npm_config_nodedir=/usr npm_config_unsafe_perm=true \
+    bash /tmp/hermes-install.sh \
+        --commit "${HERMES_GIT_COMMIT}" \
+        --hermes-home /opt/data \
+        --skip-setup --non-interactive --skip-browser --skip-computer-use \
+ && rm -f /tmp/hermes-install.sh \
+ && hermes --version \
+ && hermes --version | grep -qF "v${HERMES_GIT_VERSION}"
+
+# Pre-build the dashboard SPA so first run never shells out to npm (see 1).
+RUN cd /usr/local/lib/hermes-agent/web \
+ && npm_config_nodedir=/usr npm_config_unsafe_perm=true npm install --no-audit --no-fund \
+ && npm run build \
+ && test -f /usr/local/lib/hermes-agent/hermes_cli/web_dist/index.html \
+ && npm cache clean --force
+
+# Re-apply the three upstream patches to the 0.20.x tree (see 2).
+COPY packages/hermes/patch_upstream_hermes_auth.py       /tmp/p_auth.py
+COPY packages/hermes/patch_upstream_hermes_channeldir.py /tmp/p_chan.py
+COPY packages/hermes/patch_openai_sdk.py                 /tmp/p_openai.py
+RUN HT=/usr/local/lib/hermes-agent \
+ && RESP="$(ls "$HT"/venv/lib/python*/site-packages/openai/lib/_parsing/_responses.py | head -1)" \
+ && python3 /tmp/p_auth.py   "$HT/hermes_constants.py" \
+ && python3 /tmp/p_chan.py   "$HT/utils.py" \
+ && python3 /tmp/p_openai.py "$RESP" \
+ && grep -qF "alfred-black: never chmod a Hermes profile dir" "$HT/hermes_constants.py" \
+ && grep -qF "alfred-black: fd-safe atomic write"             "$HT/utils.py" \
+ && grep -qF "_alfred_fdopen_or_close"                        "$HT/utils.py" \
+ && grep -qF "(response.output or [])"                        "$RESP" \
+ && "$HT/venv/bin/python" -m py_compile "$HT/hermes_constants.py" "$HT/utils.py" "$RESP" \
+ && rm -f /tmp/p_auth.py /tmp/p_chan.py /tmp/p_openai.py
+
+# The live-voice gateway binary (see 3). Off unless the live-voice compose
+# profile is enabled; baking it costs ~44 MB and removes the recreate cliff.
+RUN npm_config_nodedir=/usr npm_config_unsafe_perm=true \
+    npm install --global --no-audit --no-fund "hermes-live-voice@${HERMES_LIVE_VERSION}" \
+ && hermes-live --version | grep -qF "${HERMES_LIVE_VERSION}" \
+ && npm cache clean --force
+
+# =============================================================================
 # Bake the hermes-lcm plugin (lossless cross-session context engine).
 # =============================================================================
 # The `stephenschoettler/hermes-lcm` plugin enables Hermes' LCM context engine

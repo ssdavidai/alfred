@@ -46,7 +46,14 @@ SENTINEL = "(response.output or [])"
 
 
 def main() -> None:
-    p = pathlib.Path(RESPONSES_PY)
+    # Optional argv[1] target. The image installs Hermes twice: the pip wheel
+    # into site-packages, AND the pinned 0.20.x tree under
+    # /usr/local/lib/hermes-agent, which runs from its OWN venv with
+    # PYTHONPATH/PYTHONHOME unset — so a site-packages-only patch never
+    # reaches the code that actually runs. Both trees get patched; the
+    # default keeps existing callers unchanged.
+    target = sys.argv[1] if len(sys.argv) > 1 else RESPONSES_PY
+    p = pathlib.Path(target)
     src = p.read_text()
     if SENTINEL in src:
         print(f"openai/_parsing/_responses.py: already patched, skipping")
