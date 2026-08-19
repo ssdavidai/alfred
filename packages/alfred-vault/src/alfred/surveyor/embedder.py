@@ -161,6 +161,14 @@ class Embedder:
                             log.warning("embedder.state_invalidate_failed", error=str(e))
                         break
             else:
+                # An existing collection comes back RELEASED after a restart:
+                # milvus-lite persists the data but not the loaded state, and
+                # any query then fails with
+                #   code=101 ... is in state 'released'; call load()
+                # create_collection() loads implicitly, so ONLY this path was
+                # affected — which is why the surveyor worked until the first
+                # restart and never again.
+                self._load_collection()
                 return
 
         schema = CollectionSchema(
@@ -187,7 +195,26 @@ class Embedder:
             collection_name=self.collection_name,
             index_params=index_params,
         )
+        # create_index does not load either; be explicit on both paths.
+        self._load_collection()
         log.info("embedder.collection_created", name=self.collection_name)
+
+    def _load_collection(self) -> None:
+        """Load the collection into memory. Required before any query/search.
+
+        Logged rather than raised: a failure here makes the surveyor useless
+        but should not take the whole worker down, and the query that follows
+        reports the real error anyway.
+        """
+        try:
+            self.milvus.load_collection(self.collection_name)
+            log.info("embedder.collection_loaded", name=self.collection_name)
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "embedder.collection_load_failed",
+                name=self.collection_name,
+                error=str(e),
+            )
 
     async def _ensure_http(self) -> httpx.AsyncClient:
         """Lazily create and reuse a persistent HTTP client."""
