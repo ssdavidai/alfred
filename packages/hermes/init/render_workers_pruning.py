@@ -32,6 +32,17 @@ main / codex-builder are skipped:
     its sessions are the live chat surface and reset on a daily boundary.
   * codex-builder is a sealed runtime with its own `cleanup-old-runs` GC of
     /work/runs — its sessions live elsewhere.
+
+
+SUPERSEDED (2026-08-19). The `cron.jobs` config key this writes is NOT what
+Hermes schedules from — it reads its cron STORE (<profile>/cron/jobs.json).
+Verified on a live tenant: both jobs present here, `cron list` empty, session
+files two months old under a 7-day policy. The working replacement is
+packages/hermes/scripts/state_retention.py, registered into the store by
+supervisor.sh (install_state_retention), which also does the row-level TTL
+that bounds state.db — VACUUM alone never could, since it reclaims free pages
+rather than deleting rows. This mutator is left in place only because it is
+harmless and a future Hermes may honour the declarative key.
 """
 
 from __future__ import annotations

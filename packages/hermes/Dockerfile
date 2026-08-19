@@ -549,6 +549,8 @@ RUN chmod +x /usr/local/bin/codex-builder-setup-egress.sh \
 # This is the agent identity Sir's Paperclip persona references. The
 # init container copies it into the profile dir (PR 5).
 COPY packages/hermes/SOUL.codex-builder.md /opt/hermes-assets/SOUL.codex-builder.md
+# Nightly session-retention job, installed into workers/heavy by supervisor.sh.
+COPY packages/hermes/scripts/state_retention.py /opt/hermes-assets/state_retention.py
 
 # =============================================================================
 # Self-render renderer scripts (#120 Lane IIb).

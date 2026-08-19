@@ -277,10 +277,43 @@ wait_for_profiles() {
 }
 
 # =============================================================================
+# Session retention (#241/#261; #274 was closed NOT_PLANNED)
+# =============================================================================
+# #266's jobs were declared under `cron.jobs` in config.yaml, which Hermes does
+# not schedule from — it reads its cron STORE. Register a real store-backed job
+# instead, shaped like the one working job on `main` (--no-agent + --script).
+# Full rationale: packages/hermes/scripts/state_retention.py. workers/heavy
+# only; the script independently refuses to run against `main`.
+install_state_retention() {
+    local slug profile_dir
+    for slug in workers heavy; do
+        profile_dir="${PROFILES_DIR}/${slug}"
+        [[ -d "${profile_dir}" ]] || continue
+        mkdir -p "${profile_dir}/scripts"
+        cp -f /opt/hermes-assets/state_retention.py \
+              "${profile_dir}/scripts/state_retention.py" 2>/dev/null || continue
+
+        # Idempotent: re-registering every boot would stack duplicates, and an
+        # operator who retuned the schedule must keep it.
+        if hermes -p "${slug}" cron list 2>/dev/null | grep -q 'state-retention'; then
+            continue
+        fi
+        if hermes -p "${slug}" cron create \
+                --no-agent --script state_retention.py \
+                --name state-retention --deliver local "17 4 * * *" >/dev/null 2>&1; then
+            log "registered state-retention cron on ${slug}"
+        else
+            log "WARN: could not register state-retention cron on ${slug}"
+        fi
+    done
+}
+
+# =============================================================================
 # Boot
 # =============================================================================
 log "alfred-black-hermes starting — HERMES_HOME=${HERMES_HOME}"
 wait_for_profiles
+install_state_retention
 
 # Make `main` the sticky default profile so an interactive
 # `docker exec -it alfred-black-hermes-1 hermes chat` (or just `hermes`)
