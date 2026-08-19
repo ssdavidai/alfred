@@ -1,11 +1,10 @@
 ---
-type: note
-status: draft # draft | active | review | final
-subtype: # idea | learning | research | meeting-notes | reference
+type: place
+status: active
 name:
 description:
+address:
 matter_ref: # Link to Matter
-session: # Link to Session
 related: []
 relationships: []
 created: "{{date}}"

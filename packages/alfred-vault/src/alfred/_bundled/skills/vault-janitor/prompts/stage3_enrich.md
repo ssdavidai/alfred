@@ -16,7 +16,7 @@ Other vault records that link to or from this stub. Their content is included be
 ### Source 2: Public Facts (person and org types ONLY)
 For **person** and **org** records ONLY, you may use `alfred vault search --grep` to find additional mentions in the vault, and you may search for VERIFIABLE PUBLIC FACTS:
 - For persons: role, company, LinkedIn info, professional background
-- For orgs: what they do, website, industry, location
+- For orgs: what they do, website, industry, place
 
 ### You MUST NOT:
 - Generate creative, speculative, or narrative content
@@ -27,7 +27,7 @@ For **person** and **org** records ONLY, you may use `alfred vault search --grep
 - Add information that is not directly supported by the vault context or public facts
 - Use web search for any type other than person or org
 
-**Your job is COMPILE AND FORMAT WHAT IS ALREADY KNOWN.** If a person appears in 3 conversations and 2 project records, pull their role, org, and context from those existing records into the stub body. Do not invent a bio.
+**Your job is COMPILE AND FORMAT WHAT IS ALREADY KNOWN.** If a person appears in 3 conversations and 2 matter records, pull their role, org, and context from those existing records into the stub body. Do not invent a bio.
 
 ---
 
@@ -68,7 +68,7 @@ Current record content:
 ## What to Add
 
 ### Body Content
-- A brief factual summary compiled from linked records (who they are, what their role is, what projects they are involved in)
+- A brief factual summary compiled from linked records (who they are, what their role is, what matters they are involved in)
 - Relevant context extracted from conversations, notes, or other records that reference this entity
 - For person/org: verifiable public facts if available
 

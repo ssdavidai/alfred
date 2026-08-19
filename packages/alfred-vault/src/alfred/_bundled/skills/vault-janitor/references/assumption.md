@@ -4,7 +4,7 @@ status: active # active | challenged | invalidated | confirmed
 confidence: medium # low | medium | high
 source: "" # where this came from (person, document, meeting)
 source_date:
-project: [] # [[project links]]
+matter_ref: [] # [[matter links]]
 based_on: [] # [[evidence it rests on]]
 confirmed_by: [] # [[evidence that strengthened it]]
 challenged_by: [] # [[evidence that weakened it]]

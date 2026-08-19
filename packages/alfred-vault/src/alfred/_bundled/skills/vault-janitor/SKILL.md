@@ -73,17 +73,17 @@ tags: []
 ```
 **Directory:** `org/`
 
-#### project
+#### matter
 ```yaml
 ---
-type: project                   # (required)
+type: matter                   # (required)
 status: active                  # active | paused | completed | abandoned | proposed
 name:                           # (required)
 description:
 client:                         # "[[org/Client Org]]"
-parent:                         # "[[project/Parent Project]]"
+parent:                         # "[[matter/Parent Matter]]"
 owner:                          # "[[person/Owner Name]]"
-location:                       # "[[location/Location Name]]"
+place:                       # "[[place/Place Name]]"
 related: []
 relationships: []
 supports: []
@@ -95,24 +95,24 @@ created: "YYYY-MM-DD"           # (required)
 tags: []
 ---
 ```
-**Directory:** `project/`
+**Directory:** `matter/`
 
-#### location
+#### place
 ```yaml
 ---
-type: location                  # (required)
+type: place                  # (required)
 status: active                  # active | inactive
 name:                           # (required)
 description:
 address:
-project:                        # "[[project/Project Name]]"
+matter_ref:                        # "[[matter/Matter Name]]"
 related: []
 relationships: []
 created: "YYYY-MM-DD"           # (required)
 tags: []
 ---
 ```
-**Directory:** `location/`
+**Directory:** `place/`
 
 #### account
 ```yaml
@@ -124,7 +124,7 @@ description:
 account_type:                   # financial | service | platform | subscription
 provider:                       # "[[org/Provider Org]]"
 managed_by:                     # "[[person/Person Name]]"
-project:                        # "[[project/Project Name]]"
+matter_ref:                        # "[[matter/Matter Name]]"
 account_id:
 cost:
 renewal_date:
@@ -148,8 +148,8 @@ asset_type:                     # software | hardware | license | domain | infra
 owner:                          # "[[person/Person Name]]"
 vendor:                         # "[[org/Vendor Org]]"
 account:                        # "[[account/Account Name]]"
-project:                        # "[[project/Project Name]]"
-location:                       # "[[location/Location Name]]"
+matter_ref:                        # "[[matter/Matter Name]]"
+place:                       # "[[place/Place Name]]"
 cost:
 acquired:
 renewal_date:
@@ -191,7 +191,7 @@ status: todo                    # todo | active | blocked | done | cancelled
 kind: task                      # task | discussion | reminder
 name:                           # (required)
 description:
-project:                        # "[[project/Project Name]]"
+matter_ref:                        # "[[matter/Matter Name]]"
 run:                            # "[[run/Run Name]]"
 assigned:                       # "[[person/Name]]" or "alfred"
 due:
@@ -215,7 +215,7 @@ status: active                  # active | waiting | resolved | archived
 channel: email                  # email | zoom | in-person | phone | chat | voice-memo | mixed
 subject:                        # (required)
 participants: []
-project:                        # "[[project/Project Name]]"
+matter_ref:                        # "[[matter/Matter Name]]"
 org:                            # "[[org/Org Name]]"
 external_id:
 message_count: 0
@@ -247,7 +247,7 @@ conversation:
 message_id:
 in_reply_to:
 references: []
-project:
+matter_ref:
 alfred_instructions:
 related: []
 relationships: []
@@ -264,7 +264,7 @@ status: active                  # active | completed
 name:                           # (required)
 description:
 intent:
-project:                        # "[[project/Project Name]]"
+matter_ref:                        # "[[matter/Matter Name]]"
 process:
 participants: []
 outputs: []
@@ -284,7 +284,7 @@ status: draft                   # draft | active | review | final
 subtype:                        # idea | learning | research | meeting-notes | reference
 name:                           # (required)
 description:
-project:                        # "[[project/Project Name]]"
+matter_ref:                        # "[[matter/Matter Name]]"
 session:
 related: []
 relationships: []
@@ -302,8 +302,8 @@ name:                           # (required)
 description:
 date:
 participants: []
-location:                       # "[[location/Location Name]]"
-project:                        # "[[project/Project Name]]"
+place:                       # "[[place/Place Name]]"
+matter_ref:                        # "[[matter/Matter Name]]"
 session:
 related: []
 relationships: []
@@ -321,7 +321,7 @@ status: active                  # active | completed | blocked | cancelled
 name:                           # (required)
 description:
 process:                        # "[[process/Process Name]]" (required)
-project:                        # "[[project/Project Name]]"
+matter_ref:                        # "[[matter/Matter Name]]"
 trigger:
 current_step:
 started:
@@ -343,7 +343,7 @@ status: draft                   # draft | final | superseded | reversed
 confidence: high                # low | medium | high
 source: ""
 source_date:
-project: []
+matter_ref: []
 decided_by: []
 approved_by: []
 based_on: []
@@ -365,7 +365,7 @@ status: active                  # active | challenged | invalidated | confirmed
 confidence: medium              # low | medium | high
 source: ""
 source_date:
-project: []
+matter_ref: []
 based_on: []
 confirmed_by: []
 challenged_by: []
@@ -385,8 +385,8 @@ status: active                  # active | expired | waived | superseded
 source: ""
 source_date:
 authority: ""
-project: []
-location: []
+matter_ref: []
+place: []
 related: []
 created: "YYYY-MM-DD"           # (required)
 tags: []
@@ -405,7 +405,7 @@ claim_a: ""
 claim_b: ""
 source_a: ""
 source_b: ""
-project: []
+matter_ref: []
 related: []
 created: "YYYY-MM-DD"           # (required)
 tags: []
@@ -420,7 +420,7 @@ type: synthesis                 # (required)
 status: draft                   # draft | active | superseded
 confidence: medium              # low | medium | high
 cluster_sources: []
-project: []
+matter_ref: []
 supports: []
 related: []
 created: "YYYY-MM-DD"           # (required)
@@ -431,8 +431,8 @@ tags: []
 
 ### 2.4 Bootstrap Records
 
-#### bootstrap-project / bootstrap-subproject
-Task records with `kind: task` containing project setup checklists. These live in `task/` and are created when initializing new projects.
+#### bootstrap-matter / bootstrap-subproject
+Task records with `kind: task` containing matter setup checklists. These live in `task/` and are created when initializing new matters.
 
 ---
 
@@ -454,7 +454,7 @@ Task records with `kind: task` containing project setup checklists. These live i
 **Diagnosis:** `type` field contains an unknown value.
 
 **Fix:**
-- Check if it's a typo (e.g. `typ: project` → `type: project`)
+- Check if it's a typo (e.g. `typ: matter` → `type: matter`)
 - Check if it's an old type name (e.g. `thread` → might be `conversation`)
 - If unresolvable, flag with `janitor_note: "FM002 — unknown type '{value}', needs manual review"`
 
@@ -547,7 +547,7 @@ FIXED | person/John Smith.md | FM001 | Added missing 'created: 2026-02-19'
 FIXED | task/Review Quote.md | FM003 | Changed status 'open' → 'todo'
 FLAGGED | note/Old Notes.md | ORPHAN001 | No inbound links, added janitor_note
 DELETED | note/test test.md | SEM001 | Garbage content: "test test test"
-SKIPPED | project/Eagle Farm.md | STUB001 | Not enough context to flesh out body
+SKIPPED | matter/Eagle Farm.md | STUB001 | Not enough context to flesh out body
 ```
 
 ---

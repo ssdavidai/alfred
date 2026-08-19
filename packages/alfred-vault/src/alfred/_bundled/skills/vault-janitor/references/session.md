@@ -4,8 +4,8 @@ status: active # active | completed
 name:
 description:
 intent: # What this session is for
-project: # Link to Project (or process:)
-process: # Link to Process (or project:)
+matter_ref: # Link to Matter (or process:)
+process: # Link to Process (or matter:)
 participants: [] # Links to Person records
 outputs: [] # Links to records created during session
 related: []
