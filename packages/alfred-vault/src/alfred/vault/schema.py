@@ -4,6 +4,28 @@ from __future__ import annotations
 
 # --- Known record types and their valid statuses ---
 
+# The ONLY record types ctrl-api will accept on POST /api/v1/vault/records.
+# MUST stay identical to the allowed list in
+# packages/ctrl/src/db/promotionContract.ts — ctrl is the enforcing side, and a
+# type that is in KNOWN_TYPES but not here fails at the network boundary with a
+# 422, not locally.
+CANONICAL_VAULT_TYPES: set[str] = {
+    "matter", "task", "note", "person", "org", "place", "asset",
+    "chore", "instinct", "decision", "briefing", "daybook", "commitment",
+}
+
+# Pre-cutover names and the canonical types that replaced them.
+#
+# This daemon's vocabulary predates the four-store cutover. `project` is what a
+# `matter` used to be called and `location` is what a `place` used to be called;
+# the curator's extraction skill still teaches the old names, so every extracted
+# project was POSTed as type `project` and rejected. Applied in vault_create
+# before anything downstream sees the type.
+TYPE_ALIASES: dict[str, str] = {
+    "project": "matter",
+    "location": "place",
+}
+
 KNOWN_TYPES: set[str] = {
     "project", "task", "session", "input", "person", "org",
     "location", "note", "decision", "process", "run", "event",
@@ -16,6 +38,10 @@ KNOWN_TYPES: set[str] = {
     # and where it is in its lifecycle. The unit the commitment register
     # reconciles against.
     "commitment",
+    # Canonical types the pre-cutover vocabulary had no name for. Without these
+    # the daemon cannot create the vault's central record at all: there was no
+    # `matter` in KNOWN_TYPES, so nothing here could author one.
+    "matter", "place", "chore", "briefing", "daybook",
 }
 
 LEARN_TYPES: set[str] = {
@@ -61,6 +87,13 @@ STATUS_BY_TYPE: dict[str, set[str]] = {
     # daemon has no business enforcing that state machine, so `status` stays
     # the same four-value rollup every other reader already understands.
     "commitment": {"todo", "active", "blocked", "done"},
+    # Matter's principal-facing lifecycle. Deliberately NOT project's old set:
+    # `paused`/`abandoned`/`proposed` are not states a matter can be in.
+    "matter": {"active", "dormant", "completed", "archived"},
+    "place": {"active", "inactive"},
+    "chore": set(),      # schedule state lives in Temporal, not frontmatter
+    "briefing": set(),
+    "daybook": set(),
 }
 
 # Type → expected top-level directory
@@ -84,6 +117,11 @@ TYPE_DIRECTORY: dict[str, str] = {
     "synthesis": "synthesis",
     "instinct": "instinct",
     "commitment": "commitment",
+    "matter": "matter",
+    "place": "place",
+    "chore": "chore",
+    "briefing": "briefing",
+    "daybook": "daybook",
     # session, input have flexible placement
 }
 
