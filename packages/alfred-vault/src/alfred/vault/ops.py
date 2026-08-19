@@ -12,10 +12,13 @@ from datetime import date
 from pathlib import Path
 
 import frontmatter
+import httpx
 import yaml
 
 from . import obsidian
 from .schema import (
+    CANONICAL_VAULT_TYPES,
+    TYPE_ALIASES,
     KNOWN_TYPES,
     LIST_FIELDS,
     NAME_FIELD_BY_TYPE,
@@ -387,6 +390,10 @@ def vault_create(
     body: str | None = None,
 ) -> dict:
     """Create a new vault record. Returns {path, warnings}."""
+    # Pre-cutover name -> canonical, before anything downstream sees the type.
+    # The curator's extraction skill still emits `project` and `location`.
+    record_type = TYPE_ALIASES.get(record_type, record_type)
+
     _validate_type(record_type)
     set_fields = set_fields or {}
 
@@ -395,8 +402,36 @@ def vault_create(
     # contract/index/signal.
     from alfred.ctrl_client import ctrl_create, via_ctrl_enabled
     if via_ctrl_enabled():
+        # ctrl accepts only the canonical 13. A type outside that set is a
+        # PERMANENT rejection, not a transient one — retrying cannot help. Fail
+        # as VaultError so callers that already skip-and-continue on VaultError
+        # (curator._resolve_entities) drop the one entity instead of losing the
+        # whole pipeline run to an escaping httpx exception.
+        if record_type not in CANONICAL_VAULT_TYPES:
+            raise VaultError(
+                f"Type '{record_type}' is not a canonical vault type and cannot "
+                f"be written to the vault. Canonical: "
+                f"{', '.join(sorted(CANONICAL_VAULT_TYPES))}. "
+                "Demoted types belong in alfred-state.db via ctrl-api's state "
+                "routes, not in the principal's vault."
+            )
         rendered = _render_new_record(vault_path, record_type, name, set_fields, body)
-        out = ctrl_create(record_type, name, rendered)
+        try:
+            out = ctrl_create(record_type, name, rendered)
+        except httpx.HTTPStatusError as exc:
+            # Never let a raw HTTP error escape the vault layer: callers catch
+            # VaultError, so an HTTPStatusError kills whatever pipeline is
+            # running. This is exactly how one rejected entity took down every
+            # curator run for six days.
+            detail = ""
+            try:
+                detail = exc.response.json().get("error", {}).get("message", "")
+            except Exception:  # noqa: BLE001
+                detail = (exc.response.text or "")[:200]
+            raise VaultError(
+                f"ctrl rejected create of {record_type}/{name}: "
+                f"HTTP {exc.response.status_code}. {detail}"
+            ) from exc
         return {"path": out["path"], "warnings": []}
 
     # Determine directory and path
