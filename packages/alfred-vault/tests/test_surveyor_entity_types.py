@@ -1,8 +1,13 @@
 """Bug #13 — surveyor `matter` phantom type.
 
-`labeler.ENTITY_RECORD_TYPES` listed "matter", but vault/schema.py KNOWN_TYPES
-has no "matter". If that path fired it would write `related_matters` links
-pointing at a type the rest of the system rejects (dead/poison code).
+Originally filed the wrong way round, and corrected here. Bug #13 saw "matter"
+in `labeler.ENTITY_RECORD_TYPES`, found no "matter" in vault/schema.py
+KNOWN_TYPES, and removed "matter" — keeping "project". But KNOWN_TYPES was the
+stale half: it predated the four-store cutover, where `matter` is the canonical
+type and `project` is the name it replaced. ctrl-api rejects `project` with 422
+PROMOTION_CONTRACT_VIOLATION, so the cluster path was writing `related_project`
+links at a type the system refuses — the very poison-link failure this test set
+out to prevent.
 
 NOTE on import strategy: `alfred.surveyor.labeler` imports `structlog` at
 module top — a heavy runtime dep that may not be in a minimal test env. We
@@ -16,19 +21,25 @@ from __future__ import annotations
 from alfred.vault.schema import KNOWN_TYPES
 
 # Expected value of labeler.ENTITY_RECORD_TYPES AFTER the fix (matter removed).
-EXPECTED_ENTITY_RECORD_TYPES = frozenset({"person", "org", "project"})
+EXPECTED_ENTITY_RECORD_TYPES = frozenset({"person", "org", "matter"})
 
 
 def test_entity_record_types_are_all_known_types():
-    """Every surveyor entity type must be a canonical KNOWN_TYPE, else any
-    `related_<type>` link it writes points at a type the system rejects."""
+    """Every surveyor entity type must be one ctrl-api will accept, else any
+    `related_<type>` link it writes points at a type the system rejects.
+    KNOWN_TYPES is too weak a bar — it still contains pre-cutover names."""
+    from alfred.vault.schema import CANONICAL_VAULT_TYPES
     assert EXPECTED_ENTITY_RECORD_TYPES <= KNOWN_TYPES
+    assert EXPECTED_ENTITY_RECORD_TYPES <= CANONICAL_VAULT_TYPES
 
 
-def test_matter_is_not_an_entity_record_type():
-    assert "matter" not in EXPECTED_ENTITY_RECORD_TYPES
-    # And the reason it must go: `matter` is not a canonical vault type.
-    assert "matter" not in KNOWN_TYPES
+def test_project_is_not_an_entity_record_type():
+    """`project` is the pre-cutover name. ctrl-api answers 422 for it, so a
+    `related_project` link is exactly the poison link bug #13 meant to stop."""
+    from alfred.vault.schema import CANONICAL_VAULT_TYPES
+    assert "project" not in EXPECTED_ENTITY_RECORD_TYPES
+    assert "project" not in CANONICAL_VAULT_TYPES
+    assert "matter" in CANONICAL_VAULT_TYPES
 
 
 def test_labeler_constant_matches_expected():

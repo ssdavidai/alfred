@@ -116,11 +116,14 @@ def _first_balanced_span(text: str) -> str | None:
 # cluster contains one of these, its filename stem becomes a canonical
 # cluster tag so every member inherits the entity slug and downstream
 # consumers can match on `alfred_tags: [<entity-slug>]`.
-# bug #13: "matter" was listed here but is NOT a canonical vault KNOWN_TYPE
-# (see alfred.vault.schema.KNOWN_TYPES). If the cluster path ever fired on a
-# "matter"-typed record it would write `related_matters` links pointing at a
-# type the rest of the system rejects. Only canonical entity types belong here.
-ENTITY_RECORD_TYPES = frozenset({"person", "org", "project"})
+# bug #13 got this backwards, and the correction is the point of this comment.
+# It observed "matter" here, saw that schema.KNOWN_TYPES had no "matter", and
+# removed "matter" — keeping "project". The premise was the stale half: this
+# daemon's KNOWN_TYPES predated the four-store cutover, and `matter` is the
+# canonical type while `project` is the name it replaced. ctrl-api rejects
+# `project` with 422, so the cluster path was writing `related_project` links
+# at a type the rest of the system refuses. Reversed here.
+ENTITY_RECORD_TYPES = frozenset({"person", "org", "matter"})
 
 
 def _slug_from_rel_path(rel_path: str) -> str:
