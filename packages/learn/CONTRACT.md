@@ -5,7 +5,7 @@
 > `main`; every current-runtime claim below was verified against code, with
 > `src/worker.py` (workflow/activity registration) and
 > `scripts/register_schedules.py` (schedules) as the authorities. Clauses
-> explicitly labelled `#261 target` or `#316 target` instead freeze Lane II's
+> explicitly labelled `#261 target`, `#316 target`, or `#684 target` instead freeze Lane II's
 > required future behavior and are not code-verified claims about this phase-0
 > head.
 
@@ -174,6 +174,32 @@ derivation. Lane IV owns the shared ledger consumer and all claim, progress,
 output, terminal, timeout, and recovery writes. Lane II owns only this scheduled
 polling behavior; it reads no `worker-runs` file directly and defines no
 parallel run/status interface.
+
+#### Codex Desktop projected ingest (#684)
+
+**#684 target (Lane II; not implemented at this phase-0 head).** The exact
+source and wire contract is
+`docs/CODEX-DESKTOP-CHANNEL-CONTRACT.md` revision 684-r2. alfred-learn receives
+Codex only as ordinary ctrl-api-projected `ingest.db.stream_event` rows with
+`stream="codex-desktop:<installation_id>"`,
+`channel="codex-desktop"`, `kind="agent-turn-complete"`, and a stable
+`external_id=<source_event_id>`. It does not accept a desktop credential,
+operate the local outbox, call an experimental Codex surface, or read the
+migration-0021 tables.
+
+The existing signal extraction and curation path remains authoritative; no
+Codex-specific memory, transcript, observation database, or LCM copy may be
+created. Derived records must retain the stable ingest/source-event provenance
+needed for idempotent replay and deterministic redaction. Every persistence
+operation still goes through ctrl-api, the sole canonical writer.
+
+When ctrl-api issues a #684 session/installation redaction or deletion,
+learn-owned consumers must stop/reject matching pending work and redact or
+delete derived content through the frozen ctrl-api operation. A 90-day server
+tombstone prevents a delayed outbox retry from recreating the source; learn
+must not re-materialize it from Temporal history. Continuity stays owned by the
+One Alfred journal and VPS LCM. Continuity timeout/unavailability, stale
+revision, or a redaction race never blocks or retries the Codex turn.
 
 #### DORMANT — Plane (not deployed since PR #279)
 
@@ -429,6 +455,11 @@ limit in compose. No local Whisper model — Groq-hosted.
     Janitor and distiller activities heartbeat their run identity, resume it on
     retry, and treat only a durable terminal record as completion. Lane II never
     reads or writes the execution ledger directly.
+13. **#684 target — Codex follows the existing ingest/curation path.** Learn
+    consumes only ctrl-projected events with stable provenance, creates no
+    independent transcript/memory/LCM store, and performs redaction/deletion
+    only through ctrl-api. Migration-0021 rows remain bounded transport
+    receipts outside Lane II.
 
 ---
 
