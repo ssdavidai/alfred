@@ -52,10 +52,37 @@ def ctrl_edit(
     set_fields: dict[str, Any] | None = None,
     body_append: str | None = None,
 ) -> dict:
-    """PATCH a vault record through ctrl-api (§15.1 wrapped body shape)."""
+    """PATCH a vault record through ctrl-api (§15.1 wrapped body shape).
+
+    `set` and `json_set` are NOT interchangeable, and picking the wrong one
+    fails loudly at the far end:
+
+        set:      scalars only. ctrl stringifies each value for the vault
+                  CLI's --set flag.
+        json_set: lists, dicts, bools, numbers. Merged into frontmatter as
+                  native YAML, shape preserved.
+
+    Sending a list through `set` produced the JavaScript coercion `[object
+    Object]` in the CLI argument, and the vault daemon rejected it with
+    "Field 'relationships' must be a list, got str" — HTTP 500. On the dev
+    tenant that was ~150 failed writes per 20 minutes, every one of them a
+    surveyor entity-link update, which is exactly the payload most likely to
+    be a list.
+
+    So the split is made here rather than left to the caller: every value is
+    routed by its own type.
+    """
     payload: dict[str, Any] = {}
     if set_fields:
-        payload["set"] = set_fields
+        scalars = {
+            k: v for k, v in set_fields.items()
+            if v is None or isinstance(v, (str, int, float, bool))
+        }
+        structured = {k: v for k, v in set_fields.items() if k not in scalars}
+        if scalars:
+            payload["set"] = scalars
+        if structured:
+            payload["json_set"] = structured
     if body_append:
         payload["body_append"] = body_append
     if not payload:
