@@ -198,10 +198,14 @@ jobs:
           python-version: "3.11"
       - name: Install deps
         working-directory: packages/alfred-vault
+        # Use the extras the package itself declares rather than a hand-picked
+        # list. `surveyor` pulls pymilvus/igraph/leidenalg/scikit-learn/numpy —
+        # without them those six test modules fail to import and pytest reports
+        # a collection error, which is the failure mode this job exists to
+        # catch rather than skip.
         run: |
           python -m pip install --upgrade pip
-          pip install -e . || pip install -r requirements.txt || true
-          pip install pytest numpy
+          pip install -e ".[surveyor,test]"
       - name: pytest
         working-directory: packages/alfred-vault
         run: python -m pytest -q
