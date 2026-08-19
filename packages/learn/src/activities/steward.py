@@ -2331,6 +2331,19 @@ def _surface_class(fm: dict[str, Any]) -> str:
     return "normal"
 
 
+# The steward's own bookkeeping — where the sweep got to, not what the task IS.
+# These MUST stay disjoint from ctrl's TASK_STATE_FIELDS: ctrl rejects a PATCH
+# touching any state field outright, and it rejects the WHOLE request, so one
+# state field in this bundle stops the cursor advancing at all. That is exactly
+# what `last_steward_outcome` did — see the split in evaluate_task.
+STEWARD_CURSOR_FIELDS: tuple[str, ...] = (
+    "last_steward_check_at",
+    "next_check_after",
+    "steward_no_signal_streak",
+    "signal_sources",
+)
+
+
 @activity.defn
 async def evaluate_task(task_id: str, task_data: dict[str, Any]) -> dict[str, Any]:
     """Phase 1 evaluator — real signal gathering + shadow LLM evaluation.
@@ -2800,38 +2813,66 @@ async def evaluate_task(task_id: str, task_data: dict[str, Any]) -> dict[str, An
     cfg = load_config()
     client = VaultClient(cfg)
     try:
+        # `last_steward_outcome` is a TASK STATE FIELD (ctrl's stateFields.ts).
+        # On a tenant with STATE_CHANGE_ENFORCEMENT=reject, ctrl 403s any PATCH
+        # that touches one — and it rejects the WHOLE request. Bundling the
+        # outcome with the cursor fields therefore meant NONE of them landed:
+        # `last_steward_check_at`, `next_check_after` and
+        # `steward_no_signal_streak` never advanced, so this sweep re-evaluated
+        # the same tasks forever without ever recording that it had looked.
+        # Live on the dev tenant: ~170 rejected PATCHes an hour, the same task
+        # hit twice inside one second.
+        #
+        # The old fallback made it worse by retrying the same forbidden field
+        # through the scalar path, which cannot succeed for this reason — it
+        # was written for a different failure (json_set missing mid-rollout).
+        #
+        # Split, so the cursor is never hostage to the state field.
         try:
             await client.patch_frontmatter_structured(
                 task_path,
                 scalar_updates=scalar_updates,
-                json_updates=json_updates,
+                json_updates={"signal_sources": updated_sources},
             )
         except httpx.HTTPError as exc:
             logger.warning(
-                "steward.evaluate: patch_frontmatter_structured failed task=%s err=%s — falling back to scalar PATCH",
+                "steward.evaluate: cursor PATCH failed task=%s err=%s — falling back to scalar",
                 task_id, exc,
             )
-            # Fallback to scalar-only PATCH so the cursor still advances
-            # even if json_set isn't available on this tenant's ctrl-api
-            # (e.g. during a partial Phase 2 rollout). Structured fields
-            # become repr strings — the Phase 1 read-side fallback in
-            # evaluate_task already tolerates that shape.
+            # This fallback IS still worth having: it covers the original
+            # case, a tenant whose ctrl-api predates json_set. No state field
+            # is involved, so it can actually succeed.
             try:
                 fm_updates = dict(scalar_updates)
-                fm_updates["last_steward_outcome"] = json.dumps(
-                    last_outcome_payload, ensure_ascii=False, default=str,
-                )
                 fm_updates["signal_sources"] = json.dumps(
                     updated_sources, ensure_ascii=False, default=str,
                 )
                 await client.patch_frontmatter(task_path, fm_updates)
             except httpx.HTTPError as exc2:
                 logger.warning(
-                    "steward.evaluate: scalar fallback PATCH also failed task=%s err=%s",
+                    "steward.evaluate: cursor scalar fallback also failed task=%s err=%s",
                     task_id, exc2,
                 )
-            # Continue to apply_state_change — the audit record is the
-            # source of truth in shadow mode.
+
+        # The outcome payload on its own. A tenant enforcing the state
+        # contract refuses this, and that is CORRECT — step 8 below writes the
+        # same decision through apply_state_change, which is the sanctioned
+        # route and, per the comment there, the source of truth. The
+        # frontmatter copy is a convenience mirror; losing it costs the
+        # convenience and nothing else. Logged at info, not warning: on a
+        # strict tenant it is the expected outcome, not a fault.
+        try:
+            await client.patch_frontmatter_structured(
+                task_path,
+                json_updates={"last_steward_outcome": last_outcome_payload},
+            )
+        except httpx.HTTPError as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            logger.info(
+                "steward.evaluate: last_steward_outcome not mirrored to frontmatter "
+                "task=%s status=%s — state-field contract; audit row still written",
+                task_id, status,
+            )
     finally:
         await client.close()
 
