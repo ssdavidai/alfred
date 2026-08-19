@@ -179,7 +179,11 @@ copy those shapes, not invent a parallel channel API.
 ctrl-api remains the sole canonical writer. An installation bearer is a
 90-day, one-installation ingestion/health/continuity credential, stored only as
 a SHA-256 hash, expiry-checked and immediately invalid after rotation or
-revocation. It grants no MCP capability. Enrollment, rotation, revocation,
+explicit revocation. An installation-scope redaction/deletion immediately
+restricts it to the payload-free health cleanup exchange, with no ingestion or
+continuity authority, and atomically revokes it only after the adapter reports
+the installation-wide wipe; explicit revocation cannot race and strand that
+directive. It grants no MCP capability. Enrollment, rotation, revocation,
 redaction, and deletion require the normal operator bearer. Raw credentials,
 authorization headers, and hashes never enter logs, error details, ingest
 payloads, journal metadata, or request-body storage.
