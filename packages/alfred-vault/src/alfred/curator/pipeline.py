@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from alfred.vault.mutation_log import log_mutation
+from alfred.shared_paths import manifest_paths
 from alfred.vault.ops import VaultError, vault_create, vault_edit, vault_read
 
 import time
@@ -317,11 +318,10 @@ async def _stage1_analyze(
     if not template:
         return "", []
 
-    # Generate a unique manifest file path for the LLM to write to.
-    # Use /alfred-data/ (shared volume between alfred and openclaw-workers
-    # containers) instead of /tmp (separate tmpfs per container).
-    manifest_id = uuid.uuid4().hex[:12]
-    manifest_path = f"/alfred-data/alfred-curator-{manifest_id}-manifest.json"
+    # The LLM writes in the hermes container; we read here. Same volume,
+    # different mount points. manifest_paths() hands back both views so the
+    # prompt gets the LLM's path and the read gets ours. See alfred.shared_paths.
+    manifest_path, manifest_local = manifest_paths("curator")
 
     prompt = template.format(
         vault_cli_reference=VAULT_CLI_REFERENCE,
@@ -363,18 +363,11 @@ async def _stage1_analyze(
                     )
                 note_path = suppressed
 
-        # Try to read the entity manifest from the temp file first.
-        # The manifest_path uses /alfred-data/ (openclaw-workers mount point),
-        # but the alfred container mounts the same volume at /app/data/.
-        # Try both paths.
+        # Read the manifest the LLM wrote. `manifest_local` is that same file
+        # as this container sees it — no path guessing, no always-missing
+        # primary read to fall back from.
         try:
-            manifest_file = Path(manifest_path)
-            if not manifest_file.exists():
-                # Translate /alfred-data/ → /app/data/ for cross-container access
-                alt_path = manifest_path.replace("/alfred-data/", "/app/data/")
-                alt_file = Path(alt_path)
-                if alt_file.exists():
-                    manifest_file = alt_file
+            manifest_file = manifest_local
             if manifest_file.exists():
                 raw_json = manifest_file.read_text(encoding="utf-8").strip()
                 data = json.loads(raw_json)
@@ -388,12 +381,11 @@ async def _stage1_analyze(
         except (json.JSONDecodeError, OSError, KeyError) as e:
             log.warning("pipeline.manifest_file_read_failed", path=manifest_path, error=str(e))
         finally:
-            # Clean up the temp manifest file (try both possible paths)
-            for p in [manifest_path, manifest_path.replace("/alfred-data/", "/app/data/")]:
-                try:
-                    Path(p).unlink(missing_ok=True)
-                except OSError:
-                    pass
+            # Clean up the temp manifest file.
+            try:
+                manifest_local.unlink(missing_ok=True)
+            except OSError:
+                pass
 
         # Fallback: parse entity manifest from stdout if file method failed
         if not manifest:

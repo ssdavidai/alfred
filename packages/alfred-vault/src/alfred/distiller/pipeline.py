@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from alfred.vault.mutation_log import log_mutation, read_mutations
+from alfred.shared_paths import manifest_paths
 from alfred.vault.ops import VaultError, vault_edit
 from alfred.vault.schema import DISTILLER_CREATABLE_TYPES
 
@@ -366,7 +367,11 @@ async def _stage1_extract(
     # Generate a unique temp file path for the manifest output.
     # The LLM will write its JSON manifest here instead of relying on stdout,
     # which is polluted by OpenClaw's agent conversation/reasoning output.
-    manifest_path = f"/tmp/alfred-distiller-{uuid.uuid4().hex[:12]}-manifest.json"
+    # /tmp is a separate tmpfs per container, so the file the LLM writes there
+    # is unreachable from this process — the primary read could never succeed.
+    # manifest_paths() returns the LLM-visible path for the prompt and the
+    # locally-openable path for the read. See alfred.shared_paths.
+    manifest_path, manifest_local = manifest_paths("distiller")
 
     prompt = template.format(
         learn_type_schemas=_load_learn_type_schemas(),
@@ -403,7 +408,7 @@ async def _stage1_extract(
 
         # Primary: read manifest from the temp file the LLM was instructed to write
         try:
-            manifest_text = Path(manifest_path).read_text(encoding="utf-8")
+            manifest_text = manifest_local.read_text(encoding="utf-8")
             manifest = _parse_extraction_manifest(manifest_text)
             if manifest:
                 log.info(
@@ -420,7 +425,7 @@ async def _stage1_extract(
         finally:
             # Clean up temp file
             try:
-                os.unlink(manifest_path)
+                os.unlink(manifest_local)
             except OSError:
                 pass
 
