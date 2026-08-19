@@ -131,14 +131,13 @@ def test_noise_event_below_threshold_not_linked(daemon_and_vault):
     assert "related_matters" not in md
 
 
-def test_noise_point_all_four_entity_types(daemon_and_vault):
+def test_noise_point_all_three_entity_types(daemon_and_vault):
     """One noise event linked to each entity type in one pass."""
     daemon, vault = daemon_and_vault
     for rel, rt in [
         ("matter/m.md", "matter"),
         ("person/p.md", "person"),
         ("org/o.md", "org"),
-        ("project/x.md", "project"),
         ("event/e.md", "event"),
     ]:
         _write(vault, rel, rt)
@@ -146,7 +145,6 @@ def test_noise_point_all_four_entity_types(daemon_and_vault):
         ("matter/m.md", "matter"),
         ("person/p.md", "person"),
         ("org/o.md", "org"),
-        ("project/x.md", "project"),
         ("event/e.md", "event"),
     ]}
 
@@ -166,7 +164,6 @@ def test_noise_point_all_four_entity_types(daemon_and_vault):
     assert md.get("related_matters") == ["matter/m.md"]
     assert md.get("related_persons") == ["person/p.md"]
     assert md.get("related_orgs") == ["org/o.md"]
-    assert md.get("related_projects") == ["project/x.md"]
 
 
 def test_noise_entity_source_skips_same_type_targets(daemon_and_vault):

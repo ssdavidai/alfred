@@ -324,7 +324,7 @@ class Daemon:
         # Stage 5: structured entity-link writeback. For each cluster whose
         # membership changed, walk non-entity members and add typed
         # frontmatter links (related_matters / related_persons / related_orgs
-        # / related_projects) to any entity member of the same cluster whose
+        # / related_matters) to any entity member of the same cluster whose
         # cosine similarity is above the configured threshold.
         self._link_entities_in_clusters(
             all_changed, cluster_members, records, paths, vectors,
@@ -384,7 +384,6 @@ class Daemon:
             "matter": self.writer.write_related_matters,
             "person": self.writer.write_related_persons,
             "org": self.writer.write_related_orgs,
-            "project": self.writer.write_related_projects,
         }
 
         threshold = self.cfg.entity_link.threshold
@@ -494,7 +493,6 @@ class Daemon:
             "matter": self.writer.write_related_matters,
             "person": self.writer.write_related_persons,
             "org": self.writer.write_related_orgs,
-            "project": self.writer.write_related_projects,
         }
 
         threshold = self.cfg.entity_link.threshold
@@ -586,7 +584,6 @@ class Daemon:
             "matter": self.writer.write_related_matters,
             "person": self.writer.write_related_persons,
             "org": self.writer.write_related_orgs,
-            "project": self.writer.write_related_projects,
         }
 
         threshold = self.cfg.entity_link.threshold

@@ -149,17 +149,6 @@ class VaultWriter:
             rel_path, "related_orgs", org_paths, max_total
         )
 
-    def write_related_projects(
-        self,
-        rel_path: str,
-        project_paths: list[str],
-        max_total: int | None = None,
-    ) -> int:
-        """Append project vault paths to `related_projects` frontmatter."""
-        return self._append_to_list_field(
-            rel_path, "related_projects", project_paths, max_total
-        )
-
     def write_relationships(self, rel_path: str, new_rels: list[dict]) -> None:
         """Append machine-generated relationships (only those with confidence < 1.0).
 

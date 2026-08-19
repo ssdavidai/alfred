@@ -127,16 +127,14 @@ def test_separates_entity_types_into_own_fields(daemon_and_vault):
     _write(vault, "matter/m.md", "matter")
     _write(vault, "person/p.md", "person")
     _write(vault, "org/o.md", "org")
-    _write(vault, "project/x.md", "project")
     _write(vault, "event/e.md", "event")
-    for p in ["matter/m.md", "person/p.md", "org/o.md", "project/x.md", "event/e.md"]:
+    for p in ["matter/m.md", "person/p.md", "org/o.md", "event/e.md"]:
         daemon.state.update_file(p, "h")
 
     records = {
         "matter/m.md": _record("matter/m.md", "matter"),
         "person/p.md": _record("person/p.md", "person"),
         "org/o.md": _record("org/o.md", "org"),
-        "project/x.md": _record("project/x.md", "project"),
         "event/e.md": _record("event/e.md", "event"),
     }
     # All 5 same vector so all sims = 1.0
@@ -157,7 +155,6 @@ def test_separates_entity_types_into_own_fields(daemon_and_vault):
     assert e_md.get("related_matters") == ["matter/m.md"]
     assert e_md.get("related_persons") == ["person/p.md"]
     assert e_md.get("related_orgs") == ["org/o.md"]
-    assert e_md.get("related_projects") == ["project/x.md"]
 
 
 def test_cluster_without_entities_noop(daemon_and_vault):

@@ -27,7 +27,7 @@ def test_counts_related_fields_across_types(tmp_path):
     _w(vault, "event/a.md",
        "---\ntype: event\nrelated_matters: [matter/m.md]\nrelated_persons: [person/p.md]\n---\nbody\n")
     _w(vault, "event/b.md",
-       "---\ntype: event\nrelated_orgs: [org/o.md]\nrelated_projects: [project/x.md]\n---\nbody\n")
+       "---\ntype: event\nrelated_orgs: [org/o.md]\n---\nbody\n")
     _w(vault, "matter/m.md", "---\ntype: matter\n---\nbody\n")
 
     r = _scan_entity_linking_coverage(vault)
@@ -35,7 +35,6 @@ def test_counts_related_fields_across_types(tmp_path):
     assert r["records_with_related_matters"] == 1
     assert r["records_with_related_persons"] == 1
     assert r["records_with_related_orgs"] == 1
-    assert r["records_with_related_projects"] == 1
     assert r["records_with_any_related"] == 2  # two events touched
 
 

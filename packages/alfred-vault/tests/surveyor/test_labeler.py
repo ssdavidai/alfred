@@ -41,7 +41,7 @@ def test_slug_from_rel_path_no_extension():
 def test_entity_record_types_snapshot():
     # Bug #13 removed "matter" — it is not a canonical vault KNOWN_TYPE.
     # Lock the entity set so accidental changes require a test update.
-    assert ENTITY_RECORD_TYPES == {"person", "org", "project"}
+    assert ENTITY_RECORD_TYPES == {"person", "org", "matter"}
 
 
 def _make_labeler(llm_response: str | None) -> Labeler:
@@ -85,9 +85,10 @@ async def test_label_cluster_includes_entity_slug_first():
 
 @pytest.mark.asyncio
 async def test_label_cluster_includes_multiple_entity_slugs():
-    # "person" and "org" are canonical entity types; "matter" is not (bug #13).
-    # The "matter" record below is present as a non-entity member — its slug
-    # does NOT appear as a canonical tag.
+    # person, org and matter are the three canonical entity types. Bug #13 had
+    # this backwards — it treated `matter` as the phantom and kept `project`,
+    # the type ctrl-api actually rejects — so this test used to assert that the
+    # matter slug must NOT appear. It should, and now does.
     labeler = _make_labeler(llm_response='["makerspace"]')
     records = {
         "matter/erste-makerspace.md": _record("matter/erste-makerspace.md", "matter"),
@@ -100,13 +101,13 @@ async def test_label_cluster_includes_multiple_entity_slugs():
         member_paths=list(records.keys()),
         records=records,
     )
-    entity_slugs = {"jazmin-rapali", "erste-bank"}
+    entity_slugs = {"jazmin-rapali", "erste-bank", "erste-makerspace"}
     assert entity_slugs.issubset(set(tags))
     # Entity slugs should come first (before LLM tags)
     assert set(tags[: len(entity_slugs)]) == entity_slugs
     assert "makerspace" in tags
-    # "matter" is not an entity type — its slug must NOT appear
-    assert "erste-makerspace" not in tags
+    # `matter` IS an entity type, so its slug is a canonical tag.
+    assert "erste-makerspace" in tags
 
 
 @pytest.mark.asyncio

@@ -169,14 +169,13 @@ def test_backfill_respects_threshold(daemon_and_vault):
     assert "related_matters" not in frontmatter.load(vault / "event/e.md").metadata
 
 
-def test_backfill_all_four_entity_types(daemon_and_vault):
+def test_backfill_all_three_entity_types(daemon_and_vault):
     """Each entity type gets written to its own field."""
     daemon, vault = daemon_and_vault
     for rel, rt in [
         ("matter/m.md", "matter"),
         ("person/p.md", "person"),
         ("org/o.md", "org"),
-        ("project/x.md", "project"),
         ("event/e.md", "event"),
     ]:
         _write(vault, rel, rt)
@@ -184,7 +183,6 @@ def test_backfill_all_four_entity_types(daemon_and_vault):
         ("matter/m.md", "matter"),
         ("person/p.md", "person"),
         ("org/o.md", "org"),
-        ("project/x.md", "project"),
         ("event/e.md", "event"),
     ]}
     v = _norm([1.0, 0.0])
@@ -192,7 +190,7 @@ def test_backfill_all_four_entity_types(daemon_and_vault):
     vectors = np.asarray([v] * 5, dtype=np.float32)
 
     daemon._backfill_new_entities(
-        new_entity_paths=["matter/m.md", "person/p.md", "org/o.md", "project/x.md"],
+        new_entity_paths=["matter/m.md", "person/p.md", "org/o.md"],
         records=records,
         all_paths=paths,
         all_vectors=vectors,
@@ -202,7 +200,6 @@ def test_backfill_all_four_entity_types(daemon_and_vault):
     assert md["related_matters"] == ["matter/m.md"]
     assert md["related_persons"] == ["person/p.md"]
     assert md["related_orgs"] == ["org/o.md"]
-    assert md["related_projects"] == ["project/x.md"]
 
 
 def test_backfill_caps_max_per_record(tmp_path):

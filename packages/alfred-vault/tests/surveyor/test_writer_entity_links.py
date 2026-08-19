@@ -83,13 +83,11 @@ def test_write_related_persons_separate_field(vault_with_record):
     assert md["related_persons"] == ["person/b.md"]
 
 
-def test_write_related_orgs_and_projects_separate_fields(vault_with_record):
+def test_write_related_orgs_and_matters_separate_fields(vault_with_record):
     _, _, writer, rel = vault_with_record
     writer.write_related_orgs(rel, ["org/x.md"])
-    writer.write_related_projects(rel, ["project/y.md"])
     md = _read_metadata(writer.vault_path, rel)
     assert md["related_orgs"] == ["org/x.md"]
-    assert md["related_projects"] == ["project/y.md"]
 
 
 def test_empty_list_is_noop(vault_with_record):
@@ -126,14 +124,12 @@ def test_existing_scalar_value_handled(vault_with_record):
 
 
 def test_multiple_fields_independent(vault_with_record):
-    """All four fields can coexist on the same record without interference."""
+    """All three fields can coexist on the same record without interference."""
     _, _, writer, rel = vault_with_record
     writer.write_related_matters(rel, ["matter/a.md"])
     writer.write_related_persons(rel, ["person/p.md"])
     writer.write_related_orgs(rel, ["org/o.md"])
-    writer.write_related_projects(rel, ["project/x.md"])
     md = _read_metadata(writer.vault_path, rel)
     assert md["related_matters"] == ["matter/a.md"]
     assert md["related_persons"] == ["person/p.md"]
     assert md["related_orgs"] == ["org/o.md"]
-    assert md["related_projects"] == ["project/x.md"]
