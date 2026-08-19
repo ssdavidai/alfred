@@ -4,7 +4,7 @@ status: todo # todo | active | blocked | done | cancelled
 kind: task # task | discussion | reminder
 name:
 description:
-project: # Link to Project (required unless run: is set)
+matter_ref: # Link to Matter (required unless run: is set)
 run: # Link to Run (if spawned from a process)
 assigned: # Link to Person or "alfred"
 due:

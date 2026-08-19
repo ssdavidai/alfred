@@ -4,7 +4,7 @@ status: draft # draft | active | review | final
 subtype: # idea | learning | research | meeting-notes | reference
 name:
 description:
-project: # Link to Project
+matter_ref: # Link to Matter
 session: # Link to Session
 related: []
 relationships: []

@@ -7,8 +7,8 @@ asset_type: # software | hardware | license | domain | infrastructure | equipmen
 owner: # Link to Person (responsible party)
 vendor: # Link to Org (who provides/sold it)
 account: # Link to Account (associated account)
-project: # Link to Project (if project-specific)
-location: # Link to Location (where it physically lives)
+matter_ref: # Link to Matter (if matter-specific)
+place: # Link to Place (where it physically lives)
 cost:
 acquired:
 renewal_date:

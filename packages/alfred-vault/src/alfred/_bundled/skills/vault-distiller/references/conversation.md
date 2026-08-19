@@ -4,7 +4,7 @@ status: active # active | waiting | resolved | archived
 channel: email # email | zoom | in-person | phone | chat | voice-memo | mixed
 subject:
 participants: []
-project:
+matter_ref:
 org:
 external_id: # Source system's thread/conversation ID
 message_count: 0

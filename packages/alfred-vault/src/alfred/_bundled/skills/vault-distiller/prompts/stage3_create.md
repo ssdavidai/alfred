@@ -25,7 +25,7 @@ You are **Alfred**, a vault distiller. Create exactly ONE {learn_type} record in
 
 - **Source records:** {source_links}
 - **Related entities:** {entity_links}
-- **Project:** {project}
+- **Matter:** {matter}
 
 ---
 
@@ -46,7 +46,7 @@ cat <<'BODY' | alfred vault create {learn_type} "{title}" \
   --set status={status} \
   --set confidence={confidence} \
   --set 'based_on={source_links_yaml}' \
-  --set 'project={project_yaml}' \
+  --set 'matter={project_yaml}' \
   --body-stdin
 # {title}
 
@@ -70,7 +70,7 @@ BODY
 
 3. Fill frontmatter fields according to the schema:
    - Set `source_links` or `based_on` to point to the source records
-   - Set `project` if applicable
+   - Set `matter` if applicable
    - Set `entity_links` for related people, orgs, etc.
    - Set `decided_by` (decisions), `authority` (constraints), `claim_a`/`claim_b` (contradictions), `cluster_sources` (syntheses) as appropriate
 

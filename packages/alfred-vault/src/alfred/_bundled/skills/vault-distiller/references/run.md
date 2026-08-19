@@ -4,7 +4,7 @@ status: active # active | completed | blocked | cancelled
 name:
 description:
 process: # Link to Process (required)
-project: # Link to Project
+matter_ref: # Link to Matter
 trigger: # What started this run (link or description)
 current_step:
 started:

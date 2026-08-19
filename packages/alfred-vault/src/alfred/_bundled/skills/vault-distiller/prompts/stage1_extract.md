@@ -98,11 +98,11 @@ The JSON object must have this structure:
     "title": "Use Colorbond for Eagle Farm Roof",
     "confidence": "high",
     "status": "final",
-    "claim": "Team agreed to use Colorbond steel roofing for the Eagle Farm project due to price and reliability.",
+    "claim": "Team agreed to use Colorbond steel roofing for the Eagle Farm matter due to price and reliability.",
     "evidence_excerpt": "Henry: 'Let's go with Colorbond, the price is right and we know it works.'",
     "source_links": ["[[{source_record_path_no_ext}]]"],
-    "entity_links": ["[[person/Henry Mellor]]", "[[project/Eagle Farm]]"],
-    "project": "Eagle Farm"
+    "entity_links": ["[[person/Henry Mellor]]", "[[matter/Eagle Farm]]"],
+    "matter_ref": "Eagle Farm"
   }},
   {{
     "type": "assumption",
@@ -112,8 +112,8 @@ The JSON object must have this structure:
     "claim": "Team is operating on the assumption that timber prices will remain stable through Q2.",
     "evidence_excerpt": "Budget assumes current timber rates hold through June.",
     "source_links": ["[[{source_record_path_no_ext}]]"],
-    "entity_links": ["[[project/Eagle Farm]]"],
-    "project": "Eagle Farm"
+    "entity_links": ["[[matter/Eagle Farm]]"],
+    "matter_ref": "Eagle Farm"
   }}
 ]}}
 ```
@@ -124,7 +124,7 @@ The JSON object must have this structure:
 - **Be specific** — "Team might need more resources" is too vague. Include the what, who, and why.
 - **Include evidence_excerpt** — a direct quote or close paraphrase from the source
 - **Set source_links** to the source record's wikilink path
-- **Set entity_links** to any people, projects, orgs referenced
+- **Set entity_links** to any people, matters, orgs referenced
 - **Do NOT create vault records** — only output JSON
 - **Do NOT duplicate** existing learnings listed above
 - Focus on **actionable knowledge that would be lost** if not captured

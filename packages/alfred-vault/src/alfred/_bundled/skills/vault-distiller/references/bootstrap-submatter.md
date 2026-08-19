@@ -2,9 +2,9 @@
 type: task
 status: todo
 kind: task
-name: Sub-Project Bootstrap
-description: "Setup checklist for {{subproject}} — complete to fully initialise this phase/sub-project"
-project: "[[project/{{subproject}}]]"
+name: Sub-Matter Bootstrap
+description: "Setup checklist for {{subproject}} — complete to fully initialise this phase/sub-matter"
+matter_ref: "[[matter/{{subproject}}]]"
 assigned:
 priority: high
 created: "{{date}}"
@@ -12,9 +12,9 @@ tags:
   - bootstrap
 ---
 
-# Sub-Project Bootstrap — {{subproject}}
+# Sub-Matter Bootstrap — {{subproject}}
 
-Complete this checklist to fully set up [[project/{{subproject}}]].
+Complete this checklist to fully set up [[matter/{{subproject}}]].
 
 ## Setup Checklist
 
@@ -25,4 +25,4 @@ Complete this checklist to fully set up [[project/{{subproject}}]].
 
 ## Outcome
 
-*Filled on completion — sub-project is fully initialised.*
+*Filled on completion — sub-matter is fully initialised.*
