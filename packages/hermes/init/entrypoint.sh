@@ -661,6 +661,14 @@ fi
 chown -R 10000:10000 "$HERMES_DATA_DIR" 2>/dev/null || true
 chown -R 10000:10000 /vault 2>/dev/null || true
 
+# The data dir's own mode is a precondition for §7b below: uid 10001 has to
+# TRAVERSE it to reach its profile. Anything that treats this directory as a
+# HOME can tighten it to 0700 (Hermes' own _secure_dir does exactly that),
+# and the isolation assert then fails with the confusing "cannot read its own
+# .env" — the .env is fine, the path to it is not. Re-assert the traversal
+# bit every boot so that failure mode self-heals instead of wedging deploys.
+chmod 0755 "$HERMES_DATA_DIR" 2>/dev/null || true
+
 # =============================================================================
 # 7b. codex-builder profile FS isolation (PR 4 of
 #     docs/codex-builder-runtime.md §6).

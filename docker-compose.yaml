@@ -1412,7 +1412,13 @@ services:
     user: "10000:10000"
     environment:
       - HERMES_HOME=/hermes-state/profiles/main
-      - HOME=/hermes-state
+      # HOME must be writable by uid 10000 (task state lands in
+      # $HOME/.hermes/hermes-live) but must NOT be the volume root: tools
+      # that treat HOME as theirs tighten it to 0700, which removes the
+      # traversal bit uid 10001 needs to reach its own profile and fails
+      # the init FS-isolation assert. A profile dir is the safe choice —
+      # patch_upstream_hermes_auth.py already stops those being chmod-ed.
+      - HOME=/hermes-state/profiles/main
     entrypoint: ["/bin/sh", "-lc"]
     # The task store is single-owner and its lock outlives an unclean stop, so
     # a killed container would otherwise never start again. `tasks unlock`
