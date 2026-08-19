@@ -295,6 +295,25 @@ install_state_retention() {
 
         # Idempotent: re-registering every boot would stack duplicates, and an
         # operator who retuned the schedule must keep it.
+        #
+        # Read the store FILE, not `cron list`. This runs before the gateways
+        # are up, and at that point the CLI yields nothing usable — so a
+        # `cron list | grep` guard silently passed and registered a second
+        # copy on the very first boot after rollout (observed: two jobs, one
+        # 16:42 by hand, one 17:24:48 by this function). Every later boot would
+        # have added another. The file is plain JSON and is readable whether or
+        # not a gateway is running; the CLI check stays as a fallback.
+        if python3 - "${profile_dir}/cron/jobs.json" <<'PY' 2>/dev/null
+import json, sys
+try:
+    jobs = json.load(open(sys.argv[1])).get("jobs", [])
+except Exception:
+    sys.exit(1)                     # unreadable -> fall through to the CLI check
+sys.exit(0 if any(j.get("name") == "state-retention" for j in jobs) else 1)
+PY
+        then
+            continue
+        fi
         if hermes -p "${slug}" cron list 2>/dev/null | grep -q 'state-retention'; then
             continue
         fi
