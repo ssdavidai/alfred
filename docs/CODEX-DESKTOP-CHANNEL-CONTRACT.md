@@ -231,10 +231,13 @@ Success is HTTP 201 with exactly:
     "revoked_at": null
   },
   "credential": {
-    "token": "cdi_EfM4JnX2ZkJQxY4s6vP_8uY0Ysa1YydVtVjY8yZXQqA"
+    "token": "REDACTED"
   }
 }
 ```
+
+`REDACTED` represents the freshly generated token whose exact format is frozen
+in §3.1; the provider returns the actual token in this field only once.
 
 The provider must not commit enrollment until the token hash, expiry, and
 installation row are durable. The adapter then runs an actual completion
@@ -250,12 +253,15 @@ auth. Exact body: `{}`. Success is HTTP 200 with exactly:
 {
   "installation_id": "cdi_01K2QHZA7G9E2N3E9QQ7AK8F5M",
   "credential": {
-    "token": "cdi_qb3eYtzD5ctB6QkMhdYvGspCkK78kQ8BxG0FVwERK1Y",
+    "token": "REDACTED",
     "token_expires_at": "2026-11-17T13:00:00.000Z"
   },
   "rotated_at": "2026-08-19T13:00:00.000Z"
 }
 ```
+
+As in enrollment, `REDACTED` represents the actual freshly generated token,
+which is returned only in this response.
 
 ### 5.3 Installation revocation
 
@@ -292,7 +298,7 @@ Exact revision-1 request shape:
   "installation_id": "cdi_01K2QHZA7G9E2N3E9QQ7AK8F5M",
   "opaque_session_id": "0198c5a3-3e06-72b1-9658-f15fd465c903",
   "sequence": {"first": 41, "last": 41},
-  "idempotency_key": "0198c5a4-86f1-7cc1-a5ff-7563f4d7f436",
+  "idempotency_key": "01980000-0000-7000-8000-000000000041",
   "canonical_payload_hash": "3f70bb1417b9fc2db3a4f0b5645501607292795488bf987d279a90749ff5c76b",
   "events": [
     {
