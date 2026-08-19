@@ -186,7 +186,11 @@ revocation. When the token is expired while cleanup remains pending, its stored
 hash is only a tombstone-bounded health cleanup verifier; it grants no active
 installation or MCP capability and stops working after terminal acknowledgement
 or tombstone expiry. Installation cleanup atomically revokes the token only
-after the adapter reports the installation-wide wipe. Enrollment, rotation,
+after the adapter reports the installation-wide wipe. After idempotent replay
+resolution, a new redaction/deletion request for an already explicitly revoked
+installation is rejected with the frozen non-retryable `409 REDACTION_RACE` and
+creates no tombstone or cleanup state; cleanup must precede revocation so every
+accepted directive remains deliverable and acknowledgeable. Enrollment, rotation,
 revocation, redaction, and deletion require the normal operator bearer. Raw
 credentials, authorization headers, and hashes never enter logs, error details,
 ingest payloads, journal metadata, or request-body storage.

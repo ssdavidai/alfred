@@ -149,7 +149,9 @@ non-retryable `401 TOKEN_EXPIRED`, and health also returns that error as soon as
 no unexpired pending directive remains. This bounded exception does not extend
 the token's 90-day credential lifetime and grants no ingestion, continuity,
 MCP, or content-read capability. A rotated or explicitly revoked token never
-qualifies.
+qualifies; §5.7 therefore rejects a new deletion/redaction request for an
+already explicitly revoked installation rather than accepting cleanup that
+cannot be delivered or acknowledged.
 The request carrying the terminal acknowledgement remains authorized through
 its response; §5.6 freezes what happens after that response for each scope.
 Tokens, authorization headers, and token hashes are excluded from application
@@ -610,6 +612,22 @@ cleanup tombstone awaiting acknowledgement and erases it after the terminal
 scope requires a non-null session id. Installation scope requires
 `opaque_session_id:null`. `request_id` makes creation idempotent; replay returns
 the original response, while different selectors/operation return 409.
+
+ctrl-api resolves those `request_id` replay rules before checking installation
+state, so replay of a request accepted before a later revocation still returns
+its original response. For a new request, `revoked_at` must be null. If it is
+non-null, ctrl-api returns non-retryable `409 REDACTION_RACE` with message
+exactly `installation is revoked; client cleanup cannot be delivered`, and
+`details` exactly
+`{"installation_id":"cdi_01K2QHZA7G9E2N3E9QQ7AK8F5M","revoked_at":"2026-08-19T14:00:00.000Z"}`
+using the requested installation id and stored revocation timestamp. It creates
+no deletion receipt or tombstone, changes no server or client-cleanup state,
+and cannot return 202. Operators must submit
+session- or installation-scope cleanup before explicit revocation; §5.3 then
+bars revocation until the adapter has applied and acknowledged every mandatory
+local cleanup directive. Thus no accepted lifecycle operation can strand
+unacknowledged, acknowledged-retention, or quarantined local payloads behind a
+credential that is ineligible for the health-only cleanup exchange.
 
 Success is HTTP 202 with exactly:
 
