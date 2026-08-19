@@ -1,10 +1,10 @@
 ---
-type: location
+type: place
 status: active
 name:
 description:
 address:
-project: # Link to Project
+matter_ref: # Link to Matter
 related: []
 relationships: []
 created: "{{date}}"

@@ -27,7 +27,7 @@ Before creating records, identify the content type and handle accordingly:
 - Extract the relevant information into a note
 - Extract tasks/follow-ups if any
 - Extract people mentioned or involved
-- Set project if the email relates to a known project
+- Set matter if the email relates to a known matter
 
 **Notifications / automated messages (GitHub, Stripe, CI/CD, newsletters):**
 - Create a brief summary note — no need for extensive extraction
@@ -69,7 +69,7 @@ Write to `/tmp/note-body.md`:
 **Step 2:** Use the **Bash** tool to create the vault record:
 
 ```bash
-alfred vault create note "<Descriptive Title>" --set status=active --set 'description="<1-2 sentence summary>"' --set 'project="[[project/Project Name]]"' --body-stdin < /tmp/note-body.md
+alfred vault create note "<Descriptive Title>" --set status=active --set 'description="<1-2 sentence summary>"' --set 'matter="[[matter/Matter Name]]"' --body-stdin < /tmp/note-body.md
 ```
 
 ### Batched items (emails, messages, etc.)
@@ -112,7 +112,7 @@ alfred vault create note "GitHub Activity Summary" --set status=active --set 'de
 **Note quality requirements:**
 - The `description` field MUST be a meaningful 1-2 sentence summary, never null or empty
 - The body MUST contain real content extracted from the source — never placeholders
-- Set `project` if the content relates to any known project
+- Set `matter` if the content relates to any known matter
 - Set `subtype` if appropriate: idea, learning, research, meeting-notes, reference
 - If the source is a conversation/chat, also set `subtype=meeting-notes` or similar
 
@@ -146,18 +146,18 @@ Do NOT create these entities in the vault yourself — the pipeline creates them
     "type": "person",
     "name": "John Smith",
     "description": "CTO at Acme Corp, discussed API integration timeline and technical requirements",
-    "body": "# John Smith\n\nCTO at Acme Corp. Primary technical contact for the API integration project.\n\n## Context\n\nMet during the Q1 planning session. Responsible for Acme's platform architecture decisions. Prefers async communication via Slack.\n\n## Key Interactions\n\n- Discussed REST vs GraphQL tradeoffs for the integration\n- Agreed to send staging API keys by Friday\n- Mentioned their team is moving to microservices in Q2\n",
+    "body": "# John Smith\n\nCTO at Acme Corp. Primary technical contact for the API integration matter.\n\n## Context\n\nMet during the Q1 planning session. Responsible for Acme's platform architecture decisions. Prefers async communication via Slack.\n\n## Key Interactions\n\n- Discussed REST vs GraphQL tradeoffs for the integration\n- Agreed to send staging API keys by Friday\n- Mentioned their team is moving to microservices in Q2\n",
     "fields": {{"org": "\"[[org/Acme Corp]]\"", "role": "CTO", "status": "active"}}
   }},
   {{
     "type": "org",
     "name": "Acme Corp",
     "description": "Client company, enterprise SaaS vendor working on API integration",
-    "body": "# Acme Corp\n\nEnterprise SaaS vendor. Current client for API integration project.\n\n## Relationship\n\nActive client since Q4 2025. Main contacts: John Smith (CTO), Sarah Lee (PM).\n\n## Projects\n\n- API Integration — connecting their REST API with internal dashboard\n- Data migration planned for Q2\n",
+    "body": "# Acme Corp\n\nEnterprise SaaS vendor. Current client for API integration matter.\n\n## Relationship\n\nActive client since Q4 2025. Main contacts: John Smith (CTO), Sarah Lee (PM).\n\n## Matters\n\n- API Integration — connecting their REST API with internal dashboard\n- Data migration planned for Q2\n",
     "fields": {{"org_type": "client", "status": "active"}}
   }},
   {{
-    "type": "project",
+    "type": "matter",
     "name": "Acme API Integration",
     "description": "Integrate Acme's REST API with internal dashboard, targeting Q1 completion",
     "body": "# Acme API Integration\n\nIntegrate Acme Corp's REST API with the internal analytics dashboard.\n\n## Background\n\nAcme needs real-time data sync between their platform and our dashboard. Decided on REST over GraphQL due to better documentation and existing client libraries.\n\n## Status\n\nIn progress. Waiting on staging API keys from John Smith.\n\n## Key Decisions\n\n- REST over GraphQL (documentation quality)\n- Polling approach initially, webhooks in phase 2\n",
@@ -168,14 +168,14 @@ Do NOT create these entities in the vault yourself — the pipeline creates them
     "name": "Send Acme API credentials",
     "description": "John Smith to send staging API keys by Friday for integration testing",
     "body": "# Send Acme API credentials\n\nJohn Smith agreed to send staging API keys by end of week. Needed to begin integration testing against their sandbox environment.\n\n## Context\n\nDiscussed during planning call. Keys should include read/write access to their events API.\n",
-    "fields": {{"status": "todo", "project": "\"[[project/Acme API Integration]]\"", "assigned_to": "John Smith"}}
+    "fields": {{"status": "todo", "matter_ref": "\"[[matter/Acme API Integration]]\"", "assigned_to": "John Smith"}}
   }},
   {{
     "type": "decision",
     "name": "Use REST over GraphQL for Acme",
     "description": "Decided to use REST API due to better documentation and existing client libraries",
     "body": "# Use REST over GraphQL for Acme\n\nDecided to use Acme's REST API instead of their GraphQL endpoint.\n\n## Reasoning\n\n- REST documentation is more complete and up-to-date\n- Existing Python client libraries available for REST\n- GraphQL schema still in beta, breaking changes expected\n- Team has more REST experience\n\n## Alternatives Considered\n\n- GraphQL: more flexible queries but unstable schema\n- Direct database access: rejected for security reasons\n",
-    "fields": {{"status": "final", "confidence": "high", "project": "\"[[project/Acme API Integration]]\""}}
+    "fields": {{"status": "final", "confidence": "high", "matter_ref": "\"[[matter/Acme API Integration]]\""}}
   }}
 ]}}"
 ```
@@ -183,8 +183,8 @@ Do NOT create these entities in the vault yourself — the pipeline creates them
 **Entity extraction rules:**
 - **person**: People the vault owner directly works with, communicates with, or needs to track. Must have a full name. Skip first-name-only mentions.
 - **org**: Companies, organizations, teams the vault owner has a relationship with (clients, employers, partners, service providers).
-- **project**: Initiatives the vault owner is actively working on, planning, or has a stake in. A project must be something the owner does, builds, manages, or directly participates in.
-- **location**: Specific physical places relevant to the vault owner's projects, events, or life.
+- **matter**: Initiatives the vault owner is actively working on, planning, or has a stake in. A matter must be something the owner does, builds, manages, or directly participates in.
+- **place**: Specific physical places relevant to the vault owner's matters, events, or life.
 - **conversation**: If the source is a multi-turn exchange (email thread, chat, meeting) the vault owner participated in.
 - **task**: Action items for the vault owner or their collaborators.
 - **event**: Scheduled or past events the vault owner attended or will attend.
@@ -198,28 +198,28 @@ Only extract entities that the vault owner has a **direct relationship with**. A
 **DO NOT extract:**
 - Media, entertainment, or cultural references merely mentioned or analyzed (TV shows, movies, books, songs, games)
 - Historical figures, celebrities, or public figures the owner doesn't work with
-- Third-party products, companies, or projects used only as examples or analogies
+- Third-party products, companies, or matters used only as examples or analogies
 - Academic concepts, theories, or frameworks discussed in passing
 - Legislative packages, regulations, or policies the owner doesn't directly work on
 - Anything that is the *subject of analysis* rather than something the owner *does or uses*
 
 **Examples of what to SKIP:**
-- A note analyzing "Mad Men" leadership styles → do NOT create project/Mad Men
-- A note referencing "The Sopranos" as a cultural touchpoint → do NOT create project/The Sopranos
-- A briefing mentioning EU transport regulations → do NOT create project/Transport Enforcement Package (unless the owner works on that regulation)
-- A note discussing GPT-2 architecture → do NOT create project/GPT-2 (unless the owner is building/modifying GPT-2)
+- A note analyzing "Mad Men" leadership styles → do NOT create matter/Mad Men
+- A note referencing "The Sopranos" as a cultural touchpoint → do NOT create matter/The Sopranos
+- A briefing mentioning EU transport regulations → do NOT create matter/Transport Enforcement Package (unless the owner works on that regulation)
+- A note discussing GPT-2 architecture → do NOT create matter/GPT-2 (unless the owner is building/modifying GPT-2)
 
 **Examples of what to EXTRACT:**
-- "We're building a new API integration for Acme" → YES, create project/Acme API Integration
-- "Meeting with John Smith about the kitchen renovation" → YES, create person/John Smith, project/Kitchen Renovation
-- "Started using n8n for workflow automation" → YES, create project if the owner is building workflows with it
+- "We're building a new API integration for Acme" → YES, create matter/Acme API Integration
+- "Meeting with John Smith about the kitchen renovation" → YES, create person/John Smith, matter/Kitchen Renovation
+- "Started using n8n for workflow automation" → YES, create matter if the owner is building workflows with it
 
 **For each entity provide:**
 - `type`: The vault record type
 - `name`: The record name (Title Case for entities, descriptive for tasks/decisions)
 - `description`: 1-2 sentences of context — who they are, what it is, why it matters. **NEVER leave empty.**
 - `body`: Full markdown body content for the record. Include heading, context paragraphs, relevant details, relationships. Aim for 3-10 lines minimum. The pipeline creates complete records from this — make it worth reading as a standalone document.
-- `fields`: Dict of frontmatter fields to set. Use wikilink format for references: `"\"[[type/Name]]\""`. Include `status`, `org`, `project`, `role`, etc. as applicable.
+- `fields`: Dict of frontmatter fields to set. Use wikilink format for references: `"\"[[type/Name]]\""`. Include `status`, `org`, `matter`, `role`, etc. as applicable.
 
 **Do NOT include entities that are too vague** (e.g., "Tom" without a surname).
 
@@ -227,7 +227,7 @@ Only extract entities that the vault owner has a **direct relationship with**. A
 
 ## Vault Owner Profile
 
-Use this profile to determine what is relevant to the vault owner. Only extract entities that connect to this person's life, work, projects, and relationships.
+Use this profile to determine what is relevant to the vault owner. Only extract entities that connect to this person's life, work, matters, and relationships.
 
 {user_profile}
 

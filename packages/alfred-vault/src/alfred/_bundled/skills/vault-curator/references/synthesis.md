@@ -3,7 +3,7 @@ type: synthesis
 status: draft # draft | active | superseded
 confidence: medium # low | medium | high
 cluster_sources: [] # [[entities that contributed to this insight]]
-project: [] # [[project links]]
+matter_ref: [] # [[matter links]]
 supports: [] # [[decisions/assumptions this strengthens]]
 related: []
 created: "{{date}}"
@@ -26,7 +26,7 @@ tags: []
 
 ## Applicability
 
-<!-- Which projects, people, or contexts does this apply to? -->
+<!-- Which matters, people, or contexts does this apply to? -->
 
 ![[synthesis.base#Sources]]
 ![[synthesis.base#Related]]

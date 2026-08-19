@@ -4,7 +4,7 @@ status: draft # draft | final | superseded | reversed
 confidence: high # low | medium | high
 source: "" # who/what triggered the decision
 source_date:
-project: [] # [[project links]]
+matter_ref: [] # [[matter links]]
 decided_by: [] # [[person links]]
 approved_by: [] # [[person links — authority chain]]
 based_on: [] # [[assumptions/evidence this rests on]]

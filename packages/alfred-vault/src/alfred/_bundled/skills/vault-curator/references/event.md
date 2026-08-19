@@ -4,8 +4,8 @@ name:
 description:
 date:
 participants: [] # Links to People
-location: # Link to Location
-project: # Link to Project
+place: # Link to Place
+matter_ref: # Link to Matter
 session: # Link to Session
 related: []
 relationships: []

@@ -4,8 +4,8 @@ status: active # active | expired | waived | superseded
 source: "" # regulation, contract, physics, policy
 source_date:
 authority: "" # who/what imposes this (council, contract, law)
-project: [] # [[project links]]
-location: [] # [[location links]]
+matter_ref: [] # [[matter links]]
+place: [] # [[place links]]
 related: []
 created: "{{date}}"
 tags: []
@@ -29,5 +29,5 @@ tags: []
 
 <!-- Does this expire? When should it be re-checked? -->
 
-![[constraint.base#Affected Projects]]
+![[constraint.base#Affected Matters]]
 ![[constraint.base#Related]]

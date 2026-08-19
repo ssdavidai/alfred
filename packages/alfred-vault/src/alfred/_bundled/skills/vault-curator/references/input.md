@@ -11,7 +11,7 @@ conversation:
 message_id:
 in_reply_to:
 references: []
-project:
+matter_ref:
 alfred_instructions:
 related: []
 relationships: []

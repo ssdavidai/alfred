@@ -38,9 +38,9 @@ Your job: use `alfred vault edit` to add substantive content and fill missing fr
 - `--set website=...`: If mentioned
 - `--append related="[[note/Note Title]]"`: Link to the note
 
-### For project records:
-- `--body-append`: Project objective, scope, current status, recent updates from the source
-- `--set description="..."`: If empty — project purpose and goal
+### For matter records:
+- `--body-append`: Matter objective, scope, current status, recent updates from the source
+- `--set description="..."`: If empty — matter purpose and goal
 - `--set client="[[org/Client Name]]"`: If known
 - `--set owner="[[person/Owner Name]]"`: If known
 - `--append related="[[note/Note Title]]"`: Link to the note

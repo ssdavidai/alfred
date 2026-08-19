@@ -7,7 +7,7 @@ claim_a: "" # [[link or description of first claim]]
 claim_b: "" # [[link or description of conflicting claim]]
 source_a: "" # where claim A came from
 source_b: "" # where claim B came from
-project: [] # [[project links]]
+matter_ref: [] # [[matter links]]
 related: []
 created: "{{date}}"
 tags: []

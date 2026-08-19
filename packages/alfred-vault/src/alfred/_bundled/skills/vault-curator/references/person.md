@@ -22,8 +22,8 @@ tags: []
 ## Tasks
 ![[person.base#Tasks]]
 
-## Projects
-![[person.base#Projects]]
+## Matters
+![[person.base#Matters]]
 
 ## Sessions
 ![[person.base#Sessions]]
