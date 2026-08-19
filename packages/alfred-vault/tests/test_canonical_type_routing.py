@@ -132,3 +132,31 @@ def test_project_is_routed_to_matter(monkeypatch, tmp_path):
     out = vault_create(tmp_path, "project", "MOSZ Discovery", set_fields={"status": "active"})
     assert seen["type"] == "matter", "project must be written as a matter"
     assert out["path"].startswith("matter/")
+
+
+# --- 3. the same guarantee on the edit path ------------------------------
+
+def test_edit_http_rejection_is_translated_to_vaulterror(monkeypatch, tmp_path):
+    """The janitor annotates existing records with vault_edit, and the vault is
+    full of pre-cutover ones (assumption/, synthesis/, constraint/, event/).
+    ctrl answers 422 for every such path. An escaping HTTPStatusError killed the
+    whole janitor sweep; the janitor already catches VaultError in a dozen
+    places, so translation is all that is needed."""
+    import alfred.ctrl_client as cc
+
+    def _boom(rel_path, set_fields=None, body_append=None):
+        raise httpx.HTTPStatusError(
+            "422", request=httpx.Request("PATCH", "http://ctrl/x"),
+            response=httpx.Response(
+                422,
+                json={"error": {"message": 'Path "assumption/x.md" is not canonical.'}},
+            ),
+        )
+
+    monkeypatch.setattr(cc, "ctrl_edit", _boom)
+    monkeypatch.setattr(cc, "via_ctrl_enabled", lambda: True)
+
+    from alfred.vault.ops import vault_edit
+    with pytest.raises(VaultError) as exc:
+        vault_edit(tmp_path, "assumption/x.md", set_fields={"janitor_note": "n"})
+    assert "422" in str(exc.value)

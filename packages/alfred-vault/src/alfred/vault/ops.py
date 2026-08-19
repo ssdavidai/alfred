@@ -522,7 +522,27 @@ def vault_edit(
                     merged_sets[k] = existing + [v]
                 else:
                     merged_sets[k] = [existing, v]
-        return ctrl_edit(rel_path, set_fields=merged_sets or None, body_append=body_append)
+        # Same reasoning as vault_create: ctrl answers 422 for any path outside
+        # the canonical 13, and that is PERMANENT. The janitor already handles a
+        # failed record by catching VaultError and moving on (12 call sites), so
+        # the only thing an escaping HTTPStatusError achieves is killing the
+        # sweep. It has been doing exactly that on the vault's pre-cutover
+        # records — `assumption/`, `synthesis/`, `constraint/`, `event/` — which
+        # the janitor keeps trying to annotate on every pass.
+        try:
+            return ctrl_edit(
+                rel_path, set_fields=merged_sets or None, body_append=body_append
+            )
+        except httpx.HTTPStatusError as exc:
+            detail = ""
+            try:
+                detail = exc.response.json().get("error", {}).get("message", "")
+            except Exception:  # noqa: BLE001
+                detail = (exc.response.text or "")[:200]
+            raise VaultError(
+                f"ctrl rejected edit of {rel_path}: "
+                f"HTTP {exc.response.status_code}. {detail}"
+            ) from exc
 
     file_path = _resolve_vault_path(vault_path, rel_path)
     if not file_path.exists():
