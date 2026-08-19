@@ -406,7 +406,7 @@ describe("state.db migration runner", () => {
     db.close();
   });
 
-  it("0021 creates bounded Codex Desktop receipt/provenance tables and constraints", () => {
+  it("0021 creates bounded Codex Desktop receipts, provenance, and deletion tombstones", () => {
     const db = new DatabaseSync(":memory:");
     db.exec("PRAGMA foreign_keys = ON");
     db.exec(schema);
@@ -420,6 +420,7 @@ describe("state.db migration runner", () => {
       "codex_desktop_installation",
       "codex_desktop_delivery_chunk",
       "codex_desktop_source_event",
+      "codex_desktop_deletion",
     ]) {
       assert.ok(tables.has(table), `0021: ${table} created`);
     }
@@ -443,6 +444,13 @@ describe("state.db migration runner", () => {
         "existing_ingest_ref", "existing_journal_ref", "redaction_state",
         "retention_until",
       ],
+      codex_desktop_deletion: [
+        "id", "request_id", "request_payload_hash", "installation_id",
+        "scope", "opaque_session_id", "operation", "status", "accepted_at",
+        "completion_deadline", "completed_at", "server_complete",
+        "client_cleanup_pending", "client_applied_at", "last_error_code",
+        "tombstone_expires_at", "retention_until",
+      ],
     };
     for (const [table, required] of Object.entries(requiredColumns)) {
       const actual = cols(db, table);
@@ -465,6 +473,13 @@ describe("state.db migration runner", () => {
       uq_codex_desktop_event_sequence: [
         "installation_id", "opaque_session_id", "event_sequence",
       ],
+      uq_codex_desktop_deletion_request: ["request_id"],
+      idx_codex_desktop_deletion_selector: [
+        "installation_id", "scope", "opaque_session_id", "tombstone_expires_at",
+      ],
+      idx_codex_desktop_deletion_directive: [
+        "installation_id", "client_cleanup_pending", "accepted_at", "id",
+      ],
     };
     for (const [index, expected] of Object.entries(expectedIndexes)) {
       const row = db.prepare(
@@ -484,6 +499,7 @@ describe("state.db migration runner", () => {
       "idx_codex_desktop_source_turn",
       "idx_codex_desktop_source_projection",
       "idx_codex_desktop_source_retention",
+      "idx_codex_desktop_deletion_retention",
     ]) {
       const row = db.prepare(
         "SELECT name FROM sqlite_master WHERE type='index' AND name = ?",
@@ -502,6 +518,11 @@ describe("state.db migration runner", () => {
     );
     assert.ok(sourceFkTargets.has("codex_desktop_installation"));
     assert.ok(sourceFkTargets.has("codex_desktop_delivery_chunk"));
+    const deletionFkTargets = new Set(
+      (db.prepare("PRAGMA foreign_key_list(codex_desktop_deletion)").all() as { table: string }[])
+        .map((r) => r.table),
+    );
+    assert.deepEqual(deletionFkTargets, new Set(["codex_desktop_installation"]));
 
     const hashA = "a".repeat(64);
     const hashB = "b".repeat(64);
@@ -513,6 +534,73 @@ describe("state.db migration runner", () => {
     ).run(
       "cdi_01JTESTINSTALLATION0000000", "Test Mac", "codex-cli", "0.135.0", "1",
       hashA, "2026-11-17T00:00:00.000Z", "2027-02-15T00:00:00.000Z",
+    );
+
+    const insertDeletion = db.prepare(
+      `INSERT INTO codex_desktop_deletion
+        (id, request_id, request_payload_hash, installation_id, scope,
+         opaque_session_id, operation, accepted_at, completion_deadline,
+         tombstone_expires_at, retention_until)
+       VALUES (?, ?, ?, 'cdi_01JTESTINSTALLATION0000000', ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    insertDeletion.run(
+      "deletion-1", "0198c5b1-77e3-7dc0-ad9c-e713736678d9", hashB,
+      "session", "session-before-first-delivery", "delete",
+      "2026-08-19T12:10:00.000Z", "2026-08-20T12:10:00.000Z",
+      "2026-11-17T12:10:00.000Z", "2026-11-17T12:10:00.000Z",
+    );
+    const preDeliveryTombstone = db.prepare(
+      `SELECT id, operation FROM codex_desktop_deletion
+       WHERE installation_id = ? AND scope = 'session'
+         AND opaque_session_id = ? AND tombstone_expires_at > ?`,
+    ).get(
+      "cdi_01JTESTINSTALLATION0000000",
+      "session-before-first-delivery",
+      "2026-08-19T12:11:00.000Z",
+    ) as { id: string; operation: string } | undefined;
+    assert.equal(
+      preDeliveryTombstone?.id,
+      "deletion-1",
+      "0021: session tombstone is queryable before any matching delivery",
+    );
+    assert.equal(preDeliveryTombstone?.operation, "delete");
+    assert.equal(
+      (db.prepare(
+        `SELECT COUNT(*) AS n FROM codex_desktop_delivery_chunk
+         WHERE opaque_session_id = 'session-before-first-delivery'`,
+      ).get() as { n: number }).n,
+      0,
+      "0021: pre-delivery session tombstone has no synthetic chunk",
+    );
+    assert.throws(
+      () => insertDeletion.run(
+        "deletion-request-collision", "0198c5b1-77e3-7dc0-ad9c-e713736678d9",
+        hashA, "session", "another-session", "redact",
+        "2026-08-19T12:10:01.000Z", "2026-08-20T12:10:01.000Z",
+        "2026-11-17T12:10:01.000Z", "2026-11-17T12:10:01.000Z",
+      ),
+      /UNIQUE constraint failed/i,
+      "0021: deletion request id collision is rejected",
+    );
+    assert.throws(
+      () => insertDeletion.run(
+        "deletion-invalid-session", "0198c5b1-77e3-7dc0-ad9c-e713736678da",
+        hashA, "session", null, "delete",
+        "2026-08-19T12:10:02.000Z", "2026-08-20T12:10:02.000Z",
+        "2026-11-17T12:10:02.000Z", "2026-11-17T12:10:02.000Z",
+      ),
+      /CHECK constraint failed/i,
+      "0021: session tombstone requires an opaque session selector",
+    );
+    assert.throws(
+      () => insertDeletion.run(
+        "deletion-invalid-installation", "0198c5b1-77e3-7dc0-ad9c-e713736678db",
+        hashA, "installation", "must-be-null", "delete",
+        "2026-08-19T12:10:03.000Z", "2026-08-20T12:10:03.000Z",
+        "2026-11-17T12:10:03.000Z", "2026-11-17T12:10:03.000Z",
+      ),
+      /CHECK constraint failed/i,
+      "0021: installation tombstone forbids a session selector",
     );
 
     const insertChunk = db.prepare(

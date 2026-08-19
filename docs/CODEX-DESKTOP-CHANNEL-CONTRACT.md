@@ -147,6 +147,7 @@ analytics, ingest payloads, journal metadata, and request-body storage.
 | Server delivery receipt | 30 days after acknowledgement. |
 | Server source-event provenance | 7 days after successful projection; quarantined provenance 30 days. |
 | Redaction/deletion tombstone | 90 days, longer than every permitted local retry window. |
+| Health deletion exchange | At most 100 applied deletion ids in a request and 100 directives in a response. |
 | Retry delay | `min(300, 2^(attempt-1))` seconds multiplied by uniform jitter in `[0.5,1.5]`; attempt starts at 1. |
 | Deletion server completion | within 24 hours of acceptance; client-local cleanup is mandatory before any operation on its next start/health. |
 
@@ -348,7 +349,8 @@ same persisted status and exact body:
 ```
 
 The acknowledgement is written only after every event is projected or linked
-to an existing projection. Projection is stable:
+to an existing projection, except for the content-free tombstone suppression
+case frozen below. Projection is stable:
 
 - `stream="codex-desktop:<installation_id>"`,
   `channel="codex-desktop"`, `kind="agent-turn-complete"`, and
@@ -368,6 +370,16 @@ the same `(installation, session, sequence range)`, installation-scoped
 canonical hash returns the original acknowledgement. Any different hash
 returns non-retryable HTTP 409 (`IDEMPOTENCY_CONFLICT` or
 `SEQUENCE_CONFLICT`) and changes no receipt, projection, or acknowledgement.
+
+Before projecting a valid chunk, ingestion checks the unexpired
+`codex_desktop_deletion` selectors in the same transaction. A match creates
+only payload-free chunk/source receipts marked `redacted` or `deleted`, creates
+no ingest or journal content, and returns the same exact HTTP 202 body shown
+above; `accepted_event_count` remains the validated request event count and
+`continuity_revision` is the revision advanced by the deletion. Replays return
+that original acknowledgement under the same hash/conflict rules. This is the
+only content-free acknowledgement/suppression shape; no additional response
+field or status is permitted.
 
 Network failures, 429, and 5xx keep the durable chunk and retry with the §3.2
 backoff. `Retry-After` replaces the exponential base after clamping to 1–300,
@@ -439,7 +451,7 @@ not inject this response into Codex.
 {
   "installation_id": "cdi_01K2QHZA7G9E2N3E9QQ7AK8F5M",
   "adapter_version": "1",
-  "adapter_time": "2026-08-19T12:05:00.000Z",
+  "adapter_time": "2026-08-19T12:11:00.000Z",
   "state": "healthy",
   "reason_codes": [],
   "outbox": {
@@ -459,6 +471,14 @@ from `source_contract_mismatch`, `network`, `rate_limited`, `server`,
 `outbox_age_exceeded`, `continuity_timeout`, `continuity_unavailable`,
 `stale_revision`, and `redaction_race`.
 
+`applied_deletion_ids` contains 0–100 unique deletion ULIDs, sorted
+lexicographically. Before including an id, the adapter must have
+transactionally applied the complete directive as specified in §5.7. Repeated
+reports for a directive previously issued to this installation are
+idempotently accepted. An id that was not issued to this installation makes
+the whole request fail with `400 MALFORMED_PAYLOAD`; no partial report is
+committed.
+
 Success is HTTP 200 with exactly:
 
 ```json
@@ -466,7 +486,7 @@ Success is HTTP 200 with exactly:
   "installation_id": "cdi_01K2QHZA7G9E2N3E9QQ7AK8F5M",
   "status": "healthy",
   "reason_codes": [],
-  "server_time": "2026-08-19T12:05:00.050Z",
+  "server_time": "2026-08-19T12:11:00.050Z",
   "token_expires_at": "2026-11-17T12:00:00.000Z",
   "continuity": {
     "mode": "journal_only",
@@ -479,7 +499,19 @@ Success is HTTP 200 with exactly:
     "outbox_max_bytes": 67108864,
     "unacknowledged_max_age_seconds": 604800
   },
-  "deletion_directives": []
+  "deletion_directives": [
+    {
+      "deletion_id": "01K2QK1BZCA4WX4G2S38YWMY7M",
+      "selector": {
+        "scope": "session",
+        "installation_id": "cdi_01K2QHZA7G9E2N3E9QQ7AK8F5M",
+        "opaque_session_id": "0198c5a3-3e06-72b1-9658-f15fd465c903"
+      },
+      "operation": "delete",
+      "accepted_at": "2026-08-19T12:10:00.000Z",
+      "tombstone_expires_at": "2026-11-17T12:10:00.000Z"
+    }
+  ]
 }
 ```
 
@@ -487,6 +519,23 @@ Success is HTTP 200 with exactly:
 `available|timeout|unavailable|stale_revision|redaction_race`. Server status is
 the worse of server and adapter state. Health never includes payload content,
 tokens, hashes, or journal messages.
+
+`deletion_directives` contains 0–100 objects of exactly the shape shown; no
+additional item keys are permitted, and no pending directive is represented
+by an empty or partial object. `selector.scope` is `session|installation` and
+`operation` is `redact|delete`, with the same meanings as §5.7. For
+installation scope,
+`selector.opaque_session_id` is exactly `null`; for session scope it is the
+exact opaque session id from the operator request. The server returns the
+oldest unreported directives for the authenticated installation, ordered by
+`(accepted_at, deletion_id)` ascending, and repeats each directive on every
+health response until a later health request reports its id in
+`applied_deletion_ids`. If more than 100 are pending, later pages become
+eligible only after earlier ids are reported. Processing reports and selecting
+the next response page occur in one server transaction. Each valid report sets
+`client_cleanup_pending=false` and `client_applied_at` to server receipt time;
+re-reporting it leaves those values unchanged. A response with no eligible
+directive uses `"deletion_directives":[]`.
 
 ### 5.7 Session/installation redaction or deletion
 
@@ -550,10 +599,20 @@ before all server effects below commit.
 
 Effects are ordered and idempotent:
 
-1. Create a 90-day tombstone keyed by installation plus session/sequence/source
-   identities in the migration-0021 rows. It is committed first, so a delayed
-   chunk can only receive a content-free acknowledgement/suppression and can
-   never recreate deleted content.
+1. Insert a `codex_desktop_deletion` control receipt keyed by `deletion_id` and
+   globally unique `request_id`. `request_payload_hash` is SHA-256 over the
+   RFC 8785 canonical JSON object containing exactly `request_id`,
+   `installation_id`, `scope`, `opaque_session_id`, and `operation`; same-hash
+   replay returns the original response and a different hash returns
+   `409 IDEMPOTENCY_CONFLICT`. The row carries the exact installation/session
+   selector and a 90-day
+   `tombstone_expires_at`, and can exist before any matching chunk or source
+   event. It is committed first. Ingestion checks every unexpired matching
+   selector before creating receipt/projection rows, then returns a
+   content-free acknowledgement/suppression, so a delayed first delivery or
+   retry can never recreate deleted content. The deletion receipt remains the
+   stable deletion-id link while matching existing chunk/event redaction states
+   are updated in the same transaction.
 2. For installation scope, revoke the credential immediately. For session
    scope, keep the credential but reject/suppress matching chunks.
 3. Redact or delete matching existing ingest payloads and every derived row
@@ -565,11 +624,15 @@ Effects are ordered and idempotent:
    continuity response. LCM remains authoritative but no implementation may
    edit its SQLite directly; LCM erasure waits for an evidenced supported API
    and is surfaced as health degradation rather than guessed.
-5. Return a deletion directive on health. Before any retry or capture after
-   its next start/health, the adapter transactionally erases matching
+5. Return the exact §5.6 deletion directive on health. The selector matches
+   every local row for its installation when scope is `installation`, or only
+   rows with the byte-identical opaque session id when scope is `session`.
+   Before any retry or capture after its next start/health, the adapter applies
+   directives in response order and transactionally erases matching
    unacknowledged local payloads, acknowledged-retention payloads, and
-   quarantined payloads; it retains only the 90-day local tombstone and reports
-   the deletion id in `applied_deletion_ids`.
+   quarantined payloads. It retains only the deletion id, selector, operation,
+   and `tombstone_expires_at` in the 90-day local tombstone, then reports the
+   deletion id in the next health request's `applied_deletion_ids`.
 6. `client_cleanup_pending` remains true until that report. An offline client
    cannot recreate data because the server tombstone predates content removal.
 
@@ -580,8 +643,9 @@ survive adapter and Codex restarts and follow the seven-day rule in §3.2.
 
 ## 6. Migration 0021 storage contract
 
-Migration `0021_codex_desktop.sql` creates exactly three receipt/provenance
-tables in ctrl-owned `alfred-state.db`:
+Migration `0021_codex_desktop.sql` creates three transport
+receipt/provenance tables and one bounded deletion control/tombstone table in
+ctrl-owned `alfred-state.db`:
 
 - `codex_desktop_installation`: product/version, adapter version, SHA-256 token
   hash, token expiry/rotation/revocation, bounded health, redaction/deletion,
@@ -592,18 +656,26 @@ tables in ctrl-owned `alfred-state.db`:
 - `codex_desktop_source_event`: installation/chunk, opaque session and turn,
   source identity, session event sequence, kind/revision, canonical hash,
   ingest/journal projection references, redaction state, and retention.
+- `codex_desktop_deletion`: deletion/request identity and canonical request
+  hash, exact installation/session selector, operation and completion state,
+  ordered client-cleanup state, tombstone expiry, and retention. It contains no
+  deleted payload and may be inserted before any delivery row for its session.
 
-Foreign keys bind event → chunk → installation. Unique indexes enforce
-installation-scoped idempotency, installation/session/chunk range,
-installation/source-event identity, and installation/session/event sequence.
-No plaintext token, event payload, transcript, independent user memory, or LCM
-table is permitted. Physical retention sweep implementations must preserve
-active deletion tombstones and honor the 30/7/30/90-day limits in §3.2.
+Foreign keys bind event → chunk → installation and deletion → installation.
+Unique indexes enforce installation-scoped idempotency,
+installation/session/chunk range, installation/source-event identity,
+installation/session/event sequence, and global deletion `request_id`.
+Selector and directive indexes support
+pre-ingest suppression and `(accepted_at,deletion_id)` health ordering. No
+plaintext token, event payload, deleted content, transcript, independent user
+memory, or LCM table is permitted. Physical retention sweep implementations
+must preserve active deletion tombstones and honor the 30/7/30/90-day limits
+in §3.2.
 
 ## 7. Required implementation and verification ownership
 
 - **Phase 0 (this job):** contract freeze, migration 0021, static registration,
-  schema/constraint/idempotency tests.
+  schema/constraint/idempotency/tombstone tests.
 - **ctrl lane:** auth classes, exact routes/shapes, transactional projection,
   receipt retention, journal-only continuity, health, tombstones, redaction and
   deletion. ctrl-api remains the only canonical writer.

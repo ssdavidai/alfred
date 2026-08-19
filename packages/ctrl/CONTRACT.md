@@ -188,19 +188,22 @@ Accepted revision-1 `agent-turn-complete` events are transactionally projected
 into the existing ingest and One Alfred journal paths with stable source-event
 provenance before acknowledgement. Migration-0021 source rows are bounded
 transport receipts, not a transcript or memory store; they contain no event
-body. Exact same-hash repeats return the original acknowledgement. A different
-hash at the installation-scoped idempotency, session/chunk sequence,
-source-event identity, or session/event sequence returns a non-retryable 409
-without changing projections.
+body. Its bounded `codex_desktop_deletion` control rows persist the exact
+installation/session selector before content removal or any delayed first
+delivery, and drive the ordered health cleanup directives frozen in §5.6 of
+the channel contract. Exact same-hash repeats return the original
+acknowledgement. A different hash at the installation-scoped idempotency,
+session/chunk sequence, source-event identity, or session/event sequence
+returns a non-retryable 409 without changing projections.
 
 Continuity is revisioned and bounded. Until this contract cites a supported
 LCM read API, the provider reads only ctrl-owned journal/state and returns
 `mode="journal_only"`; it never opens Hermes/LCM SQLite directly. Timeout,
 unavailable continuity, stale revision, and redaction races use the frozen
 health/error shapes and never block a Codex turn. Redaction/deletion writes a
-90-day tombstone before removing local/server payload and projections, so a
-delayed retry cannot recreate content. The One Alfred journal and VPS LCM
-remain the only continuity authorities.
+90-day `codex_desktop_deletion` tombstone before removing local/server payload
+and projections, so a delayed first delivery or retry cannot recreate content.
+The One Alfred journal and VPS LCM remain the only continuity authorities.
 
 ### Call-out: C20 durable asynchronous worker runs
 
@@ -450,7 +453,7 @@ compatibility surface; new consumers use the hyphenated route.
 
 1. **Single writer.** ctrl-api holds the only write handles to `alfred-state.db`, `ingest.db`, `cold.db`, the vault, and `/files`. learn / the alfred daemon / hermes write through HTTP here — never file-direct. Readers may open the SQLite files read-only (WAL enables this — `src/db/state.ts`).
 2. **Promotion contract enforced in code**, not convention: every vault write route calls `assertCanonicalVaultPath()` first; non-canonical → 422 with the correct destination endpoint. 12 canonical types + `SOUL.md`/`RULES.md` + `_templates/` + `needs_attention/` (interim). No new vault directories, ever.
-3. **Migrations are append-only forbidden-zone.** `src/db/schema.sql` is the frozen v0 baseline (CREATE IF NOT EXISTS); every change after it is a numbered file in `src/db/migrations/` (currently `0001`–`0021`), applied transactionally at boot gated on `PRAGMA user_version` (`src/db/migrate.ts`). Never edit a merged migration — append the next number. Lanes cannot touch `schema.sql`, `migrations/**`, `migrate.ts`, or `api/server.ts` (commit gate rejects). Migration 0021 creates only bounded Codex Desktop installation/delivery/source receipt and provenance tables; no plaintext token, transcript, user-memory, or LCM table.
+3. **Migrations are append-only forbidden-zone.** `src/db/schema.sql` is the frozen v0 baseline (CREATE IF NOT EXISTS); every change after it is a numbered file in `src/db/migrations/` (currently `0001`–`0021`), applied transactionally at boot gated on `PRAGMA user_version` (`src/db/migrate.ts`). Never edit a merged migration — append the next number. Lanes cannot touch `schema.sql`, `migrations/**`, `migrate.ts`, or `api/server.ts` (commit gate rejects). Migration 0021 creates only bounded Codex Desktop installation/delivery/source receipt and provenance tables plus the payload-free deletion control/tombstone table; no plaintext token, deleted payload, transcript, user-memory, or LCM table.
 4. **Auth is Bearer on :3100.** Master `AAS_API_KEY` everywhere; the only exceptions are the enumerated public webhook routes (each self-authenticating), the two liveness probes, and the two scoped-token classes (voice-bridge allowlist, channel tokens). `X-Tenant-ID` is rejected with 400. Token compares are constant-time.
 5. **Decisions mint `state: open`, always** — no write path may mint a terminal state, or the learning loop silently dies (see call-out).
 6. **web never talks to mcp-server or Hermes admin directly** — the dashboard's only backend is ctrl-api; secrets (`MCP_APPROVAL_SECRET`, gateway token) stay server-side.

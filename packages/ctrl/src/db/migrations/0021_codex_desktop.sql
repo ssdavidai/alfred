@@ -124,3 +124,56 @@ CREATE INDEX IF NOT EXISTS idx_codex_desktop_source_projection
   ON codex_desktop_source_event(projection_status, received_at);
 CREATE INDEX IF NOT EXISTS idx_codex_desktop_source_retention
   ON codex_desktop_source_event(retention_until);
+
+-- A control receipt and 90-day suppression tombstone, never payload storage.
+-- A session row can be committed before that session's first chunk arrives;
+-- ingestion checks this selector before creating a delivery or source row.
+CREATE TABLE IF NOT EXISTS codex_desktop_deletion (
+  id                       TEXT PRIMARY KEY, -- deletion_id
+  request_id               TEXT NOT NULL,
+  request_payload_hash     TEXT NOT NULL
+    CHECK (length(request_payload_hash) = 64),
+  installation_id          TEXT NOT NULL,
+  scope                    TEXT NOT NULL
+    CHECK (scope IN ('session', 'installation')),
+  opaque_session_id        TEXT,
+  operation                TEXT NOT NULL
+    CHECK (operation IN ('redact', 'delete')),
+  status                   TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'complete', 'failed')),
+  accepted_at              TEXT NOT NULL,
+  completion_deadline      TEXT NOT NULL,
+  completed_at             TEXT,
+  server_complete          INTEGER NOT NULL DEFAULT 0
+    CHECK (server_complete IN (0, 1)),
+  client_cleanup_pending   INTEGER NOT NULL DEFAULT 1
+    CHECK (client_cleanup_pending IN (0, 1)),
+  client_applied_at        TEXT,
+  last_error_code          TEXT,
+  tombstone_expires_at     TEXT NOT NULL,
+  retention_until          TEXT NOT NULL,
+  created_at               TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at               TEXT NOT NULL DEFAULT (datetime('now')),
+  CHECK (
+    (scope = 'session' AND opaque_session_id IS NOT NULL
+      AND length(opaque_session_id) BETWEEN 1 AND 512)
+    OR
+    (scope = 'installation' AND opaque_session_id IS NULL)
+  ),
+  CHECK (retention_until >= tombstone_expires_at),
+  FOREIGN KEY (installation_id)
+    REFERENCES codex_desktop_installation(id) ON DELETE RESTRICT
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_codex_desktop_deletion_request
+  ON codex_desktop_deletion(request_id);
+CREATE INDEX IF NOT EXISTS idx_codex_desktop_deletion_selector
+  ON codex_desktop_deletion(
+    installation_id, scope, opaque_session_id, tombstone_expires_at
+  );
+CREATE INDEX IF NOT EXISTS idx_codex_desktop_deletion_directive
+  ON codex_desktop_deletion(
+    installation_id, client_cleanup_pending, accepted_at, id
+  );
+CREATE INDEX IF NOT EXISTS idx_codex_desktop_deletion_retention
+  ON codex_desktop_deletion(retention_until);
