@@ -1512,38 +1512,62 @@ def _is_autonomous_source(source: str | None) -> bool:
 
 
 async def _gather_autonomous_actions(
-    vault: VaultClient,
     window_start: dt.datetime,
     window_end: dt.datetime,
     limit: int = 15,
 ) -> list[dict[str, Any]]:
-    """State-change audit records in window where source != manual.*."""
+    """State changes in the window that Alfred made, not Sir.
+
+    Reads the `audit` table, not the `event/` markdown.
+
+    It used to list the vault's event/ directory and filter filenames
+    containing "state-change-". That was wrong twice over:
+
+      * `limit=400` against a directory holding 1,468 records, with no
+        ordering guarantee — so this section of the brief has been quietly
+        incomplete, showing whatever 400 records came back first;
+      * it read a MIRROR. The state-change markdown is written by ctrl-api
+        with a raw fs.writeFileSync that deliberately bypasses its own
+        promotion contract (CLAUDE.md 5.1), while the authoritative copy is
+        the audit row. Reading the mirror meant the brief depended on a
+        migration shim.
+
+    The audit table answers this directly: action_type='state_change',
+    windowed server-side via since/until, ordered newest-first with an
+    (action_type, ts DESC) index behind it. `summary` IS the reason — ctrl
+    writes `summary: reason || ...` when it records the row.
+    """
     try:
-        records = await vault.list_records("event", limit=400)
-    except httpx.HTTPError as exc:
-        logger.warning("_gather_autonomous_actions: list failed err=%s", exc)
+        from src.utils.signal_state import StateClient
+
+        config = load_config()
+        async with StateClient(config) as sc:
+            envelope = await sc.list_audit(
+                action_type="state_change",
+                since=_iso(window_start),
+                until=_iso(window_end),
+                # Ask for more than we need: the autonomous filter below drops
+                # Sir's own manual.* changes, and asking for exactly `limit`
+                # would silently under-report whenever he has been busy.
+                limit=max(limit * 4, 60),
+            )
+        rows = envelope.get("entries") or []
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("_gather_autonomous_actions: audit query failed err=%s", exc)
         return []
+
     out: list[dict[str, Any]] = []
-    for rec in records or []:
-        if not isinstance(rec, dict):
+    for row in rows:
+        if not isinstance(row, dict):
             continue
-        path = str(rec.get("path") or "")
-        # state_mutator audits land at event/state-change-*.md
-        if "state-change-" not in path:
-            continue
-        fm = rec.get("frontmatter") if isinstance(rec.get("frontmatter"), dict) else {}
-        ts_raw = fm.get("applied_at") or fm.get("created") or rec.get("created")
-        ts = _parse_iso_or_none(ts_raw)
-        if ts is None or ts < window_start or ts > window_end:
-            continue
-        source = fm.get("source")
+        source = row.get("source")
         if not _is_autonomous_source(source):
             continue
         out.append({
             "source": str(source),
-            "target_path": fm.get("target_path") or "",
-            "reason": (fm.get("reason") or "")[:160],
-            "applied_at": str(ts_raw)[:40],
+            "target_path": row.get("target_path") or "",
+            "reason": str(row.get("summary") or "")[:160],
+            "applied_at": str(row.get("ts") or "")[:40],
         })
         if len(out) >= limit:
             break
@@ -2122,7 +2146,7 @@ async def compose_and_write_briefing(
             vault, window_start=window_start, window_end=window_end,
         )
         autonomous_actions = await _gather_autonomous_actions(
-            vault, window_start=window_start, window_end=window_end,
+            window_start=window_start, window_end=window_end,
         )
         inbox_unresolved_count = await _gather_inbox_unresolved_count(vault)
         window_signals = await _gather_window_signals(
