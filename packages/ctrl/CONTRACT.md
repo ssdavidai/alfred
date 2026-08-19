@@ -5,6 +5,13 @@
 **Issue #316 phase-0 target (added 2026-07-21).** The C20 call-out below is
 also a required future interface, not a claim about this pinned head.
 
+**Issue #685 phase-0 target (revision 685-r2, added 2026-08-19).** Migration
+0021 and its registration are present at this head. The Codex Desktop HTTP
+provider, ingest mirror repairer, continuity assembler, and erasure worker
+frozen below are target behavior, not claims about the pinned runtime. The
+canonical wire and storage contract is
+`docs/CODEX-DESKTOP-CHANNEL-CONTRACT.md`.
+
 ctrl-api is the tenant API server: a zero-dependency-at-runtime Node 22 HTTP service on **:3100** that is the **sole writer** of all four stores (vault markdown, `alfred-state.db`, `ingest.db`, cold archive) plus Store 5 (files). It is HTTP-only — the pre-cutover CLI/TUI was deleted; `build.mjs` produces exactly one artefact, `dist/api.mjs`, from entry `src/api/standalone.ts`. Every other service (web, alfred-learn, the alfred vault daemon, Hermes profiles via the `alfred-ctrl` MCP server, voice-bridge) persists state by calling ctrl-api over HTTP. ctrl-api in turn reaches siblings via `docker exec` (helpers `dockerExec`, `src/api/helpers.ts:100`) and HTTP (Hermes gateway, vault-cli, mcp-server, Sure, Paperclip).
 
 ---
@@ -160,6 +167,50 @@ Resolution precedence: env var > `${ALFRED_DATA_DIR}/settings.json` > default. R
 ### Call-out: MCP scoped tokens (PR #278)
 
 `/api/v1/mcp/tokens` (GET list, POST mint), `/:id/rotate`, DELETE `/:id` (`routes/mcpTokens.ts`) — a **thin proxy** to mcp-server's `/manage/tokens` API. mcp-server owns the tokens (its own SQLite; local validation on every `POST /<app>/mcp`). Chain: browser → web (Wasp op) → ctrl-api → mcp-server, so the browser never holds `MCP_APPROVAL_SECRET`; ctrl-api presents it as the onward Bearer. The raw token appears exactly once (mint + rotate responses); list never carries it; ctrl-api relays verbatim. Missing secret → 500 `MCP_NOT_CONFIGURED`; mcp-server down → 502 `MCP_UNREACHABLE`.
+
+### Call-out: Codex Desktop channel (#685)
+
+**#685 target (ctrl lane; not implemented at this phase-0 head).** Exact paths,
+request/response bodies, common errors, limits, retention, and failure behavior
+are frozen in `docs/CODEX-DESKTOP-CHANNEL-CONTRACT.md` revision 685-r2.
+Implementations copy those shapes; they do not create a parallel channel API.
+
+Provision, rotate, revoke, and redact/delete calls require the normal operator
+bearer. Only chunk ingestion and bounded continuity accept a `cdx_` scoped
+credential, and neither accepts operator auth as a substitute. A credential is
+bound immutably to one installation and one `alfred_principal`, expires after
+90 days, is stored only as a SHA-256 hash, and grants no MCP capability.
+Credentials, hashes, raw session/turn ids, workspace paths, messages, payloads,
+and free-text erasure reasons are excluded from logs and audit metadata.
+
+`alfred-state.db.codex_desktop_source_event` is canonical; the existing
+`ingest.db.stream_event` row is a consume-and-expire mirror for alfred-learn.
+Canonical receipt/source rows and captured/workspace provenance commit first.
+Acknowledgement follows only after every mirror exists. A cross-store failure
+leaves `pending`/`repair_required` state, and an exact retry repairs the mirror
+then returns the original persisted acknowledgement. Same-hash replay is
+idempotent; a different hash at an installation-scoped idempotency key, exact
+session range, source id, or session sequence is a non-retryable 409. New
+session ranges are strictly later and non-overlapping; migration 0021 also
+enforces regression/overlap below the route layer.
+
+Continuity revisions are scoped by principal plus the SHA-256 workspace key.
+An equal `after_revision` returns explicit no-change; a retained older revision
+returns only unseen changed/new items plus removed refs. Selection is
+deterministic: at most two active tasks, two active matters, and two in-flight
+decisions, interleaved to six total and rendered within 384 `o200k_base`
+tokens. A revision manifest stores refs/hashes only, never a second context
+copy. Principal scope may not widen on missing metadata. LCM timeout or
+unavailability returns a 200 degraded fallback; ctrl timeout/unavailability
+causes the adapter to proceed with empty context. Continuity never blocks a
+Codex turn or mutates ingestion state.
+
+Redaction/deletion installs a 90-day canonical tombstone before returning 202,
+nulls canonical content/workspace fields, advances affected revisions, and
+then removes/redacts ingest, journal, derived, and supported LCM content. Raw
+identities and content never enter the audit row. Tombstoned identities reserve
+their idempotency and sequence space so delayed delivery cannot recreate
+content.
 
 ### Call-out: C20 durable asynchronous worker runs
 
@@ -409,7 +460,7 @@ compatibility surface; new consumers use the hyphenated route.
 
 1. **Single writer.** ctrl-api holds the only write handles to `alfred-state.db`, `ingest.db`, `cold.db`, the vault, and `/files`. learn / the alfred daemon / hermes write through HTTP here — never file-direct. Readers may open the SQLite files read-only (WAL enables this — `src/db/state.ts`).
 2. **Promotion contract enforced in code**, not convention: every vault write route calls `assertCanonicalVaultPath()` first; non-canonical → 422 with the correct destination endpoint. 12 canonical types + `SOUL.md`/`RULES.md` + `_templates/` + `needs_attention/` (interim). No new vault directories, ever.
-3. **Migrations are append-only forbidden-zone.** `src/db/schema.sql` is the frozen v0 baseline (CREATE IF NOT EXISTS); every change after it is a numbered file in `src/db/migrations/` (currently `0001`–`0018`), applied transactionally at boot gated on `PRAGMA user_version` (`src/db/migrate.ts`). Never edit a merged migration — append the next number. Lanes cannot touch `schema.sql`, `migrations/**`, `migrate.ts`, or `api/server.ts` (commit gate rejects).
+3. **Migrations are append-only forbidden-zone.** `src/db/schema.sql` is the frozen v0 baseline (CREATE IF NOT EXISTS); every change after it is a numbered file in `src/db/migrations/` (currently `0001`–`0021`), applied transactionally at boot gated on `PRAGMA user_version` (`src/db/migrate.ts`). Never edit a merged migration — append the next number. Lanes cannot touch `schema.sql`, `migrations/**`, `migrate.ts`, or `api/server.ts` (commit gate rejects). Migration 0021 creates principal-bound Codex Desktop installation, receipt, canonical source/mirror-repair, continuity-revision, and erasure-tombstone state without changing a historical migration or either baseline schema.
 4. **Auth is Bearer on :3100.** Master `AAS_API_KEY` everywhere; the only exceptions are the enumerated public webhook routes (each self-authenticating), the two liveness probes, and the two scoped-token classes (voice-bridge allowlist, channel tokens). `X-Tenant-ID` is rejected with 400. Token compares are constant-time.
 5. **Decisions mint `state: open`, always** — no write path may mint a terminal state, or the learning loop silently dies (see call-out).
 6. **web never talks to mcp-server or Hermes admin directly** — the dashboard's only backend is ctrl-api; secrets (`MCP_APPROVAL_SECRET`, gateway token) stay server-side.
@@ -426,6 +477,13 @@ compatibility surface; new consumers use the hyphenated route.
     worker writes progress or terminal state. A same-worker active record is
     reused, trigger requests return 202 without waiting for agent work, and
     stalled state is observable and recoverable rather than silently stranded.
+12. **#685 target — Codex is a principal-scoped source, not another Alfred.**
+    ctrl-api owns canonical intake and the repairable ingest mirror. Scoped
+    credentials reach only ingestion and continuity. Ack/replay, monotonic
+    range, revision/delta, six-item/384-token, audit-redaction, and tombstone
+    behavior are the exact 685-r2 contract; no caller may widen principal
+    scope, create a shadow continuity store, or block a turn when context is
+    unavailable.
 
 ---
 
