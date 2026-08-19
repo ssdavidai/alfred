@@ -1375,6 +1375,15 @@ services:
   #
   # Requires Hermes >= 0.20: the plugin registers its `hermes-live` command
   # through the 0.20 plugin loader. On 0.19 the command does not exist.
+  # NOTE — both sidecars run inside hermes' network namespace. Recreating the
+  # hermes container (any `up -d hermes`, e.g. an image roll) leaves them
+  # attached to the OLD, now-dead namespace: the processes keep running but
+  # every port is unreachable. Docker does not restart them for this, so they
+  # sat there reporting "Up (healthy)" while answering nothing. The
+  # healthchecks below exist to make that state visible; the remedy is to
+  # recreate them after hermes:
+  #   docker compose --profile live-voice up -d --force-recreate \
+  #       hermes-dashboard hermes-live
   hermes-dashboard:
     profiles: ["live-voice"]
     logging: *default-logging
@@ -1394,6 +1403,16 @@ services:
     depends_on:
       hermes:
         condition: service_started
+    healthcheck:
+      # Probes its own port AND the gateway it exists to front. The second
+      # half is the one that matters: the dashboard serves / from its own
+      # process, so a purely local probe still passes while the shared
+      # network namespace is dead and nothing else is reachable.
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:9121/ && curl -fsS -o /dev/null http://127.0.0.1:18789/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     restart: unless-stopped
 
   hermes-live:
@@ -1431,6 +1450,12 @@ services:
     depends_on:
       hermes:
         condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:8788/ready"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     restart: unless-stopped
 
   tailscale:
