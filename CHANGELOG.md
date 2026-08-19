@@ -5,6 +5,165 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the `alfred-vault` package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-08-19]
+
+23 commits since `v2026.08.17`. Two halves: the runtime moved a major version
+and gained a voice, and the intelligence layer stopped reporting success it had
+not earned.
+
+One shape runs through nearly all of it, and it is the sequel to the last
+release. That one was about seams — two halves each correct, the join between
+them not. This one is about **the check that could not fail.** A write was
+refused and the sweep logged success. A test suite existed and CI never ran it.
+A retention job was declared in a config key nothing reads, and the one job that
+did run reclaimed free pages from a file that had none. A container exited zero
+with no output at all. Two sidecars reported `healthy` while answering nothing.
+Every one of them looked fine from the outside, because looking fine was the
+only thing they ever did.
+
+---
+
+### Hermes 0.20.4 is the standard, and live voice is real (#694, #696, #697, #698)
+
+The runtime moves 0.19.0 → 0.20.4 and is baked, not hand-installed. 0.20.x is
+git-only — no PyPI wheel — so the image now overlays the vendor installer pinned
+to a commit rather than a branch. Three things had to be handled, and each one
+had already bitten:
+
+- **The git tree ships no `web_dist`.** That was the original reason the wheel
+  was pinned. Left alone, the dashboard shells out to `npm` on first run. It is
+  pre-built at image time now.
+- **The upstream patches were silently bypassed.** The 0.20.x launcher runs its
+  own venv with `PYTHONPATH`/`PYTHONHOME` unset and carries its own copies of the
+  patched modules, so every patch applied to site-packages stopped reaching the
+  code that actually runs — including the fd-leak fix, whose absence wedges a
+  gateway with `Too many open files`. Nothing fails until the fd cliff. All three
+  patches are re-applied to the 0.20.x tree, tripwires intact. 0.20.4 has *four*
+  fd-open sites where there were three; the patch warns and covers all of them.
+- **The live-voice gateway is not part of Hermes.** It is a separate npm package,
+  so the binary lived only in the container filesystem and vanished on every
+  recreate. Now pinned and baked.
+
+Live voice runs as two sidecars behind a `live-voice` compose profile, **off by
+default**: the dashboard on loopback `:9121`, reachable with `ssh -L`, and the
+gateway private on `:8788`.
+
+Two compose faults were found getting there, both of the silent kind. A
+plain-string `command:` under `entrypoint: ["/bin/sh","-lc"]` is **shlex-split**
+by compose, so `sh -lc` receives only the first token as its script: one sidecar
+ran the bare `exec` builtin and exited zero **with no log output at all**. And
+both sidecars share the runtime's network namespace, so recreating it left them
+attached to a dead one — processes up, every port unreachable, and Docker
+reporting `Up (healthy)` throughout. They have healthchecks now, and the
+dashboard's deliberately probes the gateway it fronts rather than only its own
+port, because a purely local probe passes while the namespace is dead.
+
+The image grows 0.90 → 1.74 GB; `--skip-browser` keeps out ~620 MB of
+Playwright/Chromium that no fleet image has ever shipped. Rolled to all seven
+tenants, each verified individually.
+
+### Session storage is bounded — the fix that was closed NOT_PLANNED (#699, #700)
+
+Two tenants had reached **53–55 GB** of Hermes `state.db`, and a 16 GB one could
+not cold-start its gateway at all. The bloat is invisible while a container stays
+up and becomes an outage the moment it restarts.
+
+A retention pair had shipped for this in July. Neither job had ever run, and the
+one aimed at `state.db` could not have worked:
+
+- Hermes schedules from its cron **store**, not the `cron.jobs` config key the
+  jobs were declared in. Both were present in the config, `cron list` reported
+  none, and session files two months past a seven-day policy were still on disk.
+- `VACUUM` reclaims free pages; it does not delete rows. One tenant's freelist
+  was 97k pages against a 2.9M-page file — a working VACUUM would have returned
+  ~400 MB of 12 GB. The space was live rows.
+
+The issue titled as the root fix had been closed NOT_PLANNED. It is done now: a
+script registered in the store the scheduler actually reads, pruning session
+artefacts **and** deleting the rows that hold the space. Deleting from `messages`
+cleans both full-text indexes by itself — the schema already carries AFTER DELETE
+triggers — so there is no index drift and no rebuild.
+
+Deletes are batched under a wall-clock budget rather than issued as one
+statement: clearing a 35.6k-session backlog in a single transaction ran past ten
+minutes, because every removed message fires two FTS triggers. A nightly job
+holding a write lock that long would stall the gateway it exists to protect.
+Results across the three tenants that had backlogs — 42,313 → 6,711 sessions,
+20,207 → 1,553, 13,220 → 10,881 — with zero orphaned rows, `quick_check ok`, and
+all three gateways answering 200 **throughout** the deletes.
+
+It runs nightly on the workers and heavy profiles of all seven tenants. It will
+not touch the principal's own chat history: the supervisor registers it nowhere
+else, and the script refuses to run there as a second, independent check.
+
+One follow-up was self-inflicted and worth recording. The first idempotency guard
+asked the Hermes CLI whether the job already existed. That check runs before any
+gateway is up, where the CLI answers nothing useful — so the first boot after
+rollout registered a **second** copy, and every later boot would have added
+another. Replayed by hand once the gateways were up, the same guard skipped
+correctly, which is exactly why it looked right when tested. It reads the store
+file directly now.
+
+### The intelligence layer stopped claiming work it never did (#673–#690)
+
+The curator, distiller, janitor and surveyor were all failing quietly, in four
+different ways that presented identically as "ran fine, changed nothing".
+
+- **The vault refused writes and the sweeps logged success.** Pre-cutover record
+  types were being written against a promotion contract that no longer accepts
+  them; every write returned 422 and nothing propagated the failure. The types
+  are routed onto their canonical names (#673, #679), and the curator, distiller
+  and janitor skill packs were taught the canonical vocabulary rather than the
+  pre-cutover one (#674, #675, #676, #680, #682).
+- **The distiller wrote its manifest where it could not read it back** (#681).
+- **An existing Milvus collection comes back released**, so the surveyor searched
+  an unloaded index (#678).
+- **Structured values were sent as scalars**, so the writes that did land were
+  malformed (#683).
+- **The steward's cursor shared a PATCH with a state field**, and a rejection of
+  one silently discarded the other (#688).
+- **Two readers were still scanning `event/` markdown** that the cutover stopped
+  writing; they query the audit table now (#689, #690).
+
+And the reason a whole class of this survived: **`alfred-vault` had no CI.** Its
+tests existed and nothing ran them (#677). A rename in the surveyor's tests had
+been passing for the wrong reason for the same span (#681).
+
+### The fleet list is no longer in the tree (#670, #671)
+
+Tenant hostnames were in a tracked file in a public repository. The list is a
+repository secret now, resolved by index at deploy time and masked in logs, and
+the hostnames are gone from the tree.
+
+### The Codex channel contracts are frozen (#693)
+
+Channel, security, persistence and degradation contracts landed as phase0, so
+lanes can build against a fixed shape instead of guessing at one.
+
+### Stated plainly
+
+- **0.20.4 has hours of fleet soak, not days.** It was rolled and verified
+  tenant-by-tenant today: version, all three patches confirmed present in the
+  tree that actually executes, three gateways answering, FS-isolation assertion,
+  and a clean init. That is verification, not endurance. It has not yet survived
+  a full week of real traffic.
+- **The database files stay at their high-water mark.** Deleting rows bounds
+  growth and roughly half of each file is now reusable, so it will not expand
+  again — but reclaiming the physical space needs a VACUUM with the runtime
+  stopped, which is not a nightly job. No tenant is short of disk.
+- **One tenant carries ~96 GB of session artefacts on disk**, separate from the
+  database. The nightly prune erodes anything older than seven days; how much of
+  that pile is recent has not been measured.
+- **Rolling the runtime orphans the live-voice sidecars.** They share its network
+  namespace, so any image roll leaves them attached to a dead one. They now go
+  unhealthy instead of lying about it, but the remedy is still manual: recreate
+  them after the runtime.
+- **Client tenants were behind on `ctrl-api`** at the time of writing, missing
+  the vault type-alias fix above. The release path is what carries it.
+- Two client tenants still have no Codex access token, so their learning loop
+  remains down. Unchanged from the last release; it needs a human through the
+  OAuth flow.
+
 ## [2026-08-17]
 
 41 commits since `v2026.08.11`. Two halves: a new principal surface, and then
