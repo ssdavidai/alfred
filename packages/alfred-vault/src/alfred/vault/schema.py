@@ -14,6 +14,32 @@ CANONICAL_VAULT_TYPES: set[str] = {
     "chore", "instinct", "decision", "briefing", "daybook", "commitment",
 }
 
+# Vault paths ctrl-api accepts that are NOT record-type directories. Mirrors
+# CANONICAL_NON_RECORD_DIRS / CANONICAL_TOP_LEVEL_FILES in ctrl's
+# promotionContract.ts — the seam test asserts they stay identical.
+CANONICAL_NON_RECORD_DIRS: set[str] = {"_templates", "needs_attention"}
+CANONICAL_TOP_LEVEL_FILES: set[str] = {"SOUL.md", "RULES.md"}
+
+
+def is_writable_vault_path(rel_path: str) -> bool:
+    """True if ctrl-api will accept a write to this vault path.
+
+    Anything else is a permanent 422 — the pre-cutover directories the vault
+    still holds (event/, assumption/, constraint/, synthesis/, ...). Callers
+    that sweep the whole vault should consult this BEFORE attempting a write,
+    rather than discovering it one rejected HTTP round-trip at a time: on the
+    dev tenant the janitor was making 2,866 such calls per sweep against
+    event/ alone.
+    """
+    rel = rel_path.strip("/")
+    if not rel:
+        return False
+    head, _, tail = rel.partition("/")
+    if not tail:
+        return head in CANONICAL_TOP_LEVEL_FILES
+    return head in CANONICAL_VAULT_TYPES or head in CANONICAL_NON_RECORD_DIRS
+
+
 # Pre-cutover names and the canonical types that replaced them.
 #
 # This daemon's vocabulary predates the four-store cutover. `project` is what a

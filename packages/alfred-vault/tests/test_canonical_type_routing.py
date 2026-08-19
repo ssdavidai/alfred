@@ -160,3 +160,59 @@ def test_edit_http_rejection_is_translated_to_vaulterror(monkeypatch, tmp_path):
     with pytest.raises(VaultError) as exc:
         vault_edit(tmp_path, "assumption/x.md", set_fields={"janitor_note": "n"})
     assert "422" in str(exc.value)
+
+
+# --- 4. don't attempt writes ctrl will refuse -----------------------------
+
+def test_writable_path_predicate_matches_ctrl_exemptions():
+    """Seam test, same shape as the type one: ctrl exempts _templates/,
+    needs_attention/, SOUL.md and RULES.md from the promotion contract. If this
+    daemon's idea of writable drifts, the janitor either skips records it could
+    have fixed or hammers ones it never can."""
+    from alfred.vault.schema import (
+        CANONICAL_NON_RECORD_DIRS,
+        CANONICAL_TOP_LEVEL_FILES,
+    )
+    if not CTRL_CONTRACT.exists():
+        pytest.skip("ctrl package not present")
+    src = CTRL_CONTRACT.read_text()
+    dirs = set(re.findall(r'"([a-z_]+)"', re.search(
+        r"CANONICAL_NON_RECORD_DIRS = new Set<string>\(\[(.*?)\]", src, re.S).group(1)))
+    files = set(re.findall(r'"([A-Za-z.]+\.md)"', re.search(
+        r"CANONICAL_TOP_LEVEL_FILES = new Set<string>\(\[(.*?)\]", src, re.S).group(1)))
+    assert dirs == CANONICAL_NON_RECORD_DIRS, (dirs, CANONICAL_NON_RECORD_DIRS)
+    assert files == CANONICAL_TOP_LEVEL_FILES, (files, CANONICAL_TOP_LEVEL_FILES)
+
+
+def test_pre_cutover_directories_are_not_writable():
+    """These are what the janitor was hammering — 2,866 rejected writes per
+    sweep against event/ alone."""
+    from alfred.vault.schema import is_writable_vault_path
+    for demoted in ("event", "assumption", "constraint", "synthesis",
+                    "contradiction", "project", "session", "account"):
+        assert not is_writable_vault_path(f"{demoted}/x.md"), demoted
+
+
+def test_canonical_and_exempt_paths_stay_writable():
+    from alfred.vault.schema import is_writable_vault_path
+    for ok in ("matter/x.md", "task/x.md", "note/x.md", "person/x.md",
+               "needs_attention/card.md", "_templates/t.md", "SOUL.md", "RULES.md"):
+        assert is_writable_vault_path(ok), ok
+
+
+def test_janitor_skips_unwritable_records_without_attempting_a_write(monkeypatch):
+    """The behaviour, not just the predicate: autofix must not call through to
+    vault_edit for a record ctrl will refuse."""
+    import alfred.janitor.autofix as af
+
+    def _must_not_run(*a, **k):  # pragma: no cover
+        raise AssertionError("attempted a write to an unwritable record")
+
+    monkeypatch.setattr(af, "_apply_fix", _must_not_run)
+
+    class _Issue:
+        file = "event/some-old-record.md"
+        code = type("C", (), {"value": "FM002"})()
+        message = "stale"
+
+    af.autofix_issues([_Issue()], Path("/vault"), "session/x.md")

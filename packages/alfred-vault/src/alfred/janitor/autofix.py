@@ -11,6 +11,7 @@ from pathlib import Path
 
 from alfred.vault.mutation_log import log_mutation
 from alfred.vault.ops import VaultError, vault_edit, vault_read
+from alfred.vault.schema import is_writable_vault_path
 from alfred.vault.schema import (
     KNOWN_TYPES,
     LIST_FIELDS,
@@ -182,6 +183,26 @@ def autofix_issues(
     by_file: dict[str, list[Issue]] = {}
     for issue in issues:
         by_file.setdefault(issue.file, []).append(issue)
+
+    # Records ctrl-api will never accept a write to — the vault's pre-cutover
+    # directories (event/, assumption/, constraint/, synthesis/, ...). Every
+    # fix and every flag on one of these is a guaranteed 422, so attempting
+    # them costs a round-trip each and buys nothing. On the dev tenant that was
+    # 2,866 rejected calls per sweep against event/ alone, crowding out the
+    # records the janitor CAN act on.
+    #
+    # Counted and reported once, not skipped silently: a sweep that quietly
+    # ignores a thousand records looks identical to a clean one.
+    unwritable = [p for p in by_file if not is_writable_vault_path(p)]
+    if unwritable:
+        by_file = {p: v for p, v in by_file.items() if is_writable_vault_path(p)}
+        heads = sorted({p.split("/", 1)[0] for p in unwritable})
+        log.info(
+            "autofix.skipped_unwritable",
+            records=len(unwritable),
+            directories=heads,
+            reason="not a canonical vault path; ctrl-api rejects any write",
+        )
 
     for rel_path, file_issues in by_file.items():
         file_fixed = False
