@@ -534,6 +534,34 @@ OpenClaw is replaced by **Hermes**. In ctrl-api code:
 - `hermes-lcm` plugin is baked at `/opt/hermes-lcm` and installed into
   the `main` profile's `plugins/` dir (verified via `verify_lcm()` background probe)
 
+### 9.0 Install shape — read this before any version bump
+
+The runtime is **0.20.4**, installed from a **pinned git commit, not PyPI** —
+0.20.x ships no wheel. The image keeps the pip install as a base layer and
+overlays the vendor installer into `/usr/local/lib/hermes-agent`.
+
+**That tree has its own venv, and this is a trap.** `/usr/local/bin/hermes`
+execs `/usr/local/lib/hermes-agent/venv/bin/python` with `PYTHONPATH` and
+`PYTHONHOME` unset, and the tree carries its own copies of `utils.py`,
+`hermes_constants.py` and `openai`. A patch applied to
+`/usr/local/lib/python3.12/site-packages` therefore **never reaches the code
+that runs**, and nothing says so. That is how the GH #222 fd-leak fix quietly
+stopped applying: `hermes --version` was right, the patch was present in
+site-packages, and nothing failed until the fd cliff. The three `patch_*`
+scripts now take an optional target path and are applied to BOTH trees, with
+their tripwires intact. **Re-check this on every bump** — it is the most
+expensive thing in this file to rediscover.
+
+Two further consequences of the git install:
+
+- It ships **no `web_dist`** (the reason the wheel was originally pinned), so
+  the dashboard bundle is built at image time — `cd /usr/local/lib/hermes-agent/web
+  && npm run build`, exactly as `hermes dashboard --skip-build` documents.
+- **`hermes-live` is a separate npm package** (`hermes-live-voice`), not part of
+  Hermes. Its *plugin* half lives in the hermes volume and survives; the
+  *binary* is an image artifact and disappears on any container recreate unless
+  baked. Same class of loss as an unbaked runtime.
+
 ### 9.1 API contract
 
 Hermes speaks the **OpenAI Responses API natively** — no shim:
@@ -570,12 +598,12 @@ HTTP proxy to ctrl-api.
 
 ### 9.3 NOT used
 
-- ~~Hermes web dashboard unusable~~ **stale since the 0.17 wheel**: the
-  dashboard now ships `web_dist/` and runs as a supervised process on
-  `:9119` (main profile; internal compose network only — see the
-  `# hermes-relay … + main dashboard (:9119)` block in `supervisor.sh`).
-  The 2026-05-24 "Frontend not built" revert (`ce6c177`) predates this.
-  CLI (`hermes config` / `hermes profile` / `hermes auth`) still works.
+- ~~Hermes web dashboard unusable~~ **twice stale.** It ships a bundle and is
+  now served on `:9121` by the `hermes-dashboard` sidecar under the
+  `live-voice` compose profile (off by default; loopback-only, reach it with
+  `ssh -L 9121:127.0.0.1:9121`). Note the git install has no `web_dist` of its
+  own — see §9.0. The 2026-05-24 "Frontend not built" revert (`ce6c177`)
+  predates all of this. CLI (`hermes config` / `profile` / `auth`) still works.
 
 ---
 
@@ -1006,12 +1034,75 @@ pointing at the sidecar. Neither is wired by default — flag a follow-up
 issue if the principal needs Alfred to reach their tailnet from inside
 containers.
 
+### 15.12 compose splits a string `command:` — silently
+
+With `entrypoint: ["/bin/sh", "-lc"]`, a **plain-string `command:`** is
+shlex-split by compose, so `sh -lc` receives only the FIRST token as its script
+and the rest as positional parameters. `command: exec hermes dashboard …`
+becomes `sh -lc exec` — the bare builtin — and the container **exits 0 with no
+log output at all**. The folded form (`command: >`) has the identical problem;
+it also yields a string. Use a single-element list:
+
+```yaml
+command: ["… ; exec …"]
+```
+
+### 15.13 `network_mode: service:X` orphans on recreate
+
+Anything sharing another container's network namespace (the live-voice
+sidecars share hermes') stays attached to the **old, dead namespace** when that
+container is recreated — which is what any image roll does. The processes keep
+running, every port is unreachable, and Docker does not restart them for it. So
+they sat reporting `Up (healthy)` while answering nothing.
+
+Two rules: give such a service a healthcheck that probes **the dependency, not
+just its own port** (a local probe passes while the namespace is dead, because
+it is talking to itself), and recreate the dependents after the target:
+
+```bash
+docker compose --profile live-voice up -d --force-recreate hermes-dashboard hermes-live
+```
+
+### 15.14 supervisor boot checks must not use the `hermes` CLI
+
+`supervisor.sh` runs before any gateway is up, and the CLI yields nothing
+usable at that point. A guard written as `hermes -p X cron list | grep …`
+therefore *passes* at boot and fails only later — which is exactly backwards.
+It registered a duplicate cron on the first boot after rollout, and every boot
+after would have stacked another. Read the state **file** instead; it is plain
+JSON and readable whether or not a gateway is running. Replayed by hand once
+the gateways are up, the CLI guard looks perfect — which is why this one is
+easy to test wrong.
+
+### 15.15 Hermes cron reads its store, not `cron.jobs`
+
+Jobs declared under `cron.jobs` in a profile's `config.yaml` are **not what the
+scheduler runs**. It schedules from `<profile>/cron/jobs.json`. A retention pair
+declared the config way shipped in July and never fired once: both jobs present
+in the config, `cron list` empty, and session files two months past a seven-day
+policy still on disk. Register real jobs with
+`hermes -p <profile> cron create --no-agent --script <name>.py --name <name> '<cron>'`.
+
+### 15.16 A large workers `state.db` cannot cold-start
+
+Measured across the fleet: ~0 GB starts in 10s, 6.7 GB in 80s, 11 GB in 100s,
+and **16 GB and 53–55 GB never start at all**. Pause/resume hides this because
+it preserves memory — you only meet it on a genuine cold boot, which is to say
+during provisioning, upgrade, restore or crash recovery, i.e. when you are
+already having a bad day. `state_retention.py` (nightly, workers + heavy) is
+what keeps it bounded; deleting rows is the mechanism, since `VACUUM` reclaims
+free pages and cannot shrink what was never deleted. Wait **at least 180s**
+before concluding a workers gateway is dead — 11 GB legitimately takes 100.
+
 ---
 
 ## 16. Recent incident history (the why behind quirky code)
 
 | Date | Incident | Fix commit(s) |
 |------|----------|---------------|
+| 2026-08-19 | **Hermes 0.20.4 ran unpatched for hours without a symptom.** 0.20.x installs to its own tree with its own venv, so every patch applied to site-packages — including the GH #222 fd-leak fix — stopped reaching the running code. Nothing fails until the fd cliff. | `#694` (patch both trees, tripwires intact); see §9.0 |
+| 2026-08-19 | **Two sidecars reported `Up (healthy)` while answering nothing** — a string `command:` was shlex-split into `sh -lc exec` (exit 0, no logs), and after a hermes recreate both were attached to a dead network namespace. | `#696` (list-form command), `#698` (dependency-probing healthchecks); §15.12, §15.13 |
+| 2026-08-19 | **Session storage was never actually bounded.** #266's retention jobs were declared in a config key the scheduler does not read, and the one that did run was a `VACUUM`, which cannot shrink what is never deleted. Two tenants reached 53–55 GB; a 16 GB one could not cold-start its gateway. | `#699` (store-registered job, row TTL, batched), `#700` (guard on the file, not the CLI); §15.15, §15.16 |
 | 2026-08-06 | **Alfred emailed a vendor to cancel a subscription, unattended** — an `Asking`-tier instinct (1 stored observation) cleared the numeric bar and dispatched an executor that mailed team@elevenlabs.io from Sir's Gmail, 4 min after he'd been setting the service up. The ladder was decorative: no gate read `tier`. | #445 → `#446` (tier ceiling on the router), `#448`/`#449` (/instincts renders the real tier), `#453` (noise gate too), `#452`/`#458` (Acting needs Sir's approval) |
 | 2026-08-06 | **Clicking Done taught Alfred to silence senders.** A 23-min backlog clear-out on 2026-07-15 (28 × `intent: done`) became a suppression rule whose `sender_domains` were harvested from that batch — including Sir's primary client. It sat in the pre-extraction noise gate, which consulted no tier and wrote no audit row. | `#454` (done ≠ noise; burst-weighting), `#453` (gate obeys the ladder + audits), instinct data cleaned by hand |
 | 2026-08-06 | Reflection had never actually run on the `heavy` profile despite §9 saying so — `clerk.py` hard-coded the workers gateway (luna) | `#451` + `#450` (heavy = gpt-5.6-sol) |
