@@ -1005,6 +1005,37 @@ fi
 # =============================================================================
 # Supervise — restart any worker that exits while we are not shutting down.
 # =============================================================================
+# =============================================================================
+# Messaging-adapter preflight — fail LOUD, not silent.
+# =============================================================================
+# A configured platform whose Python dep is missing does not crash anything: the
+# gateway starts, healthchecks return 200, and the adapter is just absent. The
+# only trace is a WARNING at boot that nobody reads. In 2026-08 that pattern hid
+# a mute Slack assistant on a live tenant for five days, because the dep was
+# installed into site-packages while the runtime execs the vendor venv.
+#
+# So: if a token is configured but the module will not import in the interpreter
+# that actually runs, say so at ERROR with the fix. Never fatal — a broken chat
+# platform must not take the runtime down.
+MAIN_ENV="${PROFILES_DIR}/main/.env"
+if [[ -f "${MAIN_ENV}" ]]; then
+    VENV_PY="/usr/local/lib/hermes-agent/venv/bin/python"
+    [[ -x "${VENV_PY}" ]] || VENV_PY="$(command -v python3 || true)"
+    for pair in "SLACK_BOT_TOKEN:slack_bolt" "TELEGRAM_BOT_TOKEN:telegram" "DISCORD_BOT_TOKEN:discord"; do
+        tok_var="${pair%%:*}"; mod="${pair##*:}"
+        if grep -qE "^${tok_var}=.+" "${MAIN_ENV}" 2>/dev/null; then
+            if [[ -n "${VENV_PY}" ]] && ! "${VENV_PY}" -c "import ${mod}" >/dev/null 2>&1; then
+                log "ERROR: ${tok_var} is configured but '${mod}' will not import in ${VENV_PY}."
+                log "       That platform will be SILENTLY unavailable (gateway still healthy)."
+                log "       Fix: install ${mod} into the vendor venv's site-packages, not"
+                log "       /usr/local/lib/python3.12/site-packages — see packages/hermes/Dockerfile."
+            else
+                log "messaging preflight ok: ${tok_var} configured, '${mod}' importable"
+            fi
+        fi
+    done
+fi
+
 log "all gateway processes running — entering supervise loop"
 while true; do
     # Block until SOME child exits. `wait -n` returns that child's status.

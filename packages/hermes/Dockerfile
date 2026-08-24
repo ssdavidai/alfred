@@ -361,6 +361,39 @@ RUN HT=/usr/local/lib/hermes-agent \
  && "$HT/venv/bin/python" -m py_compile "$HT/hermes_constants.py" "$HT/utils.py" "$RESP" \
  && rm -f /tmp/p_auth.py /tmp/p_chan.py /tmp/p_openai.py
 
+# The messaging adapters must live in the VENDOR VENV, not site-packages (see 2).
+# `hermes-agent[...,messaging,...]` above installs slack_bolt / slack_sdk /
+# python-telegram-bot / discord.py into /usr/local/lib/python3.12/site-packages.
+# But /usr/local/bin/hermes unsets PYTHONPATH/PYTHONHOME and execs the 0.20.x
+# venv (python3.11), which cannot see them. The adapter then fails to construct
+# and the platform goes silently unavailable — the gateway still starts, every
+# healthcheck still returns 200, and the only trace is three lines at boot:
+#   WARNING gateway.platform_registry: Platform 'Slack' requirements not met
+#   ERROR   gateway.run: Platform 'slack' is registered but adapter creation failed
+#   WARNING gateway.run: No adapter available for slack
+#
+# 2026-08-19 -> 2026-08-24: a tenant's Slack assistant was mute for five days on
+# exactly this. Its tokens were valid the whole time. Another tenant looked fine
+# only because it had been hand-patched nine seconds after its container came up
+# during the same rollout — an undocumented fix living in a container's writable
+# layer, one `up -d` from vanishing.
+#
+# Versions are pinned to whatever the `messaging` extra resolved above so the two
+# trees agree. The venv has no pip, no ensurepip, and uv is not on PATH, so these
+# go in via the 3.12 pip with --target; all four are pure-Python.
+#
+# When bumping HERMES_GIT_VERSION: re-check this. Same class as the patch block
+# above — anything site-packages needs, the vendor venv needs too.
+RUN HT=/usr/local/lib/hermes-agent \
+ && SP="$(ls -d "$HT"/venv/lib/python*/site-packages)" \
+ && python3 -m pip install --no-cache-dir --target "$SP" \
+        "slack_bolt==1.29.0" \
+        "slack_sdk==3.43.0" \
+        "python-telegram-bot==22.6" \
+        "discord.py==2.7.1" \
+ && "$HT/venv/bin/python" -c "import slack_bolt, slack_sdk, telegram, discord" \
+ && echo "messaging adapters importable in vendor venv"
+
 # The live-voice gateway binary (see 3). Off unless the live-voice compose
 # profile is enabled; baking it costs ~44 MB and removes the recreate cliff.
 RUN npm_config_nodedir=/usr npm_config_unsafe_perm=true \
