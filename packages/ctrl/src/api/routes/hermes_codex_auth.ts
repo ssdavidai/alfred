@@ -28,6 +28,7 @@
 
 import { spawn } from "node:child_process";
 import { addRoute, type ApiRequest } from "../server.js";
+import { dockerExec } from "../helpers.js";
 
 const COMPOSE_FILE =
   process.env.COMPOSE_FILE ??
@@ -135,7 +136,78 @@ async function handleStatus({ res }: ApiRequest): Promise<void> {
   }));
 }
 
+/* ---------------------------------------------------------------------------
+ * GET /api/v1/hermes/codex-auth/profiles
+ *
+ * Per-profile Codex credential state, so the dashboard can show whether each
+ * supervised profile is actually authenticated rather than inferring it from
+ * whether Hermes happens to be up.
+ *
+ * That distinction is the whole reason this exists. The auth banner gates on
+ * Hermes health, and a gateway answering 200 says nothing about its Codex
+ * credential: on the fleet we found tenants whose three gateways were healthy
+ * while `tokens` was an empty object, and one where the openai-codex provider
+ * had vanished from auth.json entirely. Both are invisible to a health check
+ * and fatal to every clerk call.
+ *
+ * The four states are the cases observed in the wild, not invented:
+ *   ok           — provider present, access_token present
+ *   error        — token present but the last refresh failed (e.g. the refresh
+ *                  token was consumed by another client); still worth flagging
+ *   no_tokens    — provider present, `tokens` empty  → re-auth required
+ *   no_provider  — openai-codex absent from auth.json → re-auth required
+ *
+ * Read-only: one docker exec, one python, no writes. A profile whose auth.json
+ * is missing or unparseable reports no_provider rather than failing the call —
+ * a partial answer is more useful here than none.
+ * ------------------------------------------------------------------------- */
+const AUTH_PROFILES = ["main", "workers", "heavy"] as const;
+
+const READ_AUTH_PY = `
+import json, sys
+out = []
+for p in ${JSON.stringify(AUTH_PROFILES)}:
+    rec = {"profile": p, "state": "no_provider", "last_refresh": None, "error": None}
+    try:
+        d = json.load(open("/hermes-state/profiles/%s/auth.json" % p))
+        c = (d.get("providers") or {}).get("openai-codex")
+        if c is not None:
+            tok = c.get("tokens") or {}
+            rec["last_refresh"] = c.get("last_refresh")
+            err = c.get("last_auth_error") or {}
+            rec["error"] = err.get("code")
+            if not tok.get("access_token"):
+                rec["state"] = "no_tokens"
+            elif rec["error"]:
+                rec["state"] = "error"
+            else:
+                rec["state"] = "ok"
+    except Exception:
+        pass
+    out.append(rec)
+json.dump({"profiles": out}, sys.stdout)
+`;
+
+export async function handleProfiles({ res }: ApiRequest): Promise<void> {
+  let profiles: unknown[] = [];
+  try {
+    const raw = await dockerExec(HERMES_SVC, ["python3", "-c", READ_AUTH_PY]);
+    profiles = JSON.parse(raw.trim()).profiles ?? [];
+  } catch (err: any) {
+    res.writeHead(502, { "content-type": "application/json" });
+    res.end(JSON.stringify({
+      error: { code: "HERMES_UNREACHABLE", message: err?.message ?? String(err) },
+    }));
+    return;
+  }
+  const all = profiles.length > 0 &&
+    profiles.every((p: any) => p?.state === "ok");
+  res.writeHead(200, { "content-type": "application/json" });
+  res.end(JSON.stringify({ profiles, all_authenticated: all }));
+}
+
 export function registerCodexAuthRoutes(): void {
   addRoute("POST", "/api/v1/hermes/codex-auth/start", handleStart);
   addRoute("GET",  "/api/v1/hermes/codex-auth/status", handleStatus);
+  addRoute("GET",  "/api/v1/hermes/codex-auth/profiles", handleProfiles);
 }
