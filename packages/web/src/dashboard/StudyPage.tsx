@@ -51,6 +51,7 @@ import { config } from "wasp/client";
 import { auditKindLabel } from "./auditLedgerCore";
 import { apiBaseUrl } from "./apiKeysCore";
 import { ClaudeSetupSections } from "./ClaudePage";
+import CodexAuthPanel from "./CodexAuthPanel";
 import {
   deriveSignalActionModeState,
   describeSource,
@@ -452,6 +453,12 @@ function SettingsSection() {
           </div>
         </div>
       )}
+
+      {/* Codex credential state per supervised profile, plus the device-code
+          button. Lives here rather than only in the health banner: the banner
+          gates on Hermes health, which stays green while a credential is
+          empty or expired. */}
+      <CodexAuthPanel />
 
       {/* F84 — Claude Setup (MCP servers, approval secret, skills, vault
           login) folded in from the retired /claude page. */}
