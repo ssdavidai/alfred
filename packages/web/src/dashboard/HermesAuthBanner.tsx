@@ -19,10 +19,12 @@ import {
   useQuery,
   getOnboardingProgress,
   getCodexAuthStatus,
+  getCodexAuthProfiles,
   startCodexAuth,
   restartHermes,
 } from "wasp/client/operations";
 import { deriveHermesHealthFromProgress } from "./hermesHealthCore";
+import { anyProfileDegraded } from "./codexProfilesCore";
 import {
   deriveCodexViewState,
   isTerminal,
@@ -63,6 +65,11 @@ export default function HermesAuthBanner() {
   const { data: sData } = useQuery(getCodexAuthStatus, undefined, {
     refetchInterval: flowActive ? 2_500 : 60_000,
   });
+  // Credential state is a separate question from Hermes health — see below.
+  const { data: pData } = useQuery(getCodexAuthProfiles, undefined, {
+    refetchInterval: 60_000,
+    retry: false,
+  });
 
   const vs = deriveCodexViewState(sData as CodexStatusPayload, restarting);
   // Before the first poll response arrives after start, show waiting_for_code.
@@ -82,8 +89,19 @@ export default function HermesAuthBanner() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sData]);
 
+  // Two independent reasons to surface: Hermes is degraded, OR a supervised
+  // profile has no usable Codex credential.
+  //
+  // The second was missing, and it is the one that actually happens. A gateway
+  // answering 200 says nothing about its credential: on the fleet we found
+  // tenants whose three gateways were healthy while every profile's token set
+  // was empty, and one where the openai-codex provider had gone from auth.json
+  // altogether. Gated on health alone, this banner stayed hidden for exactly
+  // the tenants it exists to rescue. The health path also self-clears after an
+  // hour, so a box broken for days reads as fine.
   const health = deriveHermesHealthFromProgress(progress);
-  if (health.healthy || dismissed) return null;
+  const credentialsDegraded = anyProfileDegraded(pData);
+  if ((health.healthy && !credentialsDegraded) || dismissed) return null;
 
   async function onConnect() {
     setBusy(true); setCErr(null); sentRestart.current = false;

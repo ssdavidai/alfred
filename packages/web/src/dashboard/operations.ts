@@ -718,6 +718,14 @@ export const getCodexAuthStatus = async (_args: unknown, context: any) => {
   });
 };
 
+export const getCodexAuthProfiles = async (_args: unknown, context: any) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    path: "/api/v1/hermes/codex-auth/profiles",
+    timeoutMs: 10_000,
+  });
+};
+
 export const startCodexAuth = async (_args: unknown, context: any) => {
   const instance = await getUserInstance(context);
   return proxyToTenant(instance, {

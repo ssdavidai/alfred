@@ -1041,6 +1041,11 @@ query getCodexAuthStatus {
   entities: []
 }
 
+query getCodexAuthProfiles {
+  fn: import { getCodexAuthProfiles } from "@src/dashboard/operations",
+  entities: []
+}
+
 action startCodexAuth {
   fn: import { startCodexAuth } from "@src/dashboard/operations",
   entities: []
