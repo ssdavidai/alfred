@@ -165,23 +165,59 @@ const AUTH_PROFILES = ["main", "workers", "heavy"] as const;
 
 const READ_AUTH_PY = `
 import json, sys
+
+# A credential can live in either of two places, and which one depends on how
+# it was obtained:
+#   providers."openai-codex".tokens   — the legacy store, still holding older logins
+#   credential_pool."openai-codex"[]  — where Hermes 0.20 puts a device-code login
+# Reading only the first reports a SUCCESSFUL re-auth as no_tokens, because a
+# fresh ceremony writes to the pool and leaves the legacy store empty.
+#
+# last_auth_error is also not evidence on its own: it persists after a
+# successful re-login. It only counts when it happened AFTER the newest
+# credential we hold — otherwise it describes a failure the login already fixed.
+def newest(*vals):
+    return max([v for v in vals if v], default=None)
+
 out = []
 for p in ${JSON.stringify(AUTH_PROFILES)}:
-    rec = {"profile": p, "state": "no_provider", "last_refresh": None, "error": None}
+    rec = {"profile": p, "state": "no_provider", "last_refresh": None,
+           "error": None, "source": None}
     try:
         d = json.load(open("/hermes-state/profiles/%s/auth.json" % p))
-        c = (d.get("providers") or {}).get("openai-codex")
-        if c is not None:
-            tok = c.get("tokens") or {}
-            rec["last_refresh"] = c.get("last_refresh")
-            err = c.get("last_auth_error") or {}
+        prov = (d.get("providers") or {}).get("openai-codex")
+        pool = [c for c in ((d.get("credential_pool") or {}).get("openai-codex") or [])
+                if c.get("access_token")]
+        legacy = bool(((prov or {}).get("tokens") or {}).get("access_token"))
+
+        if prov is None and not pool:
+            out.append(rec); continue
+
+        pool_refresh = newest(*[c.get("last_refresh") for c in pool])
+        legacy_refresh = (prov or {}).get("last_refresh") if legacy else None
+        rec["last_refresh"] = newest(pool_refresh, legacy_refresh)
+        rec["source"] = "pool" if pool else ("legacy" if legacy else None)
+
+        if not pool and not legacy:
+            rec["state"] = "no_tokens"
+            err = (prov or {}).get("last_auth_error") or {}
             rec["error"] = err.get("code")
-            if not tok.get("access_token"):
-                rec["state"] = "no_tokens"
-            elif rec["error"]:
-                rec["state"] = "error"
-            else:
-                rec["state"] = "ok"
+            out.append(rec); continue
+
+        # A failure only counts if it is newer than the credential we hold.
+        err = (prov or {}).get("last_auth_error") or {}
+        live_err = None
+        if err.get("code"):
+            at = err.get("at")
+            if not rec["last_refresh"] or (at and at > rec["last_refresh"]):
+                live_err = err.get("code")
+        # A pool entry records its own failures independently.
+        for c in pool:
+            if c.get("last_error_code"):
+                live_err = live_err or c.get("last_error_code")
+
+        rec["error"] = live_err
+        rec["state"] = "error" if live_err else "ok"
     except Exception:
         pass
     out.append(rec)
