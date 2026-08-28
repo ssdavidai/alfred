@@ -13,6 +13,26 @@
  *   - GET    /api/v1/webhooks/inbound          — list registered webhooks
  *   - DELETE /api/v1/webhooks/inbound/:id      — delete (id = bare token or "webhook:<token>")
  *   - POST   /api/v1/webhooks/in/:token        — PUBLIC ingest; emits stream_event
+ *                                                 (or an alfred_journal entry when
+ *                                                  the webhook's destination is
+ *                                                  "journal" — see below)
+ *
+ * DESTINATIONS. A webhook routes to one of two places:
+ *   "stream"  (default) — emits a stream_event, the normal curator path.
+ *   "journal" — appends to alfred_journal instead. This exists so a surface
+ *               that talks to Alfred OUTSIDE a Hermes channel (Claude Cowork
+ *               via MCP, a desktop client, a script) can give Alfred
+ *               continuity of that conversation. The one-alfred plugin's
+ *               pre_gateway_dispatch hook already re-injects journal context
+ *               on every inbound message, so a journalled Cowork exchange is
+ *               remembered on the principal's next Slack/Telegram message with
+ *               no plugin change. See docs/design/one-alfred.md.
+ *
+ *               Why a webhook token rather than exposing /api/v1/alfred-journal:
+ *               ctrl-api is deliberately NOT public (Caddy proxies only a small
+ *               allowlist), and the alternative — handing a laptop the master
+ *               AAS_API_KEY — grants full ctrl-api access. A webhook token is
+ *               scoped, per-device and revocable.
  *
  * The ingest path is registered in server.ts's `isPublic` whitelist; the
  * other three CRUD routes go through the normal AAS_API_KEY auth path.
@@ -23,6 +43,8 @@ import crypto from "node:crypto";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError, NotFoundError } from "../errors.js";
 import { getIngestDb } from "../../db/ingest.js";
+import { getStateDb } from "../../db/state.js";
+import { appendJournal } from "../../db/alfredJournal.js";
 import { ulid } from "../../db/ulid.js";
 
 const VAULT_ROOT = process.env.VAULT_PATH ?? "/vault";
@@ -41,6 +63,8 @@ export function composeInboundWebhookUrl(token: string): string {
   return base ? `${base.replace(/\/$/, "")}${rel}` : rel;
 }
 
+type WebhookDestination = "stream" | "journal";
+
 interface WebhookFrontmatter {
   type: "webhook_endpoint";
   token: string;
@@ -48,6 +72,12 @@ interface WebhookFrontmatter {
   created_at: string;
   event_count: number;
   last_event_at: string | null;
+  // Omitted on every webhook created before this shipped — readWebhookRecord
+  // defaults it to "stream", so existing tokens keep their behaviour exactly.
+  destination?: WebhookDestination;
+  // Journal destination only: the channel name journal rows are written under
+  // (e.g. "cowork"). Defaults to the label, slugified.
+  journal_channel?: string;
 }
 
 function ensureDirs(): void {
@@ -126,6 +156,8 @@ function readWebhookRecord(token: string): WebhookFrontmatter | null {
     label: String(fm.label ?? "Custom Webhook"),
     created_at: String(fm.created_at ?? ""),
     event_count: typeof fm.event_count === "number" ? fm.event_count : 0,
+    destination: fm.destination === "journal" ? "journal" : "stream",
+    journal_channel: typeof fm.journal_channel === "string" ? fm.journal_channel : undefined,
     last_event_at: fm.last_event_at == null
       ? null
       : String(fm.last_event_at),
@@ -140,8 +172,22 @@ function writeWebhookRecord(fm: WebhookFrontmatter): void {
     created_at: fm.created_at,
     event_count: fm.event_count,
     last_event_at: fm.last_event_at,
+    ...(fm.destination ? { destination: fm.destination } : {}),
+    ...(fm.journal_channel ? { journal_channel: fm.journal_channel } : {}),
   });
   fs.writeFileSync(recordPath(fm.token), body, "utf-8");
+}
+
+// Best-effort counter bump, shared by both destinations. Never throws: a
+// bookkeeping failure must not fail an accepted delivery.
+function bumpWebhookCounters(fm: WebhookFrontmatter, iso: string): void {
+  try {
+    writeWebhookRecord({
+      ...fm,
+      event_count: (fm.event_count || 0) + 1,
+      last_event_at: iso,
+    });
+  } catch { /* ignore */ }
 }
 
 // Sanitise a token-ish identifier (filename-safe component) — used so that
@@ -160,6 +206,19 @@ export function registerInboundWebhookRoutes(): void {
       throw new ValidationError("label (non-empty string) is required");
     }
     const label = b.label.trim().slice(0, 120);
+
+    const destRaw = typeof b.destination === "string" ? b.destination.trim() : "stream";
+    if (destRaw !== "stream" && destRaw !== "journal") {
+      throw new ValidationError(`destination must be "stream" or "journal" (got ${JSON.stringify(destRaw)})`);
+    }
+    const destination = destRaw as WebhookDestination;
+    const journalChannel =
+      destination === "journal"
+        ? (typeof b.journal_channel === "string" && b.journal_channel.trim()
+            ? b.journal_channel.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "-").slice(0, 40)
+            : safeIdent(label).toLowerCase())
+        : undefined;
+
     ensureDirs();
     const token = crypto.randomBytes(16).toString("hex");
     const createdAt = new Date().toISOString();
@@ -170,11 +229,15 @@ export function registerInboundWebhookRoutes(): void {
       created_at: createdAt,
       event_count: 0,
       last_event_at: null,
+      destination,
+      journal_channel: journalChannel,
     });
     sendJson(res, 201, {
       id: `webhook:${token}`,
       token,
       label,
+      destination,
+      journal_channel: journalChannel ?? null,
       url: composeInboundWebhookUrl(token),
       created_at: createdAt,
     });
@@ -248,6 +311,72 @@ export function registerInboundWebhookRoutes(): void {
     const iso = now.toISOString();
     const ts = iso.replace(/[:.]/g, "-");
     const shortUuid = crypto.randomBytes(4).toString("hex");
+
+    // ── destination: journal ─────────────────────────────────────────────
+    // Continuity path (Cowork/desktop/scripts). Writes straight to
+    // alfred_journal; nothing enters the signal pipeline, because a
+    // conversation the principal already had is not a new inbound signal to
+    // triage — it is history Alfred should simply remember.
+    if ((fm.destination ?? "stream") === "journal") {
+      const jb = (body ?? {}) as Record<string, unknown>;
+
+      const direction = String(jb.direction ?? "").trim();
+      if (direction !== "inbound" && direction !== "outbound") {
+        throw new ValidationError(
+          `direction must be "inbound" or "outbound" (got ${JSON.stringify(jb.direction)})`,
+        );
+      }
+      const message = typeof jb.message === "string" ? jb.message : "";
+      if (!message.trim()) throw new ValidationError("message (non-empty string) is required");
+
+      // chat_id keys continuity. A caller that omits it collapses every
+      // exchange into one thread, which is worse than useless, so require it.
+      const chatId = typeof jb.chat_id === "string" && jb.chat_id.trim()
+        ? jb.chat_id.trim().slice(0, 200)
+        : "";
+      if (!chatId) throw new ValidationError("chat_id (non-empty string) is required");
+
+      const channel = fm.journal_channel || safeIdent(fm.label).toLowerCase();
+
+      let entry;
+      try {
+        entry = appendJournal(getStateDb(), {
+          channel,
+          chat_id: chatId,
+          direction: direction as "inbound" | "outbound",
+          message: message.slice(0, 20000),
+          source_kind: channel,
+          source_ref: typeof jb.source_ref === "string" ? jb.source_ref.slice(0, 200) : null,
+          hermes_session_id: null,
+          hermes_profile: null,
+          status: direction === "inbound" ? "received" : "delivered",
+          delivery_error: null,
+          metadata:
+            jb.metadata && typeof jb.metadata === "object"
+              ? (jb.metadata as Record<string, unknown>)
+              : null,
+          principal_id: typeof jb.principal_id === "string" ? jb.principal_id : null,
+          // Journalled history is a record of something that already happened,
+          // never a prompt Alfred should answer.
+          solicited: 0,
+        });
+      } catch (e) {
+        // Fail loudly to the caller (it retries) but never leave the webhook
+        // counter half-updated.
+        throw e;
+      }
+
+      bumpWebhookCounters(fm, iso);
+      sendJson(res, 201, {
+        ok: true,
+        destination: "journal",
+        channel,
+        chat_id: chatId,
+        journal_id: (entry as any)?.id ?? null,
+      });
+      return;
+    }
+
 
     // Pretty-print the inbound payload as text so the curator (which scans
     // markdown bodies) sees the structured content; opaque JSON in
@@ -330,13 +459,7 @@ export function registerInboundWebhookRoutes(): void {
     }
 
     // ── 3. BEST-EFFORT: webhook_endpoint counter bump ────────────────────
-    try {
-      writeWebhookRecord({
-        ...fm,
-        event_count: (fm.event_count || 0) + 1,
-        last_event_at: iso,
-      });
-    } catch { /* ignore */ }
+    bumpWebhookCounters(fm, iso);
 
     sendJson(res, 202, { status: "accepted" });
   });
