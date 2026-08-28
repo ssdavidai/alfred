@@ -368,6 +368,48 @@ hermes profile use main 2>/dev/null || true
 # Same OAuth token, two file locations, one shared ChatGPT identity.
 # Survives `docker compose pull` because hermes_data is a named volume.
 HERMES_ROOT="${HERMES_HOME:-/hermes-state}"
+
+# ── Traversal bits: repair before ANY gateway launches ──────────────────────
+#
+# hermes_cli.config._secure_dir() chmods HERMES_HOME (and its standard
+# subdirs) on every CLI invocation, defaulting to 0700 unless
+# HERMES_HOME_MODE says otherwise. Two things then break, both silently:
+#
+#   - codex-builder runs as uid 10001, so a 0700 volume root means it cannot
+#     cd into its own profile. It exits 1, the supervisor restarts it every
+#     ~5s, and once the child restart budget is spent the supervisor exits and
+#     the whole container restarts — cold-starting main/workers/heavy with it.
+#   - alfred-learn runs as uid 1000 and reads profiles/main/state.db for the
+#     NAR recap. A 0700 profile dir makes that read fail as "no session db",
+#     which is logged as a skip, not an error, so the recap quietly books zero
+#     engaged minutes.
+#
+# The compose file now sets HERMES_HOME_MODE=0711 on the hermes service and on
+# both live-voice sidecars, which stops new drift at the source. This block is
+# the self-heal for volumes that have ALREADY drifted: it runs before the auth
+# propagation and before any gateway starts, so a tenant repairs itself on its
+# next restart with no operator action.
+#
+# 0711 is traverse-only — no directory listing, and file modes are untouched
+# (auth.json stays 0600, .env stays 0600). Verified on home 2026-08-28.
+assert_traversal_bits() {
+    local d mode
+    for d in "$HERMES_ROOT" "$HERMES_ROOT"/profiles/*/; do
+        [[ -d "$d" ]] || continue
+        mode=$(stat -c%a "$d" 2>/dev/null) || continue
+        # Only widen a too-tight owner-only dir; never touch anything an
+        # operator has deliberately opened further (0755 and friends).
+        if [[ "$mode" == "700" ]]; then
+            if chmod 0711 "$d" 2>/dev/null; then
+                log "traversal: $d was 0700 -> 0711 (uid 10001/1000 need to traverse)"
+            else
+                log "traversal: WARNING could not chmod $d (was $mode)"
+            fi
+        fi
+    done
+}
+assert_traversal_bits
+
 MAIN_AUTH="$HERMES_ROOT/profiles/main/auth.json"
 if [[ -f "$MAIN_AUTH" && -s "$MAIN_AUTH" ]]; then
     MAIN_SIZE=$(stat -c%s "$MAIN_AUTH" 2>/dev/null || echo 0)

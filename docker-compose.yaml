@@ -418,6 +418,14 @@ services:
     environment:
       - HERMES_API_SERVER_KEY=${HERMES_API_SERVER_KEY}
       - HERMES_HOME=/hermes-state
+      # hermes_cli.config._secure_dir() chmods HERMES_HOME on EVERY CLI
+      # invocation, defaulting to 0700. codex-builder runs as uid 10001,
+      # so a 0700 volume root means it cannot cd into its own profile:
+      # the gateway then crash-loops every ~5s and the supervisor
+      # eventually exits, restarting the whole container. 0711 grants
+      # traversal without exposing a directory listing. Container-wide so
+      # that `docker exec ... hermes` inherits it too.
+      - HERMES_HOME_MODE=0711
       # Opt a tenant out of the hermes-relay (:8767) + dashboard (:9119)
       # block in supervisor.sh. Documented there as the per-tenant switch
       # since it shipped, but never plumbed through compose — so setting it
@@ -1393,6 +1401,10 @@ services:
       - hermes
     environment:
       - HERMES_HOME=/hermes-state/profiles/main
+      # Same _secure_dir() tighten, one level down: without this the
+      # sidecar sets profiles/main to 0700 on each start and alfred-learn
+      # (uid 1000) silently reads zero sessions.
+      - HERMES_HOME_MODE=0711
     entrypoint: ["/bin/sh", "-lc"]
     # --skip-build: web_dist is baked into the image, so never shell out to
     # npm at runtime (the git-installed tree ships no bundle of its own).
@@ -1431,12 +1443,18 @@ services:
     user: "10000:10000"
     environment:
       - HERMES_HOME=/hermes-state/profiles/main
+      # Same _secure_dir() tighten, one level down: without this the
+      # sidecar sets profiles/main to 0700 on each start and alfred-learn
+      # (uid 1000) silently reads zero sessions.
+      - HERMES_HOME_MODE=0711
       # HOME must be writable by uid 10000 (task state lands in
       # $HOME/.hermes/hermes-live) but must NOT be the volume root: tools
       # that treat HOME as theirs tighten it to 0700, which removes the
       # traversal bit uid 10001 needs to reach its own profile and fails
-      # the init FS-isolation assert. A profile dir is the safe choice —
-      # patch_upstream_hermes_auth.py already stops those being chmod-ed.
+      # the init FS-isolation assert. A profile dir is the safe choice for
+      # HOME, but note it is NOT self-protecting: patch_upstream_hermes_auth
+      # guards secure_parent_dir() (the auth-save path), not
+      # _secure_dir(home), so HERMES_HOME_MODE above is what holds the mode.
       - HOME=/hermes-state/profiles/main
     entrypoint: ["/bin/sh", "-lc"]
     # The task store is single-owner and its lock outlives an unclean stop, so
