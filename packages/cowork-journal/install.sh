@@ -42,7 +42,17 @@ case "$URL" in
 esac
 
 mkdir -p "$DEST"
-install -m 0755 "$HERE/push.py" "$DEST/push.py"
+# Work whether run from a clone or fetched standalone with curl.
+RAW="https://raw.githubusercontent.com/ssdavidai/alfred/main/packages/cowork-journal/push.py"
+if [[ -f "$HERE/push.py" ]]; then
+  install -m 0755 "$HERE/push.py" "$DEST/push.py"
+else
+  echo "  Fetching push.py..."
+  curl -fsSL "$RAW" -o "$DEST/push.py" || { echo "  Could not download push.py"; exit 1; }
+  chmod 0755 "$DEST/push.py"
+fi
+python3 -c "import ast,sys;ast.parse(open(sys.argv[1]).read())" "$DEST/push.py" \
+  || { echo "  push.py failed to parse — aborting"; exit 1; }
 umask 077
 printf 'ALFRED_WEBHOOK_URL=%s\n' "$URL" > "$DEST/env"
 chmod 600 "$DEST/env"
