@@ -299,7 +299,7 @@ RUN python3 /tmp/patch_upstream_hermes_channeldir.py \
 # /usr/local/lib/hermes-agent — which ships its OWN venv and its OWN launchers
 # in /usr/local/bin. Every `hermes` invocation therefore runs the 0.20.x tree.
 #
-# Three consequences, each of which bit us on home before being handled here:
+# Four consequences, each of which bit us on a tenant before being handled here:
 #
 #  1. web_dist. The git tree ships no dashboard bundle — that is the original
 #     reason HERMES_VERSION was pinned to the wheel (see the note above). Left
@@ -320,6 +320,15 @@ RUN python3 /tmp/patch_upstream_hermes_channeldir.py \
 #     tenant state (it lives in the hermes volume), but the `hermes-live`
 #     binary is an image artifact — so it vanishes on every container recreate
 #     unless it is baked. Pinned to the version matching the plugin (0.9.5).
+#
+#  4. Slack platform deps. The base wheel's [messaging] extra puts slack-bolt
+#     in SITE-PACKAGES — the tree that does not run (see 2). The 0.20.x venv
+#     is uv-built with no pip/ensurepip and no slack deps vendored, so the
+#     gateway re-resolves them at EVERY boot via a uv bootstrap (astral.sh +
+#     pypi at boot time). When that per-boot install fails, the Slack adapter
+#     dies with "requirements not met" — a tenant's Slack went dark exactly
+#     this way on 2026-08-28 after a fleet recreate. Baked below so the
+#     adapter has no boot-time network dependency.
 #
 # --skip-browser / --skip-computer-use: the installer would otherwise pull
 # ~620 MB of Playwright/Chromium that no fleet image has ever shipped (the base
@@ -360,6 +369,21 @@ RUN HT=/usr/local/lib/hermes-agent \
  && grep -qF "(response.output or [])"                        "$RESP" \
  && "$HT/venv/bin/python" -m py_compile "$HT/hermes_constants.py" "$HT/utils.py" "$RESP" \
  && rm -f /tmp/p_auth.py /tmp/p_chan.py /tmp/p_openai.py
+
+# Slack adapter deps for the 0.20.x venv (see 4). Pure-python wheels pinned to
+# what uv resolved on the golden home box; installed with the SYSTEM pip
+# --target into the venv's site-packages because the uv-built venv has no pip.
+# --no-deps on purpose: everything transitive (aiohttp etc.) is already in the
+# venv — uv confirmed this live ("Installed 2 packages"). The import runs with
+# the venv's OWN interpreter, so the build fails loudly if the bake ever stops
+# reaching the tree that actually runs.
+ARG SLACK_BOLT_VERSION=1.30.0
+ARG SLACK_SDK_VERSION=3.43.0
+RUN VSP="$(/usr/local/lib/hermes-agent/venv/bin/python -c 'import site; print(site.getsitepackages()[0])')" \
+ && pip install --no-cache-dir --no-deps --target "$VSP" \
+        "slack-bolt==${SLACK_BOLT_VERSION}" "slack-sdk==${SLACK_SDK_VERSION}" \
+ && /usr/local/lib/hermes-agent/venv/bin/python -c "import slack_bolt, slack_sdk" \
+ && echo "slack deps baked into the 0.20.x venv"
 
 # The live-voice gateway binary (see 3). Off unless the live-voice compose
 # profile is enabled; baking it costs ~44 MB and removes the recreate cliff.
