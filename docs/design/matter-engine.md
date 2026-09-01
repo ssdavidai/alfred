@@ -118,26 +118,37 @@ coarse projection of it — never three vocabularies again).
 
 ### 3.2 `packages/learn/src/register/` — inference (lane II)
 
-- **Collectors** (deterministic): sessions, meeting transcripts, mail,
-  messages, calendar — each read once per window into `evidence_event`
-  via ctrl POST (single-writer preserved). Rule-based matter attribution
-  first (participants, channels, repos derived from the matter), LLM
-  fallback for ambiguous, confidence stored.
-- **Interval math** (pure functions): union-of-intervals, 30-minute episode
-  clustering, per-day rounding — ported from the skill prose, with the
-  skill's worked examples as the test fixtures.
-- **Period-close workflow** (weekly per `hours_tracking` matter): build the
-  proposal from `evidence_event`, write the human-readable proposal note
-  (projection), file the Desk card, call `propose`.
-- **Reconcile workflow** (replaces the per-matter scheduled prompts): advance
-  `last_verified_at` from evidence, apply machine-ceiling transitions via
-  `transition`, regenerate projections.
-- **The one real LLM loop:** for each new evidence batch per matter, answer
-  three questions against the OPEN set — *does this create a commitment
-  (either direction)? does it discharge one? does it modify one?* — and land
-  every answer through verbs, always as proposed. A scoring harness gates
-  changes to this loop (precision/recall against a hand-verified
-  ground-truth month, which already exists from the audited client ledger).
+**Decision (2026-09-01): the scheduled agent sessions stay.** Per-matter,
+LLM-driven, token-spending reconciliation is accepted cost — what changes is
+that the agent becomes a *client of the verbs* instead of the bookkeeper.
+
+- **The verbs are the agent's tools.** The register routes are exposed
+  through the MCP surface the sessions already hold. The scheduled prompt
+  keeps its cadence; the skill shrinks to the judgment half (what counts as
+  a commitment, evidence classification, the three questions — *create?
+  discharge? modify?* — read against the matter's small OPEN set). All
+  mechanical doctrine — ID allocation, read-backs, count recomputation,
+  projection regeneration — moves inside the verbs.
+- **The arithmetic split.** The agent sweeps and submits *intervals with
+  evidence handles*; the verb computes union-of-intervals, episode merges
+  (30-minute gaps), per-day quarter-hour rounding, and totals. Per-source
+  summing — the biggest inflation risk — becomes structurally impossible
+  while the LLM keeps the judgment work.
+- **Runs are accountable and retry-safe.** Each session passes a `run_id`;
+  the journal groups writes by run. Mint idempotency and the DB-derived
+  cursor make re-runs harmless; "which matters have a stale register" is a
+  SQL query over the journal and can raise a Desk card — a failed session
+  costs one cycle loudly instead of silently.
+- **Projections go server-side**: after a verb lands, ctrl regenerates the
+  affected register/timesheet notes (debounced). The agent never writes a
+  projection again.
+- **Scoring from production**: the harness reads the journal (proposed vs
+  promoted/rejected, misses minted by hand), gating extraction changes on
+  precision/recall against the hand-verified ground-truth month.
+- **Deterministic collectors are an optimization, not a dependency** — the
+  agent is the collector for now, filing what it finds as `evidence_event`
+  rows via `record_evidence`. Code collectors can take over per-source
+  later without any schema change.
 
 ### 3.3 What deliberately does not change
 
@@ -155,7 +166,7 @@ optional `rate`); chores-managing-commitments later just call the same verbs.
 |---|---|---|
 | **P0 — the store** | Contract fixture + migration + verbs + commitment mirror + import (existing commitment records indexed; the hand-maintained client ledger's accepted rows booked as history; vault-note ledgers parsed). Nothing user-visible changes. | I (+IV for validator enum) |
 | **P1 — hours through the store** | Collectors, interval math, period-close workflow, Desk booking via `approve`. Timesheet notes become projections. Runs beside the manual process until **two consecutive weekly cycles agree**; only then is the spreadsheet demoted to a one-way export. | II + I |
-| **P2 — commitment inference** | Three-questions loop + reconcile workflow replace the per-matter scheduled prompts (~50 cron entries on the reference tenant collapse into one workflow). Scoring harness in CI. | II |
+| **P2 — verbs under the sessions** | The scheduled reconciliation sessions write through the verbs (skills shrink to judgment; mechanics move into code). The 3 enabled jobs + 2 bespoke pre-capability wrappers on the reference tenant converge on one generic job over the capability. Scoring harness in CI. | II + V (skills) |
 | **P3 — convergence** | Transcript pipeline mints commitments (today it mislabels them as tasks); matter rollup derives from commitments; NAR gains per-matter attribution from `evidence_event`. Task starvation complete. | II + I + III |
 
 ## 5. Blast radius
@@ -172,12 +183,14 @@ optional `rate`); chores-managing-commitments later just call the same verbs.
   the hand-maintained spreadsheet write flow.
 
 ### Dies at P2
-- ~50 per-matter scheduled reconciliation prompt jobs (reference tenant).
-- The *executed* mechanics of both skills (~900 lines of agent-performed
-  sweeps, ID allocation, projection regeneration, read-back ritual) — kept
-  as spec text and test fixtures, no longer performed per run.
-- Per-run LLM evidence sweeps against external sources — replaced by
-  collectors reading each source once.
+- The bespoke pre-capability register jobs and the relic tail of disabled
+  scheduler entries (reference tenant: 22 jobs mention the domain, 3
+  enabled — the earlier "~50" figure was a word-grep overcount).
+- The *mechanical* half of both skills (~900 lines of agent-performed ID
+  allocation, arithmetic, projection regeneration, read-back ritual) — kept
+  as spec text and test fixtures, enforced by verbs instead of performed by
+  the agent. The judgment half of the skills stays live.
+- Agent-written projections and their drift class.
 
 ### Dies at P3 (starvation complete; deletion is a follow-up epic)
 - `task_creation.py` (1,254 lines) including the signal→task branch.
@@ -206,7 +219,40 @@ matter `state_mutator` transitions, decisions (deferred), the vault itself.
 flag, ~50 cron jobs, and the recurring token cost of prose-driven
 reconciliation.
 
-## 6. Open questions (settle in P0)
+## 6. Noise containment (the residual model)
+
+The engine inverts the noise problem. Today "noise" is defined negatively by
+learned suppression patterns; the engine defines *signal* positively — an
+event matters if it touches the matter/commitment/evidence graph — and noise
+becomes the residual. The stream keeps two independent readers: the signal
+pipeline decides **urgency**, the engine decides **meaning**; neither does
+the other's job.
+
+The no-commitment residual stratifies, and only the last stratum is noise:
+
+1. **Hours evidence** — matched a matter, touched no commitment. The
+   majority of real work looks like this; it books hours.
+2. **Urgent non-work** — no commitment, must still reach the Desk. The
+   signal pipeline's lane; containment never eats it.
+3. **New-matter seeds** — match nothing because the matter does not exist
+   yet; the attention path catches them by design.
+4. **True noise** — the triple-negative residual: no matter, no commitment
+   effect, no urgency. Expected to be the large majority of raw volume.
+
+Learning happens inside the residual with labels the workflow generates for
+free: every proposed commitment the principal promotes or rejects (precision),
+every hand-minted miss and every weekly-ritual answer (recall), and events
+that age out untouched (noise candidates, feeding the existing instinct loop
+under the unchanged tier ladder).
+
+**The participant-graph guard.** A suppression instinct is checked against
+the graph before it can fire or be promoted: a sender appearing on an active
+matter's people or in any open commitment's evidence is structurally
+unsuppressible — no confidence score overrides membership. The two live
+suppression incidents (an Acting-tier drop of a primary client's domain; the
+done-click suppression harvest) both become impossible rather than unlikely.
+
+## 7. Open questions (settle in P0)
 
 1. **Zero-work days:** the client ledger convention omits them; the skill
    doctrine keeps them. One rule must win in `work_entry` (proposal: keep
