@@ -172,11 +172,24 @@ describe("buildUserIdClarification", () => {
     );
   });
 
-  it("redirects the agent to KNOWN_CONTACTS.md for the human's per-app identity", () => {
+  it("redirects the agent to the vault's person/org records for the human's per-app identity", () => {
+    // KNOWN_CONTACTS.md was the OpenClaw-era answer; the file does not exist
+    // on the merged stack (verified live — no tenant has one). The durable
+    // source of per-app handles is the vault: person + org records.
     assert.match(
       md,
-      /KNOWN_CONTACTS\.md/,
-      "must point at KNOWN_CONTACTS.md as the source of truth for per-app identity",
+      /search the vault/i,
+      "must point at the vault as the source of truth for per-app identity",
+    );
+    assert.match(
+      md,
+      /person.*org|org.*person/i,
+      "must name person/org records as where the handles live",
+    );
+    assert.doesNotMatch(
+      md,
+      /KNOWN_CONTACTS/,
+      "must not resurrect the dead OpenClaw-era KNOWN_CONTACTS.md path",
     );
   });
 

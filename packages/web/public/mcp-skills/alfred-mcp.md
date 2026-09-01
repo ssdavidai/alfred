@@ -1,6 +1,6 @@
 ---
 name: alfred-mcp
-description: Drive Sir's per-tenant Alfred Black box from claude.ai — read and write the vault, delegate one-shot work to Alfred, kick off Temporal workflows, and inspect the OpenClaw gateway. Use whenever Sir asks claude.ai about what's in his vault, wants a record created/updated, wants Alfred to do something on his behalf, wants a workflow started/signalled, or wants to know whether Alfred is healthy.
+description: Drive Sir's per-tenant Alfred Black box from claude.ai — read and write the vault, delegate one-shot work to Alfred, kick off Temporal workflows, and check the runtime's health. Use whenever Sir asks claude.ai about what's in his vault, wants a record created/updated, wants Alfred to do something on his behalf, wants a workflow started/signalled, or wants to know whether Alfred is healthy.
 license: alfred-platform internal — see the parent monorepo's LICENSE
 ---
 
@@ -25,10 +25,32 @@ The catalogue is intentionally narrow. Container restarts, credential rotation, 
 - `update_vault_record` — patch frontmatter (set/append) or replace body
 - `promote_triage_to_task` — convert a triage entry into a task (errand)
 
+### Matters & commitments — the two record types that organise everything
+
+A **matter** is a unit of ongoing concern (a client engagement, a property
+project, a family thread). It carries `status` (active / dormant / completed /
+archived) and `current_state` — a short narrative paragraph with an `as_of`
+timestamp that answers "where are we on this?". Read matters with
+`list_vault_by_type({type: "matter"})` or `search_vault`; a matter's
+`current_state` is the spine of any status answer.
+
+A **commitment** is a promise with an accountable party and an evidence handle
+— one Sir made, or one made to him. Commitments hang off their matter via
+`matter_ref`. When a conversation surfaces a promise in either direction
+("I told them Friday", "they owe us the contract"), record it as a
+`commitment` vault record linked to the matter — search first, the register
+may already track it. The coarse `status` hides a richer `commitment_state`
+lifecycle: delivered work can still be awaiting acceptance, so never declare a
+promise done merely because something was sent.
+
+Tasks link to their matter through `parent_matter` / `matter_ref`. A task,
+note, or commitment floating free of any matter is usually a filing error —
+find the matter first.
+
 ### Agents (2) — delegate to Alfred
 
 - `spawn_alfred_task` — hand a one-shot prompt to Alfred main; he runs it silently unless you pass `announce: true`, which posts the reply to Sir's last channel
-- `list_agents` — show which OpenClaw agents are configured (main, learn-clerk, vault-curator, vault-janitor, vault-distiller)
+- `list_agents` — show which runtime agents are configured (main, learn-clerk, vault-curator, vault-janitor, vault-distiller)
 
 ### Workflows (4) — Temporal orchestration
 
@@ -37,7 +59,7 @@ The catalogue is intentionally narrow. Container restarts, credential rotation, 
 - `start_workflow` — launch a new execution (workflow_type + task_queue + input)
 - `signal_workflow` — send a `@workflow.signal`-decorated message to a running workflow
 
-### OpenClaw diagnostics (3) — read-only
+### Runtime diagnostics (3) — read-only (tools keep their legacy `openclaw_*` names; they report the Hermes runtime)
 
 - `get_openclaw_health` — gateway healthz envelope
 - `list_openclaw_agents` — live agent state from the gateway (model bindings, provider auth)

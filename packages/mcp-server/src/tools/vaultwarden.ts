@@ -222,13 +222,13 @@ export const ALL_VAULTWARDEN_TOOLS: ToolDef[] = [
   {
     name: "vault_refresh",
     description:
-      "Rewrite /opt/alfred/compose/.env from the current Vaultwarden state and restart impacted tenant services. Use this after `update_vault_item` so the rotated secret actually reaches the running containers. Default restarts openclaw + alfred (the most common consumers); pass `services: [...]` for narrower restarts (e.g. ['sure-web', 'sure-worker'] for SURE_POSTGRES_PASSWORD rotation). Refuses to restart ctrl-api itself (would 502 the response). Backing: POST /api/v1/admin/vault/refresh.",
+      "Rewrite /opt/alfred/compose/.env from the current Vaultwarden state and restart impacted tenant services. Use this after `update_vault_item` so the rotated secret actually reaches the running containers. Default restarts hermes + alfred (the most common consumers); pass `services: [...]` for narrower restarts (e.g. ['sure-web', 'sure-worker'] for SURE_POSTGRES_PASSWORD rotation). Refuses to restart ctrl-api itself (would 502 the response). Backing: POST /api/v1/admin/vault/refresh.",
     inputSchema: z.object({
       services: z
         .array(z.string().regex(/^[a-zA-Z0-9_-]+$/))
         .optional()
         .describe(
-          "Compose services to recreate after vault-init runs. Default: ['openclaw', 'alfred'].",
+          "Compose services to recreate after vault-init runs. Default: ['hermes', 'alfred'].",
         ),
     }),
     buildRequest: (args) => ({

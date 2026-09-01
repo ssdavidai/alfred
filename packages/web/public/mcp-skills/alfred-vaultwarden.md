@@ -35,36 +35,36 @@ You have **14 Vaultwarden tools** through the MCP `vaultwarden` connector. They 
 ### Generate & propagate
 
 - `generate_password` — uses bw's built-in generator. Length, charset, passphrase mode all configurable. Returns the value but doesn't save it; chain with `create_vault_item({value: <returned>})`.
-- `vault_refresh` — rewrite `/opt/alfred/compose/.env` from the current Vaultwarden state and restart impacted services. Defaults to `[openclaw, alfred]`; pass `services` for narrower restarts (e.g. `["sure-web", "sure-worker"]` after rotating a Sure credential).
+- `vault_refresh` — rewrite `/opt/alfred/compose/.env` from the current Vaultwarden state and restart impacted services. Defaults to `[hermes, alfred]`; pass `services` for narrower restarts (e.g. `["sure-web", "sure-worker"]` after rotating a Sure credential).
 
 ## The two truths every flow hinges on
 
-1. **List/search returns metadata only. `get_vault_item` returns the password.** Sir asks "what's my OpenRouter key?" — you do `search_vault_items({search: "OPENROUTER"})`, take the id, call `get_vault_item({id})`, surface `login.password`. Don't dump the whole envelope at Sir; he wants the value.
+1. **List/search returns metadata only. `get_vault_item` returns the password.** Sir asks "what's my Composio key?" — you do `search_vault_items({search: "COMPOSIO"})`, take the id, call `get_vault_item({id})`, surface `login.password`. Don't dump the whole envelope at Sir; he wants the value.
 
 2. **Vaultwarden writes are NOT live in the running services until `vault_refresh` runs.** Vault-init regenerates `.env` from Vaultwarden on every `docker compose up`, but a single `update_vault_item` call doesn't trigger that. After rotating a credential Sir uses in production, ALWAYS chain `vault_refresh` (with the appropriate `services` list) so the new value reaches the running container. Forgetting this means the rotation lives only in Vaultwarden until the next reboot.
 
 ## Worked flows
 
-**1. "What's my OpenRouter key?"**
+**1. "What's my Composio key?"**
 
 ```
-search_vault_items({search: "OPENROUTER"})
-  → [{id: "...", name: "OPENROUTER_API_KEY", ...}]
+search_vault_items({search: "COMPOSIO"})
+  → [{id: "...", name: "COMPOSIO_API_KEY", ...}]
 get_vault_item({id: "..."})
-  → {name: "OPENROUTER_API_KEY", login: {password: "sk-or-v1-..."}}
+  → {name: "COMPOSIO_API_KEY", login: {password: "<the value>"}}
 ```
 
 Reply with the value, not the JSON.
 
-**2. "Rotate my OpenRouter key — here's the new one: sk-or-v1-NEW…"**
+**2. "Rotate my Composio key — here's the new one."**
 
 ```
-search_vault_items({search: "OPENROUTER"})
+search_vault_items({search: "COMPOSIO"})
 update_vault_item({id, value: "sk-or-v1-NEW…"})
-vault_refresh({})        // defaults to openclaw + alfred
+vault_refresh({})        // defaults to hermes + alfred
 ```
 
-Confirm to Sir: "Rotated and propagated. openclaw and alfred are restarting."
+Confirm to Sir: "Rotated and propagated. hermes and alfred are restarting."
 
 **3. "Generate a 40-character password and save it as STRIPE_WEBHOOK_SECRET"**
 
@@ -120,7 +120,7 @@ No `vault_refresh` needed here — folder placement doesn't change the values.
 
 ## Good behaviour
 
-1. **Always search before create.** Vaultwarden allows duplicate names; you'll embarrass yourself adding a second `OPENROUTER_API_KEY` next to the existing one.
+1. **Always search before create.** Vaultwarden allows duplicate names; you'll embarrass yourself adding a second `COMPOSIO_API_KEY` next to the existing one.
 2. **`update_vault_item` PATCHes — pass only the fields you want changed.** The server merges with the existing record; passing `{id, value: "new"}` keeps name/username/notes intact.
 3. **Chain `vault_refresh` whenever you write a value.** Without it, the rotation only exists in Vaultwarden — the container that actually consumes the secret hasn't seen it yet.
 4. **Reply in prose, not envelope.** `{name, login: {password}}` is for your reasoning. The first character of any Sir-facing message is never `{`.

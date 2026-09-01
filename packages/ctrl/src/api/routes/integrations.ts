@@ -652,7 +652,7 @@ export function buildToolkitGuidance(toolkit: string): string {
   return `
 ## Reading email — payload-size budget
 
-**The openclaw tool-result cap is ~15 KB. A full Gmail message is ~14 KB. So:**
+**The runtime tool-result cap is ~15 KB. A full Gmail message is ~14 KB. So:**
 
 - **Always pass \`format: "metadata"\` for listing/scanning.** This strips the body — ~1 KB/message → ~12 messages fit per call.
 - **Only pass \`format: "full"\` when fetching ONE specific message** (e.g. Sir says "show me the one from Müller").
@@ -710,7 +710,7 @@ export function buildUserIdClarification(): string {
 
 The \`user_id\` value you'll see in Composio responses (e.g. \`alfred-<tenant>-<n>\`) is the **tenant's Composio identity**, NOT Sir's identity inside the underlying app. It is shared across every connection on this tenant, regardless of which provider account is on the other end.
 
-For Sir's actual per-app identity (Slack U-ID, Gmail address, GitHub login, etc.) consult \`~/.openclaw/workspace/KNOWN_CONTACTS.md\`. Never feed the Composio \`user_id\` back into the underlying app's user-targeting fields — they expect the app's native identifier.
+For Sir's actual per-app identity (Slack U-ID, Gmail address, GitHub login, etc.) search the vault — \`person\` and \`org\` records carry the per-app handles. Never feed the Composio \`user_id\` back into the underlying app's user-targeting fields — they expect the app's native identifier.
 `;
 }
 
@@ -838,8 +838,7 @@ name: alfred-composio-${toolkit}
 description: ${displayName} integration — ${actions.length} available actions via the MCP self tool (POST /api/v1/integrations/execute).
 version: "1.0"
 metadata:
-  openclaw:
-    emoji: "${emoji}"
+  emoji: "${emoji}"
   generated: true
   composio_toolkit: "${toolkit}"
   composio_connection_id: "${connId}"
