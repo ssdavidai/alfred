@@ -17,7 +17,7 @@ export interface TrendsPeriod {
   outcomes: { delivered: number; failed: number; unknown: number };
   sessions: number;
 }
-export interface TrendsCoverage { interruption_instrumented_from: string | null; days_total: number; days_with_data: number }
+export interface TrendsCoverage { interruption_instrumented_from: string | null; days_total: number; days_with_data: number; data_from?: string | null }
 export interface TrendsObservation { headline: string; detail: string; evidence: string }
 export interface TrendsRead { generated_at: string; observations: TrendsObservation[] }
 export interface AttentionTrendsResponse {
@@ -41,6 +41,93 @@ export function derivePeriodLabel(key: string, grain: TrendsGrain): string {
 export const GRAIN_FULL_DAYS: Record<TrendsGrain, number> = { week: 7, month: 28, quarter: 84 };
 export function isPartialPeriod(period: Pick<TrendsPeriod, "days">, grain: TrendsGrain): boolean {
   return (period.days ?? 0) < GRAIN_FULL_DAYS[grain];
+}
+
+// ── Period pickers (#trends-window) ──────────────────────────────────────────
+// The Trends tab lets the principal choose WHICH weeks/months/quarters are
+// compared. These helpers enumerate selectable periods and derive/clamp the
+// window. Boundary conventions MUST match ctrl's periodKeyBounds
+// (packages/ctrl/src/api/routes/attention.ts): ISO weeks Mon–Sun with the
+// Thursday anchor, calendar months, calendar quarters.
+
+export interface PeriodOption { key: string; label: string; start: string; end: string }
+
+/** Mirror of ctrl periodKeyBounds — pure, UTC, no Date.now(). */
+export function periodBoundsClient(grain: TrendsGrain, dateStr: string): PeriodOption {
+  if (grain === "week") {
+    const d = new Date(`${dateStr}T00:00:00Z`); const dow = d.getUTCDay() || 7;
+    const mon = new Date(d); mon.setUTCDate(d.getUTCDate() - dow + 1);
+    const sun = new Date(mon); sun.setUTCDate(mon.getUTCDate() + 6);
+    const thu = new Date(d); thu.setUTCDate(d.getUTCDate() - dow + 4);
+    const wn = Math.ceil(((thu.getTime() - Date.UTC(thu.getUTCFullYear(), 0, 1)) / 86400000 + 1) / 7);
+    const key = `${thu.getUTCFullYear()}-W${String(wn).padStart(2, "0")}`;
+    const start = mon.toISOString().slice(0, 10);
+    const mm = MONTH_ABBR[mon.getUTCMonth()]; const dd = mon.getUTCDate();
+    return { key, label: `W${String(wn).padStart(2, "0")} · ${mm} ${dd}`, start, end: sun.toISOString().slice(0, 10) };
+  }
+  const [y, mo] = dateStr.slice(0, 7).split("-").map(Number);
+  if (grain === "month") {
+    const start = `${y}-${String(mo).padStart(2, "0")}-01`;
+    return { key: dateStr.slice(0, 7), label: `${MONTH_ABBR[mo - 1]} ${y}`, start,
+      end: new Date(Date.UTC(y, mo, 0)).toISOString().slice(0, 10) };
+  }
+  const q = Math.ceil(mo / 3); const qm1 = (q - 1) * 3 + 1;
+  return { key: `${y}-Q${q}`, label: `Q${q} ${y}`, start: `${y}-${String(qm1).padStart(2, "0")}-01`,
+    end: new Date(Date.UTC(y, q * 3, 0)).toISOString().slice(0, 10) };
+}
+
+/** Hard cap mirrored from the ctrl route — a wider request is a 400. */
+export const TRENDS_MAX_DAYS = 400;
+const DAY = 86400000;
+function addDaysIso(dateStr: string, n: number): string {
+  const d = new Date(`${dateStr}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+
+/**
+ * Every selectable period from the ledger's first entry (or a one-year
+ * fallback when the API predates data_from) through today. Ascending.
+ */
+export function enumeratePeriodOptions(dataFrom: string | null | undefined, today: string, grain: TrendsGrain): PeriodOption[] {
+  const floor = dataFrom && /^\d{4}-\d{2}-\d{2}$/.test(dataFrom) ? dataFrom : addDaysIso(today, -365);
+  const out: PeriodOption[] = [];
+  let cur = periodBoundsClient(grain, floor);
+  const stop = new Date(`${today}T00:00:00Z`).getTime();
+  // ≤400-day windows over a few years of grain periods — bounded, but belt it.
+  for (let i = 0; i < 400; i++) {
+    out.push(cur);
+    const nextStart = addDaysIso(cur.end, 1);
+    if (new Date(`${nextStart}T00:00:00Z`).getTime() > stop) break;
+    cur = periodBoundsClient(grain, nextStart);
+  }
+  return out;
+}
+
+/** Default comparison window per grain: last 13 weeks / 6 months / 4 quarters. */
+export const GRAIN_DEFAULT_PERIODS: Record<TrendsGrain, number> = { week: 13, month: 6, quarter: 4 };
+export function defaultTrendsWindow(grain: TrendsGrain, today: string): { from: string; to: string } {
+  const n = GRAIN_DEFAULT_PERIODS[grain];
+  const latest = periodBoundsClient(grain, today);
+  // Walk back n-1 periods from the current one.
+  let start = latest;
+  for (let i = 1; i < n; i++) start = periodBoundsClient(grain, addDaysIso(start.start, -1));
+  return { from: start.start, to: today };
+}
+
+/**
+ * Clamp a picked window: future end snaps to today, inverted ranges snap the
+ * `to` up to the `from` period's end, and a span over the server's 400-day cap
+ * pulls `from` forward to the start of the period containing (to − 399d).
+ */
+export function clampTrendsWindow(fromStart: string, toEnd: string, today: string, grain: TrendsGrain): { from: string; to: string } {
+  let from = fromStart;
+  let to = toEnd > today ? today : toEnd;
+  if (from > to) to = periodBoundsClient(grain, from).end > today ? today : periodBoundsClient(grain, from).end;
+  const span = Math.round((new Date(`${to}T00:00:00Z`).getTime() - new Date(`${from}T00:00:00Z`).getTime()) / DAY) + 1;
+  if (span > TRENDS_MAX_DAYS) from = periodBoundsClient(grain, addDaysIso(to, -(TRENDS_MAX_DAYS - 1))).start;
+  // A from pulled forward into a partial period must not precede the cap window.
+  if (from < addDaysIso(to, -(TRENDS_MAX_DAYS - 1))) from = addDaysIso(to, -(TRENDS_MAX_DAYS - 1));
+  return { from, to };
 }
 
 // ── NAR chart ─────────────────────────────────────────────────────────────────

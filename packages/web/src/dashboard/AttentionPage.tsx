@@ -22,6 +22,8 @@ import {
   deriveRatioPeak, derivePeriodLabel, deriveRatioLineSegmentsFromBars,
   deriveReadHeadline, deriveReadPairData, deriveAllocationHeadline, deriveTrendsAllocTotals,
   type TrendsGrain, type AttentionTrendsResponse,
+  enumeratePeriodOptions, defaultTrendsWindow, clampTrendsWindow, periodBoundsClient,
+  type PeriodOption,
 } from "./attentionTrendsCore";
 
 const now = () => new Date().toISOString().slice(0, 10);
@@ -32,7 +34,6 @@ const dateParam = (key: string, fallback: string): string => {
   return v !== null && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : fallback;
 };
 const sevenAgo = () => { const d = new Date(); d.setDate(d.getDate() - 6); return d.toISOString().slice(0, 10); };
-const thirteenWeeksAgo = () => { const d = new Date(); d.setDate(d.getDate() - 91); return d.toISOString().slice(0, 10); };
 
 // ── Shared primitives ─────────────────────────────────────────────────────────
 
@@ -653,9 +654,13 @@ function RangeView({ stats }: { stats: AttentionStatsResponse }) {
 
 // ── Trends view (#584 — canonical 4-panel report) ────────────────────────────
 
-function TrendsView({ data, grain, setGrain, interpretingRead, onGenerateRead, readTimedOut, onRetry }: {
+function TrendsView({ data, grain, setGrain, interpretingRead, onGenerateRead, readTimedOut, onRetry,
+  periodOptions, windowFrom, windowTo, onPickPeriod, isCustomWindow, onResetWindow }: {
   data: AttentionTrendsResponse; grain: TrendsGrain; setGrain: (g: TrendsGrain) => void;
   interpretingRead: boolean; onGenerateRead: () => void; readTimedOut: boolean; onRetry: () => void;
+  periodOptions: PeriodOption[]; windowFrom: string; windowTo: string;
+  onPickPeriod: (edge: "from" | "to", startDate: string) => void;
+  isCustomWindow: boolean; onResetWindow: () => void;
 }) {
   const ps = trimEmptyEdgePeriods(data.periods ?? []);
   if (!ps.length) return <p className="font-mono text-xs opacity-40 mt-12">No data for this period.</p>;
@@ -765,15 +770,50 @@ function TrendsView({ data, grain, setGrain, interpretingRead, onGenerateRead, r
         Attention Trends.
       </h1>
 
-      {/* Grain selector */}
-      <div className="flex gap-4 mb-10">
-        {(["week", "month", "quarter"] as TrendsGrain[]).map(g => (
-          <button key={g} type="button" onClick={() => setGrain(g)}
-            className="font-mono text-[10px] uppercase tracking-[0.22em] pb-1 transition-colors"
-            style={{ color: grain === g ? "var(--brass)" : "var(--marginalia)", borderBottom: grain === g ? "1px solid var(--brass)" : "1px solid transparent" }}>
-            {g === "week" ? "Weekly" : g === "month" ? "Monthly" : "Quarterly"}
-          </button>
-        ))}
+      {/* Grain selector + comparison window (which periods are compared) */}
+      <div className="flex flex-wrap items-end gap-x-6 gap-y-3 mb-10">
+        <div className="flex gap-4">
+          {(["week", "month", "quarter"] as TrendsGrain[]).map(g => (
+            <button key={g} type="button" onClick={() => setGrain(g)}
+              className="font-mono text-[10px] uppercase tracking-[0.22em] pb-1 transition-colors"
+              style={{ color: grain === g ? "var(--brass)" : "var(--marginalia)", borderBottom: grain === g ? "1px solid var(--brass)" : "1px solid transparent" }}>
+              {g === "week" ? "Weekly" : g === "month" ? "Monthly" : "Quarterly"}
+            </button>
+          ))}
+        </div>
+        <div className="flex items-center gap-2 ml-auto">
+          {(["from", "to"] as const).map((edge) => {
+            // The selected option is the period CONTAINING the window edge —
+            // a clamped edge (partial current period) still highlights right.
+            const sel = periodOptions.find(o => edge === "from"
+              ? (windowFrom >= o.start && windowFrom <= o.end)
+              : (windowTo >= o.start && windowTo <= o.end));
+            return (
+              <span key={edge} className="flex items-center gap-2">
+                {edge === "to" && <span className="font-mono text-[9px] tracking-[0.2em]" style={{ color: "var(--marginalia)" }}>{"—"}</span>}
+                <select
+                  value={sel?.start ?? ""}
+                  onChange={(e) => onPickPeriod(edge, e.target.value)}
+                  aria-label={edge === "from" ? "Compare from period" : "Compare to period"}
+                  className="font-mono text-[10px] uppercase tracking-[0.14em] bg-transparent border px-2 py-1 focus:outline-none transition-colors"
+                  style={{ color: "var(--ink)", borderColor: "var(--rule)" }}>
+                  {periodOptions.map(o => (
+                    <option key={o.key + o.start} value={o.start}>{o.label}</option>
+                  ))}
+                </select>
+              </span>
+            );
+          })}
+          {isCustomWindow && (
+            <button type="button" onClick={onResetWindow}
+              className="font-mono text-[9px] uppercase tracking-[0.2em] pb-0.5 transition-colors"
+              style={{ color: "var(--marginalia)", borderBottom: "1px solid transparent" }}
+              onMouseEnter={(e) => { (e.target as HTMLElement).style.color = "var(--brass)"; }}
+              onMouseLeave={(e) => { (e.target as HTMLElement).style.color = "var(--marginalia)"; }}>
+              Reset
+            </button>
+          )}
+        </div>
       </div>
 
       {/* 01 NET RETURNED — mirrored chart: GIVEN BACK above axis, YOUR TIME below */}
@@ -993,9 +1033,16 @@ export default function AttentionPage() {
   const [from, setFrom] = useState(dateParam("from", sevenAgo()));
   const [to, setTo] = useState(dateParam("to", now()));
   const [running, setRunning] = useState(false);
-  const [grain, setGrain] = useState<TrendsGrain>("week");
-  const [trendsFrom] = useState(thirteenWeeksAgo);
-  const [trendsTo] = useState(now);
+  const [grain, setGrainRaw] = useState<TrendsGrain>("week");
+  // Custom comparison window per grain (null = the grain's default). Switching
+  // grain returns to that grain's default — predictable, never a stale window
+  // measured in another grain's units.
+  const [customWin, setCustomWin] = useState<{ from: string; to: string } | null>(null);
+  const setGrain = (g: TrendsGrain) => { setGrainRaw(g); setCustomWin(null); };
+  const today = now();
+  const defWin = defaultTrendsWindow(grain, today);
+  const trendsFrom = customWin?.from ?? defWin.from;
+  const trendsTo = customWin?.to ?? defWin.to;
   const [interpretingRead, setInterpretingRead] = useState(false);
   const [readTimedOut, setReadTimedOut] = useState(false);
   // Timestamp recorded when polling starts; compared against POLL_GIVE_UP_MS in the interval.
@@ -1005,6 +1052,18 @@ export default function AttentionPage() {
   const trendsQ = useQuery(getAttentionTrends, { grain, from: trendsFrom, to: trendsTo }, { enabled: tab === "trends" });
   const recompute = useAction(recomputeAttention);
   const interpretTrends = useAction(interpretAttentionTrends);
+
+  // Period pickers: which weeks/months/quarters are being compared. Options
+  // reach from the ledger's first entry (coverage.data_from) to today.
+  const dataFrom = (trendsQ.data as AttentionTrendsResponse | undefined)?.coverage?.data_from ?? null;
+  const periodOptions = enumeratePeriodOptions(dataFrom, today, grain);
+  const pickPeriod = (edge: "from" | "to", startDate: string) => {
+    const period = periodBoundsClient(grain, startDate);
+    const next = edge === "from"
+      ? { from: period.start, to: trendsTo }
+      : { from: trendsFrom, to: period.end };
+    setCustomWin(clampTrendsWindow(next.from, next.to, today, grain));
+  };
 
   // Poll for the read every 15 s while it is being generated; give up after POLL_GIVE_UP_MS.
   // Interval is cleared on unmount and when the read arrives (see effect below).
@@ -1085,7 +1144,7 @@ export default function AttentionPage() {
               : statsQ.data ? <RangeView stats={statsQ.data as AttentionStatsResponse} /> : null
             : trendsQ.isLoading ? <p className="font-mono text-xs opacity-40">Loading…</p>
               : trendsQ.error ? <p className="font-mono text-xs" style={{ color: "oklch(0.42 0.12 30)" }}>{String((trendsQ.error as any)?.message ?? "Failed.")}</p>
-              : trendsQ.data ? <TrendsView data={trendsQ.data as AttentionTrendsResponse} grain={grain} setGrain={setGrain} interpretingRead={interpretingRead} onGenerateRead={handleGenerateRead} readTimedOut={readTimedOut} onRetry={handleGenerateRead} /> : null}
+              : trendsQ.data ? <TrendsView data={trendsQ.data as AttentionTrendsResponse} grain={grain} setGrain={setGrain} interpretingRead={interpretingRead} onGenerateRead={handleGenerateRead} readTimedOut={readTimedOut} onRetry={handleGenerateRead} periodOptions={periodOptions} windowFrom={trendsFrom} windowTo={trendsTo} onPickPeriod={pickPeriod} isCustomWindow={customWin != null} onResetWindow={() => setCustomWin(null)} /> : null}
 
       </section>
     </Frame>
