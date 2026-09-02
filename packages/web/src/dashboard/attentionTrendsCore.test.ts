@@ -16,6 +16,8 @@ import {
   f1, dir, deriveNarHeadline, deriveRatioHeadline, deriveRatioPeak,
   deriveRatioLineSegmentsFromBars, deriveReadHeadline, deriveAllocationHeadline,
   type TrendsPeriod, type ReadHeadlineParams, type RatioBar,
+  periodBoundsClient, enumeratePeriodOptions, defaultTrendsWindow, clampTrendsWindow,
+  TRENDS_MAX_DAYS,
 } from "./attentionTrendsCore";
 
 // ── Fixture factory ───────────────────────────────────────────────────────────
@@ -403,4 +405,64 @@ test("AttentionPage computes the ratio peak via deriveRatioPeak, not inline", ()
   // periods, which ignores the engagement floor.
   assert.doesNotMatch(src, /rb\.reduce\(/,
     "unfiltered peak scan over rb is back; it ignores the engagement floor");
+});
+
+
+test("period pickers: periodBoundsClient matches ctrl conventions (ISO week, month, quarter)", () => {
+  // Same fixtures as ctrl's periodKeyBounds tests — the two implementations
+  // must never disagree on a boundary.
+  const w = periodBoundsClient("week", "2026-08-10"); // a Monday
+  assert.equal(w.key, "2026-W33"); assert.equal(w.start, "2026-08-10"); assert.equal(w.end, "2026-08-16");
+  const m = periodBoundsClient("month", "2026-02-15");
+  assert.equal(m.key, "2026-02"); assert.equal(m.start, "2026-02-01"); assert.equal(m.end, "2026-02-28");
+  const q = periodBoundsClient("quarter", "2026-08-01");
+  assert.equal(q.key, "2026-Q3"); assert.equal(q.start, "2026-07-01"); assert.equal(q.end, "2026-09-30");
+});
+
+test("period pickers: ISO week-year edge: Jan 1 belonging to the previous year's W53", () => {
+  // 2027-01-01 is a Friday; its ISO week is 2026-W53 (Thursday anchor 2026-12-31).
+  const w = periodBoundsClient("week", "2027-01-01");
+  assert.equal(w.key, "2026-W53");
+  assert.equal(w.start, "2026-12-28"); assert.equal(w.end, "2027-01-03");
+});
+
+test("period pickers: enumeratePeriodOptions spans floor → today, ascending, no gaps", () => {
+  const opts = enumeratePeriodOptions("2026-05-23", "2026-09-02", "week");
+  assert.equal(opts[0].key, "2026-W21");            // week containing May 23
+  assert.equal(opts[opts.length - 1].key, "2026-W36"); // week containing Sep 2
+  for (let i = 1; i < opts.length; i++) {
+    const prevEndPlus1 = new Date(`${opts[i - 1].end}T00:00:00Z`);
+    prevEndPlus1.setUTCDate(prevEndPlus1.getUTCDate() + 1);
+    assert.equal(opts[i].start, prevEndPlus1.toISOString().slice(0, 10), "gap between periods");
+  }
+  const months = enumeratePeriodOptions("2026-05-23", "2026-09-02", "month");
+  assert.deepEqual(months.map(o => o.key), ["2026-05", "2026-06", "2026-07", "2026-08", "2026-09"]);
+  const quarters = enumeratePeriodOptions("2026-05-23", "2026-09-02", "quarter");
+  assert.deepEqual(quarters.map(o => o.key), ["2026-Q2", "2026-Q3"]);
+});
+
+test("period pickers: enumeratePeriodOptions falls back to a year of history when data_from is absent", () => {
+  const opts = enumeratePeriodOptions(null, "2026-09-02", "quarter");
+  assert.equal(opts[0].key, "2025-Q3"); // period containing 2025-09-02
+  assert.equal(opts[opts.length - 1].key, "2026-Q3");
+});
+
+test("period pickers: defaultTrendsWindow yields 13 weeks / 6 months / 4 quarters ending today", () => {
+  const w = defaultTrendsWindow("week", "2026-09-02");
+  assert.equal(w.to, "2026-09-02");
+  assert.equal(w.from, "2026-06-08"); // Monday of W24, 13 ISO weeks incl. current
+  const mo = defaultTrendsWindow("month", "2026-09-02");
+  assert.equal(mo.from, "2026-04-01");
+  const q = defaultTrendsWindow("quarter", "2026-09-02");
+  assert.equal(q.from, "2025-10-01");
+});
+
+test("period pickers: clampTrendsWindow: future end snaps to today; inverted range recovers; 400-day cap holds", () => {
+  const fut = clampTrendsWindow("2026-08-01", "2026-12-31", "2026-09-02", "month");
+  assert.equal(fut.to, "2026-09-02");
+  const inv = clampTrendsWindow("2026-08-01", "2026-06-30", "2026-09-02", "month");
+  assert.ok(inv.from <= inv.to, "inverted range must recover");
+  const wide = clampTrendsWindow("2024-01-01", "2026-09-02", "2026-09-02", "month");
+  const span = Math.round((Date.parse(`${wide.to}T00:00:00Z`) - Date.parse(`${wide.from}T00:00:00Z`)) / 86400000) + 1;
+  assert.ok(span <= TRENDS_MAX_DAYS, `span ${span} exceeds the server cap`);
 });
