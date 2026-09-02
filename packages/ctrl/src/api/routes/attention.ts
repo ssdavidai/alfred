@@ -1289,6 +1289,9 @@ export function registerAttentionRoutes(): void {
     const db=getStateDb();
     const cf=`${from}T00:00:00Z`, ct=`${to}T23:59:59.999Z`;
     const firstJ=(db.prepare(`SELECT MIN(DATE(ts)) AS d FROM alfred_journal WHERE direction='outbound' AND ts>=? AND ts<=?`).get(cf,ct) as {d:string|null}).d;
+    // Earliest ledger entry overall (not window-bound): the UI's period pickers
+    // need to know how far back a selectable week/month/quarter can reach.
+    const dataFrom=(db.prepare(`SELECT MIN(DATE(occurred_at)) AS d FROM nar_entry`).get() as {d:string|null}).d;
     const daysData=(db.prepare(`SELECT COUNT(DISTINCT DATE(occurred_at)) AS n FROM nar_entry WHERE occurred_at>=? AND occurred_at<=?`).get(cf,ct) as {n:number}).n;
 
     const periods=[];
@@ -1353,7 +1356,7 @@ export function registerAttentionRoutes(): void {
       } catch { /* malformed payload — treat as not generated */ }
     }
     sendJson(res,200,{grain,from,to,
-      coverage:{interruption_instrumented_from:firstJ??null,days_total:dates.length,days_with_data:daysData},
+      coverage:{interruption_instrumented_from:firstJ??null,days_total:dates.length,days_with_data:daysData,data_from:dataFrom??null},
       periods,read});
   });
 }

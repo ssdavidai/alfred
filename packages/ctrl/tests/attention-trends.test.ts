@@ -92,6 +92,24 @@ describe("partial period",()=>{
 });
 
 // 3. return_ratio null when engaged=0
+describe("coverage.data_from",()=>{
+  it("reports the earliest ledger entry overall, not window-bound",async()=>{
+    clear();
+    nar({occurred_at:"2026-05-23T09:00:00Z"});           // earliest, outside window
+    nar({occurred_at:"2026-08-11T09:00:00Z"});
+    const {status,p}=await getTrends("grain=week&from=2026-08-10&to=2026-08-16");
+    assert.equal(status,200);
+    // The pickers need the floor of selectable periods; a window-bound MIN
+    // would hide history the user can legitimately compare against.
+    assert.equal(p.coverage.data_from,"2026-05-23");
+  });
+  it("null on an empty ledger — pickers fall back, never crash",async()=>{
+    clear();
+    const {p}=await getTrends("grain=week&from=2026-08-10&to=2026-08-16");
+    assert.equal(p.coverage.data_from,null);
+  });
+});
+
 describe("return_ratio",()=>{
   beforeEach(clear);
   it("null (not Infinity) when engaged_hours=0",async()=>{
