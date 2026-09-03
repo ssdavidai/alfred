@@ -37,7 +37,7 @@ struct AlfredBlackMain {
       _ = NSApplication.shared; AB.registerFonts()
       func write(_ view: some View, _ name: String) {
         let host = NSHostingView(rootView: view)
-        host.frame = NSRect(x: 0, y: 0, width: 520, height: 560)
+        host.frame = NSRect(x: 0, y: 0, width: 520, height: 640)
         host.layoutSubtreeIfNeeded()
         guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { return }
         host.cacheDisplay(in: host.bounds, to: rep)
@@ -51,6 +51,10 @@ struct AlfredBlackMain {
       if paired.pairing != nil { write(RootView().environmentObject(paired), "status.png") }
       print("snapshot: \(dir.path)")
       exit(0)
+    }
+    if CommandLine.arguments.contains("--export-plugin") {
+      do { let u = try Cowork.exportPlugin(); print("exported: \(u.path)"); exit(0) }
+      catch { print("error: \((error as? TenantError)?.message ?? "\(error)")"); exit(1) }
     }
     if CommandLine.arguments.contains("--tick") {
       var done = false
@@ -115,6 +119,35 @@ final class AppState: ObservableObject {
     } catch { message = error.localizedDescription }
   }
 
+  private func record(_ error: Error) {
+
+    state.lastError = (error as? TenantError)?.message ?? error.localizedDescription
+
+    state.lastErrorAt = Date()
+
+  }
+
+  /// Everything Cowork needs, in one action: the memory tools registered, the
+
+  /// plugin file in Downloads and selected in Finder, Claude opened.
+
+  func setUpCowork() {
+
+    do { try Cowork.registerMCP(); try Cowork.exportPlugin(); Cowork.revealExport(); Cowork.openClaude() } catch { record(error) }
+
+    cowork = Cowork.status()
+
+  }
+
+  func exportPlugin() {
+
+    do { try Cowork.exportPlugin(); Cowork.revealExport() } catch { record(error) }
+
+    cowork = Cowork.status()
+
+  }
+
+
   func signOut() {
     Keychain.delete("apikey"); Store.savePairing(nil); pairing = nil; online = nil
     try? Cowork.unregisterMCP(); cowork = Cowork.status()
@@ -140,6 +173,11 @@ final class AppState: ObservableObject {
     cowork = Cowork.status()
   }
   func tick(force: Bool = false) async {
+    // A denied Keychain prompt must not look like a network problem.
+    if pairing != nil, Keychain.get("apikey") == nil {
+      state.lastError = "The key could not be read from the Keychain. Allow access when macOS asks, or sign out and pair again."
+      state.lastErrorAt = Date(); online = false; return
+    }
     guard let t = tenant, let p = pairing else { return }
     let now = Date()
     if force || now.timeIntervalSince(lastRender) >= 30 {
@@ -181,6 +219,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   var timer: Timer?
 
   func applicationDidFinishLaunching(_ n: Notification) {
+
+    if Self.moveToApplicationsIfNeeded() { return }
     AB.registerFonts()
     statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     statusItem.button?.image = Glyph.bowtie()
@@ -188,13 +228,67 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     statusItem.button?.toolTip = "Alfred Black"
     statusItem.menu = buildMenu()
     state.selfHeal()
-    if state.pairing == nil { showWindow() }
+    if state.pairing == nil || !Self.launchedAsLoginItem() { showWindow() }
     timer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
       guard let self else { return }
       Task { @MainActor in await self.state.tick(); self.statusItem.menu = self.buildMenu() }
     }
     Task { @MainActor in await state.tick(force: true); statusItem.menu = buildMenu() }
   }
+
+  /// Launched from a mounted disk image (or anywhere read-only), the app would
+
+  /// die on eject and its login item would point into /Volumes. Copy to
+
+  /// /Applications, start from there, and let this copy quit.
+
+  static func moveToApplicationsIfNeeded() -> Bool {
+
+    let here = URL(fileURLWithPath: Bundle.main.bundlePath)
+
+    guard here.path.hasPrefix("/Volumes/") else { return false }
+
+    let dest = URL(fileURLWithPath: "/Applications/Alfred Black.app")
+
+    do {
+
+      try? FileManager.default.removeItem(at: dest)
+
+      try FileManager.default.copyItem(at: here, to: dest)
+
+    } catch { return false }   // keep running from here rather than not at all
+
+    let cfg = NSWorkspace.OpenConfiguration(); cfg.createsNewApplicationInstance = true
+
+    NSWorkspace.shared.openApplication(at: dest, configuration: cfg) { _, _ in
+
+      DispatchQueue.main.async { NSApp.terminate(nil) }
+
+    }
+
+    return true
+
+  }
+
+
+  /// A login-item launch arrives as an open-application event tagged as such;
+
+  /// a person double-clicking the app does not, and expects to see the window.
+
+  static func launchedAsLoginItem() -> Bool {
+
+    let aevt: UInt32 = 0x61657674, oapp: UInt32 = 0x6F617070, prdt: UInt32 = 0x70726474, lgit: UInt32 = 0x6C676974
+
+    guard let ev = NSAppleEventManager.shared().currentAppleEvent, ev.eventClass == aevt, ev.eventID == oapp,
+
+          let prop = ev.paramDescriptor(forKeyword: prdt) else { return false }
+
+    return prop.enumCodeValue == lgit
+
+  }
+
+  func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool { showWindow(); return true }
+
 
   @MainActor func buildMenu() -> NSMenu {
     let m = NSMenu()
@@ -227,7 +321,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
   func showWindow() {
     if window == nil {
-      let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 560),
+      let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 640),
                        styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
       w.title = "Alfred Black"
       w.titlebarAppearsTransparent = true

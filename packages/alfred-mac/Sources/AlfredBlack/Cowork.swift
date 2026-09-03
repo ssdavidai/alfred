@@ -14,6 +14,7 @@ struct CoworkStatus {
   var folderReady = false
   var mcpRegistered = false
   var pluginStaged = false
+  var pluginExported = false
   var claudeInstalled = false
 }
 
@@ -25,6 +26,7 @@ enum Cowork {
     s.folderReady = FileManager.default.fileExists(atPath: Paths.folderInstructions.path)
     s.pluginStaged = FileManager.default.fileExists(atPath: Paths.coworkPlugin.appendingPathComponent(".claude-plugin/plugin.json").path)
     s.claudeInstalled = FileManager.default.fileExists(atPath: "/Applications/Claude.app")
+    s.pluginExported = FileManager.default.fileExists(atPath: exportedPlugin.path)
     if let d = try? Data(contentsOf: Paths.claudeDesktopConfig),
        let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
        let servers = j["mcpServers"] as? [String: Any] {
@@ -75,5 +77,36 @@ enum Cowork {
     }
   }
   static func revealPlugin() { NSWorkspace.shared.activateFileViewerSelecting([Paths.coworkPlugin]) }
+
+  /// Claude Desktop installs a plugin from a `.plugin` file — a zip with
+  /// `.claude-plugin/plugin.json` at its root, under 4 MB — chosen in its own
+  /// Plugins UI. There is no deep link or CLI for that step, so the app makes
+  /// the file, selects it in Finder, and opens Claude.
+  static var exportedPlugin: URL {
+    let dl = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+      ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads")
+    return dl.appendingPathComponent("Alfred Continuity.plugin")
+  }
+
+  @discardableResult
+  static func exportPlugin() throws -> URL {
+    try stagePlugin()
+    let root = Paths.coworkPlugin
+    guard FileManager.default.fileExists(atPath: root.appendingPathComponent(".claude-plugin/plugin.json").path) else {
+      throw TenantError(message: "Plugin manifest missing from the staged copy.")
+    }
+    let out = exportedPlugin
+    try? FileManager.default.removeItem(at: out)
+    let zip = Process()
+    zip.executableURL = URL(fileURLWithPath: "/usr/bin/zip")
+    zip.currentDirectoryURL = root
+    zip.arguments = ["-r", "-X", "-q", out.path, ".", "-x", "*.DS_Store", "-x", "__MACOSX/*"]
+    try zip.run(); zip.waitUntilExit()
+    guard zip.terminationStatus == 0 else { throw TenantError(message: "Could not build the plugin file (zip exited \(zip.terminationStatus)).") }
+    let size = (try? FileManager.default.attributesOfItem(atPath: out.path)[.size] as? Int) ?? 0
+    guard size > 0, size < 4 * 1024 * 1024 else { throw TenantError(message: "Plugin file is \(size) bytes; Claude accepts up to 4 MB.") }
+    return out
+  }
+  static func revealExport() { NSWorkspace.shared.activateFileViewerSelecting([exportedPlugin]) }
   static func revealAlfredFolder() { NSWorkspace.shared.activateFileViewerSelecting([Paths.continuity]) }
 }

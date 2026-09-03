@@ -15,7 +15,9 @@ Slack, and the next turn on either side must already know about it.
 | **Pair** | Enter the tenant URL and the dashboard login. The app signs in, mints a dedicated API key (visible under *Study › API keys*, revocable there), stores it in the login Keychain, and forgets the password. |
 | **Read side** | Every 30 s it renders the principal's recent journal (Slack, Telegram, Cowork, …) into `~/Alfred/continuity.md` as the same `[ALFRED-CONTINUITY — authoritative]` block the Hermes plugin injects. A Cowork plugin (staged by the app) reads that file on `SessionStart`, `UserPromptSubmit` and `PostCompact`. |
 | **Write side** | Every 60 s it mirrors new Cowork turns from the local session transcripts into the journal (`channel: cowork`), binding each new session to the owner. Only turns from the last 48 h are ever mirrored: the journal stamps `ts` server-side, so history mirrored late would land as "now". |
+| **Set up Cowork** | One action: registers the MCP server, exports the hooks plugin as `Alfred Continuity.plugin` into Downloads (a zip with `.claude-plugin/plugin.json` at its root — the file Claude Desktop's plugin upload accepts), selects it in Finder and opens Claude. Installing a plugin is Claude's own UI step; there is no deep link or CLI for it. |
 | **MCP** | Registers itself in Claude Desktop (`mcpServers.alfred-continuity`, `--mcp`) exposing `alfred_continuity_recent` / `alfred_continuity_note` / `alfred_continuity_bind` — Cowork can read and write continuity directly, through the app, over a loopback stdio pipe. |
+| **First launch** | Opened from a mounted disk image, the app copies itself to `/Applications`, starts from there and lets the mounted copy quit — so the login item never points into `/Volumes`. A double-click on the running app opens the window; a login-item launch stays in the menu bar. |
 | **Always on** | Registers as a login item (`SMAppService`). Menu-bar only (`LSUIElement`), no Dock icon. On every launch it re-points the MCP registration and the login item at its current bundle path, so moving it to `/Applications` needs nothing. |
 
 Everything speaks to the tenant through the dashboard's own API proxy
@@ -61,7 +63,8 @@ Produces `dist/Alfred Black.app` and `dist/AlfredBlack-2026.09.03.dmg`.
 "dist/Alfred Black.app/Contents/MacOS/AlfredBlack" --pair https://<domain> <email> <password>
 "dist/Alfred Black.app/Contents/MacOS/AlfredBlack" --tick       # one render + one mirror pass
 "dist/Alfred Black.app/Contents/MacOS/AlfredBlack" --status
-"dist/Alfred Black.app/Contents/MacOS/AlfredBlack" --snapshot /path/out.png   # render the UI to a file
+"dist/Alfred Black.app/Contents/MacOS/AlfredBlack" --export-plugin           # write ~/Downloads/Alfred Continuity.plugin
+"dist/Alfred Black.app/Contents/MacOS/AlfredBlack" --snapshot /path/dir      # render both views to PNGs
 ```
 
 ## Signing and distribution
@@ -69,6 +72,12 @@ Produces `dist/Alfred Black.app` and `dist/AlfredBlack-2026.09.03.dmg`.
 The build is **ad-hoc signed** (`codesign --sign -`). It runs on the Mac it
 was built on; on another Mac, Gatekeeper will refuse a double-click the
 first time — right-click › *Open* once, or clear the quarantine flag.
+Because each ad-hoc build has a new signature, an **updated** build asks once
+for access to the key the previous build stored in the Keychain — click *Always
+Allow*. Pairing from the installed app creates the item with that binary as its
+owner, so a first run never asks. A denied read is reported in the app, not
+mistaken for a network problem.
+
 Proper distribution needs a Developer ID certificate and notarization;
 `build-app.sh` is the place to add them (`codesign --sign "Developer ID
 Application: …"`, then `notarytool submit` + `stapler`).
