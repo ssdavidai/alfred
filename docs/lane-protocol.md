@@ -22,10 +22,11 @@ user-visible flow is the close gate.
 | **V** — edges/infra | `lane-5/` | `packages/{hermes,mcp-server,vault-init,setup}/**`, `scripts/**`, `caddy/**`, `docker-compose.yaml`, `.env.example`, `Makefile`, `docs/**` | `docker compose config -q` |
 | **VI** — voice-bridge | `lane-6/` | `packages/voice-bridge/**` | `cd packages/voice-bridge && npm test` |
 | **VII** — paperclip | `lane-7/` | `packages/paperclip/**` | `cd packages/paperclip/adapter && npm run typecheck && npm test` |
+| **VIII** — alfred-mac | `lane-8/` | `packages/alfred-mac/**` | `cd packages/alfred-mac && swift build -c release` |
 | phase0 — orchestrator | n/a (main checkout) | `**` (allow-all) | `true` |
 
 Branch naming: `lane-<arabic>/<issue>-<slug>` — the arabic digit maps to
-the roman lane ID (lane-1 = Lane I … lane-7 = Lane VII). These are the
+the roman lane ID (lane-1 = Lane I … lane-8 = Lane VIII). These are the
 ONLY valid lane IDs. If your work doesn't fit a lane, it's orchestrator
 (phase0) work — STOP and report; do not invent a lane name.
 
@@ -162,7 +163,7 @@ Inherit lane-worker.md. Your lane scope:
   {lane_scope}
 
 FIRST ACTION: write the .lane manifest — echo '{{"lane":"<ID>"}}' > .lane
-(valid IDs: I II III IV V VI VII — see docs/lane-protocol.md).
+(valid IDs: I II III IV V VI VII VIII — see docs/lane-protocol.md).
 
 Contracts at /tmp/orchestrator-{n}-contracts.md (read verbatim, don't drift).
 
