@@ -31,7 +31,7 @@ Hardening (2026-07-15, post-audit):
     the rules for the same commit. Falls back to the on-disk copy only when
     HEAD has no copy (fresh repo).
 
-`.lane` format:  {"lane": "II"}            # required: I|II|III|IV|V|VI|VII
+`.lane` format:  {"lane": "II"}            # required: I|II|III|IV|V|VI|VII|VIII
                  {"lane": "II", "verify": "cd packages/learn && python -m pytest tests/test_signals.py -q"}
                  {"lane": "II", "scope_limit": 350}   # only for a justified larger task
 
@@ -46,7 +46,7 @@ import sys
 
 RED, GREEN, YELLOW, RESET = "\033[31m", "\033[32m", "\033[33m", "\033[0m"
 
-ROMAN_LANES = ("I", "II", "III", "IV", "V", "VI", "VII")
+ROMAN_LANES = ("I", "II", "III", "IV", "V", "VI", "VII", "VIII")
 
 
 def run(*args):

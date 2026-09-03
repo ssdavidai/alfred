@@ -11,7 +11,7 @@
 #   lane-1/* → I (ctrl)          lane-5/* → V  (edges/infra)
 #   lane-2/* → II (learn)        lane-6/* → VI (voice-bridge)
 #   lane-3/* → III (web)         lane-7/* → VII (paperclip)
-#   lane-4/* → IV (alfred-vault)
+#   lane-4/* → IV (alfred-vault)  lane-8/* → VIII (alfred-mac)
 #   anything else → phase0 (operator branch; allow-all by design — the lane
 #   protocol constrains AGENT branches, and agents must use lane-N/ naming).
 #
@@ -45,6 +45,7 @@ jobs:
             lane-5/*) LANE=V ;;
             lane-6/*) LANE=VI ;;
             lane-7/*) LANE=VII ;;
+            lane-8/*) LANE=VIII ;;
             lane-*)   LANE=INVALID ;;
             *)        LANE=phase0 ;;
           esac
@@ -56,7 +57,7 @@ jobs:
         env:
           BRANCH: ${{ github.head_ref }}
         run: |
-          echo "::error::branch '$BRANCH' uses lane-* naming but maps to no lane (valid: lane-1 … lane-7). Rename the branch or use a non-lane branch for operator work."
+          echo "::error::branch '$BRANCH' uses lane-* naming but maps to no lane (valid: lane-1 … lane-8). Rename the branch or use a non-lane branch for operator work."
           exit 1
 
       - name: Replay the lane gate on the PR diff
