@@ -97,7 +97,7 @@ struct StatusView: View {
         Row(k: "Hooks plugin", v: s.cowork.pluginExported ? "exported to Downloads" : (s.cowork.pluginStaged ? "ready to export" : "not staged"), ok: s.cowork.pluginExported)
       }.padding(.top, 6)
       if s.cowork.pluginExported {
-        Text("Alfred Continuity.plugin is in your Downloads, selected in Finder. In Claude, open Plugins and choose upload, then pick that file. Hooks load only through a plugin, and installing one is Claude's own step.")
+        Text("Alfred Continuity.plugin is in your Downloads, selected in Finder. In Claude, switch to Cowork, open its Plugins panel and upload that file there — a Cowork session loads only plugins installed from Cowork. Installing one is Claude's own step.")
           .font(AB.body(14)).foregroundColor(AB.marginalia).lineSpacing(3).padding(.top, 12).frame(maxWidth: 448, alignment: .leading).fixedSize(horizontal: false, vertical: true)
       }
 
