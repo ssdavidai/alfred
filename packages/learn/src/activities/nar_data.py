@@ -176,7 +176,7 @@ def _get_human_sessions(db: sqlite3.Connection, day: date) -> list[dict[str, Any
     try:
         rows = db.execute(
             """
-            SELECT id, source, started_at, ended_at
+            SELECT id, source, started_at, ended_at, parent_session_id
             FROM sessions
             WHERE source IN ({placeholders})
               AND started_at >= ?
@@ -211,12 +211,62 @@ def _get_human_sessions(db: sqlite3.Connection, day: date) -> list[dict[str, Any
             "source": row["source"],
             "started_at": row["started_at"],
             "ended_at": row["ended_at"],
+            "parent_session_id": row["parent_session_id"] if "parent_session_id" in row.keys() else None,
             "messages": [
                 {"role": m["role"], "content": m["content"], "ts": m["timestamp"]}
                 for m in msgs
             ],
         })
-    return sessions
+    return _fold_session_chains(sessions)
+
+
+def _fold_session_chains(sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge same-day continuation chains into one conversation per root.
+
+    Hermes context compression (end_reason=compression) and session resets
+    chain a continued human thread to its predecessor via parent_session_id.
+    Scored fragment by fragment, one long conversation becomes many sessions
+    that each look like "discussion only, nothing delivered": on a live tenant
+    a day with 11 real conversations appeared as 75 sessions (one chain was 40
+    fragments), every one scored bucket=none with 0 displaced while carrying
+    real engaged minutes — a -4.7h day that was actually productive.
+
+    Folding rule: a session whose parent is ALSO in this day's set is a
+    fragment; its messages join the root's, in timestamp order. The root keeps
+    its id/started_at/source, so dedup keys stay stable and the day's replace
+    write retires the fragment rows. A child whose parent started on another
+    day stays its own session for this day (bounded, rare — 7 of 142 live).
+    ``fragments`` records how many sessions were folded in (root counts as 1).
+    """
+    by_id = {s["id"]: s for s in sessions}
+    def root_of(sid: str) -> str:
+        seen = 0
+        cur = sid
+        while seen < 500:
+            parent = by_id[cur].get("parent_session_id")
+            if not parent or parent not in by_id:
+                return cur
+            cur = parent
+            seen += 1
+        return cur
+    merged: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for s in sessions:
+        r = root_of(s["id"])
+        if r not in merged:
+            root = dict(by_id[r])
+            root["messages"] = list(by_id[r]["messages"])
+            root["fragments"] = 1
+            merged[r] = root
+            order.append(r)
+        if r != s["id"]:
+            merged[r]["messages"].extend(s["messages"])
+            merged[r]["fragments"] += 1
+            if s.get("ended_at") and (not merged[r].get("ended_at") or s["ended_at"] > merged[r]["ended_at"]):
+                merged[r]["ended_at"] = s["ended_at"]
+    for r in order:
+        merged[r]["messages"].sort(key=lambda m: (m.get("ts") is None, m.get("ts") or 0))
+    return [merged[r] for r in order]
 
 
 # ---------------------------------------------------------------------------
