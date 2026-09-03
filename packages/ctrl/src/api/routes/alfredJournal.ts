@@ -26,6 +26,7 @@ import { getStateDb } from "../../db/state.js";
 import {
   appendJournal,
   bindPrincipalChannel,
+  queryRecentForChat,
   queryRecentJournal,
   type Direction,
   type Status,
@@ -153,17 +154,34 @@ export function registerAlfredJournalRoutes(): void {
     }
 
     const db = getStateDb();
-    const entries = principalId
-      ? queryRecentJournal(db, { principal_id: principalId }, {
-          limit,
-          within_hours: withinHours,
-          hermes_profile: hermesProfile,
-        })
-      : queryRecentJournal(
-          db,
-          { channel: channel as string, chat_id: chatId as string },
-          { limit, within_hours: withinHours, hermes_profile: hermesProfile },
-        );
+    // `scope=chat` pins a (channel, chat_id) request to that chat's own
+    // history; otherwise a bound private chat reads its principal's
+    // cross-surface window (rooms never do — see isPrivateChat).
+    const pinToChat = query.get("scope") === "chat";
+    let scope: "principal" | "chat" = "principal";
+    let entries;
+    if (principalId) {
+      entries = queryRecentJournal(db, { principal_id: principalId }, {
+        limit,
+        within_hours: withinHours,
+        hermes_profile: hermesProfile,
+      });
+    } else if (pinToChat) {
+      scope = "chat";
+      entries = queryRecentJournal(
+        db,
+        { channel: channel as string, chat_id: chatId as string },
+        { limit, within_hours: withinHours, hermes_profile: hermesProfile },
+      );
+    } else {
+      const r = queryRecentForChat(db, channel as string, chatId as string, {
+        limit,
+        within_hours: withinHours,
+        hermes_profile: hermesProfile,
+      });
+      scope = r.scope;
+      entries = r.entries;
+    }
 
     sendJson(res, 200, {
       entries,
@@ -171,6 +189,7 @@ export function registerAlfredJournalRoutes(): void {
       window: {
         limit,
         within_hours: withinHours,
+        scope,
         ...(profileParam !== null ? { profile: profileParam } : {}),
       },
     });
