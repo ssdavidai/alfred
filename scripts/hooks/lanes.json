@@ -1,5 +1,5 @@
 {
-  "_comment": "Lane definitions for the Alfred fix fan-out. Enforced by check_lane.py at pre-commit AND replayed server-side by .github/workflows/lane-gate.yml on every PR from a lane-N/* branch. forbidden_zone is Phase-0-owned and off-limits to every lane (except phase0). A staged file must match >=1 of its lane's `allowed` globs and 0 forbidden_zone globs. Glob rules: `a/b/**` = prefix match; `**/x` = suffix match; otherwise fnmatch; exact path = equality. `verify` is the regression gate (overridable per-task via .lane). scope_limit is net changed LOC. Branch naming: lane-<arabic>/<issue>-<slug> maps to the roman lane id (lane-1=I .. lane-7=VII). v2 2026-07-15: added lanes VI (voice-bridge) + VII (paperclip), setup joined lane V — every package now has exactly one owning lane; .github/** and docs/lane-protocol.md joined the forbidden zone. v3 2026-08-15: design-system/** joined lane V — the imported Alfred Black brand system (tokens, components, templates) is shipped in-repo so a fresh clone can build in-brand.",
+  "_comment": "Lane definitions for the Alfred fix fan-out. Enforced by check_lane.py at pre-commit AND replayed server-side by .github/workflows/lane-gate.yml on every PR from a lane-N/* branch. forbidden_zone is Phase-0-owned and off-limits to every lane (except phase0). A staged file must match >=1 of its lane's `allowed` globs and 0 forbidden_zone globs. Glob rules: `a/b/**` = prefix match; `**/x` = suffix match; otherwise fnmatch; exact path = equality. `verify` is the regression gate (overridable per-task via .lane). scope_limit is net changed LOC. Branch naming: lane-<arabic>/<issue>-<slug> maps to the roman lane id (lane-1=I .. lane-7=VII). v2 2026-07-15: added lanes VI (voice-bridge) + VII (paperclip), setup joined lane V \u2014 every package now has exactly one owning lane; .github/** and docs/lane-protocol.md joined the forbidden zone. v3 2026-08-15: design-system/** joined lane V \u2014 the imported Alfred Black brand system (tokens, components, templates) is shipped in-repo so a fresh clone can build in-brand.",
   "forbidden_zone": [
     "packages/ctrl/src/db/schema.sql",
     "packages/ctrl/src/db/migrations/**",
@@ -88,6 +88,14 @@
       ],
       "verify": "true",
       "scope_limit": 100000
+    },
+    "VIII": {
+      "name": "alfred-mac",
+      "allowed": [
+        "packages/alfred-mac/**"
+      ],
+      "verify": "cd packages/alfred-mac && swift build -c release",
+      "scope_limit": 200
     }
   }
 }

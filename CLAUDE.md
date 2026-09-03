@@ -60,6 +60,7 @@ alfred-black/
 │   ├── hermes/              Hermes runtime image (Dockerfile + supervisor.sh + init/)
 │   ├── voice-bridge/        Twilio/telephony bridge (own image + CI)
 │   ├── paperclip/           Paperclip adapter (own image + CI; see docs/PAPERCLIP-BOOTSTRAP-CONTRACT.md)
+│   ├── alfred-mac/          Alfred Black for macOS — menu-bar app pairing a Mac's Claude Cowork with the tenant's continuity layer (SwiftPM; see its README)
 │   └── setup/               first-run setup wizard (own image + CI)
 ├── docs/
 │   ├── lane-protocol.md     CANONICAL lane protocol (mirrored in the operator harness)
@@ -701,6 +702,7 @@ For mapping unknown breakage (e.g. a sweep over the live product):
    | **V**·edges/infra | `lane-5/` | `packages/{hermes,mcp-server,vault-init,setup}/**`, `scripts/**`, `caddy/**`, `docker-compose.yaml`, `.env.example`, `Makefile`, `docs/**`, `design-system/**` | All non-package config + the brand system |
    | **VI**·voice-bridge | `lane-6/` | `packages/voice-bridge/**` | Twilio/telephony bridge |
    | **VII**·paperclip | `lane-7/` | `packages/paperclip/**` | Paperclip adapter |
+   | **VIII**·alfred-mac | `lane-8/` | `packages/alfred-mac/**` | The macOS companion app (one-Alfred continuity for Claude Cowork) |
 
    These are the ONLY valid lane IDs — never invent one ("CTRL"/"HERMES"
    inventions are how the 2026-06 ungated commits happened). `.github/**`
