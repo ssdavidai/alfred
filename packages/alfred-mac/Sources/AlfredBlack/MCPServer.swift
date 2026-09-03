@@ -67,10 +67,20 @@ enum MCPServer {
             case "alfred_continuity_recent":
               let e = try await tenant.recent(limit: (args["limit"] as? Int) ?? 20, withinHours: (args["within_hours"] as? Double) ?? 24)
               out = text(Continuity.render(e, domain: domain))
+              Activity.record(recent: true)
             case "alfred_continuity_note":
-              try await tenant.append(channel: (args["channel"] as? String) ?? "cowork", chatId: args["chat_id"] as? String ?? "",
+              let channel = (args["channel"] as? String) ?? "cowork"
+              let chatId = (args["chat_id"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "cowork-unknown"
+              // Bind on first sight, so the sandboxed session never has to.
+              var st = Store.loadState()
+              if !st.boundSessions.contains(chatId) {
+                try await tenant.bind(channel: channel, chatId: chatId)
+                st.boundSessions.insert(chatId); Store.saveState(st)
+              }
+              try await tenant.append(channel: channel, chatId: chatId,
                                       direction: args["direction"] as? String ?? "inbound", message: args["message"] as? String ?? "",
                                       sourceRef: UUID().uuidString, metadata: ["via": "alfred-black-mac-mcp"])
+              Activity.record(note: true)
               out = text("journaled")
             case "alfred_continuity_bind":
               try await tenant.bind(channel: (args["channel"] as? String) ?? "cowork", chatId: args["chat_id"] as? String ?? "")
@@ -86,5 +96,24 @@ enum MCPServer {
       }
     }
     exit(0)
+  }
+}
+
+
+/// What the sandboxed sessions did through the tools — kept in a file of its
+/// own because the MCP server is a separate process from the menu-bar app.
+struct ActivityLog: Codable { var notes = 0; var recents = 0; var lastNoteAt: Date?; var lastRecentAt: Date? }
+enum Activity {
+  static var file: URL { Paths.support.appendingPathComponent("mcp-activity.json") }
+  static func load() -> ActivityLog {
+    guard let d = try? Data(contentsOf: file), let a = try? JSONDecoder().decode(ActivityLog.self, from: d) else { return ActivityLog() }
+    return a
+  }
+  static func record(note: Bool = false, recent: Bool = false) {
+    var a = load()
+    if note { a.notes += 1; a.lastNoteAt = Date() }
+    if recent { a.recents += 1; a.lastRecentAt = Date() }
+    try? FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+    if let d = try? JSONEncoder().encode(a) { try? d.write(to: file, options: .atomic) }
   }
 }

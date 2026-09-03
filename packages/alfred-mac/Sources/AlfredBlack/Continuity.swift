@@ -49,7 +49,20 @@ enum Continuity {
   static func refresh(tenant: Tenant, domain: String) async throws -> Int {
     let entries = try await tenant.recent(limit: 50, withinHours: 48)
     try FileManager.default.createDirectory(at: Paths.alfredDir, withIntermediateDirectories: true)
-    try render(entries, domain: domain).write(to: Paths.continuity, atomically: true, encoding: .utf8)
+    let block = render(entries, domain: domain)
+    try block.write(to: Paths.continuity, atomically: true, encoding: .utf8)
+    // Cowork sessions run in a sandbox that mounts only the space's folders, so the
+    // plugin's hook also looks for the block inside the project folder itself.
+    // The block is the principal's private memory: never into a folder that syncs
+    // elsewhere, and never into a repository's history.
+    for folder in Cowork.spaceFolders() where !Cowork.isSynced(folder) {
+      let dir = folder.appendingPathComponent(".alfred", isDirectory: true)
+      try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+      let file = dir.appendingPathComponent("continuity.md")
+      try? block.write(to: file, atomically: true, encoding: .utf8)
+      try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+      Cowork.excludeFromGit(folder, entry: ".alfred/")
+    }
     if !FileManager.default.fileExists(atPath: Paths.folderInstructions.path) {
       try folderInstructions.write(to: Paths.folderInstructions, atomically: true, encoding: .utf8)
     }
