@@ -12,7 +12,7 @@ Slack, and the next turn on either side must already know about it.
 
 | | |
 |---|---|
-| **Pair** | Enter the tenant URL and the dashboard login. The app signs in, mints a dedicated API key (visible under *Study › API keys*, revocable there), stores it in the login Keychain, and forgets the password. |
+| **Pair** | Enter the tenant URL and the dashboard login. The app signs in, mints a dedicated API key (visible under *Study › API keys*, revocable there), stores it in a 0600 file of its own, and forgets the password. |
 | **Read side** | Every 30 s it renders the principal's recent journal (Slack, Telegram, Cowork, …) into `~/Alfred/continuity.md` as the same `[ALFRED-CONTINUITY — authoritative]` block the Hermes plugin injects. A Cowork plugin (staged by the app) reads that file on `SessionStart`, `UserPromptSubmit` and `PostCompact`. |
 | **Write side** | Every 60 s it mirrors new Cowork turns from the local session transcripts into the journal (`channel: cowork`), binding each new session to the owner. Only turns from the last 48 h are ever mirrored: the journal stamps `ts` server-side, so history mirrored late would land as "now". |
 | **Set up Cowork** | One action: registers the MCP server, exports the hooks plugin as `Alfred Continuity.plugin` into Downloads (a zip with `.claude-plugin/plugin.json` at its root — the file Claude Desktop's plugin upload accepts), selects it in Finder and opens Claude. Installing a plugin is Claude's own UI step; there is no deep link or CLI for it. |
@@ -72,11 +72,13 @@ Produces `dist/Alfred Black.app` and `dist/AlfredBlack-2026.09.03.dmg`.
 The build is **ad-hoc signed** (`codesign --sign -`). It runs on the Mac it
 was built on; on another Mac, Gatekeeper will refuse a double-click the
 first time — right-click › *Open* once, or clear the quarantine flag.
-Because each ad-hoc build has a new signature, an **updated** build asks once
-for access to the key the previous build stored in the Keychain — click *Always
-Allow*. Pairing from the installed app creates the item with that binary as its
-owner, so a first run never asks. A denied read is reported in the app, not
-mistaken for a network problem.
+The login Keychain's ACL trusts a code identity, and an ad-hoc signature is a
+new identity on every build — every update would re-ask, and for the background
+MCP server that Claude Desktop spawns the question is never shown: the process
+just blocks. So while the app is ad-hoc signed the key lives in a 0600 file in
+its support folder, and the Keychain is only read with user interaction
+disabled (to migrate a key an earlier build stored there). A Developer ID
+signature is what makes a Keychain-backed store viable.
 
 Proper distribution needs a Developer ID certificate and notarization;
 `build-app.sh` is the place to add them (`codesign --sign "Developer ID
@@ -92,9 +94,9 @@ Application: …"`, then `notarytool submit` + `stapler`).
 | `~/Library/Application Support/Alfred Black/state.json` | mirrored-turn ids, bound sessions, last run |
 | `~/Library/Application Support/Alfred Black/cowork-plugin/` | the staged Cowork plugin |
 | `~/Library/Application Support/Claude/claude_desktop_config.json` | `mcpServers.alfred-continuity` (other keys preserved) |
-| login Keychain, service `black.alfred.mac` | the API key |
+| `~/Library/Application Support/Alfred Black/.device-key` (0600) | the API key — see *Signing* for why not the Keychain yet |
 
-Sign out removes the pairing, the Keychain item and the MCP registration;
+Sign out removes the pairing, the key file and the MCP registration;
 the API key itself is revoked from *Study › API keys* on the tenant.
 
 ## Design
