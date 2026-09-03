@@ -46,9 +46,15 @@ enum Continuity {
   """
 
   /// Fetch + write. Returns the number of entries rendered.
+  private static let isoFrac: ISO8601DateFormatter = { let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]; return f }()
+  private static let isoPlain = ISO8601DateFormatter()
+  static func parseTs(_ s: String) -> Date? { isoFrac.date(from: s) ?? isoPlain.date(from: s) }
+
   static func refresh(tenant: Tenant, domain: String) async throws -> Int {
     let entries = try await tenant.recent(limit: 50, withinHours: 48)
     try FileManager.default.createDirectory(at: Paths.alfredDir, withIntermediateDirectories: true)
+    let cw = entries.filter { $0.channel == "cowork" }
+    Activity.recordJournal(coworkCount: cw.count, last: cw.compactMap { Continuity.parseTs($0.ts) }.max())
     let block = render(entries, domain: domain)
     try block.write(to: Paths.continuity, atomically: true, encoding: .utf8)
     // Cowork sessions run in a sandbox that mounts only the space's folders, so the
