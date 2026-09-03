@@ -1,0 +1,6 @@
+{
+  "name": "alfred-continuity",
+  "version": "1.0.0",
+  "description": "One Alfred in Claude Cowork: reads Alfred's cross-surface memory before every turn and journals this surface's turns so every other surface remembers them.",
+  "author": { "name": "Alfred Black" }
+}

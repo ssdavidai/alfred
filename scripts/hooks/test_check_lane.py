@@ -47,10 +47,10 @@ class TestConfigShape(unittest.TestCase):
         with open(os.path.join(HERE, "lanes.json")) as fh:
             self.cfg = json.load(fh)
 
-    def test_all_seven_lanes_plus_phase0(self):
+    def test_all_eight_lanes_plus_phase0(self):
         self.assertEqual(
             set(self.cfg["lanes"].keys()),
-            {"I", "II", "III", "IV", "V", "VI", "VII", "phase0"})
+            {"I", "II", "III", "IV", "V", "VI", "VII", "VIII", "phase0"})
 
     def test_every_package_has_exactly_one_owning_lane(self):
         packages = ["alfred-vault", "ctrl", "hermes", "learn", "mcp-server",

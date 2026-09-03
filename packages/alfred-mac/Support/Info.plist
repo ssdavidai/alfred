@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key>            <string>Alfred Black</string>
+  <key>CFBundleDisplayName</key>     <string>Alfred Black</string>
+  <key>CFBundleIdentifier</key>      <string>black.alfred.mac</string>
+  <key>CFBundleVersion</key>         <string>__BUILD__</string>
+  <key>CFBundleShortVersionString</key> <string>__VERSION__</string>
+  <key>CFBundleExecutable</key>      <string>AlfredBlack</string>
+  <key>CFBundlePackageType</key>     <string>APPL</string>
+  <key>CFBundleIconFile</key>        <string>AppIcon</string>
+  <key>LSMinimumSystemVersion</key>  <string>13.0</string>
+  <key>LSUIElement</key>             <true/>
+  <key>NSHighResolutionCapable</key> <true/>
+  <key>NSHumanReadableCopyright</key><string>Alfred Black. Service is the standard.</string>
+  <key>ATSApplicationFontsPath</key> <string>Fonts</string>
+  <key>NSAppTransportSecurity</key>
+  <dict><key>NSAllowsArbitraryLoads</key><false/></dict>
+</dict>
+</plist>
