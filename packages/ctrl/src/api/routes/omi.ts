@@ -9,6 +9,33 @@ const STREAMS_DIR = path.join(ALFRED_DATA_DIR, "streams");
 const OMI_AUDIO_DIR = path.join(STREAMS_DIR, "omi-audio");
 const STREAMS_META_PATH = path.join(STREAMS_DIR, "streams.json");
 
+const parseNumericId = (value: string | undefined, fallback: number): number => {
+  const parsed = Number.parseInt(value ?? "", 10);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
+};
+
+// ctrl-api runs as root in the deployment while alfred-learn runs as uid/gid
+// 1000. A normal root-owned 0755 directory lets the processor read incoming
+// PCM chunks but not create its processed/ directory, permanently blocking
+// transcription. Hand each per-device directory to the processor account.
+// The writable fallback keeps local/non-root development usable when chown is
+// unavailable; the Docker volume is private to trusted stack services.
+export function ensureOmiUidDirectory(uid: string): string {
+  const uidDir = path.join(OMI_AUDIO_DIR, uid);
+  fs.mkdirSync(uidDir, { recursive: true });
+
+  const processorUid = parseNumericId(process.env.OMI_PROCESSOR_UID, 1000);
+  const processorGid = parseNumericId(process.env.OMI_PROCESSOR_GID, 1000);
+  try {
+    fs.chownSync(uidDir, processorUid, processorGid);
+    fs.chmodSync(uidDir, 0o770);
+  } catch {
+    fs.chmodSync(uidDir, 0o777);
+  }
+
+  return uidDir;
+}
+
 interface StreamMeta {
   id: string;
   source: string;
@@ -103,8 +130,7 @@ export function registerOmiRoutes(): void {
       }
 
       // Create directory for this uid
-      const uidDir = path.join(OMI_AUDIO_DIR, uid);
-      fs.mkdirSync(uidDir, { recursive: true });
+      const uidDir = ensureOmiUidDirectory(uid);
 
       // Write audio chunk and metadata
       const timestamp = Date.now();
