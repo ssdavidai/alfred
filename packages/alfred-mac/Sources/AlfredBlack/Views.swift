@@ -7,7 +7,7 @@ struct RootView: View {
     ZStack { AB.paper.ignoresSafeArea()
       if s.pairing == nil { OnboardingView() } else { StatusView() }
     }
-    .frame(width: 520, height: 560)
+    .frame(width: 520, height: 640)
   }
 }
 
@@ -93,8 +93,12 @@ struct StatusView: View {
         Row(k: "Claude Desktop", v: s.cowork.claudeInstalled ? "installed" : "not found", ok: s.cowork.claudeInstalled)
         Row(k: "Alfred folder", v: s.cowork.folderReady ? "~/Alfred ready" : "pending", ok: s.cowork.folderReady)
         Row(k: "Memory tools", v: s.cowork.mcpRegistered ? "registered with Claude" : "not registered", ok: s.cowork.mcpRegistered)
-        Row(k: "Hooks plugin", v: s.cowork.pluginStaged ? "staged — install from Claude › Plugins" : "not staged", ok: s.cowork.pluginStaged)
+        Row(k: "Hooks plugin", v: s.cowork.pluginExported ? "exported to Downloads" : (s.cowork.pluginStaged ? "ready to export" : "not staged"), ok: s.cowork.pluginExported)
       }.padding(.top, 6)
+      if s.cowork.pluginExported {
+        Text("Alfred Continuity.plugin is in your Downloads, selected in Finder. In Claude, open Plugins and choose upload, then pick that file. Hooks load only through a plugin, and installing one is Claude's own step.")
+          .font(AB.body(14)).foregroundColor(AB.marginalia).lineSpacing(3).padding(.top, 12).frame(maxWidth: 448, alignment: .leading).fixedSize(horizontal: false, vertical: true)
+      }
 
       if let e = s.state.lastError, let at = s.state.lastErrorAt, Date().timeIntervalSince(at) < 600 {
         Text(e).font(AB.mono(10)).foregroundColor(AB.oxblood).padding(.top, 10).lineLimit(2)
@@ -102,8 +106,8 @@ struct StatusView: View {
       Spacer()
       Hairline(brass: true)
       HStack(spacing: 8) {
-        Button("Set up Cowork") { try? Cowork.stagePlugin(); try? Cowork.registerMCP(); s.cowork = Cowork.status(); Cowork.openClaude() }.buttonStyle(ABButton(primary: true))
-        Button("Plugin") { Cowork.revealPlugin() }.buttonStyle(ABButton())
+        Button("Set up Cowork") { s.setUpCowork() }.buttonStyle(ABButton(primary: true))
+        Button("Export") { s.exportPlugin() }.buttonStyle(ABButton())
         Button("Refresh") { Task { await s.tick(force: true) } }.buttonStyle(ABButton())
         Spacer()
         Button("Sign out") { s.signOut() }.buttonStyle(ABButton())
