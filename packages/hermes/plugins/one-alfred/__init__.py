@@ -259,6 +259,91 @@ def _format_journal_context(entries: list[dict[str, Any]]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Session -> chat resolution (Hermes 0.20)
+# ---------------------------------------------------------------------------
+#
+# 0.20 changed session ids from `agent:main:<platform>:dm:<chat_id>` to
+# `YYYYMMDD_HHMMSS_<hex>`. The two LLM hooks below used to derive the chat id
+# by parsing the session id, so on 0.20 every real channel turn hit "no
+# chat_id ... skip" and the journal's write side went silent for two weeks —
+# fail-soft by design, INFO not surfaced, nobody noticed (2026-09-03).
+#
+# The chat id now lives on the gateway's session-store entry: `lookup_by_
+# session_id()` returns a SessionEntry whose `origin.chat_id` is the chat, and
+# whose `session_key` still carries the old `:dm:<chat_id>:` shape. The store
+# is handed to pre_gateway_dispatch on every inbound; we keep the reference
+# and resolve from it. Two fallbacks stay in place: the legacy key parse, and
+# the last chat seen on that platform (one principal, one DM per platform).
+
+_SESSION_STORE: Any = None
+_LAST_CHAT_BY_PLATFORM: dict[str, str] = {}
+
+# Platforms that are not a person talking to Alfred. Journaling them would
+# record machinery as conversation.
+_NON_CONVERSATION_PLATFORMS = {"", "cli", "subagent", "cron", "api_server", "unknown"}
+
+# Liveness. The write path has now died silently twice (2026-05-25 a wrong
+# kwarg name, 2026-08-19 a changed id format). A path that can fail without
+# anyone noticing is worse than one that fails loudly, so: after this many
+# journal-eligible turns with zero successful writes, log at ERROR.
+_LIVENESS = {"eligible": 0, "written": 0, "alarmed": False}
+_LIVENESS_THRESHOLD = 10
+
+
+def _parse_chat_from_key(key: str) -> str:
+    for marker in (":dm:", ":group:", ":channel:", ":thread:"):
+        if marker in key:
+            return key.split(marker, 1)[1].split(":")[0]
+    return ""
+
+
+def _resolve_chat_id(session_id: str, platform: str) -> str:
+    store = _SESSION_STORE
+    if store is not None:
+        try:
+            entry = store.lookup_by_session_id(session_id)
+            if entry is not None:
+                origin = getattr(entry, "origin", None)
+                cid = getattr(origin, "chat_id", None) if origin is not None else None
+                if cid:
+                    return str(cid)
+                cid = _parse_chat_from_key(str(getattr(entry, "session_key", "") or ""))
+                if cid:
+                    return cid
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[one-alfred] session-store lookup failed for %s: %s", session_id, e)
+    cid = _parse_chat_from_key(session_id)  # legacy id shape
+    if cid:
+        return cid
+    return _LAST_CHAT_BY_PLATFORM.get(platform, "")
+
+
+def _note_eligible_turn() -> None:
+    _LIVENESS["eligible"] += 1
+    if (
+        not _LIVENESS["alarmed"]
+        and _LIVENESS["written"] == 0
+        and _LIVENESS["eligible"] >= _LIVENESS_THRESHOLD
+    ):
+        _LIVENESS["alarmed"] = True
+        logger.error(
+            "[one-alfred] LIVENESS: %d journal-eligible turns and ZERO journal writes "
+            "— the continuity write path is dead. Check chat-id resolution and "
+            "ctrl-api reachability.",
+            _LIVENESS["eligible"],
+        )
+
+
+def _note_write(result: Optional[dict[str, Any]]) -> None:
+    if result is None:
+        return
+    _LIVENESS["written"] += 1
+    if _LIVENESS["alarmed"]:
+        _LIVENESS["alarmed"] = False
+        logger.info("[one-alfred] LIVENESS: journal writes resumed")
+
+
+# ---------------------------------------------------------------------------
 # Hook implementations
 # ---------------------------------------------------------------------------
 
@@ -315,6 +400,11 @@ def _hook_pre_gateway_dispatch(
             return None
         channel = str(platform).lower()
         chat_id_str = str(chat_id)
+        global _SESSION_STORE
+        store = session_store or getattr(gateway, "session_store", None)
+        if store is not None:
+            _SESSION_STORE = store
+        _LAST_CHAT_BY_PLATFORM[channel] = chat_id_str
         if not _should_inject(channel, chat_id_str):
             logger.info("[one-alfred] pre_gateway_dispatch: latched (<5s) — skip")
             return None
@@ -380,21 +470,16 @@ def _hook_post_llm_call(
         if not text or not platform or not session_id:
             return
         channel = str(platform).lower()
-        if channel == "cli":
-            return  # CLI sessions are dev-only — no Sir-facing exchange to record
+        if channel in _NON_CONVERSATION_PLATFORMS:
+            return  # machinery, not a person talking to Alfred
 
-        # Derive chat_id from the session_id (session keys for channel
-        # sessions are `agent:main:{platform}:dm:{chat_id}` or similar).
-        chat_id: str = ""
         sid = str(session_id)
-        for marker in (":dm:", ":group:"):
-            if marker in sid:
-                chat_id = sid.split(marker, 1)[1].split(":")[0]
-                break
+        chat_id = _resolve_chat_id(sid, channel)
         if not chat_id:
-            return  # not a channel session we recognise — skip
+            logger.warning("[one-alfred] post_llm_call: could not resolve chat for session=%s platform=%s", sid, channel)
+            return
 
-        _http_post_json(
+        _note_write(_http_post_json(
             "/api/v1/alfred-journal",
             {
                 "channel": channel,
@@ -409,7 +494,7 @@ def _hook_post_llm_call(
                     "model": kwargs.get("model"),
                 },
             },
-        )
+        ))
     except Exception as e:  # noqa: BLE001
         logger.warning("[one-alfred] post_llm_call journal failed: %s", e)
 
@@ -445,16 +530,13 @@ def _hook_pre_llm_call_inbound_journal(
         if not user_message or not platform or not session_id:
             return
         channel = str(platform).lower()
-        if channel == "cli":
+        if channel in _NON_CONVERSATION_PLATFORMS:
             return
         sid = str(session_id)
-        chat_id: str = ""
-        for marker in (":dm:", ":group:"):
-            if marker in sid:
-                chat_id = sid.split(marker, 1)[1].split(":")[0]
-                break
+        _note_eligible_turn()
+        chat_id = _resolve_chat_id(sid, channel)
         if not chat_id:
-            logger.info("[one-alfred] pre_llm_call: no chat_id in session_id=%s — skip", sid)
+            logger.warning("[one-alfred] pre_llm_call: could not resolve chat for session=%s platform=%s", sid, channel)
             return
 
         # If the user_message we see already CONTAINS our context-block
@@ -472,7 +554,7 @@ def _hook_pre_llm_call_inbound_journal(
                     clean = clean[idx + len(end_tag):].lstrip()
                     break
 
-        _http_post_json(
+        _note_write(_http_post_json(
             "/api/v1/alfred-journal",
             {
                 "channel": channel,
@@ -484,7 +566,7 @@ def _hook_pre_llm_call_inbound_journal(
                 "hermes_profile": "main",
                 "status": "received",
             },
-        )
+        ))
     except Exception as e:  # noqa: BLE001
         logger.warning("[one-alfred] pre_llm_call journal failed: %s", e)
 
