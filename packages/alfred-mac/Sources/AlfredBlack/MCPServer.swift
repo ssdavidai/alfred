@@ -102,12 +102,33 @@ enum MCPServer {
 
 /// What the sandboxed sessions did through the tools — kept in a file of its
 /// own because the MCP server is a separate process from the menu-bar app.
-struct ActivityLog: Codable { var notes = 0; var recents = 0; var lastNoteAt: Date?; var lastRecentAt: Date? }
+struct ActivityLog: Codable {
+  var notes = 0; var recents = 0; var lastNoteAt: Date?; var lastRecentAt: Date?
+  var journalCowork = 0; var journalCoworkLast: Date?
+  init() {}
+  // Fields are added over time; an older file must still decode, not reset the counters.
+  init(from d: Decoder) throws {
+    let c = try d.container(keyedBy: CodingKeys.self)
+    notes = try c.decodeIfPresent(Int.self, forKey: .notes) ?? 0
+    recents = try c.decodeIfPresent(Int.self, forKey: .recents) ?? 0
+    lastNoteAt = try c.decodeIfPresent(Date.self, forKey: .lastNoteAt)
+    lastRecentAt = try c.decodeIfPresent(Date.self, forKey: .lastRecentAt)
+    journalCowork = try c.decodeIfPresent(Int.self, forKey: .journalCowork) ?? 0
+    journalCoworkLast = try c.decodeIfPresent(Date.self, forKey: .journalCoworkLast)
+  }
+}
 enum Activity {
   static var file: URL { Paths.support.appendingPathComponent("mcp-activity.json") }
   static func load() -> ActivityLog {
     guard let d = try? Data(contentsOf: file), let a = try? JSONDecoder().decode(ActivityLog.self, from: d) else { return ActivityLog() }
     return a
+  }
+  /// What the tenant's window says about Cowork — the truth regardless of which
+  /// tool path a session used (this app's server or the tenant's own).
+  static func recordJournal(coworkCount: Int, last: Date?) {
+    var a = load(); a.journalCowork = coworkCount; a.journalCoworkLast = last
+    try? FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+    if let d = try? JSONEncoder().encode(a) { try? d.write(to: file, options: .atomic) }
   }
   static func record(note: Bool = false, recent: Bool = false) {
     var a = load()
