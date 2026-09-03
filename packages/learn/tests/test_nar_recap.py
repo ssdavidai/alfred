@@ -662,6 +662,40 @@ class TestGetHumanSessionsParentage:
         results = _get_human_sessions(db, self._day())
         assert [r["id"] for r in results] == ["s_continued"]
 
+    def test_same_day_chain_folds_into_root(self):
+        """Compression fragments of one conversation become ONE session: root id
+        kept, messages merged in timestamp order, fragments counted."""
+        t0 = self._ts(9)
+        db = _make_session_db(
+            sessions=[
+                {"id": "root", "source": "slack", "started_at": t0, "ended_at": t0 + 600, "parent_session_id": None},
+                {"id": "frag1", "source": "slack", "started_at": t0 + 600, "ended_at": t0 + 1200, "parent_session_id": "root"},
+                {"id": "frag2", "source": "slack", "started_at": t0 + 1200, "ended_at": t0 + 1800, "parent_session_id": "frag1"},
+            ],
+            messages=[
+                {"session_id": "frag2", "role": "user", "content": "c", "timestamp": t0 + 1300},
+                {"session_id": "root", "role": "user", "content": "a", "timestamp": t0 + 10},
+                {"session_id": "frag1", "role": "assistant", "content": "b", "timestamp": t0 + 700},
+            ],
+        )
+        results = _get_human_sessions(db, self._day())
+        assert [r["id"] for r in results] == ["root"]
+        assert results[0]["fragments"] == 3
+        assert [m["content"] for m in results[0]["messages"]] == ["a", "b", "c"]
+        assert results[0]["ended_at"] == t0 + 1800
+
+    def test_cross_day_child_stays_its_own_session(self):
+        """A fragment whose parent started on another day is not in today's
+        set — it stands alone for today rather than vanishing."""
+        t = self._ts(10)
+        db = _make_session_db([
+            {"id": "today_child", "source": "slack", "started_at": t, "ended_at": t + 60,
+             "parent_session_id": "yesterday_root_not_in_set"},
+        ])
+        results = _get_human_sessions(db, self._day())
+        assert [r["id"] for r in results] == ["today_child"]
+        assert results[0]["fragments"] == 1
+
     def test_spawned_session_turns_absent_from_results(self):
         """Turns belonging to an agent-spawned session must not appear in the
         returned session list, so their timestamps cannot reach cluster_bursts.
