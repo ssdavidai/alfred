@@ -129,16 +129,39 @@ export function bindPrincipalChannel(
        (channel, chat_id, principal_id, added_at)
      VALUES (?, ?, ?, ?)`,
   ).run(channel, chatId, principalId, nowIso());
+  // A binding is a statement about the conversation, not about the moment it
+  // was made: rows written before it were this principal's too. The owner
+  // window filters on the stamped column, so attribute them now.
+  db.prepare(
+    `UPDATE alfred_journal SET principal_id = ?, updated_at = ?
+      WHERE channel = ? AND chat_id = ? AND principal_id IS NULL`,
+  ).run(principalId, nowIso(), channel, chatId);
+}
+
+/**
+ * Channels whose conversations are the owner's by construction: a Cowork
+ * session journals through this tenant's own authenticated tools, so an
+ * unknown chat there is a new session of the principal, not a stranger. Other
+ * channels (Telegram, Slack) can carry strangers and stay unbound until a
+ * deliberate bind.
+ */
+const AUTO_BIND_TO_OWNER = new Set(["cowork"]);
+
+function ownerPrincipalId(db: DatabaseSync): string | null {
+  const row = db
+    .prepare("SELECT id FROM alfred_principal WHERE is_owner = 1 LIMIT 1")
+    .get() as { id?: string } | undefined;
+  return row?.id ?? null;
 }
 
 /**
  * Append one entry. The shape is wide because every caller wants different
  * subsets — by-keyword args + a clear default for status.
  *
- * Auto-resolves principal_id from the (channel, chat_id) binding if the
- * caller didn't pass one explicitly — so every outbound on home auto-binds
- * chat_id=100000000 → 'owner' on first write, and later inbound lookups
- * find it.
+ * Resolves principal_id from the (channel, chat_id) binding if the caller
+ * didn't pass one explicitly. For channels in AUTO_BIND_TO_OWNER an unknown
+ * chat is bound to the owner on first write; every other channel stays
+ * unattributed until a deliberate bind (which then backfills).
  */
 export function appendJournal(
   db: DatabaseSync,
@@ -164,8 +187,15 @@ export function appendJournal(
 ): JournalEntry {
   const id = ulid();
   const ts = nowIso();
-  const principalId =
+  let principalId =
     fields.principal_id ?? resolvePrincipal(db, fields.channel, fields.chat_id);
+  if (!principalId && AUTO_BIND_TO_OWNER.has(fields.channel)) {
+    const owner = ownerPrincipalId(db);
+    if (owner) {
+      bindPrincipalChannel(db, fields.channel, fields.chat_id, owner);
+      principalId = owner;
+    }
+  }
   const metadataJson = fields.metadata ? JSON.stringify(fields.metadata) : null;
   // Normalise: only accept 0 or 1; anything else collapses to null so a
   // stale caller passing a truthy string cannot silently inflate the term.
