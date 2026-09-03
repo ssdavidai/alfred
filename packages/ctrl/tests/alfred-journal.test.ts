@@ -149,6 +149,37 @@ describe("appendJournal + resolvePrincipal", () => {
     db.close();
   });
 
+  it("appendJournal auto-binds an unknown cowork chat to the owner on first write", () => {
+    const db = makeDb();
+    const e = appendJournal(db, {
+      channel: "cowork", chat_id: "session_new", direction: "inbound", message: "hey alfred",
+    });
+    assert.equal(e.principal_id, "owner");
+    assert.equal(resolvePrincipal(db, "cowork", "session_new"), "owner");
+    const seen = queryRecentJournal(db, { principal_id: "owner" }, { limit: 10, within_hours: 1 });
+    assert.ok(seen.some((r) => r.id === e.id), "the owner window sees the row");
+  });
+
+  it("appendJournal leaves other channels unbound (no guessing who a stranger is)", () => {
+    const db = makeDb();
+    const e = appendJournal(db, {
+      channel: "telegram", chat_id: "999", direction: "inbound", message: "hello?",
+    });
+    assert.equal(e.principal_id, null);
+    assert.equal(resolvePrincipal(db, "telegram", "999"), null);
+  });
+
+  it("bindPrincipalChannel attributes rows written before the binding", () => {
+    const db = makeDb();
+    const before = appendJournal(db, {
+      channel: "telegram", chat_id: "424242", direction: "inbound", message: "earlier",
+    });
+    assert.equal(before.principal_id, null);
+    bindPrincipalChannel(db, "telegram", "424242", "owner");
+    const seen = queryRecentJournal(db, { principal_id: "owner" }, { limit: 10, within_hours: 1 });
+    assert.ok(seen.some((r) => r.id === before.id), "binding backfills the earlier row");
+  });
+
   it("appendJournal respects explicit principal_id over the binding", () => {
     const db = makeDb();
     bindPrincipalChannel(db, "telegram", "100000000", "owner");
