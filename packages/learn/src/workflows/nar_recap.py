@@ -1,10 +1,14 @@
 """NarDayRecapWorkflow — compute nar_entry rows for one calendar day (#584).
 
-Thin wrapper around ``compute_nar_day``.  Triggered by the backfill
-script (after validation) or ad-hoc via Temporal for a single day.
+Thin wrapper around ``compute_nar_day``.  Runs nightly on ``al-nar-recap``
+for the previous UTC day, and can be invoked ad-hoc or by the backfill
+script for any single date.
 
-Not scheduled automatically — the backfill is a separate orchestrator
-step that runs once validation confirms the reference days match.
+Without a daily run the nar_entry table simply stops gaining rows.  Displaced
+time comes from those rows; engaged time is derived live from sessions.  So a
+missing day is not a gap on the chart — it is 0 - engaged, a confident
+negative.  Observed on a live tenant: an eight-day hole rendered as -6.4h on
+its worst day.
 """
 from __future__ import annotations
 
@@ -17,6 +21,22 @@ with workflow.unsafe.imports_passed_through():
     from src.activities.nar_recap import compute_nar_day
 
 
+def resolve_recap_date(params: dict | str | None, now_date) -> str:
+    """Which day a run recaps: an explicit ISO date wins; otherwise yesterday.
+
+    Pure so it can be unit-tested without a Temporal sandbox. `now_date` is
+    the caller's date (workflow.now().date() in the workflow) — never
+    datetime.utcnow(), so a replay resolves identically.
+    """
+    if isinstance(params, str):
+        day_iso = params
+    else:
+        day_iso = (params or {}).get("date", "")
+    if day_iso:
+        return day_iso
+    return (now_date - timedelta(days=1)).isoformat()
+
+
 @workflow.defn(name="NarDayRecapWorkflow")
 class NarDayRecapWorkflow:
     """Compute and write nar_entry rows for a single UTC calendar day.
@@ -27,12 +47,11 @@ class NarDayRecapWorkflow:
 
     @workflow.run
     async def run(self, params: dict | str) -> dict:
-        if isinstance(params, str):
-            day_iso = params
-        else:
-            day_iso = params.get("date", "")
-        if not day_iso:
-            raise ValueError("NarDayRecapWorkflow: 'date' param is required (YYYY-MM-DD)")
+        explicit = params if isinstance(params, str) else (params or {}).get("date", "")
+        day_iso = resolve_recap_date(params, workflow.now().date())
+        if not explicit:
+            # Scheduled runs pass no date: recap the day that just ended.
+            workflow.logger.info("nar_recap: no date given, defaulting to %s", day_iso)
 
         workflow.logger.info("nar_recap.start date=%s", day_iso)
         result: dict = await workflow.execute_activity(

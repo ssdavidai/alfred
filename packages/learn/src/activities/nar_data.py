@@ -102,17 +102,46 @@ def _session_db_path(profile: str = "main") -> str:
     return os.path.join(config_dir, profile, _SESSION_DB_FILENAME)
 
 
+class SessionDbUnreadable(RuntimeError):
+    """The session store exists but this process may not read it.
+
+    Raised instead of returning None so the recap FAILS the day rather than
+    booking a chores-only day with zero engaged time. Observed live: the
+    hermes volume drifted to 0700 and three consecutive nightly runs logged
+    "session db not found — skipping sessions" as a WARNING, then completed
+    successfully with 0.9h days. A permission regression must be a red
+    workflow, not a quiet number.
+    """
+
+
 def _open_session_db(profile: str = "main") -> sqlite3.Connection | None:
-    """Open the Hermes session store read-only.  Returns None on failure."""
+    """Open the Hermes session store read-only.
+
+    Returns None only when the store genuinely does not exist (a fresh tenant
+    with no sessions yet). Raises SessionDbUnreadable when it exists but is
+    not accessible — os.path.exists() cannot tell the two apart from outside a
+    0700 directory, so the check goes through the parent explicitly.
+    """
     path = _session_db_path(profile)
+    parent = os.path.dirname(path)
+    if os.path.isdir(parent) is False and os.path.exists(parent):
+        raise SessionDbUnreadable(f"session db parent is not a directory: {parent}")
+    if os.path.exists(parent) and not os.access(parent, os.X_OK):
+        raise SessionDbUnreadable(
+            f"session db parent not traversable (permission denied): {parent}"
+        )
     if not os.path.exists(path):
         logger.warning("nar_data: session db not found at %s — skipping sessions", path)
         return None
+    if not os.access(path, os.R_OK):
+        raise SessionDbUnreadable(f"session db not readable (permission denied): {path}")
     try:
         conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
         return conn
-    except Exception as exc:  # noqa: BLE001
+    except sqlite3.OperationalError as exc:
+        if "unable to open" in str(exc).lower() or "permission" in str(exc).lower():
+            raise SessionDbUnreadable(f"session db open failed: {path}: {exc}") from exc
         logger.warning("nar_data: cannot open session db %s: %s", path, exc)
         return None
 
@@ -136,6 +165,12 @@ def _get_human_sessions(db: sqlite3.Connection, day: date) -> list[dict[str, Any
     would match sessions with a NULL ended_at from any prior day, inflating
     counts by an unbounded amount on tenants with un-closed sessions.
     Missing columns degrade silently rather than crashing.
+
+    No ``parent_session_id IS NULL`` clause: Hermes links a CONTINUED human
+    thread (end_reason=session_reset) to its predecessor via
+    parent_session_id, so that clause silently dropped every continued Slack
+    DM — a 96-message day booked as zero sessions on a live tenant. Subagent
+    and cron children are already excluded by the source allowlist.
     """
     start_s, end_s = _day_epoch_window(day)
     try:
@@ -146,7 +181,6 @@ def _get_human_sessions(db: sqlite3.Connection, day: date) -> list[dict[str, Any
             WHERE source IN ({placeholders})
               AND started_at >= ?
               AND started_at <= ?
-              AND parent_session_id IS NULL
             ORDER BY started_at ASC
             """.format(placeholders=",".join("?" * len(HUMAN_SOURCES))),
             (*HUMAN_SOURCES, start_s, end_s),

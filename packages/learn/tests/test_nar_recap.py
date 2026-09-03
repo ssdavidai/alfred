@@ -622,10 +622,17 @@ def _make_session_db(
 
 
 class TestGetHumanSessionsParentage:
-    """_get_human_sessions must exclude agent-spawned sessions (#584).
+    """_get_human_sessions must exclude agent-spawned sessions (#584) — but the
+    discriminator is the SOURCE allowlist, not parent_session_id.
 
-    sessions.parent_session_id IS NULL is the structural discriminator:
-    the principal's sessions have no parent; agent-spawned ones do.
+    The earlier version of this class asserted that a slack session with a
+    parent is agent-spawned. On Hermes 0.20 data that is false: a continued
+    human thread is chained to its predecessor via parent_session_id —
+    end_reason=compression (context roll-over) or session_reset — and carries
+    real user turns. On a live tenant 142 such sessions (~10.5k messages, one
+    of them a 96-message day) were silently dropped from NAR. Spawned work
+    never carries a human source: it is source='subagent' (1,667 sessions on
+    the same tenant), which the allowlist already excludes.
     """
 
     def _day(self) -> date:
@@ -645,26 +652,28 @@ class TestGetHumanSessionsParentage:
         assert len(results) == 1
         assert results[0]["id"] == "s1"
 
-    def test_nonnull_parent_slack_session_excluded(self):
-        """A slack session with a non-null parent_session_id is agent-spawned
-        and must NOT appear in the human session list."""
+    def test_nonnull_parent_slack_session_included(self):
+        """A slack session chained to a predecessor (compression / reset
+        continuation) is the SAME human conversation and must be counted."""
         db = _make_session_db([
-            {"id": "s_spawned", "source": "slack", "started_at": self._ts(10),
+            {"id": "s_continued", "source": "slack", "started_at": self._ts(10),
              "ended_at": self._ts(10) + 300, "parent_session_id": "parent_abc"},
         ])
         results = _get_human_sessions(db, self._day())
-        assert results == []
+        assert [r["id"] for r in results] == ["s_continued"]
 
     def test_spawned_session_turns_absent_from_results(self):
         """Turns belonging to an agent-spawned session must not appear in the
-        returned session list, so their timestamps cannot reach cluster_bursts."""
+        returned session list, so their timestamps cannot reach cluster_bursts.
+        Spawned sessions are source='subagent' (live shape) — excluded by the
+        allowlist regardless of parentage."""
         spawned_ts = self._ts(9)
         human_ts = self._ts(10)
         db = _make_session_db(
             sessions=[
                 {"id": "s_human", "source": "slack", "started_at": human_ts,
                  "parent_session_id": None},
-                {"id": "s_spawned", "source": "slack", "started_at": spawned_ts,
+                {"id": "s_spawned", "source": "subagent", "started_at": spawned_ts,
                  "parent_session_id": "some_parent"},
             ],
             messages=[
@@ -1121,3 +1130,77 @@ class TestAllocation:
             result = await _classify_chore_bucket("ran and found nothing", "test-chore")
         assert result["allocation"] == "unallocated"
         assert result["allocation"] != "work"
+
+
+# ── Nightly default date + loud session-db failure (al-nar-recap) ─────────────
+
+from src.workflows.nar_recap import resolve_recap_date  # noqa: E402
+from src.activities.nar_data import SessionDbUnreadable, _open_session_db  # noqa: E402
+
+
+class TestResolveRecapDate:
+    """The scheduled run passes no date; it must recap the day that just ended,
+    derived from the workflow clock (replay-stable), never from the wall clock."""
+
+    def test_explicit_dict_date_wins(self):
+        assert resolve_recap_date({"date": "2026-08-20"}, date(2026, 9, 3)) == "2026-08-20"
+
+    def test_bare_string_wins(self):
+        assert resolve_recap_date("2026-08-21", date(2026, 9, 3)) == "2026-08-21"
+
+    def test_none_defaults_to_yesterday(self):
+        assert resolve_recap_date(None, date(2026, 9, 3)) == "2026-09-02"
+
+    def test_empty_dict_defaults_to_yesterday(self):
+        assert resolve_recap_date({}, date(2026, 9, 3)) == "2026-09-02"
+
+    def test_empty_date_string_defaults_to_yesterday(self):
+        assert resolve_recap_date({"date": ""}, date(2026, 9, 3)) == "2026-09-02"
+
+    def test_month_boundary(self):
+        assert resolve_recap_date({}, date(2026, 9, 1)) == "2026-08-31"
+
+
+class TestOpenSessionDbLoudness:
+    """A missing store is a legitimate skip (fresh tenant). An UNREADABLE store
+    must raise — three nightly runs once booked 0.9h chores-only days because a
+    0700 volume made the db look 'not found'."""
+
+    def test_absent_store_returns_none(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.activities.nar_data._DEFAULT_HERMES_CONFIG_DIR", str(tmp_path / "profiles"))
+        monkeypatch.delenv("HERMES_CONFIG_DIR", raising=False)
+        (tmp_path / "profiles" / "main").mkdir(parents=True)
+        assert _open_session_db("main") is None
+
+    def test_untraversable_parent_raises(self, tmp_path, monkeypatch):
+        import os
+        if os.geteuid() == 0:
+            pytest.skip("root bypasses directory permissions")
+        monkeypatch.setattr("src.activities.nar_data._DEFAULT_HERMES_CONFIG_DIR", str(tmp_path / "profiles"))
+        monkeypatch.delenv("HERMES_CONFIG_DIR", raising=False)
+        main_dir = tmp_path / "profiles" / "main"
+        main_dir.mkdir(parents=True)
+        (main_dir / "state.db").write_bytes(b"")
+        main_dir.chmod(0o000)  # the live failure: parent not traversable
+        try:
+            with pytest.raises(SessionDbUnreadable):
+                _open_session_db("main")
+        finally:
+            main_dir.chmod(0o700)
+
+    def test_unreadable_file_raises(self, tmp_path, monkeypatch):
+        import os
+        if os.geteuid() == 0:
+            pytest.skip("root bypasses file permissions")
+        monkeypatch.setattr("src.activities.nar_data._DEFAULT_HERMES_CONFIG_DIR", str(tmp_path / "profiles"))
+        monkeypatch.delenv("HERMES_CONFIG_DIR", raising=False)
+        main_dir = tmp_path / "profiles" / "main"
+        main_dir.mkdir(parents=True)
+        f = main_dir / "state.db"
+        f.write_bytes(b"")
+        f.chmod(0o000)
+        try:
+            with pytest.raises(SessionDbUnreadable):
+                _open_session_db("main")
+        finally:
+            f.chmod(0o600)
