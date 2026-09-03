@@ -27,6 +27,8 @@ import { fileURLToPath } from "node:url";
 import {
   appendJournal,
   bindPrincipalChannel,
+  isPrivateChat,
+  queryRecentForChat,
   queryRecentJournal,
   resolvePrincipal,
 } from "../src/db/alfredJournal.js";
@@ -178,6 +180,46 @@ describe("appendJournal + resolvePrincipal", () => {
     bindPrincipalChannel(db, "telegram", "424242", "owner");
     const seen = queryRecentJournal(db, { principal_id: "owner" }, { limit: 10, within_hours: 1 });
     assert.ok(seen.some((r) => r.id === before.id), "binding backfills the earlier row");
+  });
+
+  it("isPrivateChat: DMs and personal surfaces are private, channels and groups are not", () => {
+    assert.equal(isPrivateChat("slack", "D0ABCDEF123"), true);
+    assert.equal(isPrivateChat("slack", "C0ABCDEF123"), false);
+    assert.equal(isPrivateChat("slack", "#general"), false);
+    assert.equal(isPrivateChat("telegram", "432094090"), true);
+    assert.equal(isPrivateChat("telegram", "-100987654321"), false);
+    for (const ch of ["cowork", "omi", "voice"]) assert.equal(isPrivateChat(ch, "anything"), true);
+    assert.equal(isPrivateChat("unknown-platform", "x"), false);
+  });
+
+  it("queryRecentForChat: a bound private chat reads the principal's cross-surface window", () => {
+    const db = makeDb();
+    bindPrincipalChannel(db, "slack", "D0DM", "owner");
+    appendJournal(db, { channel: "slack", chat_id: "D0DM", direction: "inbound", message: "ping" });
+    const cw = appendJournal(db, { channel: "cowork", chat_id: "session_x", direction: "inbound", message: "hey alfred" });
+    const seen = queryRecentForChat(db, "slack", "D0DM", { limit: 20, within_hours: 1 });
+    assert.equal(seen.scope, "principal");
+    assert.ok(seen.entries.some((r) => r.id === cw.id), "the DM sees the Cowork turn");
+  });
+
+  it("queryRecentForChat: a bound group channel stays on its own history", () => {
+    const db = makeDb();
+    bindPrincipalChannel(db, "slack", "C0CLIENT", "owner");
+    appendJournal(db, { channel: "slack", chat_id: "C0CLIENT", direction: "inbound", message: "hello team" });
+    const cw = appendJournal(db, { channel: "cowork", chat_id: "session_y", direction: "inbound", message: "private" });
+    const seen = queryRecentForChat(db, "slack", "C0CLIENT", { limit: 20, within_hours: 1 });
+    assert.equal(seen.scope, "chat");
+    assert.ok(!seen.entries.some((r) => r.id === cw.id), "no private memory in a group");
+    assert.equal(seen.entries.length, 1);
+  });
+
+  it("queryRecentForChat: an unbound private chat stays on its own history", () => {
+    const db = makeDb();
+    appendJournal(db, { channel: "slack", chat_id: "D0STRANGER", direction: "inbound", message: "hi" });
+    appendJournal(db, { channel: "cowork", chat_id: "session_z", direction: "inbound", message: "private" });
+    const seen = queryRecentForChat(db, "slack", "D0STRANGER", { limit: 20, within_hours: 1 });
+    assert.equal(seen.scope, "chat");
+    assert.equal(seen.entries.length, 1);
   });
 
   it("appendJournal respects explicit principal_id over the binding", () => {
