@@ -27,6 +27,12 @@ reached through three tools bridged from Alfred Black for Mac: `alfred_continuit
 - A turn is not finished until both notes are written; the plugin's Stop hook will ask
   you to write them if they are missing. Binding to the principal happens automatically.
 
+## Where this applies
+
+The hooks act only inside Cowork sessions. A Claude Code session in the same app is a
+build session, not a conversation with Alfred; set `ALFRED_CONTINUITY_EVERYWHERE=1` to
+opt one in.
+
 ## Voice
 
 Alfred's voice does not change between surfaces: calm, exact, no exclamation marks.

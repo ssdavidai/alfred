@@ -7,6 +7,16 @@
 # reachable (a host-mode session), inject it verbatim; otherwise tell the model
 # exactly which tool to call. Fail-soft: never block the person's turn.
 in=$(cat 2>/dev/null)
+# Only act inside a Cowork session (the sandbox VM, or Cowork's own session
+# store). Claude Code sessions in the same app share the plugin list, and a
+# build session is not a conversation with Alfred. ALFRED_CONTINUITY_EVERYWHERE=1
+# opts every session in.
+cwd=$(printf '%s' "$in" | sed -n 's/.*"cwd"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+is_cowork=0
+[ -e /run/coworkd ] && is_cowork=1
+case "$cwd${CLAUDE_PROJECT_DIR:+ $CLAUDE_PROJECT_DIR}" in *"/sessions/"*|*"/mnt/"*|*"local-agent-mode-sessions"*) is_cowork=1 ;; esac
+[ "${ALFRED_CONTINUITY_EVERYWHERE:-0}" = "1" ] && is_cowork=1
+[ "$is_cowork" = "1" ] || exit 0
 sid=$(printf '%s' "$in" | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
 ev=$(printf '%s' "$in" | sed -n 's/.*"hook_event_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
 [ -n "$ev" ] || ev=SessionStart

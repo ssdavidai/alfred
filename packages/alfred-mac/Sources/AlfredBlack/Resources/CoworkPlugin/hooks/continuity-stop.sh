@@ -4,6 +4,16 @@
 # otherwise block once with the exact instruction. stop_hook_active means we
 # already blocked this turn — never loop. Unreadable transcript: allow (soft).
 in=$(cat 2>/dev/null)
+# Only act inside a Cowork session (the sandbox VM, or Cowork's own session
+# store). Claude Code sessions in the same app share the plugin list, and a
+# build session is not a conversation with Alfred. ALFRED_CONTINUITY_EVERYWHERE=1
+# opts every session in.
+cwd=$(printf '%s' "$in" | sed -n 's/.*"cwd"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+is_cowork=0
+[ -e /run/coworkd ] && is_cowork=1
+case "$cwd${CLAUDE_PROJECT_DIR:+ $CLAUDE_PROJECT_DIR}" in *"/sessions/"*|*"/mnt/"*|*"local-agent-mode-sessions"*) is_cowork=1 ;; esac
+[ "${ALFRED_CONTINUITY_EVERYWHERE:-0}" = "1" ] && is_cowork=1
+[ "$is_cowork" = "1" ] || exit 0
 case "$in" in *'"stop_hook_active"'*'true'*) exit 0 ;; esac
 sid=$(printf '%s' "$in" | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
 tp=$(printf '%s' "$in" | sed -n 's/.*"transcript_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
