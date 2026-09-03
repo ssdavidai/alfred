@@ -235,6 +235,49 @@ export function appendJournal(
 }
 
 /**
+ * Is this chat the principal alone with Alfred, or a room with other people in
+ * it? The principal's cross-surface memory may be read into the former; never
+ * into the latter, where the model could repeat it to a client. Platform id
+ * shapes are the honest signal we have today: Slack DMs start with "D"
+ * (channels "C"/"G", names "#…"), Telegram private chats have positive ids
+ * (groups negative). Cowork, omi and voice are personal by construction.
+ * Unknown platforms are treated as rooms.
+ */
+export function isPrivateChat(channel: string, chatId: string): boolean {
+  switch (channel) {
+    case "cowork":
+    case "omi":
+    case "voice":
+      return true;
+    case "slack":
+      return /^D[A-Z0-9]+$/.test(chatId);
+    case "telegram":
+      return /^\d+$/.test(chatId);
+    default:
+      return false;
+  }
+}
+
+/**
+ * The window for a (channel, chat_id) as a surface asks for it: a private chat
+ * bound to a principal reads that principal's cross-surface window — so a
+ * Slack DM knows what was said in Cowork an hour ago — while a room, or an
+ * unbound chat, stays on its own history.
+ */
+export function queryRecentForChat(
+  db: DatabaseSync,
+  channel: string,
+  chatId: string,
+  opts: { limit?: number; within_hours?: number; hermes_profile?: string | null } = {},
+): { scope: "principal" | "chat"; entries: JournalEntry[] } {
+  const principal = isPrivateChat(channel, chatId) ? resolvePrincipal(db, channel, chatId) : null;
+  if (principal) {
+    return { scope: "principal", entries: queryRecentJournal(db, { principal_id: principal }, opts) };
+  }
+  return { scope: "chat", entries: queryRecentJournal(db, { channel, chat_id: chatId }, opts) };
+}
+
+/**
  * Window policy for the pre_gateway_dispatch hook: most-recent first, capped
  * by both N and a recency hours threshold. Both bounds matter — without N a
  * chatty user can blow main's context window; without `within_hours` an
