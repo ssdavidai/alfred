@@ -366,6 +366,24 @@ CALENDAR_SCHEDULES = [
         ),
     },
     {
+        # NAR daily recap — writes the nar_entry rows /attention reads.
+        # 03:00, so it lands after the day it summarises has closed in UTC and
+        # after the 02:00 narrative pass.
+        #
+        # Ad-hoc only until 2026-08-25, which left an eight-day hole in
+        # nar_entry. Displaced time comes from these rows; engaged time is
+        # derived live from sessions, so a missing day is not "no data" on the
+        # chart — it is 0 - engaged, i.e. a confident negative.
+        #
+        # No input: the workflow recaps the previous UTC day by default.
+        "id": "al-nar-recap",
+        "workflow": "NarDayRecapWorkflow",
+        "calendar": ScheduleCalendarSpec(
+            hour=[ScheduleRange(start=3)],
+            minute=[ScheduleRange(start=0)],
+        ),
+    },
+    {
         # RFC #884: nightly_narrative — Workflow 7 of the Living
         # Narratives layer. Walks every active matter and asks the
         # clerk to draft a fresh ``current_state`` paragraph from the
