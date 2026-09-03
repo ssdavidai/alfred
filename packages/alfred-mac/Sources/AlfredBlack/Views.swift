@@ -84,6 +84,7 @@ struct StatusView: View {
       VStack(spacing: 0) {
         Row(k: "Tenant", v: s.online == true ? "connected" : (s.online == false ? "unreachable" : "checking"), ok: s.online)
         Row(k: "Memory file", v: s.state.lastRenderAt.map { "\(s.state.lastRenderEntries) entries · \(AppDelegate.ago($0))" } ?? "not yet", ok: s.state.lastRenderAt != nil)
+        Row(k: "Cowork journaled", v: s.activity.lastNoteAt.map { "\(s.activity.notes) notes via Claude · \(AppDelegate.ago($0))" } ?? "none yet — sessions journal through the tools", ok: s.activity.lastNoteAt != nil)
         Row(k: "Cowork mirrored", v: "\(s.state.totalPushed) turns · " + (s.state.lastPushAt.map { AppDelegate.ago($0) } ?? "not yet"), ok: s.state.lastPushAt != nil)
         Row(k: "Starts at login", v: s.loginItem ? "yes" : (SMAppService.mainApp.status == .requiresApproval ? "approve in System Settings › Login Items" : "no"), ok: s.loginItem)
       }.padding(.top, 6)

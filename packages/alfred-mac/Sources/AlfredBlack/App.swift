@@ -70,7 +70,7 @@ struct AlfredBlackMain {
     }
     if CommandLine.arguments.contains("--status") {
       let p = Store.loadPairing(); let st = Store.loadState(); let c = Cowork.status()
-      print("paired: \(p?.domain ?? "no") keyInKeychain: \(Keychain.get("apikey") != nil) loginItem: \(SMAppService.mainApp.status == .enabled)")
+      print("paired: \(p?.domain ?? "no") key: \(Keychain.get("apikey") != nil) loginItem: \(SMAppService.mainApp.status == .enabled)")
       print("render: \(st.lastRenderAt.map { ISO8601DateFormatter().string(from: $0) } ?? "never") entries=\(st.lastRenderEntries)  push: \(st.lastPushAt.map { ISO8601DateFormatter().string(from: $0) } ?? "never") total=\(st.totalPushed) lastError=\(st.lastError ?? "none")")
       print("cowork: folder=\(c.folderReady) mcp=\(c.mcpRegistered) plugin=\(c.pluginStaged) claude=\(c.claudeInstalled)")
       exit(0)
@@ -108,7 +108,7 @@ final class AppState: ObservableObject {
       let session = try await t.login(email: email, password: password)
       let name = "Alfred Black for Mac — \(Host.current().localizedName ?? "this Mac")"
       let key = try await t.createApiKey(session: session, name: name)
-      guard Keychain.set(key.key, account: "apikey") else { throw TenantError(message: "Could not store the device key in the Keychain.") }
+      guard Keychain.set(key.key, account: "apikey") else { throw TenantError(message: "Could not store the device key on this Mac.") }
       let p = Pairing(domain: domain, email: email, keyId: key.id, pairedAt: Date())
       Store.savePairing(p); pairing = p
       online = await Tenant(api: p.api, apiKey: key.key).check()
@@ -157,6 +157,7 @@ final class AppState: ObservableObject {
   private var lastRender = Date.distantPast
   private var lastPush = Date.distantPast
   var lastReport = PushReport()
+  @Published var activity = Activity.load()
 
   /// On every launch while paired: the app may have been moved (dist → /Applications),
   /// so the MCP registration and the login item must point at THIS bundle.
@@ -173,9 +174,10 @@ final class AppState: ObservableObject {
     cowork = Cowork.status()
   }
   func tick(force: Bool = false) async {
+    activity = Activity.load()
     // A denied Keychain prompt must not look like a network problem.
     if pairing != nil, Keychain.get("apikey") == nil {
-      state.lastError = "The key could not be read from the Keychain. Allow access when macOS asks, or sign out and pair again."
+      state.lastError = "The device key is missing on this Mac. Sign out and pair again."
       state.lastErrorAt = Date(); online = false; return
     }
     guard let t = tenant, let p = pairing else { return }

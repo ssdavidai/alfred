@@ -107,6 +107,45 @@ enum Cowork {
     guard size > 0, size < 4 * 1024 * 1024 else { throw TenantError(message: "Plugin file is \(size) bytes; Claude accepts up to 4 MB.") }
     return out
   }
+  /// The folders Cowork mounts into its sessions, from Claude Desktop's own
+  /// per-space records. Only folders that exist on this Mac.
+  static func spaceFolders() -> [URL] {
+    let root = Paths.coworkSessions
+    guard let accounts = try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else { return [] }
+    var out: [URL] = []
+    for account in accounts {
+      guard let spaces = try? FileManager.default.contentsOfDirectory(at: account, includingPropertiesForKeys: nil) else { continue }
+      for space in spaces {
+        let f = space.appendingPathComponent("spaces.json")
+        guard let d = try? Data(contentsOf: f), let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+              let list = j["spaces"] as? [[String: Any]] else { continue }
+        for sp in list {
+          for folder in (sp["folders"] as? [[String: Any]]) ?? [] {
+            if let path = folder["path"] as? String, FileManager.default.fileExists(atPath: path) { out.append(URL(fileURLWithPath: path)) }
+          }
+        }
+      }
+    }
+    return Array(Set(out.map { $0.path })).sorted().map { URL(fileURLWithPath: $0) }
+  }
+  /// Folders that replicate elsewhere are no place for private memory.
+  static func isSynced(_ folder: URL) -> Bool {
+    let p = folder.path
+    return ["/Syncthing/", "/Dropbox/", "/Mobile Documents/", "/Google Drive/", "/OneDrive/", "/Library/CloudStorage/"].contains { p.contains($0) }
+  }
+  /// If the folder is a git repository, keep `entry` out of its history via the
+  /// local exclude file (never touching tracked files). Idempotent.
+  static func excludeFromGit(_ folder: URL, entry: String) {
+    let git = folder.appendingPathComponent(".git")
+    guard FileManager.default.fileExists(atPath: git.path) else { return }
+    let info = git.appendingPathComponent("info", isDirectory: true)
+    let exclude = info.appendingPathComponent("exclude")
+    let existing = (try? String(contentsOf: exclude, encoding: .utf8)) ?? ""
+    if existing.split(separator: "\n").map(String.init).contains(entry) { return }
+    try? FileManager.default.createDirectory(at: info, withIntermediateDirectories: true)
+    let sep = existing.isEmpty || existing.hasSuffix("\n") ? "" : "\n"
+    try? (existing + sep + entry + "\n").write(to: exclude, atomically: true, encoding: .utf8)
+  }
   static func revealExport() { NSWorkspace.shared.activateFileViewerSelecting([exportedPlugin]) }
   static func revealAlfredFolder() { NSWorkspace.shared.activateFileViewerSelecting([Paths.continuity]) }
 }
