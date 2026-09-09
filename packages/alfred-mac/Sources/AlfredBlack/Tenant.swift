@@ -128,7 +128,7 @@ struct Tenant {
 
   /// The most recent brief: its slot, date, and a short excerpt of the body.
   func latestBrief() async throws -> Brief? {
-    struct Item: Decodable { var slug_date: String; var slot: String; var date: String }
+    struct Item: Decodable { var slug_date: String; var slot: String; var date: String; var composed_at: String? }
     struct List: Decodable { var briefings: [Item] }
     struct Detail: Decodable { var body: String }
     let (code, data) = try await request("api/v1/briefings", bearer: apiKey)
@@ -136,7 +136,7 @@ struct Tenant {
     let (c2, d2) = try await request("api/v1/briefings/\(latest.slug_date)", bearer: apiKey)
     guard c2 == 200 else { return nil }
     let body = try JSONDecoder().decode(Detail.self, from: d2).body
-    return Brief(slot: latest.slot, date: latest.date, excerpt: Brief.excerpt(of: body))
+    return Brief(slot: latest.slot, date: latest.date, slug_date: latest.slug_date, composed_at: latest.composed_at, excerpt: Brief.excerpt(of: body), items: Brief.items(of: body))
   }
 
   /// Matters in flight, with the narrative state Alfred keeps for each.
@@ -179,8 +179,38 @@ struct DeskItem: Decodable, Identifiable {
 }
 
 struct Brief {
-  var slot: String; var date: String; var excerpt: String
+  var slot: String; var date: String; var slug_date: String = ""; var composed_at: String? = nil; var excerpt: String; var items: [String] = []
   var title: String { "\(slot.prefix(1).uppercased() + slot.dropFirst()) brief · \(date)" }
+  /// "THE BRIEF · TUE 9 SEP" and the time it was composed.
+  var header: String {
+    let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"; let o = DateFormatter(); o.dateFormat = "EEE d MMM"
+    return "The Brief · " + (f.date(from: date).map { o.string(from: $0) } ?? date)
+  }
+  var composedTime: String {
+    guard let c = composed_at, let d = ISO8601DateFormatter().date(from: c) ?? { let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]; return f.date(from: c) }() else { return slot == "morning" ? "07:00" : "19:00" }
+    let t = DateFormatter(); t.dateFormat = "HH:mm"; return t.string(from: d)
+  }
+  var isToday: Bool { let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"; return f.string(from: Date()) == date }
+  /// The brief's bullet lines, markdown stripped, at most three.
+  static func items(of body: String) -> [String] {
+    let text = body.range(of: "\n---\n").map { String(body[$0.upperBound...]) } ?? body
+    var out: [String] = []
+    for raw in text.components(separatedBy: "\n") {
+      let line = raw.trimmingCharacters(in: .whitespaces)
+      guard line.hasPrefix("- ") || line.hasPrefix("* ") || line.hasPrefix("• ") else { continue }
+      var t = String(line.dropFirst(2)).replacingOccurrences(of: "**", with: "")
+      t = t.replacingOccurrences(of: #"\[([^\]]+)\]\([^)]*\)"#, with: "$1", options: .regularExpression)
+      if !t.isEmpty && !out.contains(t) { out.append(t) }
+      if out.count == 3 { break }
+    }
+    return out
+  }
+  /// A deadline the line names, as its meta — else nothing.
+  static func deadline(in line: String) -> String? {
+    let re = try! NSRegularExpression(pattern: #"\b(noon|tonight|today|tomorrow|this (?:morning|evening|week)|by (?:mon|tue|wed|thu|fri|sat|sun)\w*|\d{1,2}:\d{2})\b"#, options: .caseInsensitive)
+    guard let m = re.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)), let r = Range(m.range, in: line) else { return nil }
+    return String(line[r])
+  }
   /// First paragraph of prose after the heading, prose only, capped.
   static func excerpt(of body: String) -> String {
     let text = body.range(of: "\n---\n").map { String(body[$0.upperBound...]) } ?? body   // skip frontmatter if present

@@ -90,6 +90,7 @@ struct AlfredBlackMain {
       Task { @MainActor in
         let st = AppState(); await st.tick(force: true)
         let name = CommandLine.arguments[i + 1]
+        st.screen = ["brief": Screen.brief, "matters": .matters, "yourword": .yourWord, "ledger": .ledger, "vault": .vault, "arrangement": .arrangement][name] ?? .glance
         if let r = CommandLine.arguments.firstIndex(of: "--reply"), CommandLine.arguments.count > r + 1 { st.askReply = CommandLine.arguments[r + 1] }
         let host: NSHostingView<AnyView> = name == "ask" ? NSHostingView(rootView: AnyView(AskView().environmentObject(st))) : NSHostingView(rootView: AnyView(PopoverView().environmentObject(st)))
         let w: CGFloat = name == "ask" ? 620 : T.popoverWidth
@@ -282,6 +283,9 @@ final class AppState: ObservableObject {
   @Published var screen: Screen = .glance
   private var lastNar = Date.distantPast
   func open(_ sc: Screen) { screen = sc }
+  /// Priority when the popover opens: an unread brief of the day, else the Glance.
+  func popoverOpened() { screen = (brief.map { $0.isToday && state.briefReadSlug != $0.slug_date } ?? false) ? .brief : .glance }
+  func popoverClosed() { if screen == .brief, let b = brief { state.briefReadSlug = b.slug_date }; screen = .glance }
   @Published var reply: (text: String, at: Date)? = nil
   @Published var asking = false
   @Published var askReply: String? = nil
@@ -357,7 +361,8 @@ final class AppState: ObservableObject {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
+  func popoverDidClose(_ n: Notification) { state.popoverClosed() }
   let state = AppState()
   var statusItem: NSStatusItem!
   var window: NSWindow?
@@ -372,7 +377,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     refreshPresence()
     statusItem.button?.toolTip = "Alfred Black"
     statusItem.button?.target = self; statusItem.button?.action = #selector(markClicked); statusItem.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
-    popover.contentViewController = NSHostingController(rootView: PopoverView().environmentObject(state))
+    popover.contentViewController = NSHostingController(rootView: PopoverView().environmentObject(state)); popover.delegate = self
     state.selfHeal()
     HotKey.onPress = { [weak self] in self?.state.toggleAsk() }; HotKey.register()
     if state.pairing == nil || !Self.launchedAsLoginItem() { showWindow() }
@@ -484,7 +489,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     if popover.isShown { popover.performClose(nil) }
 
-    else { state.screen = .glance; popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY); popover.contentViewController?.view.window?.makeKey() }
+    else { state.popoverOpened(); popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY); popover.contentViewController?.view.window?.makeKey() }
 
   }
 

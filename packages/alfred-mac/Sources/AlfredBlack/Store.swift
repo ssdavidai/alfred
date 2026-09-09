@@ -14,6 +14,7 @@ struct Pairing: Codable, Equatable {
 struct RunState: Codable {
   var pushedUUIDs: Set<String> = []
   var boundSessions: Set<String> = []
+  var briefReadSlug: String? = nil
   var lastRenderAt: Date?
   var lastRenderEntries: Int = 0
   var lastPushAt: Date?
