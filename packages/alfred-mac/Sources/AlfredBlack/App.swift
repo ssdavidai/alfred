@@ -59,6 +59,16 @@ struct AlfredBlackMain {
       do { let u = try Cowork.exportPlugin(); print("exported: \(u.path)"); exit(0) }
       catch { print("error: \((error as? TenantError)?.message ?? "\(error)")"); exit(1) }
     }
+    if let i = CommandLine.arguments.firstIndex(of: "--pet"), CommandLine.arguments.count > i + 1 {
+      let dir = URL(fileURLWithPath: CommandLine.arguments[i + 1]); try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+      for (name, st) in [("present", PetState.present), ("attending", .attending), ("resting", .resting)] {
+        let img = Pet.image(st, scale: 8)
+        if let tiff = img.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff), let png = rep.representation(using: .png, properties: [:]) {
+          try? png.write(to: dir.appendingPathComponent("pet-\(name).png"))
+        }
+      }
+      print("pet: \(dir.path)"); exit(0)
+    }
     if CommandLine.arguments.contains("--tick") {
       var done = false
       Task { @MainActor in
@@ -161,6 +171,9 @@ final class AppState: ObservableObject {
   private var lastPush = Date.distantPast
   var lastReport = PushReport()
   @Published var activity = Activity.load()
+  @Published var desk: [DeskItem] = []
+  private var lastDesk = Date.distantPast
+  var petState: PetState { Pet.isQuiet() ? .resting : (desk.isEmpty ? .present : .attending) }
 
   /// On every launch while paired: the app may have been moved (dist → /Applications),
   /// so the MCP registration and the login item must point at THIS bundle.
@@ -191,6 +204,10 @@ final class AppState: ObservableObject {
         let n = try await Continuity.refresh(tenant: t, domain: p.domain)
         state.lastRenderAt = Date(); state.lastRenderEntries = n; online = true
       } catch { online = false; state.lastError = error.localizedDescription; state.lastErrorAt = Date() }
+    }
+    if force || now.timeIntervalSince(lastDesk) >= 60 {
+      lastDesk = now
+      if let items = try? await t.deskPending() { desk = items.filter { ($0.status ?? "pending") == "pending" } }
     }
     if force || now.timeIntervalSince(lastPush) >= 60 {
       lastPush = now
@@ -228,15 +245,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     if Self.moveToApplicationsIfNeeded() { return }
     AB.registerFonts()
     statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-    statusItem.button?.image = Glyph.bowtie()
-    statusItem.button?.image?.isTemplate = true
+    statusItem.button?.image = Pet.image(state.petState)
+    scheduleBlink()
     statusItem.button?.toolTip = "Alfred Black"
     statusItem.menu = buildMenu()
     state.selfHeal()
     if state.pairing == nil || !Self.launchedAsLoginItem() { showWindow() }
     timer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
       guard let self else { return }
-      Task { @MainActor in await self.state.tick(); self.statusItem.menu = self.buildMenu() }
+      Task { @MainActor in await self.state.tick(); self.statusItem.menu = self.buildMenu(); self.statusItem.button?.image = Pet.image(self.state.petState) }
     }
     Task { @MainActor in await state.tick(force: true); statusItem.menu = buildMenu() }
   }
@@ -297,8 +314,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
   @MainActor func buildMenu() -> NSMenu {
     let m = NSMenu()
-    let title = state.pairing.map { "Paired with \($0.domain)" } ?? "Not paired"
+    let title = state.pairing.map { _ in Pet.line(state.petState, deskCount: state.desk.count) } ?? "Not paired"
     m.addItem(withTitle: title, action: nil, keyEquivalent: "")
+    for item in state.desk.prefix(3) where !item.title.isEmpty {
+      let t = item.title.count > 64 ? String(item.title.prefix(63)) + "…" : item.title
+      m.addItem(withTitle: "· " + t, action: #selector(openDesk), keyEquivalent: "").target = self
+    }
+    if state.pairing != nil { m.addItem(withTitle: "Open the Desk", action: #selector(openDesk), keyEquivalent: "d").target = self }
     if state.pairing != nil {
       let dot = state.online == true ? "connected" : (state.online == false ? "unreachable" : "checking")
       m.addItem(withTitle: "Tenant \(dot)", action: nil, keyEquivalent: "")
@@ -321,6 +343,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   @objc func openWindow() { showWindow() }
+
+  @objc func openDesk() { if let d = state.pairing?.domain, let u = URL(string: "https://\(d)/desk") { NSWorkspace.shared.open(u) } }
+
+  /// Perhaps once a minute — unless the Mac asks for reduced motion, or the pet is resting.
+
+  func scheduleBlink() {
+
+    DispatchQueue.main.asyncAfter(deadline: .now() + Double.random(in: 45...90)) { [weak self] in
+
+      guard let self else { return }
+
+      if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion, self.state.petState != .resting {
+
+        self.statusItem.button?.image = Pet.image(self.state.petState, blink: true)
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) { self.statusItem.button?.image = Pet.image(self.state.petState) }
+
+      }
+
+      self.scheduleBlink()
+
+    }
+
+  }
   @objc func revealFolder() { Cowork.revealAlfredFolder() }
   @objc func quit() { NSApp.terminate(nil) }
 
