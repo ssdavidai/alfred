@@ -167,13 +167,18 @@ struct Tenant {
   }
 
   /// The principal's word on a Desk card: hold (defer), take it himself, or so ordered (delegate to Alfred).
-  func decide(card: DeskItem, intent: String) async throws {
+  @discardableResult
+  func decide(card: DeskItem, intent: String) async throws -> String? {
     let (code, data) = try await request("api/v1/decisions", method: "POST", bearer: apiKey,
       body: ["source": "needs_attention", "source_record": card.path ?? "needs_attention/\(card.id).md", "intent": intent, "origin": "mac"])
-    guard code == 200 || code == 201 else {
-      let msg = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["error"] as? String
-      throw TenantError(message: msg ?? "The decision was not recorded (HTTP \(code)).")
-    }
+    let j = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+    guard code == 200 || code == 201 else { throw TenantError(message: (j["error"] as? String) ?? "The decision was not recorded (HTTP \(code)).") }
+    return (j["id"] as? String) ?? ((j["decision"] as? [String: Any])?["id"] as? String)
+  }
+  /// Undo: the route reverses a decision and restores the card.
+  func reverse(decisionId: String) async throws {
+    let (code, _) = try await request("api/v1/decisions/\(decisionId)/reverse", method: "POST", bearer: apiKey, body: [:])
+    guard code == 200 else { throw TenantError(message: "The decision could not be undone (HTTP \(code)).") }
   }
 
   /// The audit ledger — append-only, every line traceable to its session.

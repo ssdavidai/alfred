@@ -22,9 +22,19 @@ struct PopoverView: View {
       default: GlanceView()
       }
       }
+      if let n = s.notice {
+        HStack(spacing: 12) {
+          Circle().fill(T.brass).frame(width: 5, height: 5)
+          Text(n.text).font(T.body(13)).foregroundColor(T.ink)
+          Spacer()
+          if let u = n.undo { Button(action: u) { Keycap(text: "UNDO") }.buttonStyle(.plain).pointer() }
+        }.padding(.horizontal, 18).padding(.vertical, 9).background(T.bg2)
+        .transition(.opacity)
+      }
       NavStrip()
       }
     }
+    .animation(.easeOut(duration: 0.2), value: s.notice?.at)
     .background(   // the screens' keys: ⌘G glance · ⌘B brief · ⌘M matters · ⌘L ledger · ⌘V vault · ⌘, arrangement
       Group {
         Button("") { s.open(.glance) }.keyboardShortcut("g", modifiers: [.command])
@@ -59,7 +69,7 @@ struct GlanceView: View {
   }
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
-      ScreenHeader(name: "Today", status: s.deskTotal == 0 ? "The desk is quiet" : (s.newSinceSeen > 0 ? "\(s.newSinceSeen) new · \(max(s.deskTotal, s.desk.count)) waiting" : "\(max(s.deskTotal, s.desk.count)) waiting"), brass: s.newSinceSeen > 0)
+      ScreenHeader(name: "Today", status: s.lastRefreshAt == nil ? "reading the desk…" : s.deskTotal == 0 ? "The desk is quiet" : (s.newSinceSeen > 0 ? "\(s.newSinceSeen) new · \(max(s.deskTotal, s.desk.count)) waiting" : "\(max(s.deskTotal, s.desk.count)) waiting"), brass: s.newSinceSeen > 0)
       AskInline().padding(.horizontal, 18).padding(.top, 16)
       Say(text: line).padding(.horizontal, 18).padding(.top, 16).padding(.bottom, 14)
       ForEach(Array(s.desk.prefix(3))) { item in
@@ -180,7 +190,7 @@ struct LedgerView: View {
   private func openAudit() { if let d = s.pairing?.domain, let u = URL(string: "https://\(d)/decisions") { NSWorkspace.shared.open(u) } }
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
-      ScreenHeader(name: "Activity", status: "today · every line traceable")
+      ScreenHeader(name: "Activity", status: s.lastRefreshAt.map { "updated \(AppDelegate.ago($0)) · every line traceable" } ?? "reading…")
       if s.ledger.isEmpty { Say(text: "Nothing recorded yet today, \(T.honorific).").padding(.horizontal, 18).padding(.vertical, 18) }
       ForEach(Array(s.ledger.sorted { (($0.mode ?? "live") == "live" ? 0 : 1) < (($1.mode ?? "live") == "live" ? 0 : 1) }.prefix(6))) { l in
         let live = (l.mode ?? "live") == "live"
@@ -304,7 +314,7 @@ struct AskInline: View {
         TextField("What shall Alfred handle?", text: $text).textFieldStyle(.plain)
           .font(T.say(15)).foregroundColor(T.ink).focused($focused).disabled(s.asking)
           .onSubmit { if s.askReply != nil { s.soOrdered(withoutRead: NSEvent.modifierFlags.contains(.shift)) } else { let q = text; text = ""; Task { await s.propose(q) } } }
-        if s.asking { Meta(text: "reading your desk…", size: 8.5, tracking: 1.2) } else { Button(action: { s.toggleAsk() }) { Keycap(text: "⌘⇧A") }.buttonStyle(.plain).pointer().help("Ask from anywhere") }
+        if s.asking { Waiting() } else { Button(action: { s.toggleAsk() }) { Keycap(text: "⌘⇧A") }.buttonStyle(.plain).pointer().help("Ask from anywhere") }
       }
       .padding(.horizontal, 12).padding(.vertical, 9)
       .overlay(RoundedRectangle(cornerRadius: T.rButton).stroke(focused ? T.brass : T.hair2, lineWidth: 1))
@@ -319,5 +329,19 @@ struct AskInline: View {
         Meta(text: "⏎ to ask · Alfred proposes before he acts", size: 8.5, tracking: 1.2)
       }
     }
+  }
+}
+
+/// While Alfred reads the desk: the seconds, and ESC to stop waiting.
+struct Waiting: View {
+  @EnvironmentObject var s: AppState
+  @State private var tick = 0
+  private let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+  var body: some View {
+    let secs = Int(Date().timeIntervalSince(s.askStartedAt ?? Date())) + tick * 0
+    HStack(spacing: 8) {
+      Meta(text: "reading your desk · \(secs)s", size: 8.5, tracking: 1.2)
+      Button(action: { s.cancelAsk() }) { Keycap(text: "ESC") }.buttonStyle(.plain).pointer().keyboardShortcut(.escape, modifiers: [])
+    }.onReceive(timer) { _ in tick += 1 }
   }
 }
