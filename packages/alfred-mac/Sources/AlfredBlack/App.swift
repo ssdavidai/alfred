@@ -59,15 +59,19 @@ struct AlfredBlackMain {
       do { let u = try Cowork.exportPlugin(); print("exported: \(u.path)"); exit(0) }
       catch { print("error: \((error as? TenantError)?.message ?? "\(error)")"); exit(1) }
     }
-    if let i = CommandLine.arguments.firstIndex(of: "--pet"), CommandLine.arguments.count > i + 1 {
+    if let i = CommandLine.arguments.firstIndex(of: "--presence"), CommandLine.arguments.count > i + 1 {
       let dir = URL(fileURLWithPath: CommandLine.arguments[i + 1]); try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-      for (name, st) in [("present", PetState.present), ("attending", .attending), ("resting", .resting)] {
-        let img = Pet.image(st, scale: 8)
-        if let tiff = img.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff), let png = rep.representation(using: .png, properties: [:]) {
-          try? png.write(to: dir.appendingPathComponent("pet-\(name).png"))
+      for (name, need, dark) in [("silent-dark", false, true), ("attending-dark", true, true), ("attending-light", true, false)] {
+        let src = Presence.image(needsWord: need, dark: dark)
+        let big = NSImage(size: NSSize(width: src.size.width * 8, height: src.size.height * 8), flipped: false) { r in
+          (dark ? AB.hex(0x1C1A17) : AB.hex(0xE8E4DC)).setFill(); r.fill()
+          if src.isTemplate { src.draw(in: r, from: .zero, operation: .sourceOver, fraction: 1); (dark ? NSColor.white : NSColor.black).setFill(); r.fill(using: .sourceAtop) }
+          else { src.draw(in: r, from: .zero, operation: .sourceOver, fraction: 1) }
+          return true
         }
+        if let tiff = big.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff), let png = rep.representation(using: .png, properties: [:]) { try? png.write(to: dir.appendingPathComponent("presence-\(name).png")) }
       }
-      print("pet: \(dir.path)"); exit(0)
+      print("presence: \(dir.path)"); exit(0)
     }
     if let i = CommandLine.arguments.firstIndex(of: "--ask"), CommandLine.arguments.count > i + 1 {   // ask Alfred from a shell
       var done = false
@@ -205,7 +209,7 @@ final class AppState: ObservableObject {
   @Published var brief: Brief? = nil
   private var lastBrief = Date.distantPast
   private var lastDesk = Date.distantPast
-  var petState: PetState { Pet.isQuiet() ? .resting : (desk.isEmpty ? .present : .attending) }
+  var needsWord: Bool { !desk.isEmpty }
 
   /// On every launch while paired: the app may have been moved (dist → /Applications),
   /// so the MCP registration and the login item must point at THIS bundle.
@@ -280,15 +284,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     if Self.moveToApplicationsIfNeeded() { return }
     AB.registerFonts()
     statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-    statusItem.button?.image = Pet.image(state.petState)
-    scheduleBlink()
+    refreshPresence()
     statusItem.button?.toolTip = "Alfred Black"
     statusItem.menu = buildMenu()
     state.selfHeal()
     if state.pairing == nil || !Self.launchedAsLoginItem() { showWindow() }
     timer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
       guard let self else { return }
-      Task { @MainActor in await self.state.tick(); self.statusItem.menu = self.buildMenu(); self.statusItem.button?.image = Pet.image(self.state.petState) }
+      Task { @MainActor in await self.state.tick(); self.statusItem.menu = self.buildMenu(); self.refreshPresence() }
     }
     Task { @MainActor in await state.tick(force: true); statusItem.menu = buildMenu() }
   }
@@ -349,7 +352,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
   @MainActor func buildMenu() -> NSMenu {
     let m = NSMenu()
-    let title = state.pairing.map { _ in Pet.line(state.petState, deskCount: state.desk.count) } ?? "Not paired"
+    let title = state.pairing.map { _ in Presence.line(deskCount: state.desk.count) } ?? "Not paired"
     m.addItem(withTitle: title, action: nil, keyEquivalent: "")
     for item in state.desk.prefix(3) where !item.title.isEmpty {
       let t = item.title.count > 64 ? String(item.title.prefix(63)) + "…" : item.title
@@ -379,29 +382,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
   @objc func openWindow() { showWindow() }
 
-  @objc func openDesk() { if let d = state.pairing?.domain, let u = URL(string: "https://\(d)/desk") { NSWorkspace.shared.open(u) } }
+  /// The mark, and the dot only while something needs the principal's word.
 
-  /// Perhaps once a minute — unless the Mac asks for reduced motion, or the pet is resting.
+  func refreshPresence() {
 
-  func scheduleBlink() {
+    let dark = statusItem.button?.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
 
-    DispatchQueue.main.asyncAfter(deadline: .now() + Double.random(in: 45...90)) { [weak self] in
+    let img = Presence.image(needsWord: state.needsWord, dark: dark)
 
-      guard let self else { return }
-
-      if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion, self.state.petState != .resting {
-
-        self.statusItem.button?.image = Pet.image(self.state.petState, blink: true)
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) { self.statusItem.button?.image = Pet.image(self.state.petState) }
-
-      }
-
-      self.scheduleBlink()
-
-    }
+    if statusItem.button?.image?.size != img.size || statusItem.button?.image?.isTemplate != img.isTemplate || state.needsWord { statusItem.button?.image = img }
 
   }
+
+  @objc func openDesk() { if let d = state.pairing?.domain, let u = URL(string: "https://\(d)/desk") { NSWorkspace.shared.open(u) } }
   @objc func revealFolder() { Cowork.revealAlfredFolder() }
   @objc func quit() { NSApp.terminate(nil) }
 

@@ -95,7 +95,7 @@ struct StatusView: View {
     VStack(alignment: .leading, spacing: 0) {
       HStack(alignment: .firstTextBaseline) { Label_(text: "For Mac"); Spacer(); Label_(text: s.pairing?.domain ?? "", color: AB.brass) }
       Wordmark().padding(.top, 6)
-      Text(s.online == false ? "The tenant cannot be reached at the moment." : Pet.line(s.petState, deskCount: s.desk.count))
+      Text(s.online == false ? "The tenant cannot be reached at the moment." : Presence.line(deskCount: s.desk.count))
         .font(AB.body(19, italic: true)).foregroundColor(AB.marginalia).padding(.top, 4)
       Hairline().padding(.vertical, 16)
 
