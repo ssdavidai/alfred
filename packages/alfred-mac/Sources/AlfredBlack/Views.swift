@@ -45,12 +45,13 @@ struct OnboardingView: View {
         field("Email", "you@example.com", $email)
         field("Password", "", $password, secure: true)
       }.padding(.horizontal, 48).padding(.top, 26)
-      if let m = s.message { Text(m).font(T.mono(9)).foregroundColor(T.brass).padding(.top, 12).padding(.horizontal, 48).fixedSize(horizontal: false, vertical: true) }
+      if let m = s.message { Text(m).font(T.body(12.5)).foregroundColor(Color(nsColor: AB.hex(0xD9776C))).padding(.top, 12).padding(.horizontal, 48).multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true) }
       HStack(spacing: 10) {
-        Button("The terms") { if let d = Tenant.domain(from: url), let u = URL(string: "https://\(d)/household") { NSWorkspace.shared.open(u) } }.buttonStyle(PopButton())
+        Button("The terms") { if let d = Tenant.domain(from: url), let u = URL(string: "https://\(d)/household") { NSWorkspace.shared.open(u) } }.buttonStyle(PopButton()).pointer().help("The household rules Alfred follows")
         Button(s.busy ? "One moment" : "Begin the watch") { Task { await s.pair(url: url, email: email, password: password) } }
-          .buttonStyle(PopButton(primary: true)).disabled(s.busy || url.isEmpty || email.isEmpty || password.isEmpty).keyboardShortcut(.return, modifiers: [])
-      }.padding(.top, 26)
+          .buttonStyle(PopButton(primary: true)).disabled(s.busy || url.isEmpty || email.isEmpty || password.isEmpty).keyboardShortcut(.return, modifiers: []).pointer()
+      }.padding(.top, 22)
+      Meta(text: "Sign in and pair this Mac · ⏎", size: 8.5, tracking: 1.2).padding(.top, 10)
       Spacer(minLength: 20)
       Meta(text: "Week one · L1 · nothing leaves this machine", tracking: 1.8).padding(.bottom, 22)
     }
