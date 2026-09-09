@@ -83,7 +83,7 @@ struct AlfredBlackMain {
       while !done && Date() < deadline { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.05)) }
       exit(done ? 0 : 2)
     }
-    if CommandLine.arguments.contains("--tick") {
+        if CommandLine.arguments.contains("--tick") {
       var done = false
       Task { @MainActor in
         let st = AppState(); st.selfHeal(); await st.tick(force: true)
@@ -204,6 +204,10 @@ final class AppState: ObservableObject {
   var lastReport = PushReport()
   @Published var activity = Activity.load()
   @Published var desk: [DeskItem] = []
+  @Published var deskTotal = 0
+  @Published var matters: [Matter] = []
+  @Published var narToday: Double? = nil
+  private var lastNar = Date.distantPast
   @Published var reply: (text: String, at: Date)? = nil
   @Published var asking = false
   @Published var brief: Brief? = nil
@@ -241,12 +245,16 @@ final class AppState: ObservableObject {
         state.lastRenderAt = Date(); state.lastRenderEntries = n; online = true
       } catch { online = false; state.lastError = error.localizedDescription; state.lastErrorAt = Date() }
     }
+    if force || now.timeIntervalSince(lastNar) >= 300 {
+      lastNar = now; if let h = try? await t.returnedToday() { narToday = h }
+    }
     if force || now.timeIntervalSince(lastBrief) >= 600 {
       lastBrief = now; if let b = try? await t.latestBrief() { brief = b }
     }
     if force || now.timeIntervalSince(lastDesk) >= 60 {
       lastDesk = now
-      if let items = try? await t.deskPending() { desk = items.filter { ($0.status ?? "pending") == "pending" } }
+      if let page = try? await t.deskPending() { desk = page.items.filter { ($0.status ?? "pending") == "pending" }.sorted { ($0.created ?? "") > ($1.created ?? "") }; deskTotal = page.total }   // newest first
+      if let ms = try? await t.matters() { matters = ms.filter { ($0.state ?? "active") != "archived" } }
     }
     if force || now.timeIntervalSince(lastPush) >= 60 {
       lastPush = now
@@ -352,7 +360,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
   @MainActor func buildMenu() -> NSMenu {
     let m = NSMenu()
-    let title = state.pairing.map { _ in Presence.line(deskCount: state.desk.count) } ?? "Not paired"
+    let title = state.pairing.map { _ in Presence.line(deskCount: max(state.deskTotal, state.desk.count)) } ?? "Not paired"
     m.addItem(withTitle: title, action: nil, keyEquivalent: "")
     for item in state.desk.prefix(3) where !item.title.isEmpty {
       let t = item.title.count > 64 ? String(item.title.prefix(63)) + "…" : item.title
