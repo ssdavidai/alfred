@@ -64,12 +64,18 @@ struct AskView: View {
 
 /// ⌘⇧A, system-wide, without accessibility permission (Carbon hot keys).
 enum HotKey {
-  private static var ref: EventHotKeyRef?
-  static var onPress: (() -> Void)?
+  private static var refs: [EventHotKeyRef?] = [nil, nil]
+  static var onPress: (() -> Void)?          // ⌘⇧A
+  static var onStatement: (() -> Void)?      // ⌘⇧S
   static func register() {
-    var id = EventHotKeyID(signature: OSType(0x414C4652), id: 1)   // "ALFR"
-    RegisterEventHotKey(UInt32(kVK_ANSI_A), UInt32(cmdKey | shiftKey), id, GetApplicationEventTarget(), 0, &ref)
+    var a = EventHotKeyID(signature: OSType(0x414C4652), id: 1)   // "ALFR"
+    var b = EventHotKeyID(signature: OSType(0x414C4652), id: 2)
+    RegisterEventHotKey(UInt32(kVK_ANSI_A), UInt32(cmdKey | shiftKey), a, GetApplicationEventTarget(), 0, &refs[0])
+    RegisterEventHotKey(UInt32(kVK_ANSI_S), UInt32(cmdKey | shiftKey), b, GetApplicationEventTarget(), 0, &refs[1])
     var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
-    InstallEventHandler(GetApplicationEventTarget(), { _, _, _ in HotKey.onPress?(); return noErr }, 1, &spec, nil, nil)
+    InstallEventHandler(GetApplicationEventTarget(), { _, event, _ in
+      var id = EventHotKeyID(); GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil, MemoryLayout<EventHotKeyID>.size, nil, &id)
+      if id.id == 2 { HotKey.onStatement?() } else { HotKey.onPress?() }; return noErr
+    }, 1, &spec, nil, nil)
   }
 }
