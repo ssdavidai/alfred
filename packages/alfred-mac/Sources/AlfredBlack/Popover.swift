@@ -20,6 +20,16 @@ struct PopoverView: View {
       default: GlanceView()
       }
     }
+    .background(   // the screens' keys: ⌘G glance · ⌘B brief · ⌘M matters · ⌘L ledger · ⌘V vault · ⌘, arrangement
+      Group {
+        Button("") { s.open(.glance) }.keyboardShortcut("g", modifiers: [.command])
+        Button("") { s.open(.brief) }.keyboardShortcut("b", modifiers: [.command])
+        Button("") { s.open(.matters) }.keyboardShortcut("m", modifiers: [.command])
+        Button("") { s.open(.ledger) }.keyboardShortcut("l", modifiers: [.command])
+        Button("") { s.open(.vault) }.keyboardShortcut("v", modifiers: [.command])
+        Button("") { s.open(.arrangement) }.keyboardShortcut(",", modifiers: [.command])
+        Button("") { if !s.desk.isEmpty { s.open(.yourWord) } }.keyboardShortcut("w", modifiers: [.command])
+      }.opacity(0).frame(width: 0, height: 0))
     .frame(width: s.screen == .arrangement ? 380 : T.popoverWidth)
     .overlay(RoundedRectangle(cornerRadius: T.rPopover).stroke(T.brass.opacity(s.screen == .yourWord ? 0.5 : 0), lineWidth: 1))
     .animation(.easeInOut(duration: 0.15), value: s.screen)

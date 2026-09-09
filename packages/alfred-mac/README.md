@@ -1,19 +1,32 @@
-# Alfred Black for macOS
+# Alfred for macOS
 
-A small, always-on menu-bar app that keeps a principal's **Claude Cowork**
-sessions inside the one-Alfred continuity layer of their tenant, in both
-directions — without a terminal, a launchd agent, or an egress rule.
-
-The rule it exists to honour: *Alfred is one memory across every surface.*
-A conversation in Cowork is as much a conversation with Alfred as one on
-Slack, and the next turn on either side must already know about it.
-
-## What it does
+The principal's desk client for Alfred Black, built to the **Alfred for
+macOS** handoff. The core thesis: **there is no main window.** Alfred lives
+in the menu bar and a global command bar; the only true windows are the
+monthly Attention Statement and the first-run Placement. Everything else is
+one 344 pt popover that swaps its content. Silence when nothing needs the
+principal; one brass dot when something does.
 
 | | |
 |---|---|
-| **The surface** | Command first. `alfred.black >` asks Alfred anything; the reply comes back in serif, signed, and both turns are journaled (`POST /api/v1/alfred/ask`), so Slack, Telegram and Cowork remember the exchange. Below it: the Desk's matters awaiting judgment as ledger lines that open the Desk, the latest brief as a prose excerpt, and the machine-truth rows folded into a Ledger. |
-| **The Pet** | The menu-bar item is the design system's Pet (the Top Hat, 32 × 39 pixels): *Present* is still; *Attending* shows one brass dot when the Desk holds matters awaiting judgment, and the menu lists the first three; *Resting* dims the eyes through quiet hours (23:00–07:00 local) and never shows brass. It blinks perhaps once a minute, never under reduced motion. |
+| **00 · The Presence** | The white Alfred mark in the menu bar, 15 pt, and one brass dot to its right while at least one matter needs the principal's word. No dot is total silence — no badge counts, no animation. Left click opens the popover; right click the utility menu. |
+| **01 · The Glance** | Alfred's greeting with the clause that matters in brass; up to three rows — needs-you first (filled brass dot, *Your word*), then matters in flight (hollow, *In hand*); footer: today's hours returned after every cost, and `⌘⇧A ASK`. |
+| **02 · The Brief** | The tenant's latest brief: header in brass, its intro as Alfred's line, its first three bullets as rows. An unread brief of the day is what the popover opens on; closing it marks it read. |
+| **03 · Matters** | Work in flight, at most five: title, the living state as an italic subline, a meta (*Blocked on you* in brass when a Desk card points at it); trust class in the header; overdue count in the footer; ⌘L to the Ledger. |
+| **04 · Your Word** | An escalation, one decision, the border brassed: the Desk card's headline as Alfred's line, then Hold · Myself · So ordered (`POST /api/v1/decisions`), then the next. Only this screen may notify. |
+| **05/06 · The Ask** | ⌘⇧A anywhere: a floating 620 pt bar on any Space, one field, no modes. ⏎ asks Alfred what he would do (not yet acting); ⏎ again is *So ordered*, ⇧⏎ *send without read*, ESC never mind. Both turns journaled (`POST /api/v1/alfred/ask`), so every surface remembers. |
+| **07 · The Statement** | ⌘⇧S, the only real window: last month's hours returned in 54 pt brass and the three bars — displaced, your time (hatched), net — from the attention statement. ⌘E opens the print statement. |
+| **08 · The Ledger** | The audit ledger in plain words, append-only, actors in brass for what was done live; no edit or delete affordance. |
+| **09 · The Vault** | What Alfred holds, counted by record type onto six shelves; Credentials sealed, never a count. |
+| **10 · The Arrangement** | Settings as a contract: three sentences kept in `vault/RULES.md` (*Alfred may, without asking · asks first · never*), and the trust class (L1 · L2 · L3) mapped to the tenant's autonomy flags — applied at midnight, never at once. |
+| **11 · The Placement** | First run: the brass mark, "At your service.", Alfred's paragraph, the pairing fields, *The Terms* and *Begin the Watch*. One screen, then the app goes silent. |
+
+Keys inside the popover: ⌘G glance · ⌘B brief · ⌘M matters · ⌘W your word · ⌘L ledger · ⌘V vault · ⌘, arrangement.
+
+## The continuity layer underneath
+
+| | |
+|---|---|
 | **Pair** | Enter the tenant URL and the dashboard login. The app signs in, mints a dedicated API key (visible under *Study › API keys*, revocable there), stores it in a 0600 file of its own, and forgets the password. |
 | **Read side** | Every 30 s it renders the principal's recent journal (Slack, Telegram, Cowork, …) into `~/Alfred/continuity.md` as the same `[ALFRED-CONTINUITY — authoritative]` block the Hermes plugin injects. A Cowork plugin (staged by the app) reads that file on `SessionStart`, `UserPromptSubmit` and `PostCompact`. |
 | **Write side** | Every 60 s it mirrors new Cowork turns from the local session transcripts into the journal (`channel: cowork`), binding each new session to the owner. Only turns from the last 48 h are ever mirrored: the journal stamps `ts` server-side, so history mirrored late would land as "now". |
