@@ -323,7 +323,17 @@ final class AppState: ObservableObject {
     let body = a.written(into: rulesBody ?? "# Standing Rules\n")
     do { try await t.saveRules(body); rulesBody = body; arrangement = a } catch { record(error) }
   }
-  func popoverClosed() { if screen == .brief, let b = brief { state.briefReadSlug = b.slug_date }; screen = .glance }
+  /// Cards that arrived since the principal last looked at the desk (yesterday's midnight until they have).
+  var newSinceSeen: Int {
+    let since = state.deskSeenAt ?? Calendar.current.startOfDay(for: Date())
+    let f = ISO8601DateFormatter(); let g = ISO8601DateFormatter(); g.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return desk.filter { c in (c.created.flatMap { f.date(from: $0) ?? g.date(from: $0) } ?? .distantPast) > since }.count
+  }
+  func popoverClosed() {
+    if screen == .brief, let b = brief { state.briefReadSlug = b.slug_date }
+    if screen == .glance || screen == .yourWord { state.deskSeenAt = Date() }
+    screen = .glance
+  }
   @Published var reply: (text: String, at: Date)? = nil
   @Published var asking = false
   @Published var askReply: String? = nil
@@ -383,7 +393,7 @@ final class AppState: ObservableObject {
       lastDesk = now
       if let page = try? await t.deskPending() {
         let before = deskTotal
-        desk = page.items.filter { ($0.status ?? "pending") == "pending" }.sorted { ($0.created ?? "") > ($1.created ?? "") }; deskTotal = page.total   // newest first
+        desk = page.items.filter { ($0.status ?? "pending") == "pending" }.sorted { ($0.decay_score ?? 0, $0.created ?? "") > ($1.decay_score ?? 0, $1.created ?? "") }; deskTotal = page.total   // most pressing first
         if before > 0 || lastDeskSeen != nil, page.total > before, let newest = desk.first { Notify.yourWord(newest.title) }
         lastDeskSeen = now
       }

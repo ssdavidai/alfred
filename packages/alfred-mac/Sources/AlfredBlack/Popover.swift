@@ -48,10 +48,10 @@ struct GlanceView: View {
     return h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening"
   }
   private var line: String {
-    let n = max(s.deskTotal, s.desk.count)
+    let n = max(s.deskTotal, s.desk.count); let new = s.newSinceSeen
     if n == 0 { return "\(greeting), \(T.honorific). The desk is quiet — «nothing needs your word.»" }
-    if n == 1 { return "\(greeting), \(T.honorific). The desk is quiet — «one thing needs your word.»" }
-    return "\(greeting), \(T.honorific). «\(n) things need your word.»"
+    if new == 0 { return "\(greeting), \(T.honorific). Nothing new since you looked — «\(n) waiting.»" }
+    return "\(greeting), \(T.honorific). «\(new == 1 ? "One thing is" : "\(new) things are") new» since you looked; \(n) waiting."
   }
   private var returned: String {
     guard let h = s.narToday else { return "Today · in hand" }
@@ -59,8 +59,9 @@ struct GlanceView: View {
   }
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
-      ScreenHeader(name: "Today", status: s.deskTotal == 0 ? "The desk is quiet" : "\(max(s.deskTotal, s.desk.count)) waiting", brass: s.deskTotal > 0)
-      Say(text: line).padding(.horizontal, 18).padding(.top, 18).padding(.bottom, 16)
+      ScreenHeader(name: "Today", status: s.deskTotal == 0 ? "The desk is quiet" : (s.newSinceSeen > 0 ? "\(s.newSinceSeen) new · \(max(s.deskTotal, s.desk.count)) waiting" : "\(max(s.deskTotal, s.desk.count)) waiting"), brass: s.newSinceSeen > 0)
+      AskInline().padding(.horizontal, 18).padding(.top, 16)
+      Say(text: line).padding(.horizontal, 18).padding(.top, 16).padding(.bottom, 14)
       ForEach(Array(s.desk.prefix(3))) { item in
         PopRow(title: item.title, meta: "Your word", needsWord: true) { s.open(.yourWord) }
       }
@@ -70,7 +71,7 @@ struct GlanceView: View {
       HStack {
         Meta(text: returned, tracking: 1.8)
         Spacer()
-        Button(action: { s.toggleAsk() }) { Keycap(text: "⌘⇧A  ASK ALFRED") }.buttonStyle(.plain).pointer()
+        if s.deskTotal > 3 { Button(action: { s.open(.yourWord) }) { Meta(text: "See all \(max(s.deskTotal, s.desk.count)) in Decisions →", color: T.brass, tracking: 1.4) }.buttonStyle(.plain).pointer() }
       }.padding(.horizontal, 18).padding(.vertical, 12)
     }
   }
@@ -271,9 +272,9 @@ struct NavStrip: View {
   var body: some View {
     VStack(spacing: 0) {
       Rectangle().fill(T.hair2).frame(height: 1)
-      HStack(spacing: 4) {
+      HStack(spacing: 1) {
         ForEach(items, id: \.0) { name, sc in NavItem(name: name, active: s.screen == sc) { s.open(sc) } }
-      }.frame(maxWidth: .infinity).padding(.horizontal, 6)
+      }.frame(maxWidth: .infinity).padding(.horizontal, 4)
     }.background(T.bg2.opacity(0.6))
   }
 }
@@ -283,10 +284,40 @@ struct NavItem: View {
   @State private var hover = false
   var body: some View {
     Button(action: action) {
-      Text(name.uppercased()).font(T.mono(9.5, weight: .heavy)).tracking(0.6)
+      Text(name.uppercased()).font(T.mono(9, weight: .heavy)).tracking(0.3)
         .foregroundColor(active ? T.brass : (hover ? T.ink : T.dim)).lineLimit(1).fixedSize()
-        .padding(.horizontal, 7).padding(.vertical, 11).contentShape(Rectangle())
+        .padding(.horizontal, 5).padding(.vertical, 11).contentShape(Rectangle())
         .background(RoundedRectangle(cornerRadius: T.rButton).fill(hover && !active ? T.bg3 : Color.clear))
     }.buttonStyle(.plain).onHover { hover = $0 }.pointer().accessibilityLabel(name)
+  }
+}
+
+/// The command line, in the popover: ask here, or ⌘⇧A anywhere. Alfred proposes before he acts.
+struct AskInline: View {
+  @EnvironmentObject var s: AppState
+  @State private var text = ""
+  @FocusState private var focused: Bool
+  var body: some View {
+    VStack(alignment: .leading, spacing: 8) {
+      HStack(spacing: 10) {
+        Text("alfred.black >").font(T.mono(11, weight: .bold)).foregroundColor(T.brass)
+        TextField("What shall Alfred handle?", text: $text).textFieldStyle(.plain)
+          .font(T.say(15)).foregroundColor(T.ink).focused($focused).disabled(s.asking)
+          .onSubmit { if s.askReply != nil { s.soOrdered(withoutRead: NSEvent.modifierFlags.contains(.shift)) } else { let q = text; text = ""; Task { await s.propose(q) } } }
+        if s.asking { Meta(text: "reading your desk…", size: 8.5, tracking: 1.2) } else { Button(action: { s.toggleAsk() }) { Keycap(text: "⌘⇧A") }.buttonStyle(.plain).pointer().help("Ask from anywhere") }
+      }
+      .padding(.horizontal, 12).padding(.vertical, 9)
+      .overlay(RoundedRectangle(cornerRadius: T.rButton).stroke(focused ? T.brass : T.hair2, lineWidth: 1))
+      if let r = s.askReply {
+        Say(text: r, size: 14.5).padding(.top, 4)
+        HStack(spacing: 18) {
+          Button(action: { s.soOrdered(withoutRead: false) }) { Meta(text: "⏎ so ordered", color: T.brass, tracking: 1.6) }.buttonStyle(.plain).pointer()
+          Button(action: { s.soOrdered(withoutRead: true) }) { Meta(text: "⇧⏎ without read", tracking: 1.6) }.buttonStyle(.plain).pointer()
+          Button(action: { s.askReply = nil }) { Meta(text: "esc never mind", tracking: 1.6) }.buttonStyle(.plain).pointer().keyboardShortcut(.escape, modifiers: [])
+        }
+      } else if focused && text.isEmpty {
+        Meta(text: "⏎ to ask · Alfred proposes before he acts", size: 8.5, tracking: 1.2)
+      }
+    }
   }
 }
