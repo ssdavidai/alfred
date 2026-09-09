@@ -35,7 +35,7 @@ struct PopoverView: View {
         Button("") { s.open(.arrangement) }.keyboardShortcut(",", modifiers: [.command])
         Button("") { if !s.desk.isEmpty { s.open(.yourWord) } }.keyboardShortcut("w", modifiers: [.command])
       }.opacity(0).frame(width: 0, height: 0))
-    .frame(width: s.screen == .arrangement ? 380 : T.popoverWidth)
+    .frame(width: T.popoverWidth)
     .overlay(RoundedRectangle(cornerRadius: T.rPopover).stroke(T.brass.opacity(s.screen == .yourWord ? 0.5 : 0), lineWidth: 1))
     .animation(.easeInOut(duration: 0.15), value: s.screen)
   }
@@ -59,7 +59,8 @@ struct GlanceView: View {
   }
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
-      Say(text: line).padding(.horizontal, 18).padding(.top, 20).padding(.bottom, 16)
+      ScreenHeader(name: "Today", status: s.deskTotal == 0 ? "The desk is quiet" : "\(max(s.deskTotal, s.desk.count)) waiting", brass: s.deskTotal > 0)
+      Say(text: line).padding(.horizontal, 18).padding(.top, 18).padding(.bottom, 16)
       ForEach(Array(s.desk.prefix(3))) { item in
         PopRow(title: item.title, meta: "Your word", needsWord: true) { s.open(.yourWord) }
       }
@@ -69,8 +70,8 @@ struct GlanceView: View {
       HStack {
         Meta(text: returned, tracking: 1.8)
         Spacer()
-        Keycap(text: "⌘⇧A  ASK ALFRED")
-      }.padding(.horizontal, 18).padding(.vertical, 11)
+        Button(action: { s.toggleAsk() }) { Keycap(text: "⌘⇧A  ASK ALFRED") }.buttonStyle(.plain).pointer()
+      }.padding(.horizontal, 18).padding(.vertical, 12)
     }
   }
 }
@@ -81,9 +82,7 @@ struct BriefView: View {
   private func openBrief() { if let d = s.pairing?.domain, let u = URL(string: "https://\(d)/brief") { NSWorkspace.shared.open(u) } }
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
-      HStack { Meta(text: s.brief?.header ?? "Brief", color: T.brass); Spacer(); Meta(text: s.brief?.composedTime ?? "") }
-        .padding(.horizontal, 18).padding(.top, 15).padding(.bottom, 13)
-      Rectangle().fill(T.hair).frame(height: 1)
+      ScreenHeader(name: "Brief", status: s.brief.map { "\($0.header.replacingOccurrences(of: "Brief · ", with: "")) · \($0.composedTime)" } ?? "none yet")
       if let b = s.brief {
         let items = b.items
         Say(text: b.excerpt.isEmpty ? "Nothing pressing today, \(T.honorific). «Everything is in hand.»" : b.excerpt).padding(.horizontal, 18).padding(.top, 18).padding(.bottom, 16)
@@ -95,8 +94,8 @@ struct BriefView: View {
         Say(text: "No brief has been composed yet, \(T.honorific).").padding(.horizontal, 18).padding(.vertical, 18)
       }
       HStack { Meta(text: "Everything else is in hand", tracking: 1.8); Spacer()
-        Button(action: openBrief) { Keycap(text: "RETURN  OPEN") }.buttonStyle(.plain) }
-        .padding(.horizontal, 18).padding(.vertical, 11)
+        Button(action: openBrief) { Meta(text: "Read the full brief →", color: T.brass, tracking: 1.4) }.buttonStyle(.plain).pointer() }
+        .padding(.horizontal, 18).padding(.vertical, 12)
     }
   }
 }
@@ -119,9 +118,7 @@ struct MattersView: View {
   }
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
-      HStack { Meta(text: "Matters · \(inFlight.count) in flight", color: T.brass); Spacer(); Meta(text: "L\(s.trust) trust") }
-        .padding(.horizontal, 18).padding(.top, 15).padding(.bottom, 13)
-      Rectangle().fill(T.hair).frame(height: 1)
+      ScreenHeader(name: "Matters", status: "\(inFlight.count) in flight · L\(s.trust) trust · " + (overdue == 0 ? "nothing overdue" : "\(overdue) past due"), brass: overdue > 0)
       if inFlight.isEmpty {
         Say(text: "Nothing in flight, \(T.honorific). «The desk is clear.»").padding(.horizontal, 18).padding(.vertical, 18)
       }
@@ -139,9 +136,6 @@ struct MattersView: View {
           Rectangle().fill(T.hair).frame(height: 1)
         }
       }
-      HStack { Meta(text: overdue == 0 ? "Nothing overdue" : "\(overdue) past due", color: overdue == 0 ? T.dim : T.brass, tracking: 1.8); Spacer()
-        Button(action: { s.open(.ledger) }) { Keycap(text: "⌘L  ACTIVITY") }.buttonStyle(.plain) }
-        .padding(.horizontal, 18).padding(.vertical, 11)
     }
   }
 }
@@ -156,9 +150,7 @@ struct YourWordView: View {
   }
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
-      HStack { Meta(text: "Decisions", color: T.brass); Spacer(); Meta(text: "\(min(s.wordIndex + 1, max(1, s.desk.count))) of \(max(s.deskTotal, s.desk.count, 1))") }
-        .padding(.horizontal, 18).padding(.top, 15).padding(.bottom, 13)
-      Rectangle().fill(T.hair).frame(height: 1)
+      ScreenHeader(name: "Decisions", status: s.desk.isEmpty ? "none waiting" : "\(min(s.wordIndex + 1, max(1, s.desk.count))) of \(max(s.deskTotal, s.desk.count, 1))", brass: !s.desk.isEmpty)
       if let c = card {
         Say(text: c.title, size: 15.5).padding(.horizontal, 18).padding(.top, 18)
         if !c.body.isEmpty && c.body != c.title {
@@ -187,9 +179,7 @@ struct LedgerView: View {
   private func openAudit() { if let d = s.pairing?.domain, let u = URL(string: "https://\(d)/decisions") { NSWorkspace.shared.open(u) } }
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
-      HStack { Meta(text: "Activity · today", color: T.brass); Spacer(); Button(action: openAudit) { Meta(text: "Open ⌘F") }.buttonStyle(.plain) }
-        .padding(.horizontal, 18).padding(.top, 15).padding(.bottom, 13)
-      Rectangle().fill(T.hair).frame(height: 1)
+      ScreenHeader(name: "Activity", status: "today · every line traceable")
       if s.ledger.isEmpty { Say(text: "Nothing recorded yet today, \(T.honorific).").padding(.horizontal, 18).padding(.vertical, 18) }
       ForEach(Array(s.ledger.sorted { (($0.mode ?? "live") == "live" ? 0 : 1) < (($1.mode ?? "live") == "live" ? 0 : 1) }.prefix(6))) { l in
         let live = (l.mode ?? "live") == "live"
@@ -200,7 +190,7 @@ struct LedgerView: View {
         }.padding(.horizontal, 18).padding(.vertical, 11)
         Rectangle().fill(T.hair).frame(height: 1)
       }
-      Meta(text: "Every line traceable to its session", tracking: 1.8).padding(.horizontal, 18).padding(.vertical, 11)
+      Button(action: openAudit) { Meta(text: "Open the full log →", color: T.brass, tracking: 1.4) }.buttonStyle(.plain).pointer().padding(.horizontal, 18).padding(.vertical, 12)
     }
   }
 }
@@ -214,9 +204,7 @@ struct VaultView: View {
   ]
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
-      HStack { Meta(text: "Vault", color: T.brass); Spacer(); Meta(text: "Private by design") }
-        .padding(.horizontal, 18).padding(.top, 15).padding(.bottom, 13)
-      Rectangle().fill(T.hair).frame(height: 1)
+      ScreenHeader(name: "Vault", status: "private by design")
       ForEach(Self.shelves, id: \.0) { name, types in
         let n = types.reduce(0) { $0 + (s.vault[$1] ?? 0) }
         HStack { Text(name).font(T.body(14)).foregroundColor(T.ink); Spacer(); Meta(text: n == 0 ? "—" : String(n), size: 9, tracking: 1.4) }
@@ -256,9 +244,7 @@ struct ArrangementView: View {
   }
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
-      HStack { Meta(text: "Settings", color: T.brass); Spacer(); Meta(text: since) }
-        .padding(.horizontal, 18).padding(.top, 15).padding(.bottom, 13)
-      Rectangle().fill(T.hair).frame(height: 1)
+      ScreenHeader(name: "Settings", status: since)
       field("Alfred may, without asking", $draft.may); Rectangle().fill(T.hair).frame(height: 1)
       field("Alfred asks first", $draft.asksFirst); Rectangle().fill(T.hair).frame(height: 1)
       field("Alfred never", $draft.never); Rectangle().fill(T.hair).frame(height: 1)
@@ -285,15 +271,22 @@ struct NavStrip: View {
   var body: some View {
     VStack(spacing: 0) {
       Rectangle().fill(T.hair2).frame(height: 1)
-      HStack(spacing: 11) {
-        ForEach(items, id: \.0) { name, sc in
-          Button(action: { s.open(sc) }) {
-            Text(name.uppercased()).font(T.mono(7.5, weight: .heavy)).tracking(0.8)
-              .foregroundColor(s.screen == sc ? T.brass : T.dim).lineLimit(1).fixedSize()
-              .padding(.vertical, 10).contentShape(Rectangle())
-          }.buttonStyle(.plain)
-        }
-      }.frame(maxWidth: .infinity)
+      HStack(spacing: 4) {
+        ForEach(items, id: \.0) { name, sc in NavItem(name: name, active: s.screen == sc) { s.open(sc) } }
+      }.frame(maxWidth: .infinity).padding(.horizontal, 6)
     }.background(T.bg2.opacity(0.6))
+  }
+}
+
+struct NavItem: View {
+  let name: String; let active: Bool; let action: () -> Void
+  @State private var hover = false
+  var body: some View {
+    Button(action: action) {
+      Text(name.uppercased()).font(T.mono(9.5, weight: .heavy)).tracking(0.6)
+        .foregroundColor(active ? T.brass : (hover ? T.ink : T.dim)).lineLimit(1).fixedSize()
+        .padding(.horizontal, 7).padding(.vertical, 11).contentShape(Rectangle())
+        .background(RoundedRectangle(cornerRadius: T.rButton).fill(hover && !active ? T.bg3 : Color.clear))
+    }.buttonStyle(.plain).onHover { hover = $0 }.pointer().accessibilityLabel(name)
   }
 }
