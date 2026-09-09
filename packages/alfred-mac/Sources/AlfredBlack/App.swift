@@ -83,7 +83,23 @@ struct AlfredBlackMain {
       while !done && Date() < deadline { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.05)) }
       exit(done ? 0 : 2)
     }
-        if CommandLine.arguments.contains("--tick") {
+    if let i = CommandLine.arguments.firstIndex(of: "--screen"), CommandLine.arguments.count > i + 2 {
+      let dir = URL(fileURLWithPath: CommandLine.arguments[i + 2]); try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+      _ = NSApplication.shared; AB.registerFonts(); NSApp.appearance = NSAppearance(named: .darkAqua)
+      var done = false
+      Task { @MainActor in
+        let st = AppState(); await st.tick(force: true)
+        switch CommandLine.arguments[i + 1] { default: st.screen = .glance }
+        let host = NSHostingView(rootView: PopoverView().environmentObject(st))
+        host.frame = NSRect(x: 0, y: 0, width: T.popoverWidth, height: host.fittingSize.height); host.layoutSubtreeIfNeeded()
+        if let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) { host.cacheDisplay(in: host.bounds, to: rep); try? rep.representation(using: .png, properties: [:])?.write(to: dir.appendingPathComponent("screen-\(CommandLine.arguments[i + 1]).png")) }
+        print("screen: \(CommandLine.arguments[i + 1]) \(Int(host.bounds.height))pt desk=\(st.desk.count) matters=\(st.matters.count) nar=\(st.narToday.map { String($0) } ?? "-")"); done = true
+      }
+      let deadline = Date().addingTimeInterval(120)
+      while !done && Date() < deadline { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.05)) }
+      exit(done ? 0 : 2)
+    }
+    if CommandLine.arguments.contains("--tick") {
       var done = false
       Task { @MainActor in
         let st = AppState(); st.selfHeal(); await st.tick(force: true)
@@ -207,7 +223,9 @@ final class AppState: ObservableObject {
   @Published var deskTotal = 0
   @Published var matters: [Matter] = []
   @Published var narToday: Double? = nil
+  @Published var screen: Screen = .glance
   private var lastNar = Date.distantPast
+  func open(_ sc: Screen) { screen = sc }
   @Published var reply: (text: String, at: Date)? = nil
   @Published var asking = false
   @Published var brief: Brief? = nil
@@ -285,6 +303,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   let state = AppState()
   var statusItem: NSStatusItem!
   var window: NSWindow?
+  let popover: NSPopover = { let p = NSPopover(); p.behavior = .transient; p.animates = true; p.appearance = NSAppearance(named: .darkAqua); return p }()
   var timer: Timer?
 
   func applicationDidFinishLaunching(_ n: Notification) {
@@ -294,14 +313,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     refreshPresence()
     statusItem.button?.toolTip = "Alfred Black"
-    statusItem.menu = buildMenu()
+    statusItem.button?.target = self; statusItem.button?.action = #selector(markClicked); statusItem.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
+    popover.contentViewController = NSHostingController(rootView: PopoverView().environmentObject(state))
     state.selfHeal()
     if state.pairing == nil || !Self.launchedAsLoginItem() { showWindow() }
     timer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
       guard let self else { return }
-      Task { @MainActor in await self.state.tick(); self.statusItem.menu = self.buildMenu(); self.refreshPresence() }
+      Task { @MainActor in await self.state.tick(); self.refreshPresence() }
     }
-    Task { @MainActor in await state.tick(force: true); statusItem.menu = buildMenu() }
+    Task { @MainActor in await state.tick(force: true); refreshPresence() }
   }
 
   /// Launched from a mounted disk image (or anywhere read-only), the app would
@@ -386,6 +406,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   static func ago(_ d: Date) -> String {
     let s = Int(Date().timeIntervalSince(d))
     if s < 60 { return "\(s)s ago" }; if s < 3600 { return "\(s/60)m ago" }; return "\(s/3600)h ago"
+  }
+
+  /// Left click: the popover. Right click: the utility menu.
+
+  @objc func markClicked() {
+
+    guard let button = statusItem.button else { return }
+
+    if NSApp.currentEvent?.type == .rightMouseUp || state.pairing == nil {
+
+      if state.pairing == nil { showWindow(); return }
+
+      statusItem.menu = buildMenu(); button.performClick(nil); statusItem.menu = nil; return
+
+    }
+
+    if popover.isShown { popover.performClose(nil) }
+
+    else { state.screen = .glance; popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY); popover.contentViewController?.view.window?.makeKey() }
+
   }
 
   @objc func openWindow() { showWindow() }
