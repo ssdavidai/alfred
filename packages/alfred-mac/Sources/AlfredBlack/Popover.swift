@@ -16,10 +16,11 @@ struct PopoverView: View {
       case .yourWord: YourWordView()
       case .ledger: LedgerView()
       case .vault: VaultView()
+      case .arrangement: ArrangementView()
       default: GlanceView()
       }
     }
-    .frame(width: T.popoverWidth)
+    .frame(width: s.screen == .arrangement ? 380 : T.popoverWidth)
     .overlay(RoundedRectangle(cornerRadius: T.rPopover).stroke(T.brass.opacity(s.screen == .yourWord ? 0.5 : 0), lineWidth: 1))
     .animation(.easeInOut(duration: 0.15), value: s.screen)
   }
@@ -212,5 +213,52 @@ struct VaultView: View {
       Rectangle().fill(T.hair).frame(height: 1)
       Text("Nothing leaves this machine without your word, \(T.honorific).").font(T.say(13.5)).foregroundColor(T.dim).padding(.horizontal, 18).padding(.vertical, 14)
     }
+  }
+}
+
+/// 10 · The Arrangement — settings as a contract, not toggles. 380 pt.
+struct ArrangementView: View {
+  @EnvironmentObject var s: AppState
+  @State private var draft = Arrangement()
+  @State private var loaded = false
+  private var since: String {
+    guard let d = s.pairing?.pairedAt else { return "" }
+    let f = DateFormatter(); f.dateFormat = "MMM yyyy"; return "Since " + f.string(from: d)
+  }
+  private func field(_ label: String, _ text: Binding<String>) -> some View {
+    VStack(alignment: .leading, spacing: 6) {
+      Meta(text: label, tracking: 1.8)
+      TextField("Not yet written", text: text).textFieldStyle(.plain).font(T.body(14)).foregroundColor(T.ink)
+    }.padding(.horizontal, 18).padding(.vertical, 12)
+  }
+  private func chip(_ level: Int, _ name: String) -> some View {
+    let active = (s.state.pendingTrust ?? s.trust) == level
+    return Button(action: { s.chooseTrust(level) }) {
+      Meta(text: name, color: active ? T.brass : T.dim, size: 8.5, tracking: 1.4).padding(.horizontal, 10).padding(.vertical, 7)
+        .background(RoundedRectangle(cornerRadius: T.rButton).fill(active ? T.brass.opacity(0.08) : Color.clear))
+        .overlay(RoundedRectangle(cornerRadius: T.rButton).stroke(active ? T.brass : T.hair2, lineWidth: 1))
+    }.buttonStyle(.plain)
+  }
+  var body: some View {
+    VStack(alignment: .leading, spacing: 0) {
+      HStack { Meta(text: "The Arrangement", color: T.brass); Spacer(); Meta(text: since) }
+        .padding(.horizontal, 18).padding(.top, 15).padding(.bottom, 13)
+      Rectangle().fill(T.hair).frame(height: 1)
+      field("Alfred may, without asking", $draft.may); Rectangle().fill(T.hair).frame(height: 1)
+      field("Alfred asks first", $draft.asksFirst); Rectangle().fill(T.hair).frame(height: 1)
+      field("Alfred never", $draft.never); Rectangle().fill(T.hair).frame(height: 1)
+      VStack(alignment: .leading, spacing: 10) {
+        Meta(text: "Trust class", tracking: 1.8)
+        HStack(spacing: 8) { chip(1, "L1 Watch"); chip(2, "L2 Propose"); chip(3, "L3 Act, then report") }
+      }.padding(.horizontal, 18).padding(.vertical, 14)
+      Rectangle().fill(T.hair).frame(height: 1)
+      HStack {
+        Meta(text: s.state.pendingTrust != nil ? "L\(s.state.pendingTrust!) takes effect at midnight" : "Changes take effect at midnight", color: s.state.pendingTrust != nil ? T.brass : T.dim, tracking: 1.8)
+        Spacer()
+        if draft != s.arrangement { Button(action: { Task { await s.saveArrangement(draft) } }) { Keycap(text: "SAVE ⏎") }.buttonStyle(.plain).keyboardShortcut(.return, modifiers: []) }
+      }.padding(.horizontal, 18).padding(.vertical, 11)
+    }
+    .onAppear { if !loaded { draft = s.arrangement; loaded = true } }
+    .onChange(of: s.arrangement) { a in if draft == Arrangement() { draft = a } }
   }
 }

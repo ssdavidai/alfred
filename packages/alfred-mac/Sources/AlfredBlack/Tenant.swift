@@ -194,6 +194,26 @@ struct Tenant {
     return out
   }
 
+  /// The standing rules Alfred follows (vault/RULES.md), whole.
+  func rules() async throws -> String {
+    struct Rec: Decodable { var body: String }
+    let (code, data) = try await request("api/v1/vault/records/RULES.md", bearer: apiKey)
+    guard code == 200 else { throw TenantError(message: "Rules read failed (HTTP \(code)).") }
+    return try JSONDecoder().decode(Rec.self, from: data).body
+  }
+  func saveRules(_ body: String) async throws {
+    let (code, _) = try await request("api/v1/vault/records/RULES.md", method: "PATCH", bearer: apiKey, body: ["body_set": body])
+    guard code == 200 else { throw TenantError(message: "The arrangement was not saved (HTTP \(code)).") }
+  }
+  /// The trust class, applied: L3 acts (all live), L2 proposes (acts only through the principal), L1 watches.
+  func setTrust(_ level: Int) async throws {
+    let values = level >= 3 ? ["live", "live", "live"] : level == 2 ? ["shadow", "live", "live"] : ["shadow", "shadow", "shadow"]
+    for (k, v) in zip(["signal_action_mode", "state_mutator_mode", "auto_task_create_mode"], values) {
+      let (code, _) = try await request("api/v1/settings/\(k)", method: "PUT", bearer: apiKey, body: ["value": v])
+      guard code == 200 else { throw TenantError(message: "Trust class not applied (\(k): HTTP \(code)).") }
+    }
+  }
+
   static func domain(from raw: String) -> String? {
     var s = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     if !s.contains("://") { s = "https://" + s }
@@ -297,5 +317,32 @@ struct LedgerLine: Decodable, Identifiable {
     }
     t = t.replacingOccurrences(of: #"([a-z])([A-Z])"#, with: "$1 $2", options: .regularExpression).replacingOccurrences(of: " Workflow", with: "")
     return t.trimmingCharacters(in: .whitespaces)
+  }
+}
+
+/// The three sentences of the arrangement, kept in RULES.md under "## The arrangement".
+struct Arrangement: Equatable {
+  var may = "", asksFirst = "", never = ""
+  static let heading = "## The arrangement"
+  static let labels = ["Alfred may, without asking", "Alfred asks first", "Alfred never"]
+  static func parse(_ body: String) -> Arrangement {
+    var a = Arrangement()
+    guard let r = body.range(of: heading) else { return a }
+    let section = body[r.upperBound...].components(separatedBy: "\n## ").first ?? ""
+    for line in section.components(separatedBy: "\n") {
+      let l = line.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: #"^[-*]\s*"#, with: "", options: .regularExpression)
+      for (i, label) in labels.enumerated() where l.lowercased().hasPrefix(label.lowercased() + ":") {
+        let v = l.dropFirst(label.count + 1).trimmingCharacters(in: .whitespaces)
+        if i == 0 { a.may = v } else if i == 1 { a.asksFirst = v } else { a.never = v }
+      }
+    }
+    return a
+  }
+  /// The body with this arrangement's section replaced, or appended.
+  func written(into body: String) -> String {
+    let block = "\(Self.heading)\n\n- \(Self.labels[0]): \(may)\n- \(Self.labels[1]): \(asksFirst)\n- \(Self.labels[2]): \(never)\n"
+    guard let r = body.range(of: Self.heading) else { return body.trimmingCharacters(in: .newlines) + "\n\n" + block }
+    let after = body[r.upperBound...]; let end = after.range(of: "\n## ").map { after.index($0.lowerBound, offsetBy: 1) } ?? after.endIndex
+    return String(body[..<r.lowerBound]) + block + (end < after.endIndex ? "\n" + String(after[end...]) : "")
   }
 }
