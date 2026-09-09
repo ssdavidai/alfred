@@ -105,6 +105,14 @@ struct Tenant {
   func check() async -> Bool { (try? await recent(limit: 1, withinHours: 1)) != nil }
 
   /// Turn whatever the person typed into the tenant domain.
+  /// The Desk: cards awaiting the principal's judgment.
+  func deskPending() async throws -> [DeskItem] {
+    struct Page: Decodable { var records: [DeskItem] }
+    let (code, data) = try await request("api/v1/admin/needs-attention", bearer: apiKey)
+    guard code == 200 else { throw TenantError(message: "Desk read failed (HTTP \(code)).") }
+    return try JSONDecoder().decode(Page.self, from: data).records
+  }
+
   static func domain(from raw: String) -> String? {
     var s = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     if !s.contains("://") { s = "https://" + s }
@@ -113,4 +121,9 @@ struct Tenant {
     for p in ["api.", "www."] where h.hasPrefix(p) { h = String(h.dropFirst(p.count)) }
     return h
   }
+}
+
+struct DeskItem: Decodable, Identifiable {
+  var id: String; var status: String?; var created: String?; var action_what: String?; var matter_ref: String?
+  var title: String { (action_what ?? "").replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespaces) }
 }
