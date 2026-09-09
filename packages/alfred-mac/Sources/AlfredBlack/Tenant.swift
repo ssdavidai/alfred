@@ -32,7 +32,9 @@ struct Tenant {
     return URLSession(configuration: c)
   }
 
-  private func request(_ path: String, method: String = "GET", bearer: String?, body: [String: Any]? = nil, query: [String: String] = [:]) async throws -> (Int, Data) {
+  /// Asking Alfred can take a minute; everything else answers in seconds.
+  private static let slow: URLSession = { let c = URLSessionConfiguration.ephemeral; c.timeoutIntervalForRequest = 180; return URLSession(configuration: c) }()
+  private func request(_ path: String, method: String = "GET", bearer: String?, body: [String: Any]? = nil, query: [String: String] = [:], patient: Bool = false) async throws -> (Int, Data) {
     var comps = URLComponents(url: api.appendingPathComponent(path), resolvingAgainstBaseURL: false)!
     if !query.isEmpty { comps.queryItems = query.map { URLQueryItem(name: $0.key, value: $0.value) } }
     var r = URLRequest(url: comps.url!)
@@ -41,7 +43,7 @@ struct Tenant {
     r.setValue("application/json", forHTTPHeaderField: "Accept")
     if let bearer { r.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization") }
     if let body { r.httpBody = try JSONSerialization.data(withJSONObject: body) }
-    let (data, resp) = try await session.data(for: r)
+    let (data, resp) = try await (patient ? Tenant.slow : session).data(for: r)
     return ((resp as? HTTPURLResponse)?.statusCode ?? 0, data)
   }
 
@@ -113,6 +115,29 @@ struct Tenant {
     return try JSONDecoder().decode(Page.self, from: data).records
   }
 
+  /// Ask Alfred from this Mac. ctrl-api journals both turns and puts his memory in front of him.
+  func ask(_ message: String, chatId: String) async throws -> String {
+    let (code, data) = try await request("api/v1/alfred/ask", method: "POST", bearer: apiKey, body: ["message": message, "chat_id": chatId, "channel": "mac"], patient: true)
+    let j = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+    guard code == 200, let reply = j["reply"] as? String, !reply.isEmpty else {
+      throw TenantError(message: code == 502 ? "Alfred could not be reached just now." : "The tenant did not answer (HTTP \(code)).")
+    }
+    return reply
+  }
+
+  /// The most recent brief: its slot, date, and a short excerpt of the body.
+  func latestBrief() async throws -> Brief? {
+    struct Item: Decodable { var slug_date: String; var slot: String; var date: String }
+    struct List: Decodable { var briefings: [Item] }
+    struct Detail: Decodable { var body: String }
+    let (code, data) = try await request("api/v1/briefings", bearer: apiKey)
+    guard code == 200, let latest = try JSONDecoder().decode(List.self, from: data).briefings.max(by: { $0.slug_date < $1.slug_date }) else { return nil }
+    let (c2, d2) = try await request("api/v1/briefings/\(latest.slug_date)", bearer: apiKey)
+    guard c2 == 200 else { return nil }
+    let body = try JSONDecoder().decode(Detail.self, from: d2).body
+    return Brief(slot: latest.slot, date: latest.date, excerpt: Brief.excerpt(of: body))
+  }
+
   static func domain(from raw: String) -> String? {
     var s = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     if !s.contains("://") { s = "https://" + s }
@@ -126,4 +151,17 @@ struct Tenant {
 struct DeskItem: Decodable, Identifiable {
   var id: String; var status: String?; var created: String?; var action_what: String?; var matter_ref: String?
   var title: String { (action_what ?? "").replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespaces) }
+}
+
+struct Brief {
+  var slot: String; var date: String; var excerpt: String
+  var title: String { "\(slot.prefix(1).uppercased() + slot.dropFirst()) brief · \(date)" }
+  /// First paragraph of prose after the heading, prose only, capped.
+  static func excerpt(of body: String) -> String {
+    let text = body.range(of: "\n---\n").map { String(body[$0.upperBound...]) } ?? body   // skip frontmatter if present
+    let para = text.components(separatedBy: "\n\n").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+      .first { !$0.isEmpty && !$0.hasPrefix("#") && !$0.hasPrefix("-") && !$0.hasPrefix("|") } ?? ""
+    let flat = para.replacingOccurrences(of: "**", with: "").replacingOccurrences(of: "\n", with: " ")
+    return flat.count > 260 ? String(flat.prefix(257)).trimmingCharacters(in: .whitespaces) + "…" : flat
+  }
 }

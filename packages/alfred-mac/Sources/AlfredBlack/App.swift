@@ -161,6 +161,24 @@ final class AppState: ObservableObject {
   }
 
 
+  /// One question, one reply, both remembered on every other surface.
+
+
+  func ask(_ text: String) async {
+
+
+    let q = text.trimmingCharacters(in: .whitespacesAndNewlines); guard !q.isEmpty, !asking, let t = tenant else { return }
+
+
+    asking = true; defer { asking = false }
+
+
+    do { reply = (try await t.ask(q, chatId: Store.deviceId()), Date()) } catch { record(error) }
+
+
+  }
+
+
   func signOut() {
     Keychain.delete("apikey"); Store.savePairing(nil); pairing = nil; online = nil
     try? Cowork.unregisterMCP(); cowork = Cowork.status()
@@ -172,6 +190,10 @@ final class AppState: ObservableObject {
   var lastReport = PushReport()
   @Published var activity = Activity.load()
   @Published var desk: [DeskItem] = []
+  @Published var reply: (text: String, at: Date)? = nil
+  @Published var asking = false
+  @Published var brief: Brief? = nil
+  private var lastBrief = Date.distantPast
   private var lastDesk = Date.distantPast
   var petState: PetState { Pet.isQuiet() ? .resting : (desk.isEmpty ? .present : .attending) }
 
@@ -204,6 +226,9 @@ final class AppState: ObservableObject {
         let n = try await Continuity.refresh(tenant: t, domain: p.domain)
         state.lastRenderAt = Date(); state.lastRenderEntries = n; online = true
       } catch { online = false; state.lastError = error.localizedDescription; state.lastErrorAt = Date() }
+    }
+    if force || now.timeIntervalSince(lastBrief) >= 600 {
+      lastBrief = now; if let b = try? await t.latestBrief() { brief = b }
     }
     if force || now.timeIntervalSince(lastDesk) >= 60 {
       lastDesk = now
