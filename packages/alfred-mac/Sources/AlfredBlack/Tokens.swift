@@ -14,7 +14,7 @@ enum T {
   static let brass = Color(nsColor: AB.hex(0xB08D57))   // oklch(0.62 0.09 75)
   static let hair  = Color(nsColor: AB.hex(0xF0EADE, 0.13))
   static let hair2 = Color(nsColor: AB.hex(0xF0EADE, 0.22))
-  static let popoverWidth: CGFloat = 344
+  static let popoverWidth: CGFloat = 400   // wider than the handoff's 344 so labels can be read
   static let rPopover: CGFloat = 13, rBar: CGFloat = 14, rWindow: CGFloat = 12, rButton: CGFloat = 6
   static let honorific = "sir"   // a per-user setting later; keep the string in one place
 
@@ -56,6 +56,27 @@ struct Say: View {
   }
 }
 
+/// Every screen names itself the same way, in the same place: the name in ink, the status beside it.
+struct ScreenHeader: View {
+  let name: String; var status: String = ""; var brass = false
+  var body: some View {
+    VStack(spacing: 0) {
+      HStack(alignment: .firstTextBaseline) {
+        Text(name.uppercased()).font(T.mono(10.5, weight: .heavy)).tracking(1.6).foregroundColor(T.ink)
+        Spacer()
+        if !status.isEmpty { Meta(text: status, color: brass ? T.brass : T.dim, size: 9, tracking: 1.4) }
+      }.padding(.horizontal, 18).padding(.top, 15).padding(.bottom, 13)
+      Rectangle().fill(T.hair).frame(height: 1)
+    }
+  }
+}
+
+/// The hand cursor over anything that can be clicked.
+struct Pointer: ViewModifier {
+  func body(content: Content) -> some View { content.onHover { if $0 { NSCursor.pointingHand.push() } else { NSCursor.pop() } } }
+}
+extension View { func pointer() -> some View { modifier(Pointer()) } }
+
 /// One popover row: dot · title (body 14) · meta. Filled brass dot = needs the principal; hollow = in hand.
 struct PopRow: View {
   let title: String; let meta: String; var needsWord = false; var metaBrass = false; var action: (() -> Void)? = nil
@@ -69,7 +90,7 @@ struct PopRow: View {
       }
       .padding(.horizontal, 18).padding(.vertical, 12).contentShape(Rectangle())
       .background(hover ? T.bg2 : Color.clear)
-    }.buttonStyle(.plain).onHover { hover = $0 }
+    }.buttonStyle(.plain).onHover { hover = $0 }.pointer().accessibilityLabel("\(title), \(meta)")
     Rectangle().fill(T.hair).frame(height: 1)
   }
 }
