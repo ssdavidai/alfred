@@ -93,7 +93,7 @@ struct AlfredBlackMain {
         st.screen = ["brief": Screen.brief, "matters": .matters, "yourword": .yourWord, "ledger": .ledger, "vault": .vault, "arrangement": .arrangement][name] ?? .glance
         if let r = CommandLine.arguments.firstIndex(of: "--reply"), CommandLine.arguments.count > r + 1 { st.askReply = CommandLine.arguments[r + 1] }
         let host: NSHostingView<AnyView> = name == "ask" ? NSHostingView(rootView: AnyView(AskView().environmentObject(st))) : NSHostingView(rootView: AnyView(PopoverView().environmentObject(st)))
-        let w: CGFloat = name == "ask" ? 620 : T.popoverWidth
+        let w: CGFloat = name == "ask" ? 620 : (name == "arrangement" ? 380 : T.popoverWidth)
         host.frame = NSRect(x: 0, y: 0, width: w, height: host.fittingSize.height); host.layoutSubtreeIfNeeded()
         if let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) { host.cacheDisplay(in: host.bounds, to: rep); try? rep.representation(using: .png, properties: [:])?.write(to: dir.appendingPathComponent("screen-\(CommandLine.arguments[i + 1]).png")) }
         print("screen: \(CommandLine.arguments[i + 1]) \(Int(host.bounds.height))pt desk=\(st.desk.count) matters=\(st.matters.count) nar=\(st.narToday.map { String($0) } ?? "-")"); done = true
@@ -283,6 +283,8 @@ final class AppState: ObservableObject {
   @Published var trust = 3
   @Published var ledger: [LedgerLine] = []
   @Published var vault: [String: Int] = [:]
+  @Published var rulesBody: String? = nil
+  @Published var arrangement = Arrangement()
   @Published var screen: Screen = .glance
   private var lastNar = Date.distantPast
   func open(_ sc: Screen) { screen = sc }
@@ -297,6 +299,15 @@ final class AppState: ObservableObject {
     do { try await t.decide(card: card, intent: intent); desk.remove(at: wordIndex); deskTotal = max(0, deskTotal - 1) } catch { record(error) }
     if wordIndex >= desk.count { wordIndex = max(0, desk.count - 1) }
     if desk.isEmpty { screen = .glance }
+  }
+  func chooseTrust(_ level: Int) {
+    let cal = Calendar.current; let midnight = cal.startOfDay(for: cal.date(byAdding: .day, value: 1, to: Date())!)
+    if level == trust { state.pendingTrust = nil; state.trustEffectiveAt = nil } else { state.pendingTrust = level; state.trustEffectiveAt = midnight }
+  }
+  func saveArrangement(_ a: Arrangement) async {
+    guard let t = tenant else { return }
+    let body = a.written(into: rulesBody ?? "# Standing Rules\n")
+    do { try await t.saveRules(body); rulesBody = body; arrangement = a } catch { record(error) }
   }
   func popoverClosed() { if screen == .brief, let b = brief { state.briefReadSlug = b.slug_date }; screen = .glance }
   @Published var reply: (text: String, at: Date)? = nil
@@ -343,6 +354,11 @@ final class AppState: ObservableObject {
       if let c = try? await t.trustClass() { trust = c }
       if let l = try? await t.activity() { ledger = l }
       if let v = try? await t.vaultCounts() { vault = v }
+      if let r = try? await t.rules() { rulesBody = r; arrangement = Arrangement.parse(r) }
+      // Deliberate friction: a chosen trust class takes effect at midnight, not now.
+      if let p = state.pendingTrust, let at = state.trustEffectiveAt, Date() >= at {
+        do { try await t.setTrust(p); state.pendingTrust = nil; state.trustEffectiveAt = nil; trust = p } catch { record(error) }
+      }
     }
     if force || now.timeIntervalSince(lastBrief) >= 600 {
       lastBrief = now; if let b = try? await t.latestBrief() { brief = b }
@@ -393,7 +409,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     refreshPresence()
     statusItem.button?.toolTip = "Alfred Black"
     statusItem.button?.target = self; statusItem.button?.action = #selector(markClicked); statusItem.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
-    popover.contentViewController = NSHostingController(rootView: PopoverView().environmentObject(state)); popover.delegate = self
+    let host = NSHostingController(rootView: PopoverView().environmentObject(state)); host.sizingOptions = .preferredContentSize; popover.contentViewController = host; popover.delegate = self
     state.selfHeal()
     HotKey.onPress = { [weak self] in self?.state.toggleAsk() }; HotKey.register()
     if state.pairing == nil || !Self.launchedAsLoginItem() { showWindow() }

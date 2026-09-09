@@ -15,6 +15,8 @@ struct RunState: Codable {
   var pushedUUIDs: Set<String> = []
   var boundSessions: Set<String> = []
   var briefReadSlug: String? = nil
+  var pendingTrust: Int? = nil
+  var trustEffectiveAt: Date? = nil
   var lastRenderAt: Date?
   var lastRenderEntries: Int = 0
   var lastPushAt: Date?
