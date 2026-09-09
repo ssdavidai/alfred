@@ -93,7 +93,7 @@ struct AlfredBlackMain {
         st.screen = ["brief": Screen.brief, "matters": .matters, "yourword": .yourWord, "ledger": .ledger, "vault": .vault, "arrangement": .arrangement][name] ?? .glance
         if let r = CommandLine.arguments.firstIndex(of: "--reply"), CommandLine.arguments.count > r + 1 { st.askReply = CommandLine.arguments[r + 1] }
         let host: NSHostingView<AnyView> = name == "ask" ? NSHostingView(rootView: AnyView(AskView().environmentObject(st))) : name == "statement" ? NSHostingView(rootView: AnyView(StatementView().environmentObject(st))) : NSHostingView(rootView: AnyView(PopoverView().environmentObject(st)))
-        let w: CGFloat = name == "ask" ? 620 : name == "statement" ? 520 : (name == "arrangement" ? 380 : T.popoverWidth)
+        let w: CGFloat = name == "ask" ? 700 : name == "statement" ? 520 : (name == "arrangement" ? 380 : T.popoverWidth)
         host.frame = NSRect(x: 0, y: 0, width: w, height: host.fittingSize.height); host.layoutSubtreeIfNeeded()
         if let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) { host.cacheDisplay(in: host.bounds, to: rep); try? rep.representation(using: .png, properties: [:])?.write(to: dir.appendingPathComponent("screen-\(CommandLine.arguments[i + 1]).png")) }
         print("screen: \(CommandLine.arguments[i + 1]) \(Int(host.bounds.height))pt desk=\(st.desk.count) matters=\(st.matters.count) nar=\(st.narToday.map { String($0) } ?? "-")"); done = true
@@ -513,12 +513,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
       m.addItem(withTitle: p, action: nil, keyEquivalent: "")
     }
     m.addItem(.separator())
-    for (title, sel) in [("The Glance", #selector(showGlance)), ("The Brief", #selector(showBrief)), ("Matters", #selector(showMatters)), ("Your Word", #selector(showYourWord)), ("The Ledger", #selector(showLedger)), ("The Vault", #selector(showVault)), ("The Arrangement", #selector(showArrangement))] {
+    for (title, sel) in [("Today", #selector(showGlance)), ("Brief", #selector(showBrief)), ("Matters", #selector(showMatters)), ("Decisions", #selector(showYourWord)), ("Activity", #selector(showLedger)), ("Vault", #selector(showVault)), ("Settings", #selector(showArrangement))] {
       m.addItem(withTitle: title, action: sel, keyEquivalent: "").target = self
     }
     m.addItem(.separator())
     m.addItem(withTitle: "Ask Alfred…", action: #selector(askAlfred), keyEquivalent: "").target = self
-    m.addItem(withTitle: "The Statement…", action: #selector(showStatement), keyEquivalent: "").target = self
+    m.addItem(withTitle: "Attention statement…", action: #selector(showStatement), keyEquivalent: "").target = self
     m.addItem(withTitle: "Open Alfred Black…", action: #selector(openWindow), keyEquivalent: "o").target = self
     m.addItem(withTitle: "Reveal Alfred folder", action: #selector(revealFolder), keyEquivalent: "").target = self
     m.addItem(.separator())

@@ -9,7 +9,7 @@ struct MonthStatement { var month: String; var returned: Double; var displaced: 
 final class StatementWindow: NSWindow {
   init(state: AppState) {
     super.init(contentRect: NSRect(x: 0, y: 0, width: 520, height: 420), styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView], backing: .buffered, defer: false)
-    title = "Attention Statement"; titlebarAppearsTransparent = true; titleVisibility = .hidden
+    title = "Attention statement"; titlebarAppearsTransparent = true; titleVisibility = .hidden
     appearance = NSAppearance(named: .darkAqua); backgroundColor = AB.hex(0x1C1A17); isReleasedWhenClosed = false
     contentViewController = NSHostingController(rootView: StatementView().environmentObject(state))
     center()

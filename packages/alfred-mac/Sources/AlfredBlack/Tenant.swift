@@ -257,7 +257,7 @@ struct Brief {
   /// "THE BRIEF · TUE 9 SEP" and the time it was composed.
   var header: String {
     let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"; let o = DateFormatter(); o.dateFormat = "EEE d MMM"
-    return "The Brief · " + (f.date(from: date).map { o.string(from: $0) } ?? date)
+    return "Brief · " + (f.date(from: date).map { o.string(from: $0) } ?? date)
   }
   var composedTime: String {
     guard let c = composed_at, let d = ISO8601DateFormatter().date(from: c) ?? { let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]; return f.date(from: c) }() else { return slot == "morning" ? "07:00" : "19:00" }
