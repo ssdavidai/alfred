@@ -513,12 +513,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
       m.addItem(withTitle: p, action: nil, keyEquivalent: "")
     }
     m.addItem(.separator())
-    for (title, sel) in [("The Glance", #selector(showGlance)), ("The Brief", #selector(showBrief)), ("Matters", #selector(showMatters)), ("Your Word", #selector(showYourWord)), ("The Ledger", #selector(showLedger)), ("The Vault", #selector(showVault)), ("The Arrangement", #selector(showArrangement))] {
+    for (title, sel) in [("Today", #selector(showGlance)), ("Brief", #selector(showBrief)), ("Matters", #selector(showMatters)), ("Decisions", #selector(showYourWord)), ("Activity", #selector(showLedger)), ("Vault", #selector(showVault)), ("Settings", #selector(showArrangement))] {
       m.addItem(withTitle: title, action: sel, keyEquivalent: "").target = self
     }
     m.addItem(.separator())
     m.addItem(withTitle: "Ask Alfred…", action: #selector(askAlfred), keyEquivalent: "").target = self
-    m.addItem(withTitle: "The Statement…", action: #selector(showStatement), keyEquivalent: "").target = self
+    m.addItem(withTitle: "Attention statement…", action: #selector(showStatement), keyEquivalent: "").target = self
     m.addItem(withTitle: "Open Alfred Black…", action: #selector(openWindow), keyEquivalent: "o").target = self
     m.addItem(withTitle: "Reveal Alfred folder", action: #selector(revealFolder), keyEquivalent: "").target = self
     m.addItem(.separator())

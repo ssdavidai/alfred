@@ -10,6 +10,8 @@ struct PopoverView: View {
   @EnvironmentObject var s: AppState
   var body: some View {
     ZStack { T.bg
+      VStack(spacing: 0) {
+      Group {
       switch s.screen {
       case .brief: BriefView()
       case .matters: MattersView()
@@ -18,6 +20,9 @@ struct PopoverView: View {
       case .vault: VaultView()
       case .arrangement: ArrangementView()
       default: GlanceView()
+      }
+      }
+      NavStrip()
       }
     }
     .background(   // the screens' keys: ⌘G glance · ⌘B brief · ⌘M matters · ⌘L ledger · ⌘V vault · ⌘, arrangement
@@ -45,8 +50,8 @@ struct GlanceView: View {
   private var line: String {
     let n = max(s.deskTotal, s.desk.count)
     if n == 0 { return "\(greeting), \(T.honorific). The desk is quiet — «nothing needs your word.»" }
-    if n == 1 { return "\(greeting), \(T.honorific). The desk is quiet — «one matter needs your word.»" }
-    return "\(greeting), \(T.honorific). «\(n) matters need your word.»"
+    if n == 1 { return "\(greeting), \(T.honorific). The desk is quiet — «one thing needs your word.»" }
+    return "\(greeting), \(T.honorific). «\(n) things need your word.»"
   }
   private var returned: String {
     guard let h = s.narToday else { return "Today · in hand" }
@@ -64,7 +69,7 @@ struct GlanceView: View {
       HStack {
         Meta(text: returned, tracking: 1.8)
         Spacer()
-        Keycap(text: "⌘⇧A  ASK")
+        Keycap(text: "⌘⇧A  ASK ALFRED")
       }.padding(.horizontal, 18).padding(.vertical, 11)
     }
   }
@@ -76,7 +81,7 @@ struct BriefView: View {
   private func openBrief() { if let d = s.pairing?.domain, let u = URL(string: "https://\(d)/brief") { NSWorkspace.shared.open(u) } }
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
-      HStack { Meta(text: s.brief?.header ?? "The Brief", color: T.brass); Spacer(); Meta(text: s.brief?.composedTime ?? "") }
+      HStack { Meta(text: s.brief?.header ?? "Brief", color: T.brass); Spacer(); Meta(text: s.brief?.composedTime ?? "") }
         .padding(.horizontal, 18).padding(.top, 15).padding(.bottom, 13)
       Rectangle().fill(T.hair).frame(height: 1)
       if let b = s.brief {
@@ -135,7 +140,7 @@ struct MattersView: View {
         }
       }
       HStack { Meta(text: overdue == 0 ? "Nothing overdue" : "\(overdue) past due", color: overdue == 0 ? T.dim : T.brass, tracking: 1.8); Spacer()
-        Button(action: { s.open(.ledger) }) { Keycap(text: "⌘L  LEDGER") }.buttonStyle(.plain) }
+        Button(action: { s.open(.ledger) }) { Keycap(text: "⌘L  ACTIVITY") }.buttonStyle(.plain) }
         .padding(.horizontal, 18).padding(.vertical, 11)
     }
   }
@@ -151,7 +156,7 @@ struct YourWordView: View {
   }
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
-      HStack { Meta(text: "Your word, \(T.honorific)", color: T.brass); Spacer(); Meta(text: "\(min(s.wordIndex + 1, max(1, s.desk.count))) of \(max(s.desk.count, 1))") }
+      HStack { Meta(text: "Decisions", color: T.brass); Spacer(); Meta(text: "\(min(s.wordIndex + 1, max(1, s.desk.count))) of \(max(s.deskTotal, s.desk.count, 1))") }
         .padding(.horizontal, 18).padding(.top, 15).padding(.bottom, 13)
       Rectangle().fill(T.hair).frame(height: 1)
       if let c = card {
@@ -170,7 +175,7 @@ struct YourWordView: View {
           Button("So ordered") { Task { await s.decide("delegate") } }.buttonStyle(PopButton(primary: true)).keyboardShortcut(.return, modifiers: [])
         }.padding(.horizontal, 18).padding(.vertical, 16).disabled(s.deciding)
       } else {
-        Say(text: "Nothing needs your word, \(T.honorific). «The desk is quiet.»").padding(.horizontal, 18).padding(.vertical, 18)
+        Say(text: "Nothing needs your decision, \(T.honorific). «The desk is quiet.»").padding(.horizontal, 18).padding(.vertical, 18)
       }
     }
   }
@@ -182,7 +187,7 @@ struct LedgerView: View {
   private func openAudit() { if let d = s.pairing?.domain, let u = URL(string: "https://\(d)/decisions") { NSWorkspace.shared.open(u) } }
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
-      HStack { Meta(text: "The Ledger · today", color: T.brass); Spacer(); Button(action: openAudit) { Meta(text: "Open ⌘F") }.buttonStyle(.plain) }
+      HStack { Meta(text: "Activity · today", color: T.brass); Spacer(); Button(action: openAudit) { Meta(text: "Open ⌘F") }.buttonStyle(.plain) }
         .padding(.horizontal, 18).padding(.top, 15).padding(.bottom, 13)
       Rectangle().fill(T.hair).frame(height: 1)
       if s.ledger.isEmpty { Say(text: "Nothing recorded yet today, \(T.honorific).").padding(.horizontal, 18).padding(.vertical, 18) }
@@ -209,7 +214,7 @@ struct VaultView: View {
   ]
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
-      HStack { Meta(text: "The Vault", color: T.brass); Spacer(); Meta(text: "Private by design") }
+      HStack { Meta(text: "Vault", color: T.brass); Spacer(); Meta(text: "Private by design") }
         .padding(.horizontal, 18).padding(.top, 15).padding(.bottom, 13)
       Rectangle().fill(T.hair).frame(height: 1)
       ForEach(Self.shelves, id: \.0) { name, types in
@@ -251,7 +256,7 @@ struct ArrangementView: View {
   }
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
-      HStack { Meta(text: "The Arrangement", color: T.brass); Spacer(); Meta(text: since) }
+      HStack { Meta(text: "Settings", color: T.brass); Spacer(); Meta(text: since) }
         .padding(.horizontal, 18).padding(.top, 15).padding(.bottom, 13)
       Rectangle().fill(T.hair).frame(height: 1)
       field("Alfred may, without asking", $draft.may); Rectangle().fill(T.hair).frame(height: 1)
@@ -270,5 +275,25 @@ struct ArrangementView: View {
     }
     .onAppear { if !loaded { draft = s.arrangement; loaded = true } }
     .onChange(of: s.arrangement) { a in if draft == Arrangement() { draft = a } }
+  }
+}
+
+/// Where the popover can go, in plain words; the screen you are on is brass.
+struct NavStrip: View {
+  @EnvironmentObject var s: AppState
+  private let items: [(String, Screen)] = [("Today", .glance), ("Brief", .brief), ("Matters", .matters), ("Decisions", .yourWord), ("Activity", .ledger), ("Vault", .vault), ("Settings", .arrangement)]
+  var body: some View {
+    VStack(spacing: 0) {
+      Rectangle().fill(T.hair2).frame(height: 1)
+      HStack(spacing: 11) {
+        ForEach(items, id: \.0) { name, sc in
+          Button(action: { s.open(sc) }) {
+            Text(name.uppercased()).font(T.mono(7.5, weight: .heavy)).tracking(0.8)
+              .foregroundColor(s.screen == sc ? T.brass : T.dim).lineLimit(1).fixedSize()
+              .padding(.vertical, 10).contentShape(Rectangle())
+          }.buttonStyle(.plain)
+        }
+      }.frame(maxWidth: .infinity)
+    }.background(T.bg2.opacity(0.6))
   }
 }

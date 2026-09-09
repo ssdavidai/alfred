@@ -28,6 +28,6 @@ enum Presence {
     img.isTemplate = false; return img
   }
   static func line(deskCount: Int) -> String {
-    deskCount == 0 ? "The desk is quiet." : deskCount == 1 ? "One matter needs your word." : "\(deskCount) matters need your word."
+    deskCount == 0 ? "The desk is quiet." : deskCount == 1 ? "One thing needs your word." : "\(deskCount) things need your word."
   }
 }
