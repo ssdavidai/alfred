@@ -20,40 +20,41 @@ struct Wordmark: View {
   }
 }
 
+/// 11 · The Placement — first run, one screen, then the app goes silent.
 struct OnboardingView: View {
   @EnvironmentObject var s: AppState
   @State private var url = ""
   @State private var email = ""
   @State private var password = ""
-  var body: some View {
-    VStack(alignment: .leading, spacing: 0) {
-      Label_(text: "For Mac")
-      Wordmark().padding(.top, 6)
-      Text("Service is the standard.").font(AB.body(19, italic: true)).foregroundColor(AB.marginalia).padding(.top, 4)
-      Hairline().padding(.vertical, 24)
-
-      Text("Pair this Mac with your Alfred. Sign in once with the same details you use for the dashboard; this Mac then keeps a key of its own, which you can revoke at any time from Study.")
-        .font(AB.body(17)).foregroundColor(AB.ink).fixedSize(horizontal: false, vertical: true)
-
-      VStack(alignment: .leading, spacing: 14) {
-        VStack(alignment: .leading, spacing: 6) { Label_(text: "Your Alfred"); TextField("yourname.alfred.black", text: $url).abField() }
-        VStack(alignment: .leading, spacing: 6) { Label_(text: "Email"); TextField("you@example.com", text: $email).abField() }
-        VStack(alignment: .leading, spacing: 6) { Label_(text: "Password"); SecureField("", text: $password).abField() }
-      }.padding(.top, 24)
-
-      if let m = s.message {
-        Text(m).font(AB.mono(11)).foregroundColor(AB.oxblood).padding(.top, 14).fixedSize(horizontal: false, vertical: true)
-      }
-      Spacer()
-      Hairline(brass: true)
-      HStack {
-        Text(s.busy ? "Pairing…" : "Nothing leaves this Mac but the key it mints.").font(AB.mono(10)).foregroundColor(AB.marginalia)
-        Spacer()
-        Button(s.busy ? "Pairing" : "Pair") { Task { await s.pair(url: url, email: email, password: password) } }
-          .buttonStyle(ABButton(primary: true)).disabled(s.busy || url.isEmpty || email.isEmpty || password.isEmpty)
-      }.padding(.top, 14)
+  private func field(_ label: String, _ placeholder: String, _ text: Binding<String>, secure: Bool = false) -> some View {
+    VStack(alignment: .leading, spacing: 6) {
+      Meta(text: label, tracking: 1.8)
+      Group { if secure { SecureField(placeholder, text: text) } else { TextField(placeholder, text: text) } }
+        .textFieldStyle(.plain).font(T.body(14)).foregroundColor(T.ink)
+      Rectangle().fill(T.hair2).frame(height: 1)
     }
-    .padding(36)
+  }
+  var body: some View {
+    VStack(spacing: 0) {
+      if let m = Brand.image("logo-brass.svg") { Image(nsImage: m).resizable().aspectRatio(contentMode: .fit).frame(height: 52).padding(.top, 44) }
+      Text("At your service.").font(T.title(26)).foregroundColor(T.ink).padding(.top, 22)
+      Say(text: "I'll spend this week watching how your desk runs — «touching nothing.» By Friday you'll have my first brief, and we'll agree what I take over.", size: 15)
+        .multilineTextAlignment(.center).padding(.horizontal, 48).padding(.top, 14)
+      VStack(spacing: 16) {
+        field("Your Alfred", "yourname.alfred.black", $url)
+        field("Email", "you@example.com", $email)
+        field("Password", "", $password, secure: true)
+      }.padding(.horizontal, 48).padding(.top, 26)
+      if let m = s.message { Text(m).font(T.mono(9)).foregroundColor(T.brass).padding(.top, 12).padding(.horizontal, 48).fixedSize(horizontal: false, vertical: true) }
+      HStack(spacing: 10) {
+        Button("The terms") { if let d = Tenant.domain(from: url), let u = URL(string: "https://\(d)/household") { NSWorkspace.shared.open(u) } }.buttonStyle(PopButton())
+        Button(s.busy ? "One moment" : "Begin the watch") { Task { await s.pair(url: url, email: email, password: password) } }
+          .buttonStyle(PopButton(primary: true)).disabled(s.busy || url.isEmpty || email.isEmpty || password.isEmpty).keyboardShortcut(.return, modifiers: [])
+      }.padding(.top, 26)
+      Spacer(minLength: 20)
+      Meta(text: "Week one · L1 · nothing leaves this machine", tracking: 1.8).padding(.bottom, 22)
+    }
+    .frame(width: 460, height: 560).background(T.bg)
   }
 }
 
