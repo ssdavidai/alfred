@@ -92,8 +92,8 @@ struct AlfredBlackMain {
         let name = CommandLine.arguments[i + 1]
         st.screen = ["brief": Screen.brief, "matters": .matters, "yourword": .yourWord, "ledger": .ledger, "vault": .vault, "arrangement": .arrangement][name] ?? .glance
         if let r = CommandLine.arguments.firstIndex(of: "--reply"), CommandLine.arguments.count > r + 1 { st.askReply = CommandLine.arguments[r + 1] }
-        let host: NSHostingView<AnyView> = name == "ask" ? NSHostingView(rootView: AnyView(AskView().environmentObject(st))) : NSHostingView(rootView: AnyView(PopoverView().environmentObject(st)))
-        let w: CGFloat = name == "ask" ? 620 : (name == "arrangement" ? 380 : T.popoverWidth)
+        let host: NSHostingView<AnyView> = name == "ask" ? NSHostingView(rootView: AnyView(AskView().environmentObject(st))) : name == "statement" ? NSHostingView(rootView: AnyView(StatementView().environmentObject(st))) : NSHostingView(rootView: AnyView(PopoverView().environmentObject(st)))
+        let w: CGFloat = name == "ask" ? 620 : name == "statement" ? 520 : (name == "arrangement" ? 380 : T.popoverWidth)
         host.frame = NSRect(x: 0, y: 0, width: w, height: host.fittingSize.height); host.layoutSubtreeIfNeeded()
         if let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) { host.cacheDisplay(in: host.bounds, to: rep); try? rep.representation(using: .png, properties: [:])?.write(to: dir.appendingPathComponent("screen-\(CommandLine.arguments[i + 1]).png")) }
         print("screen: \(CommandLine.arguments[i + 1]) \(Int(host.bounds.height))pt desk=\(st.desk.count) matters=\(st.matters.count) nar=\(st.narToday.map { String($0) } ?? "-")"); done = true
@@ -233,6 +233,18 @@ final class AppState: ObservableObject {
   }
 
 
+  func showStatement() {
+
+
+    if statementWindow == nil { statementWindow = StatementWindow(state: self) }
+
+
+    statementWindow?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+
+
+  }
+
+
   func dismissAsk() { askReply = nil; askPanel?.orderOut(nil) }
 
 
@@ -285,6 +297,8 @@ final class AppState: ObservableObject {
   @Published var vault: [String: Int] = [:]
   @Published var rulesBody: String? = nil
   @Published var arrangement = Arrangement()
+  @Published var statement: MonthStatement? = nil
+  var statementWindow: StatementWindow? = nil
   @Published var screen: Screen = .glance
   private var lastNar = Date.distantPast
   func open(_ sc: Screen) { screen = sc }
@@ -355,6 +369,7 @@ final class AppState: ObservableObject {
       if let l = try? await t.activity() { ledger = l }
       if let v = try? await t.vaultCounts() { vault = v }
       if let r = try? await t.rules() { rulesBody = r; arrangement = Arrangement.parse(r) }
+      if let m = try? await t.statement() { statement = m }
       // Deliberate friction: a chosen trust class takes effect at midnight, not now.
       if let p = state.pendingTrust, let at = state.trustEffectiveAt, Date() >= at {
         do { try await t.setTrust(p); state.pendingTrust = nil; state.trustEffectiveAt = nil; trust = p } catch { record(error) }
@@ -411,7 +426,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     statusItem.button?.target = self; statusItem.button?.action = #selector(markClicked); statusItem.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
     let host = NSHostingController(rootView: PopoverView().environmentObject(state)); host.sizingOptions = .preferredContentSize; popover.contentViewController = host; popover.delegate = self
     state.selfHeal()
-    HotKey.onPress = { [weak self] in self?.state.toggleAsk() }; HotKey.register()
+    HotKey.onPress = { [weak self] in self?.state.toggleAsk() }; HotKey.onStatement = { [weak self] in self?.state.showStatement() }; HotKey.register()
     if state.pairing == nil || !Self.launchedAsLoginItem() { showWindow() }
     timer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
       guard let self else { return }
@@ -493,6 +508,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
     m.addItem(.separator())
     m.addItem(withTitle: "Ask Alfred…", action: #selector(askAlfred), keyEquivalent: "").target = self
+    m.addItem(withTitle: "The Statement…", action: #selector(showStatement), keyEquivalent: "").target = self
     m.addItem(withTitle: "Open Alfred Black…", action: #selector(openWindow), keyEquivalent: "o").target = self
     m.addItem(withTitle: "Reveal Alfred folder", action: #selector(revealFolder), keyEquivalent: "").target = self
     m.addItem(.separator())
@@ -526,6 +542,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
   }
 
   @objc func askAlfred() { state.toggleAsk() }
+
+  @objc func showStatement() { state.showStatement() }
 
   @objc func openWindow() { showWindow() }
 
