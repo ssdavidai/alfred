@@ -11,6 +11,7 @@ struct PopoverView: View {
   var body: some View {
     ZStack { T.bg
       switch s.screen {
+      case .brief: BriefView()
       default: GlanceView()
       }
     }
@@ -49,6 +50,32 @@ struct GlanceView: View {
         Spacer()
         Keycap(text: "⌘⇧A  ASK")
       }.padding(.horizontal, 18).padding(.vertical, 11)
+    }
+  }
+}
+
+/// 02 · The Brief — mornings, in the same popover, until read.
+struct BriefView: View {
+  @EnvironmentObject var s: AppState
+  private func openBrief() { if let d = s.pairing?.domain, let u = URL(string: "https://\(d)/brief") { NSWorkspace.shared.open(u) } }
+  var body: some View {
+    VStack(alignment: .leading, spacing: 0) {
+      HStack { Meta(text: s.brief?.header ?? "The Brief", color: T.brass); Spacer(); Meta(text: s.brief?.composedTime ?? "") }
+        .padding(.horizontal, 18).padding(.top, 15).padding(.bottom, 13)
+      Rectangle().fill(T.hair).frame(height: 1)
+      if let b = s.brief {
+        let items = b.items
+        Say(text: b.excerpt.isEmpty ? "Nothing pressing today, \(T.honorific). «Everything is in hand.»" : b.excerpt).padding(.horizontal, 18).padding(.top, 18).padding(.bottom, 16)
+        ForEach(Array(items.enumerated()), id: \.offset) { i, line in
+          let dl = Brief.deadline(in: line)
+          PopRow(title: line, meta: dl ?? (i == 0 ? "First" : "In hand"), needsWord: i == 0, metaBrass: dl != nil) { openBrief() }
+        }
+      } else {
+        Say(text: "No brief has been composed yet, \(T.honorific).").padding(.horizontal, 18).padding(.vertical, 18)
+      }
+      HStack { Meta(text: "Everything else is in hand", tracking: 1.8); Spacer()
+        Button(action: openBrief) { Keycap(text: "RETURN  OPEN") }.buttonStyle(.plain) }
+        .padding(.horizontal, 18).padding(.vertical, 11)
     }
   }
 }
