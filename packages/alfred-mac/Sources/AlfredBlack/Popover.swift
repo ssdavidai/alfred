@@ -247,20 +247,28 @@ struct VaultView: View {
   }
 }
 
-/// 10 · The Arrangement — settings as a contract, not toggles. 380 pt.
+/// Settings — written as a contract, not toggles. 400 pt.
 struct ArrangementView: View {
   @EnvironmentObject var s: AppState
   @State private var draft = Arrangement()
   @State private var loaded = false
+  private static let examples = ["e.g. research, draft, file, reconcile, schedule", "e.g. anything sent to a client · anything above €500", "e.g. sign, pay, or delete on my behalf"]
+  private static let explain = ["Alfred does these on his own and reports after.", "Alfred prepares these and waits for your word.", "Alfred will not do these, even if asked."]
+  private static let levels = [(1, "L1 Watch", "Observes and reports; changes nothing."), (2, "L2 Propose", "Prepares everything; acts only through you."), (3, "L3 Act, then report", "Acts within the arrangement; tells you after.")]
   private var since: String {
     guard let d = s.pairing?.pairedAt else { return "" }
-    let f = DateFormatter(); f.dateFormat = "MMM yyyy"; return "Since " + f.string(from: d)
+    let f = DateFormatter(); f.dateFormat = "MMM yyyy"; return "since " + f.string(from: d)
   }
-  private func field(_ label: String, _ text: Binding<String>) -> some View {
+  private func field(_ i: Int, _ label: String, _ text: Binding<String>) -> some View {
     VStack(alignment: .leading, spacing: 6) {
       Meta(text: label, tracking: 1.8)
-      TextField("Not yet written", text: text).textFieldStyle(.plain).font(T.body(14)).foregroundColor(T.ink)
-    }.padding(.horizontal, 18).padding(.vertical, 12)
+      ZStack(alignment: .leading) {
+        if text.wrappedValue.isEmpty { Text(Self.examples[i]).font(T.body(14)).foregroundColor(T.dim.opacity(0.7)).allowsHitTesting(false) }
+        TextField("", text: text).textFieldStyle(.plain).font(T.body(14)).foregroundColor(T.ink)
+      }
+        .onSubmit { Task { await s.saveArrangement(draft) } }
+      Text(Self.explain[i]).font(T.body(11.5, italic: true)).foregroundColor(T.dim)
+    }.padding(.horizontal, 18).padding(.vertical, 11)
   }
   private func chip(_ level: Int, _ name: String) -> some View {
     let active = (s.state.pendingTrust ?? s.trust) == level
@@ -268,31 +276,36 @@ struct ArrangementView: View {
       Meta(text: name, color: active ? T.brass : T.dim, size: 8.5, tracking: 1.4).padding(.horizontal, 10).padding(.vertical, 7)
         .background(RoundedRectangle(cornerRadius: T.rButton).fill(active ? T.brass.opacity(0.08) : Color.clear))
         .overlay(RoundedRectangle(cornerRadius: T.rButton).stroke(active ? T.brass : T.hair2, lineWidth: 1))
-    }.buttonStyle(.plain)
+    }.buttonStyle(.plain).pointer()
   }
+  private var unsaved: Bool { draft != s.arrangement }
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
-      ScreenHeader(name: "Settings", status: since)
-      field("Alfred may, without asking", $draft.may); Rectangle().fill(T.hair).frame(height: 1)
-      field("Alfred asks first", $draft.asksFirst); Rectangle().fill(T.hair).frame(height: 1)
-      field("Alfred never", $draft.never); Rectangle().fill(T.hair).frame(height: 1)
+      ScreenHeader(name: "Settings", status: unsaved ? "unsaved · ⏎ saves" : since, brass: unsaved)
+      field(0, "Alfred may, without asking", $draft.may); Rectangle().fill(T.hair).frame(height: 1)
+      field(1, "Alfred asks first", $draft.asksFirst); Rectangle().fill(T.hair).frame(height: 1)
+      field(2, "Alfred never", $draft.never); Rectangle().fill(T.hair).frame(height: 1)
       VStack(alignment: .leading, spacing: 10) {
         Meta(text: "Trust class", tracking: 1.8)
-        HStack(spacing: 8) { chip(1, "L1 Watch"); chip(2, "L2 Propose"); chip(3, "L3 Act, then report") }
+        HStack(spacing: 8) { ForEach(Self.levels, id: \.0) { l, name, _ in chip(l, name) } }
+        Text(Self.levels.first { $0.0 == (s.state.pendingTrust ?? s.trust) }?.2 ?? "").font(T.body(11.5, italic: true)).foregroundColor(T.dim)
       }.padding(.horizontal, 18).padding(.vertical, 14)
       Rectangle().fill(T.hair).frame(height: 1)
       HStack {
-        Meta(text: s.state.pendingTrust != nil ? "L\(s.state.pendingTrust!) takes effect at midnight" : "Changes take effect at midnight", color: s.state.pendingTrust != nil ? T.brass : T.dim, tracking: 1.8)
+        if let p = s.state.pendingTrust {
+          Meta(text: "L\(p) takes effect at midnight", tracking: 1.8)
+          Button(action: { s.cancelTrustChange() }) { Keycap(text: "CANCEL") }.buttonStyle(.plain).pointer()
+        } else { Meta(text: "Changes take effect at midnight", tracking: 1.8) }
         Spacer()
-        if draft != s.arrangement { Button(action: { Task { await s.saveArrangement(draft) } }) { Keycap(text: "SAVE ⏎") }.buttonStyle(.plain).keyboardShortcut(.return, modifiers: []) }
-      }.padding(.horizontal, 18).padding(.vertical, 11)
+        if unsaved { Button(action: { Task { await s.saveArrangement(draft) } }) { Keycap(text: "SAVE ⏎", color: T.brass) }.buttonStyle(.plain).pointer() }
+      }.padding(.horizontal, 18).padding(.vertical, 12)
     }
-    .onAppear { if !loaded { draft = s.arrangement; loaded = true } }
+    .onAppear { if !loaded { if let d = s.state.arrangementDraft, d.count == 3 { draft = Arrangement(may: d[0], asksFirst: d[1], never: d[2]) } else { draft = s.arrangement }; loaded = true } }
+    .onChange(of: draft) { d in s.keepDraft(d) }
     .onChange(of: s.arrangement) { a in if draft == Arrangement() { draft = a } }
   }
 }
 
-/// Where the popover can go, in plain words; the screen you are on is brass.
 struct NavStrip: View {
   @EnvironmentObject var s: AppState
   private let items: [(String, Screen)] = [("Today", .glance), ("Brief", .brief), ("Matters", .matters), ("Decisions", .yourWord), ("Activity", .ledger), ("Vault", .vault), ("Settings", .arrangement)]

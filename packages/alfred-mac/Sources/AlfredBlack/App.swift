@@ -330,6 +330,8 @@ final class AppState: ObservableObject {
     if wordIndex >= desk.count { wordIndex = max(0, desk.count - 1) }
     if desk.isEmpty { screen = .glance }
   }
+  func cancelTrustChange() { state.pendingTrust = nil; state.trustEffectiveAt = nil }
+  func keepDraft(_ a: Arrangement) { state.arrangementDraft = a == arrangement ? nil : [a.may, a.asksFirst, a.never] }
   func chooseTrust(_ level: Int) {
     let cal = Calendar.current; let midnight = cal.startOfDay(for: cal.date(byAdding: .day, value: 1, to: Date())!)
     if level == trust { state.pendingTrust = nil; state.trustEffectiveAt = nil } else { state.pendingTrust = level; state.trustEffectiveAt = midnight }
