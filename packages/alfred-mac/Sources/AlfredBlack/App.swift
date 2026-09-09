@@ -5,6 +5,7 @@
 import SwiftUI
 import AppKit
 import ServiceManagement
+import UserNotifications
 
 @main
 struct AlfredBlackMain {
@@ -220,6 +221,21 @@ final class AppState: ObservableObject {
   }
 
 
+  func shiftStatement(_ by: Int) {
+
+
+    let n = max(1, statementMonthsBack + by); guard n != statementMonthsBack, let t = tenant else { return }
+
+
+    statementMonthsBack = n; statement = nil
+
+
+    Task { if let m = try? await t.statement(monthsBack: n) { statement = m } }
+
+
+  }
+
+
   func showStatement() {
 
 
@@ -297,6 +313,7 @@ final class AppState: ObservableObject {
   @Published var rulesBody: String? = nil
   @Published var arrangement = Arrangement()
   @Published var statement: MonthStatement? = nil
+  @Published var statementMonthsBack = 1
   var statementWindow: StatementWindow? = nil
   @Published var screen: Screen = .glance
   private var lastNar = Date.distantPast
@@ -398,7 +415,7 @@ final class AppState: ObservableObject {
       if let l = try? await t.activity() { ledger = l }
       if let v = try? await t.vaultCounts() { vault = v }
       if let r = try? await t.rules() { rulesBody = r; arrangement = Arrangement.parse(r) }
-      if let m = try? await t.statement() { statement = m }
+      if let m = try? await t.statement(monthsBack: statementMonthsBack) { statement = m }
       // Deliberate friction: a chosen trust class takes effect at midnight, not now.
       if let p = state.pendingTrust, let at = state.trustEffectiveAt, Date() >= at {
         do { try await t.setTrust(p); state.pendingTrust = nil; state.trustEffectiveAt = nil; trust = p } catch { record(error) }
@@ -442,7 +459,7 @@ final class AppState: ObservableObject {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNUserNotificationCenterDelegate {
   func popoverDidClose(_ n: Notification) { state.popoverClosed() }
   let state = AppState()
   var statusItem: NSStatusItem!
@@ -454,6 +471,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     if Self.moveToApplicationsIfNeeded() { return }
     AB.registerFonts()
+    UNUserNotificationCenter.current().delegate = self
     statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     refreshPresence()
     statusItem.button?.toolTip = "Alfred Black"
@@ -578,6 +596,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     else { state.popoverOpened(); popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY); popover.contentViewController?.view.window?.makeKey() }
 
   }
+
+  /// A click on "Your word" lands on Decisions; the banner shows even while the app is frontmost.
+
+  func userNotificationCenter(_ c: UNUserNotificationCenter, didReceive r: UNNotificationResponse, withCompletionHandler done: @escaping () -> Void) { showScreen(.yourWord); done() }
+
+  func userNotificationCenter(_ c: UNUserNotificationCenter, willPresent n: UNNotification, withCompletionHandler done: @escaping (UNNotificationPresentationOptions) -> Void) { done([.banner, .list]) }
 
   func showScreen(_ sc: Screen) {
 
