@@ -281,6 +281,8 @@ final class AppState: ObservableObject {
   @Published var matters: [Matter] = []
   @Published var narToday: Double? = nil
   @Published var trust = 3
+  @Published var ledger: [LedgerLine] = []
+  @Published var vault: [String: Int] = [:]
   @Published var screen: Screen = .glance
   private var lastNar = Date.distantPast
   func open(_ sc: Screen) { screen = sc }
@@ -339,6 +341,8 @@ final class AppState: ObservableObject {
     if force || now.timeIntervalSince(lastNar) >= 300 {
       lastNar = now; if let h = try? await t.returnedToday() { narToday = h }
       if let c = try? await t.trustClass() { trust = c }
+      if let l = try? await t.activity() { ledger = l }
+      if let v = try? await t.vaultCounts() { vault = v }
     }
     if force || now.timeIntervalSince(lastBrief) >= 600 {
       lastBrief = now; if let b = try? await t.latestBrief() { brief = b }
