@@ -51,6 +51,14 @@ enum Store {
     if let p, let d = try? enc.encode(p) { try? d.write(to: Paths.pairingFile, options: .atomic) }
     else { try? FileManager.default.removeItem(at: Paths.pairingFile) }
   }
+  /// A stable id for this Mac — the chat_id of its conversation with Alfred.
+  static func deviceId() -> String {
+    let f = Paths.support.appendingPathComponent("device-id")
+    if let s = try? String(contentsOf: f, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines), !s.isEmpty { return s }
+    let id = "mac-" + UUID().uuidString.lowercased().prefix(12)
+    try? FileManager.default.createDirectory(at: Paths.support, withIntermediateDirectories: true)
+    try? id.write(to: f, atomically: true, encoding: .utf8); return id
+  }
   static func loadState() -> RunState {
     guard let d = try? Data(contentsOf: Paths.stateFile), let s = try? dec.decode(RunState.self, from: d) else { return RunState() }
     return s
