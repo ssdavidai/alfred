@@ -155,6 +155,17 @@ struct Tenant {
     return try JSONDecoder().decode(Day.self, from: data).nar_hours
   }
 
+  /// The tenant's autonomy flags, read as a trust class: L1 watches (all
+  /// shadow), L2 proposes (acts only through the principal), L3 acts, then reports.
+  func trustClass() async throws -> Int {
+    let (code, data) = try await request("api/v1/settings", bearer: apiKey)
+    guard code == 200, let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return 3 }
+    let bag = (j["settings"] as? [String: Any]) ?? j
+    func mode(_ k: String) -> String { ((bag[k] as? [String: Any])?["value"] as? String) ?? (bag[k] as? String) ?? "live" }
+    let live = ["signal_action_mode", "state_mutator_mode", "auto_task_create_mode"].map { mode($0) == "live" }
+    return live.allSatisfy { $0 } ? 3 : (live[0] ? 2 : (live[1] || live[2] ? 2 : 1))
+  }
+
   static func domain(from raw: String) -> String? {
     var s = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     if !s.contains("://") { s = "https://" + s }
@@ -222,7 +233,13 @@ struct Brief {
 }
 
 struct Matter: Decodable, Identifiable {
-  var id: String; var name: String?; var summary: String?; var state: String?; var current_state: String?
+  var id: String; var name: String?; var summary: String?; var state: String?; var current_state: String?; var path: String?; var next: String?
+  /// The living state, first sentence only, for the subline.
+  var subline: String {
+    let st = (current_state ?? summary ?? "").replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespaces)
+    let first = st.components(separatedBy: ". ").first ?? st
+    return first.count > 90 ? String(first.prefix(89)) + "…" : first
+  }
   var title: String { (name ?? id).trimmingCharacters(in: .whitespaces) }
   /// One line for the Glance: the matter and its living state, if any.
   var glanceTitle: String {
