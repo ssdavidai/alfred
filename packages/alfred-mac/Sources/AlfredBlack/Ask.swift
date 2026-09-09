@@ -64,8 +64,11 @@ struct AskView: View {
         TextField("What can I take off your desk, \(T.honorific)?", text: $text).textFieldStyle(.plain)
           .font(T.say(21)).foregroundColor(T.ink).focused($focused).disabled(s.asking)
           .onSubmit { submit(withoutRead: NSEvent.modifierFlags.contains(.shift)) }
-        if s.asking { Meta(text: "one moment", color: T.dim) } else { Keycap(text: "ESC") }
+        if s.asking { Waiting() } else { Keycap(text: "ESC") }
       }.padding(.horizontal, 24).padding(.vertical, 22)
+      if s.askReply == nil && !s.asking {
+        Meta(text: "⏎ to ask · Alfred proposes before he acts", size: 8.5, tracking: 1.2).padding(.horizontal, 24).padding(.bottom, 14)
+      }
       if let r = s.askReply {
         Rectangle().fill(T.hair).frame(height: 1).padding(.horizontal, 24)
         Say(text: r, size: 17).padding(.horizontal, 24).padding(.top, 16)

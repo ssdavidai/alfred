@@ -198,20 +198,14 @@ final class AppState: ObservableObject {
 
 
   func propose(_ text: String) async {
-
-
     let q = text.trimmingCharacters(in: .whitespacesAndNewlines); guard !q.isEmpty, !asking, let t = tenant else { return }
-
-
-    asking = true; defer { asking = false }
-
-
+    asking = true; askStartedAt = Date(); defer { asking = false; askStartedAt = nil }
     let framed = "\(T.honorific.capitalized) asks: «\(q)». Before acting, say in one short paragraph what you would do and any specifics you can see — then wait for his word. Do not act yet."
-
-
-    do { askReply = try await t.ask(framed, chatId: Store.deviceId()) } catch { record(error) }
-
-
+    let task = Task { () -> String? in try? await t.ask(framed, chatId: Store.deviceId()) }
+    askTask = task
+    let r = await task.value
+    if task.isCancelled { return }
+    if let r { askReply = r } else { say("Alfred could not be reached just now.") }
   }
 
 
@@ -219,17 +213,10 @@ final class AppState: ObservableObject {
 
 
   func soOrdered(withoutRead: Bool) {
-
-
     guard let t = tenant else { return }
-
-
     let word = withoutRead ? "So ordered — send without my read." : "So ordered."
-
-
-    dismissAsk(); Task { _ = try? await t.ask(word, chatId: Store.deviceId()) }
-
-
+    dismissAsk(); say(withoutRead ? "Ordered, without a read. Alfred is on it." : "Ordered. Alfred is on it — drafts for your read.")
+    Task { _ = try? await t.ask(word, chatId: Store.deviceId()) }
   }
 
 
@@ -245,7 +232,10 @@ final class AppState: ObservableObject {
   }
 
 
-  func dismissAsk() { askReply = nil; askPanel?.orderOut(nil) }
+  func cancelAsk() { askTask?.cancel(); askTask = nil; asking = false; askStartedAt = nil }
+
+
+  func dismissAsk() { if asking { cancelAsk() }; askReply = nil; askPanel?.orderOut(nil) }
 
 
   func toggleAsk() {
@@ -305,12 +295,28 @@ final class AppState: ObservableObject {
   /// Priority when the popover opens: an unread brief of the day, else the Glance.
   func popoverOpened() { screen = (brief.map { $0.isToday && state.briefReadSlug != $0.slug_date } ?? false) ? .brief : .glance }
   @Published var wordIndex = 0
+  @Published var notice: (text: String, at: Date, undo: (() -> Void)?)? = nil
+  @Published var lastRefreshAt: Date? = nil
+  @Published var askStartedAt: Date? = nil
+  private var askTask: Task<String?, Never>? = nil
+  func say(_ text: String, undo: (() -> Void)? = nil) {
+    notice = (text, Date(), undo)
+    DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in if let n = self?.notice, Date().timeIntervalSince(n.at) >= 7.9 { self?.notice = nil } }
+  }
   @Published var deciding = false
   /// The principal's word, then the next matter — or the Glance when none remain.
   func decide(_ intent: String) async {
     guard !deciding, let t = tenant, wordIndex < desk.count else { return }
     let card = desk[wordIndex]; deciding = true; defer { deciding = false }
-    do { try await t.decide(card: card, intent: intent); desk.remove(at: wordIndex); deskTotal = max(0, deskTotal - 1) } catch { record(error) }
+    do {
+      let id = try await t.decide(card: card, intent: intent)
+      let removed = desk.remove(at: wordIndex); deskTotal = max(0, deskTotal - 1)
+      let what = intent == "delegate" ? "Recorded. Alfred is on it." : intent == "defer" ? "Held for later." : "Recorded as yours."
+      say(what, undo: id.map { did in { [weak self] in
+        guard let self, let t = self.tenant else { return }
+        Task { do { try await t.reverse(decisionId: did); self.desk.insert(removed, at: 0); self.deskTotal += 1; self.notice = nil } catch { self.record(error) } }
+      } })
+    } catch { record(error) }
     if wordIndex >= desk.count { wordIndex = max(0, desk.count - 1) }
     if desk.isEmpty { screen = .glance }
   }
@@ -390,7 +396,7 @@ final class AppState: ObservableObject {
       lastBrief = now; if let b = try? await t.latestBrief() { brief = b }
     }
     if force || now.timeIntervalSince(lastDesk) >= 60 {
-      lastDesk = now
+      lastDesk = now; lastRefreshAt = now
       if let page = try? await t.deskPending() {
         let before = deskTotal
         desk = page.items.filter { ($0.status ?? "pending") == "pending" }.sorted { ($0.decay_score ?? 0, $0.created ?? "") > ($1.decay_score ?? 0, $1.created ?? "") }; deskTotal = page.total   // most pressing first
