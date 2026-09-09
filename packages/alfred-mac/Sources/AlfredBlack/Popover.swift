@@ -147,6 +147,7 @@ struct MattersView: View {
             Meta(text: meta(m), color: b ? T.brass : T.dim, size: 8.5, tracking: 1.4)
           }.padding(.horizontal, 18).padding(.vertical, 12).contentShape(Rectangle())
           .onTapGesture { if let d = s.pairing?.domain, let u = URL(string: "https://\(d)/matters/\(m.id)") { NSWorkspace.shared.open(u) } }.pointer()
+          .accessibilityElement(children: .ignore).accessibilityLabel("\(m.title), \(meta(m))").accessibilityAddTraits(.isButton)
           Rectangle().fill(T.hair).frame(height: 1)
         }
       }
@@ -172,7 +173,7 @@ struct YourWordView: View {
         }
         HStack(spacing: 8) {
           Meta(text: (c.target_kind ?? "matter"), size: 8.5, tracking: 1.4); Meta(text: "·", size: 8.5); Meta(text: when(c.created), size: 8.5, tracking: 1.4); Spacer()
-          Button(action: { if let d = s.pairing?.domain, let u = URL(string: "https://\(d)/desk") { NSWorkspace.shared.open(u) } }) { Meta(text: "Desk ⏎", color: T.brass, size: 8.5, tracking: 1.4) }.buttonStyle(.plain)
+          Button(action: { if let d = s.pairing?.domain, let u = URL(string: "https://\(d)/desk") { NSWorkspace.shared.open(u) } }) { Meta(text: "Desk ⏎", color: T.dim, size: 8.5, tracking: 1.4) }.buttonStyle(.plain)
         }.padding(.horizontal, 18).padding(.top, 14)
         if let a = c.proposedAction {
           HStack(alignment: .firstTextBaseline, spacing: 8) { Meta(text: "If so ordered", color: T.brass, size: 8.5, tracking: 1.4); Text(a).font(T.body(13)).foregroundColor(T.ink).lineLimit(2) }
@@ -211,7 +212,7 @@ struct LedgerView: View {
           Meta(text: l.time, color: T.dim, size: 8.5, tracking: 1.2).frame(width: 40, alignment: .leading)
           Text(l.title).font(T.body(13.5)).foregroundColor(live ? T.ink : T.dim).lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
           Meta(text: live ? (l.actor ?? "Alfred") : "Shadow", color: live ? T.brass : T.dim, size: 8.5, tracking: 1.4)
-        }.padding(.horizontal, 18).padding(.vertical, 11)
+        }.padding(.horizontal, 18).padding(.vertical, 11).accessibilityElement(children: .combine)
         Rectangle().fill(T.hair).frame(height: 1)
       }
       HStack { Meta(text: "\(s.ledger.count - lines.count) machine lines hidden", size: 8.5, tracking: 1.2); Spacer()
@@ -232,13 +233,13 @@ struct VaultView: View {
       ScreenHeader(name: "Vault", status: "private by design")
       ForEach(Self.shelves, id: \.0) { name, types in
         let n = types.reduce(0) { $0 + (s.vault[$1] ?? 0) }
-        HStack { Text(name).font(T.body(14)).foregroundColor(T.ink); Spacer(); Meta(text: n == 0 ? "—" : String(n), size: 9, tracking: 1.4); Meta(text: "→", color: T.brass, size: 9) }
+        HStack { Text(name).font(T.body(14)).foregroundColor(T.ink); Spacer(); Meta(text: n == 0 ? "—" : String(n), size: 9, tracking: 1.4); Meta(text: "→", color: T.dim, size: 9) }
           .padding(.horizontal, 18).padding(.vertical, 12).contentShape(Rectangle())
           .onTapGesture { if let d = s.pairing?.domain, let u = URL(string: "https://\(d)/vault?type=\(types[0])") { NSWorkspace.shared.open(u) } }.pointer()
-          .accessibilityLabel("\(name), \(n) records")
+          .accessibilityLabel("\(name), \(n) records").accessibilityAddTraits(.isButton)
         Rectangle().fill(T.hair).frame(height: 1)
       }
-      HStack { Text("Credentials").font(T.body(14)).foregroundColor(T.ink); Spacer(); Meta(text: "Sealed", color: T.brass, size: 9, tracking: 1.4) }
+      HStack { Text("Credentials").font(T.body(14)).foregroundColor(T.ink); Spacer(); Meta(text: "Sealed", color: T.dim, size: 9, tracking: 1.4) }
         .padding(.horizontal, 18).padding(.vertical, 12)
         .help("Kept in the password vault on your tenant. Alfred can use them; he never shows or counts them here.")
       Rectangle().fill(T.hair).frame(height: 1)
@@ -299,6 +300,13 @@ struct ArrangementView: View {
         Spacer()
         if unsaved { Button(action: { Task { await s.saveArrangement(draft) } }) { Keycap(text: "SAVE ⏎", color: T.brass) }.buttonStyle(.plain).pointer() }
       }.padding(.horizontal, 18).padding(.vertical, 12)
+      Rectangle().fill(T.hair).frame(height: 1)
+      HStack(spacing: 16) {
+        Button(action: { s.setUpCowork() }) { Meta(text: "Set up Cowork", size: 8.5, tracking: 1.4) }.buttonStyle(.plain).pointer().help("Registers Alfred with Claude Desktop and exports the Cowork plugin")
+        Button(action: { Cowork.revealAlfredFolder() }) { Meta(text: "Alfred folder", size: 8.5, tracking: 1.4) }.buttonStyle(.plain).pointer().help("~/Alfred — what a Cowork session reads")
+        Spacer()
+        Button(action: { s.signOut() }) { Meta(text: "Sign out", size: 8.5, tracking: 1.4) }.buttonStyle(.plain).pointer().help("Forgets the pairing on this Mac; revoke the key under Study › API keys")
+      }.padding(.horizontal, 18).padding(.vertical, 10)
     }
     .onAppear { if !loaded { if let d = s.state.arrangementDraft, d.count == 3 { draft = Arrangement(may: d[0], asksFirst: d[1], never: d[2]) } else { draft = s.arrangement }; loaded = true } }
     .onChange(of: draft) { d in s.keepDraft(d) }

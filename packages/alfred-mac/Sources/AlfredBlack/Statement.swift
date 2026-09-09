@@ -19,7 +19,7 @@ final class StatementWindow: NSWindow {
 struct StatementView: View {
   @EnvironmentObject var s: AppState
   private func openPDF() { if let d = s.pairing?.domain, let u = URL(string: "https://\(d)/attention") { NSWorkspace.shared.open(u) } }
-  private func bar(_ label: String, _ hours: Double, max: Double, hatched: Bool = false) -> some View {
+  private func bar(_ label: String, _ hours: Double, max: Double, hatched: Bool = false, help: String) -> some View {
     let h = max > 0 ? CGFloat(hours / max) * 120 : 0
     return VStack(spacing: 8) {
       ZStack(alignment: .bottom) {
@@ -31,21 +31,26 @@ struct StatementView: View {
       }
       Meta(text: label, size: 8, tracking: 1.4).fixedSize()
       Meta(text: String(format: "%.1f h", hours), color: T.ink, size: 8.5, tracking: 1.2).fixedSize()
-    }.frame(width: 64)
+    }.frame(width: 64).help(help)
   }
   var body: some View {
     let st = s.statement
     VStack(spacing: 0) {
-      Meta(text: "Attention statement · \(st?.month ?? "—")", color: T.brass, tracking: 2.6).padding(.top, 40)
+      HStack(spacing: 14) {
+        Button(action: { s.shiftStatement(+1) }) { Keycap(text: "←") }.buttonStyle(.plain).pointer().help("The month before").keyboardShortcut(.leftArrow, modifiers: [])
+        Meta(text: "Attention statement · \(st?.month ?? "—")", color: T.brass, tracking: 2.6)
+        Button(action: { s.shiftStatement(-1) }) { Keycap(text: "→") }.buttonStyle(.plain).pointer().help("The month after").keyboardShortcut(.rightArrow, modifiers: [])
+          .disabled(s.statementMonthsBack <= 1).opacity(s.statementMonthsBack <= 1 ? 0.35 : 1)
+      }.padding(.top, 40)
       HStack(alignment: .bottom, spacing: 16) {
         VStack(alignment: .leading, spacing: 8) {
           Text(st.map { String(format: "%.1f h", $0.returned) } ?? "—").font(T.title(54)).foregroundColor(T.brass).kerning(-1.1)
           Meta(text: "Returned · after every cost", size: 8.5, tracking: 1.3).fixedSize()
-        }.fixedSize()
+        }.fixedSize().help("Net hours returned to you this month: what Alfred absorbed, minus the time you spent on him")
         Spacer()
         if let st {
           let m = Swift.max(st.displaced, st.engaged, st.returned, 1)
-          HStack(alignment: .bottom, spacing: 6) { bar("Displaced", st.displaced, max: m); bar("Your time", st.engaged, max: m, hatched: true); bar("Net", st.returned, max: m) }
+          HStack(alignment: .bottom, spacing: 6) { bar("Displaced", st.displaced, max: m, help: "Hours of your attention Alfred absorbed — work that would otherwise have reached you"); bar("Your time", st.engaged, max: m, hatched: true, help: "Hours you spent with Alfred — reading, deciding, correcting"); bar("Net", st.returned, max: m, help: "Displaced minus your time — what was actually returned") }
         }
       }.padding(.horizontal, 44).padding(.top, 36)
       Spacer()

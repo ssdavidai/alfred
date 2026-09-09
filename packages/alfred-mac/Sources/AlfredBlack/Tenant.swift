@@ -220,14 +220,15 @@ struct Tenant {
   }
 
   /// The last complete month's attention statement: returned, displaced, engaged (hours).
-  func statement() async throws -> MonthStatement? {
+  func statement(monthsBack: Int = 1) async throws -> MonthStatement? {
     struct Totals: Decodable { var nar_hours: Double?; var displaced_hours: Double?; var engaged_hours: Double? }
     struct Page: Decodable { var totals: Totals? }
     let cal = Calendar.current; let now = Date()
     guard let firstOfThis = cal.date(from: cal.dateComponents([.year, .month], from: now)),
-          let firstOfLast = cal.date(byAdding: .month, value: -1, to: firstOfThis),
-          let lastOfLast = cal.date(byAdding: .day, value: -1, to: firstOfThis) else { return nil }
-    let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"; let mf = DateFormatter(); mf.dateFormat = "MMMM"
+          let firstOfLast = cal.date(byAdding: .month, value: -monthsBack, to: firstOfThis),
+          let firstAfter = cal.date(byAdding: .month, value: 1, to: firstOfLast),
+          let lastOfLast = cal.date(byAdding: .day, value: -1, to: firstAfter) else { return nil }
+    let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"; let mf = DateFormatter(); mf.dateFormat = "MMMM yyyy"
     let (code, data) = try await request("api/v1/attention/statement", bearer: apiKey, query: ["from": f.string(from: firstOfLast), "to": f.string(from: lastOfLast)])
     guard code == 200, let t = try JSONDecoder().decode(Page.self, from: data).totals else { return nil }
     return MonthStatement(month: mf.string(from: firstOfLast), returned: t.nar_hours ?? 0, displaced: t.displaced_hours ?? 0, engaged: t.engaged_hours ?? 0)
