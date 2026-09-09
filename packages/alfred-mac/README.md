@@ -12,6 +12,8 @@ Slack, and the next turn on either side must already know about it.
 
 | | |
 |---|---|
+| **The surface** | Command first. `alfred.black >` asks Alfred anything; the reply comes back in serif, signed, and both turns are journaled (`POST /api/v1/alfred/ask`), so Slack, Telegram and Cowork remember the exchange. Below it: the Desk's matters awaiting judgment as ledger lines that open the Desk, the latest brief as a prose excerpt, and the machine-truth rows folded into a Ledger. |
+| **The Pet** | The menu-bar item is the design system's Pet (the Top Hat, 32 × 39 pixels): *Present* is still; *Attending* shows one brass dot when the Desk holds matters awaiting judgment, and the menu lists the first three; *Resting* dims the eyes through quiet hours (23:00–07:00 local) and never shows brass. It blinks perhaps once a minute, never under reduced motion. |
 | **Pair** | Enter the tenant URL and the dashboard login. The app signs in, mints a dedicated API key (visible under *Study › API keys*, revocable there), stores it in a 0600 file of its own, and forgets the password. |
 | **Read side** | Every 30 s it renders the principal's recent journal (Slack, Telegram, Cowork, …) into `~/Alfred/continuity.md` as the same `[ALFRED-CONTINUITY — authoritative]` block the Hermes plugin injects. A Cowork plugin (staged by the app) reads that file on `SessionStart`, `UserPromptSubmit` and `PostCompact`. |
 | **Write side** | Every 60 s it mirrors new Cowork turns from the local session transcripts into the journal (`channel: cowork`), binding each new session to the owner. Only turns from the last 48 h are ever mirrored: the journal stamps `ts` server-side, so history mirrored late would land as "now". |
@@ -32,7 +34,10 @@ packages/alfred-mac/
 ├── Sources/AlfredBlack/
 │   ├── App.swift                 entry point, AppState, menu bar, CLI modes
 │   ├── Views.swift               onboarding + status (SwiftUI)
-│   ├── Theme.swift               design-system tokens + font registration
+│   ├── Theme.swift               design-system tokens (paper by day, wool by night) + font registration
+│   ├── Brand.swift               the engraved icons, the marks, the seal, the grain
+│   ├── Surface.swift             Pill, LedgerRow, CommandField, ReplyView — the kit's components
+│   ├── Pet.swift                 the presence in the menu bar (Present / Attending / Resting)
 │   ├── Tenant.swift              login / API key / journal client
 │   ├── Continuity.swift          renders continuity.md + folder CLAUDE.md
 │   ├── Pusher.swift              transcript → journal mirror
@@ -41,6 +46,7 @@ packages/alfred-mac/
 │   ├── Store.swift / Keychain.swift
 │   └── Resources/
 │       ├── Fonts/                Playfair Display, EB Garamond, JetBrains Mono (OFL)
+│       ├── Brand/                icons.json (17 engraved icons), marks, seal, grain tiles
 │       └── CoworkPlugin/         the alfred-continuity plugin (hooks + skill)
 ├── Support/Info.plist, AppIcon.icns
 └── scripts/build-app.sh          → dist/Alfred Black.app + dist/AlfredBlack-<version>.dmg
@@ -64,7 +70,9 @@ Produces `dist/Alfred Black.app` and `dist/AlfredBlack-2026.09.03.dmg`.
 "dist/Alfred Black.app/Contents/MacOS/AlfredBlack" --tick       # one render + one mirror pass
 "dist/Alfred Black.app/Contents/MacOS/AlfredBlack" --status
 "dist/Alfred Black.app/Contents/MacOS/AlfredBlack" --export-plugin           # write ~/Downloads/Alfred Continuity.plugin
-"dist/Alfred Black.app/Contents/MacOS/AlfredBlack" --snapshot /path/dir      # render both views to PNGs
+"dist/Alfred Black.app/Contents/MacOS/AlfredBlack" --snapshot /path/dir [--light|--dark]   # render both views to PNGs
+"dist/Alfred Black.app/Contents/MacOS/AlfredBlack" --ask "what is on my plate today?"    # ask Alfred from a shell
+"dist/Alfred Black.app/Contents/MacOS/AlfredBlack" --pet /path/dir       # the Pet's three states at 8×
 ```
 
 ## Signing and distribution
@@ -101,7 +109,8 @@ the API key itself is revoked from *Study › API keys* on the tenant.
 
 ## Design
 
-Built on the Alfred Black design system (`design-system/`): paper and wool,
-ink, one brass accent, sharp corners, hairline rules, Playfair Display for
-display, EB Garamond for prose, JetBrains Mono for machine truth. No emoji.
-Calm copy.
+Built on the Alfred Black design system (`design-system/`): paper by day and
+wool by night (brass holds, a step brighter on wool), ink, one brass accent,
+sharp corners, hairline rules, the engraved icon set, the seal at 7 % in the
+gutter, Playfair Display for display, EB Garamond for prose, JetBrains Mono
+for machine truth. No emoji. Calm copy. Entrances rise in; nothing bounces.
