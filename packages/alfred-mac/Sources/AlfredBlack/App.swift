@@ -89,9 +89,11 @@ struct AlfredBlackMain {
       var done = false
       Task { @MainActor in
         let st = AppState(); await st.tick(force: true)
-        switch CommandLine.arguments[i + 1] { default: st.screen = .glance }
-        let host = NSHostingView(rootView: PopoverView().environmentObject(st))
-        host.frame = NSRect(x: 0, y: 0, width: T.popoverWidth, height: host.fittingSize.height); host.layoutSubtreeIfNeeded()
+        let name = CommandLine.arguments[i + 1]
+        if let r = CommandLine.arguments.firstIndex(of: "--reply"), CommandLine.arguments.count > r + 1 { st.askReply = CommandLine.arguments[r + 1] }
+        let host: NSHostingView<AnyView> = name == "ask" ? NSHostingView(rootView: AnyView(AskView().environmentObject(st))) : NSHostingView(rootView: AnyView(PopoverView().environmentObject(st)))
+        let w: CGFloat = name == "ask" ? 620 : T.popoverWidth
+        host.frame = NSRect(x: 0, y: 0, width: w, height: host.fittingSize.height); host.layoutSubtreeIfNeeded()
         if let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) { host.cacheDisplay(in: host.bounds, to: rep); try? rep.representation(using: .png, properties: [:])?.write(to: dir.appendingPathComponent("screen-\(CommandLine.arguments[i + 1]).png")) }
         print("screen: \(CommandLine.arguments[i + 1]) \(Int(host.bounds.height))pt desk=\(st.desk.count) matters=\(st.matters.count) nar=\(st.narToday.map { String($0) } ?? "-")"); done = true
       }
@@ -191,6 +193,60 @@ final class AppState: ObservableObject {
   }
 
 
+  /// The Ask, step one: Alfred says what he would do — before doing it.
+
+
+  func propose(_ text: String) async {
+
+
+    let q = text.trimmingCharacters(in: .whitespacesAndNewlines); guard !q.isEmpty, !asking, let t = tenant else { return }
+
+
+    asking = true; defer { asking = false }
+
+
+    let framed = "\(T.honorific.capitalized) asks: «\(q)». Before acting, say in one short paragraph what you would do and any specifics you can see — then wait for his word. Do not act yet."
+
+
+    do { askReply = try await t.ask(framed, chatId: Store.deviceId()) } catch { record(error) }
+
+
+  }
+
+
+  /// Step two: his word. The panel closes silently; the matter appears in flight.
+
+
+  func soOrdered(withoutRead: Bool) {
+
+
+    guard let t = tenant else { return }
+
+
+    let word = withoutRead ? "So ordered — send without my read." : "So ordered."
+
+
+    dismissAsk(); Task { _ = try? await t.ask(word, chatId: Store.deviceId()) }
+
+
+  }
+
+
+  func dismissAsk() { askReply = nil; askPanel?.orderOut(nil) }
+
+
+  func toggleAsk() {
+
+
+    if askPanel == nil { askPanel = AskPanel(state: self) }
+
+
+    if askPanel?.isVisible == true { dismissAsk() } else { askReply = nil; askPanel?.present() }
+
+
+  }
+
+
   /// One question, one reply, both remembered on every other surface.
 
 
@@ -228,6 +284,8 @@ final class AppState: ObservableObject {
   func open(_ sc: Screen) { screen = sc }
   @Published var reply: (text: String, at: Date)? = nil
   @Published var asking = false
+  @Published var askReply: String? = nil
+  var askPanel: AskPanel? = nil
   @Published var brief: Brief? = nil
   private var lastBrief = Date.distantPast
   private var lastDesk = Date.distantPast
@@ -316,6 +374,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     statusItem.button?.target = self; statusItem.button?.action = #selector(markClicked); statusItem.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
     popover.contentViewController = NSHostingController(rootView: PopoverView().environmentObject(state))
     state.selfHeal()
+    HotKey.onPress = { [weak self] in self?.state.toggleAsk() }; HotKey.register()
     if state.pairing == nil || !Self.launchedAsLoginItem() { showWindow() }
     timer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
       guard let self else { return }
@@ -396,6 +455,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       m.addItem(withTitle: p, action: nil, keyEquivalent: "")
     }
     m.addItem(.separator())
+    m.addItem(withTitle: "Ask Alfred…", action: #selector(askAlfred), keyEquivalent: "").target = self
     m.addItem(withTitle: "Open Alfred Black…", action: #selector(openWindow), keyEquivalent: "o").target = self
     m.addItem(withTitle: "Reveal Alfred folder", action: #selector(revealFolder), keyEquivalent: "").target = self
     m.addItem(.separator())
@@ -427,6 +487,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     else { state.screen = .glance; popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY); popover.contentViewController?.view.window?.makeKey() }
 
   }
+
+  @objc func askAlfred() { state.toggleAsk() }
 
   @objc func openWindow() { showWindow() }
 
