@@ -7,18 +7,30 @@ import AppKit
 import CoreText
 
 enum AB {
-  static let paper      = Color(red: 0xF4/255, green: 0xEF/255, blue: 0xE6/255)
-  static let wool       = Color(red: 0x0B/255, green: 0x0B/255, blue: 0x0B/255)
-  static let ink        = Color(red: 0x1A/255, green: 0x1A/255, blue: 0x1A/255)
-  static let brass      = Color(red: 0xA8/255, green: 0x84/255, blue: 0x3A/255)
-  static let marginalia = Color(red: 0x5C/255, green: 0x5A/255, blue: 0x55/255)
-  static let rule       = Color(red: 0x1A/255, green: 0x1A/255, blue: 0x1A/255).opacity(0.55)
-  static let border     = Color(red: 0x1A/255, green: 0x1A/255, blue: 0x1A/255).opacity(0.18)
-  static let oxblood    = Color(red: 0x6B/255, green: 0x1F/255, blue: 0x1A/255)
-  static let billiard   = Color(red: 0x2E/255, green: 0x6B/255, blue: 0x45/255)
+  // A dark mode inverts ink and paper while brass holds (design-system readme).
+  static func dyn(_ light: NSColor, _ dark: NSColor) -> Color {
+    Color(nsColor: NSColor(name: nil) { a in a.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? dark : light })
+  }
+  static func hex(_ v: UInt32, _ alpha: CGFloat = 1) -> NSColor {
+    NSColor(srgbRed: CGFloat((v >> 16) & 0xFF)/255, green: CGFloat((v >> 8) & 0xFF)/255, blue: CGFloat(v & 0xFF)/255, alpha: alpha)
+  }
+  static let paper      = dyn(hex(0xF4EFE6), hex(0x0B0B0B))          // the ground
+  static let wool       = Color(nsColor: hex(0x0B0B0B))               // wool is always dark and never theme-swaps
+  static let ink        = dyn(hex(0x1A1A1A), hex(0xF4EFE6))
+  static let brass      = dyn(hex(0xA8843A), hex(0xC69A55))
+  static let marginalia = dyn(hex(0x5C5A55), hex(0x9A958C))
+  static let rule       = dyn(hex(0x1A1A1A, 0.55), hex(0xF4EFE6, 0.35))
+  static let border     = dyn(hex(0x1A1A1A, 0.18), hex(0xF4EFE6, 0.18))
+  static let oxblood    = dyn(hex(0x6B1F1A), hex(0xB5524A))
+  static let billiard   = dyn(hex(0x2E6B45), hex(0x5E9C76))
 
+  /// Playfair ships as two variable faces; CoreText exposes named instances
+  /// (PlayfairDisplayRoman-Black, PlayfairDisplayItalic-Black, …), so ask for one by name.
   static func display(_ size: CGFloat, italic: Bool = false, weight: Font.Weight = .bold) -> Font {
-    Font.custom(italic ? "Playfair Display Italic" : "Playfair Display", size: size).weight(weight)
+    let w: String = weight == .black ? "Black" : weight == .bold ? "Bold" : weight == .semibold ? "SemiBold" : weight == .medium ? "Medium" : ""
+    let name = w.isEmpty ? (italic ? "PlayfairDisplay-Italic" : "PlayfairDisplay-Regular")
+                         : (italic ? "PlayfairDisplayItalic-" : "PlayfairDisplayRoman-") + w
+    return Font.custom(name, size: size)
   }
   static func body(_ size: CGFloat = 17, italic: Bool = false) -> Font {
     Font.custom(italic ? "EB Garamond Italic" : "EB Garamond", size: size)

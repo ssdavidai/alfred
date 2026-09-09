@@ -35,6 +35,8 @@ struct AlfredBlackMain {
       let dir = URL(fileURLWithPath: CommandLine.arguments[i + 1])
       try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
       _ = NSApplication.shared; AB.registerFonts()
+      if CommandLine.arguments.contains("--dark") { NSApp.appearance = NSAppearance(named: .darkAqua) }
+      if CommandLine.arguments.contains("--light") { NSApp.appearance = NSAppearance(named: .aqua) }
       func write(_ view: some View, _ name: String) {
         let host = NSHostingView(rootView: view)
         host.frame = NSRect(x: 0, y: 0, width: 520, height: 640)
@@ -47,8 +49,9 @@ struct AlfredBlackMain {
       }
       let paired = AppState()                       // whatever this Mac is paired with
       let fresh = AppState(); fresh.pairing = nil   // first launch
-      write(RootView().environmentObject(fresh), "onboarding.png")
-      if paired.pairing != nil { write(RootView().environmentObject(paired), "status.png") }
+      let sfx = CommandLine.arguments.contains("--dark") ? "-dark" : (CommandLine.arguments.contains("--light") ? "-light" : "")
+      write(RootView().environmentObject(fresh), "onboarding\(sfx).png")
+      if paired.pairing != nil { write(RootView().environmentObject(paired), "status\(sfx).png") }
       print("snapshot: \(dir.path)")
       exit(0)
     }
