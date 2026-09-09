@@ -13,6 +13,7 @@ let package = Package(
       resources: [
         .copy("Resources/Fonts"),
         .copy("Resources/CoworkPlugin"),
+        .copy("Resources/Brand"),
       ],
       swiftSettings: [.unsafeFlags(["-parse-as-library"])]
     ),

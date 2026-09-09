@@ -62,7 +62,7 @@ struct Row: View {
   var body: some View {
     HStack(alignment: .firstTextBaseline) {
       Label_(text: k).frame(width: 150, alignment: .leading)
-      Text(v).font(AB.mono(12)).foregroundColor(ok == false ? AB.oxblood : AB.ink)
+      Text(v).font(AB.mono(12)).foregroundColor(ok == false ? AB.marginalia : AB.ink)
       Spacer()
       if let ok { Text(ok ? "●" : "○").font(AB.mono(9)).foregroundColor(ok ? AB.billiard : AB.marginalia) }
     }.padding(.vertical, 7)
