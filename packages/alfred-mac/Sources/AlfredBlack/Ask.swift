@@ -82,7 +82,8 @@ struct AskView: View {
     .frame(width: 700)
     .background(ZStack { Vibrancy(); RoundedRectangle(cornerRadius: 18).fill(T.bg.opacity(0.72)) })
     .overlay(RoundedRectangle(cornerRadius: 18).stroke(T.hair2, lineWidth: 1))
-    .onAppear { focused = true }
+    .onAppear { focused = true; if !s.askDraft.isEmpty { text = s.askDraft; s.askDraft = "" } }
+    .onChange(of: s.askDraft) { d in if !d.isEmpty { text = d; s.askDraft = ""; focused = true } }
     .onExitCommand { s.dismissAsk() }
     .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: s.askReply)
   }

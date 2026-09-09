@@ -161,7 +161,7 @@ struct YourWordView: View {
   }
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
-      ScreenHeader(name: "Decisions", status: s.desk.isEmpty ? "none waiting" : "\(min(s.wordIndex + 1, max(1, s.desk.count))) of \(max(s.deskTotal, s.desk.count, 1))", brass: !s.desk.isEmpty)
+      ScreenHeader(name: "Decisions", status: s.desk.isEmpty ? "none waiting" : "\(min(s.wordIndex + 1, max(1, s.desk.count))) of \(max(s.deskTotal, s.desk.count, 1))" + (s.newSinceSeen > 0 ? " · \(s.newSinceSeen) new" : "") + (s.desk.count > 1 ? " · ↑↓" : ""), brass: !s.desk.isEmpty)
       if let c = card {
         Say(text: c.title, size: 15.5).padding(.horizontal, 18).padding(.top, 18)
         if !c.body.isEmpty && c.body != c.title {
@@ -171,12 +171,21 @@ struct YourWordView: View {
           Meta(text: (c.target_kind ?? "matter"), size: 8.5, tracking: 1.4); Meta(text: "·", size: 8.5); Meta(text: when(c.created), size: 8.5, tracking: 1.4); Spacer()
           Button(action: { if let d = s.pairing?.domain, let u = URL(string: "https://\(d)/desk") { NSWorkspace.shared.open(u) } }) { Meta(text: "Desk ⏎", color: T.brass, size: 8.5, tracking: 1.4) }.buttonStyle(.plain)
         }.padding(.horizontal, 18).padding(.top, 14)
+        if let a = c.proposedAction {
+          HStack(alignment: .firstTextBaseline, spacing: 8) { Meta(text: "If so ordered", color: T.brass, size: 8.5, tracking: 1.4); Text(a).font(T.body(13)).foregroundColor(T.ink).lineLimit(2) }
+            .padding(.horizontal, 18).padding(.top, 12)
+        } else {
+          HStack(alignment: .firstTextBaseline, spacing: 8) { Meta(text: "No action proposed", size: 8.5, tracking: 1.4)
+            Button(action: { s.askAbout(c) }) { Meta(text: "Ask Alfred what he'd do →", color: T.brass, size: 8.5, tracking: 1.4) }.buttonStyle(.plain).pointer() }
+            .padding(.horizontal, 18).padding(.top, 12)
+        }
         HStack(spacing: 8) {
           Spacer()
-          Button("Hold") { Task { await s.decide("defer") } }.buttonStyle(PopButton()).keyboardShortcut(.escape, modifiers: [])
-          Button("Myself") { Task { await s.decide("take_mine") } }.buttonStyle(PopButton()).keyboardShortcut(.return, modifiers: [.command])
-          Button("So ordered") { Task { await s.decide("delegate") } }.buttonStyle(PopButton(primary: true)).keyboardShortcut(.return, modifiers: [])
+          Button(action: { Task { await s.decide("defer") } }) { HStack(spacing: 7) { Text("Hold"); Keycap(text: "ESC", color: T.ink) } }.buttonStyle(PopButton()).keyboardShortcut(.escape, modifiers: []).pointer()
+          Button(action: { Task { await s.decide("take_mine") } }) { HStack(spacing: 7) { Text("Myself"); Keycap(text: "⌘⏎", color: T.ink) } }.buttonStyle(PopButton()).keyboardShortcut(.return, modifiers: [.command]).pointer()
+          Button(action: { Task { await s.decide("delegate") } }) { HStack(spacing: 7) { Text("So ordered"); Keycap(text: "⏎", color: T.bg) } }.buttonStyle(PopButton(primary: true)).keyboardShortcut(.return, modifiers: []).pointer().disabled(c.proposedAction == nil)
         }.padding(.horizontal, 18).padding(.vertical, 16).disabled(s.deciding)
+        .background(Group { Button("") { s.nextCard(-1) }.keyboardShortcut(.upArrow, modifiers: []); Button("") { s.nextCard(1) }.keyboardShortcut(.downArrow, modifiers: []) }.opacity(0).frame(width: 0, height: 0))
       } else {
         Say(text: "Nothing needs your decision, \(T.honorific). «The desk is quiet.»").padding(.horizontal, 18).padding(.vertical, 18)
       }
