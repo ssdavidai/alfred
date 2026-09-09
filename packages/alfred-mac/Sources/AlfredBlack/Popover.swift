@@ -13,10 +13,12 @@ struct PopoverView: View {
       switch s.screen {
       case .brief: BriefView()
       case .matters: MattersView()
+      case .yourWord: YourWordView()
       default: GlanceView()
       }
     }
     .frame(width: T.popoverWidth)
+    .overlay(RoundedRectangle(cornerRadius: T.rPopover).stroke(T.brass.opacity(s.screen == .yourWord ? 0.5 : 0), lineWidth: 1))
     .animation(.easeInOut(duration: 0.15), value: s.screen)
   }
 }
@@ -122,6 +124,41 @@ struct MattersView: View {
       HStack { Meta(text: overdue == 0 ? "Nothing overdue" : "\(overdue) past due", color: overdue == 0 ? T.dim : T.brass, tracking: 1.8); Spacer()
         Button(action: { s.open(.ledger) }) { Keycap(text: "⌘L  LEDGER") }.buttonStyle(.plain) }
         .padding(.horizontal, 18).padding(.vertical, 11)
+    }
+  }
+}
+
+/// 04 · Your Word — an escalation, one decision. The border shifts to brass.
+struct YourWordView: View {
+  @EnvironmentObject var s: AppState
+  private var card: DeskItem? { s.wordIndex < s.desk.count ? s.desk[s.wordIndex] : nil }
+  private func when(_ ts: String?) -> String {
+    guard let ts, let d = ISO8601DateFormatter().date(from: ts) ?? { let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]; return f.date(from: ts) }() else { return "" }
+    let f = DateFormatter(); f.dateFormat = "d MMM"; return f.string(from: d)
+  }
+  var body: some View {
+    VStack(alignment: .leading, spacing: 0) {
+      HStack { Meta(text: "Your word, \(T.honorific)", color: T.brass); Spacer(); Meta(text: "\(min(s.wordIndex + 1, max(1, s.desk.count))) of \(max(s.desk.count, 1))") }
+        .padding(.horizontal, 18).padding(.top, 15).padding(.bottom, 13)
+      Rectangle().fill(T.hair).frame(height: 1)
+      if let c = card {
+        Say(text: c.title, size: 15.5).padding(.horizontal, 18).padding(.top, 18)
+        if !c.body.isEmpty && c.body != c.title {
+          Text(c.body).font(T.body(13.5)).foregroundColor(T.dim).lineSpacing(3).lineLimit(6).padding(.horizontal, 18).padding(.top, 10).fixedSize(horizontal: false, vertical: true)
+        }
+        HStack(spacing: 8) {
+          Meta(text: (c.target_kind ?? "matter"), size: 8.5, tracking: 1.4); Meta(text: "·", size: 8.5); Meta(text: when(c.created), size: 8.5, tracking: 1.4); Spacer()
+          Button(action: { if let d = s.pairing?.domain, let u = URL(string: "https://\(d)/desk") { NSWorkspace.shared.open(u) } }) { Meta(text: "Desk ⏎", color: T.brass, size: 8.5, tracking: 1.4) }.buttonStyle(.plain)
+        }.padding(.horizontal, 18).padding(.top, 14)
+        HStack(spacing: 8) {
+          Spacer()
+          Button("Hold") { Task { await s.decide("defer") } }.buttonStyle(PopButton()).keyboardShortcut(.escape, modifiers: [])
+          Button("Myself") { Task { await s.decide("take_mine") } }.buttonStyle(PopButton()).keyboardShortcut(.return, modifiers: [.command])
+          Button("So ordered") { Task { await s.decide("delegate") } }.buttonStyle(PopButton(primary: true)).keyboardShortcut(.return, modifiers: [])
+        }.padding(.horizontal, 18).padding(.vertical, 16).disabled(s.deciding)
+      } else {
+        Say(text: "Nothing needs your word, \(T.honorific). «The desk is quiet.»").padding(.horizontal, 18).padding(.vertical, 18)
+      }
     }
   }
 }

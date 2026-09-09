@@ -166,6 +166,16 @@ struct Tenant {
     return live.allSatisfy { $0 } ? 3 : (live[0] ? 2 : (live[1] || live[2] ? 2 : 1))
   }
 
+  /// The principal's word on a Desk card: hold (defer), take it himself, or so ordered (delegate to Alfred).
+  func decide(card: DeskItem, intent: String) async throws {
+    let (code, data) = try await request("api/v1/decisions", method: "POST", bearer: apiKey,
+      body: ["source": "needs_attention", "source_record": card.path ?? "needs_attention/\(card.id).md", "intent": intent, "origin": "mac"])
+    guard code == 200 || code == 201 else {
+      let msg = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["error"] as? String
+      throw TenantError(message: msg ?? "The decision was not recorded (HTTP \(code)).")
+    }
+  }
+
   static func domain(from raw: String) -> String? {
     var s = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     if !s.contains("://") { s = "https://" + s }
@@ -178,7 +188,7 @@ struct Tenant {
 
 struct DeskItem: Decodable, Identifiable {
   var id: String; var status: String?; var created: String?; var action_what: String?; var matter_ref: String?
-  var display_headline: String?; var display_body: String?; var body_preview: String?; var target_path: String?; var target_kind: String?; var decay_score: Double?
+  var display_headline: String?; var display_body: String?; var body_preview: String?; var target_path: String?; var target_kind: String?; var decay_score: Double?; var path: String?
   /// The readable line: the card's headline, else what it asks, else its preview, else what it points at.
   var title: String {
     for c in [display_headline, action_what, body_preview, target_path] {
