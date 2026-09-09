@@ -69,12 +69,22 @@ struct AlfredBlackMain {
       }
       print("pet: \(dir.path)"); exit(0)
     }
+    if let i = CommandLine.arguments.firstIndex(of: "--ask"), CommandLine.arguments.count > i + 1 {   // ask Alfred from a shell
+      var done = false
+      Task { @MainActor in
+        let st = AppState(); await st.ask(CommandLine.arguments[i + 1])
+        print(st.reply.map { "Alfred: \($0.text)" } ?? "error: \(st.state.lastError ?? "no reply")"); done = true
+      }
+      let deadline = Date().addingTimeInterval(200)
+      while !done && Date() < deadline { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.05)) }
+      exit(done ? 0 : 2)
+    }
     if CommandLine.arguments.contains("--tick") {
       var done = false
       Task { @MainActor in
         let st = AppState(); st.selfHeal(); await st.tick(force: true)
         let r = st.lastReport
-        print("tick: online=\(st.online.map(String.init) ?? "?") rendered=\(st.state.lastRenderEntries) pushed=\(r.pushed) skipped=\(r.skipped) tooOld=\(r.tooOld) bound=\(r.bound) failed=\(r.failed) total=\(st.state.totalPushed)")
+        print("tick: online=\(st.online.map(String.init) ?? "?") rendered=\(st.state.lastRenderEntries) pushed=\(r.pushed) skipped=\(r.skipped) tooOld=\(r.tooOld) bound=\(r.bound) failed=\(r.failed) total=\(st.state.totalPushed) desk=\(st.desk.count) brief=\(st.brief.map { $0.title } ?? "none")")
         done = true
       }
       let deadline = Date().addingTimeInterval(120)

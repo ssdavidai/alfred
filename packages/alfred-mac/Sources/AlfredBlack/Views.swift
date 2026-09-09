@@ -70,42 +70,84 @@ struct Row: View {
   }
 }
 
+/// A single engraved icon in brass with reassuring copy — how the system rests.
+struct EmptyState: View {
+  let icon: String; let text: String
+  var body: some View {
+    HStack(spacing: 10) { ABIcon(icon, 18, color: AB.brass); Text(text).font(AB.body(15, italic: true)).foregroundColor(AB.marginalia) }
+      .padding(.vertical, 10)
+  }
+}
+
 struct StatusView: View {
   @EnvironmentObject var s: AppState
+  @State private var command = ""
+  @State private var ledgerOpen = false
+  private var reduceMotion: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
+  private func openDesk() { if let d = s.pairing?.domain, let u = URL(string: "https://\(d)/desk") { NSWorkspace.shared.open(u) } }
+  private func openBrief() { if let d = s.pairing?.domain, let u = URL(string: "https://\(d)/brief") { NSWorkspace.shared.open(u) } }
+  private static let iso: ISO8601DateFormatter = { let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]; return f }()
+  private func when(_ ts: String?) -> String {
+    guard let ts, let d = Self.iso.date(from: ts) ?? ISO8601DateFormatter().date(from: ts) else { return "—" }
+    let f = DateFormatter(); f.dateFormat = Calendar.current.isDateInToday(d) ? "HH:mm" : "d MMM"; return f.string(from: d)
+  }
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
       HStack(alignment: .firstTextBaseline) { Label_(text: "For Mac"); Spacer(); Label_(text: s.pairing?.domain ?? "", color: AB.brass) }
       Wordmark().padding(.top, 6)
-      Text(s.online == false ? "The tenant cannot be reached at the moment." : "Everything important is in hand.")
+      Text(s.online == false ? "The tenant cannot be reached at the moment." : Pet.line(s.petState, deskCount: s.desk.count))
         .font(AB.body(19, italic: true)).foregroundColor(AB.marginalia).padding(.top, 4)
-      Hairline().padding(.vertical, 20)
+      Hairline().padding(.vertical, 16)
 
-      Label_(text: "Continuity")
-      VStack(spacing: 0) {
-        Row(k: "Tenant", v: s.online == true ? "connected" : (s.online == false ? "unreachable" : "checking"), ok: s.online)
-        Row(k: "Memory file", v: s.state.lastRenderAt.map { "\(s.state.lastRenderEntries) entries · \(AppDelegate.ago($0))" } ?? "not yet", ok: s.state.lastRenderAt != nil)
-        Row(k: "Cowork journaled", v: s.activity.journalCoworkLast.map { "\(s.activity.journalCowork) turns in the window · \(AppDelegate.ago($0))" } ?? "none in the window yet", ok: s.activity.journalCoworkLast != nil)
-        Row(k: "Cowork mirrored", v: "\(s.state.totalPushed) turns · " + (s.state.lastPushAt.map { AppDelegate.ago($0) } ?? "not yet"), ok: s.state.lastPushAt != nil)
-        Row(k: "Starts at login", v: s.loginItem ? "yes" : (SMAppService.mainApp.status == .requiresApproval ? "approve in System Settings › Login Items" : "no"), ok: s.loginItem)
-      }.padding(.top, 6)
+      CommandField(text: $command, busy: s.asking) { let q = command; command = ""; Task { await s.ask(q) } }
 
-      Label_(text: "Claude Cowork").padding(.top, 18)
-      VStack(spacing: 0) {
-        Row(k: "Claude Desktop", v: s.cowork.claudeInstalled ? "installed" : "not found", ok: s.cowork.claudeInstalled)
-        Row(k: "Alfred folder", v: s.cowork.folderReady ? "~/Alfred ready" : "pending", ok: s.cowork.folderReady)
-        Row(k: "Memory tools", v: s.cowork.mcpRegistered ? "registered with Claude" : "not registered", ok: s.cowork.mcpRegistered)
-        Row(k: "Hooks plugin", v: s.cowork.pluginExported ? "exported to Downloads" : (s.cowork.pluginStaged ? "ready to export" : "not staged"), ok: s.cowork.pluginExported)
-      }.padding(.top, 6)
-      if s.cowork.pluginExported {
-        Text("Alfred Continuity.plugin is in your Downloads, selected in Finder. In Claude, switch to Cowork, open its Plugins panel and upload that file there — a Cowork session loads only plugins installed from Cowork. Installing one is Claude's own step.")
-          .font(AB.body(14)).foregroundColor(AB.marginalia).lineSpacing(3).padding(.top, 12).frame(maxWidth: 448, alignment: .leading).fixedSize(horizontal: false, vertical: true)
+      ScrollView(.vertical, showsIndicators: false) {
+        VStack(alignment: .leading, spacing: 0) {
+          if let r = s.reply {
+            ReplyView(text: r.text).padding(.top, 14).id(r.at)
+              .transition(reduceMotion ? .opacity : .opacity.combined(with: .offset(y: 8)))
+          } else if s.asking {
+            Text("One moment.").font(AB.mono(11)).foregroundColor(AB.marginalia).padding(.top, 14)
+          }
+
+          HStack { Label_(text: "The Desk"); Spacer(); if !s.desk.isEmpty { Pill(text: "\(s.desk.count) awaiting", tone: .brass) } }.padding(.top, 22)
+          if s.desk.isEmpty { EmptyState(icon: "pocket_watch", text: "No urgent action is required.") }
+          else { ForEach(s.desk.prefix(4)) { item in LedgerRow(time: when(item.created), subject: item.title, state: Pill(text: "Awaiting")) { openDesk() } } }
+
+          Label_(text: "The Brief").padding(.top, 22)
+          if let b = s.brief, !b.excerpt.isEmpty {
+            Text(b.excerpt).font(AB.body(15)).foregroundColor(AB.ink).lineSpacing(3).padding(.top, 8).fixedSize(horizontal: false, vertical: true)
+            HStack { Text(b.title).font(AB.mono(10)).foregroundColor(AB.marginalia); Spacer()
+              Button("Read the brief →") { openBrief() }.buttonStyle(.plain).font(AB.mono(10, weight: .bold)).foregroundColor(AB.brass) }.padding(.top, 8)
+          } else { EmptyState(icon: "envelope", text: "No brief has been composed yet.") }
+
+          Button(action: { withAnimation(reduceMotion ? nil : .easeOut(duration: 0.3)) { ledgerOpen.toggle() } }) {
+            HStack(spacing: 8) { Label_(text: "Ledger"); Text(ledgerOpen ? "↓" : "→").font(AB.mono(10)).foregroundColor(AB.marginalia) }
+          }.buttonStyle(.plain).padding(.top, 22)
+          if ledgerOpen {
+            VStack(spacing: 0) {
+              Row(k: "Tenant", v: s.online == true ? "connected" : (s.online == false ? "unreachable" : "checking"), ok: s.online)
+              Row(k: "Memory file", v: s.state.lastRenderAt.map { "\(s.state.lastRenderEntries) entries · \(AppDelegate.ago($0))" } ?? "not yet", ok: s.state.lastRenderAt != nil)
+              Row(k: "Cowork journaled", v: s.activity.journalCoworkLast.map { "\(s.activity.journalCowork) turns in the window · \(AppDelegate.ago($0))" } ?? "none in the window yet", ok: s.activity.journalCoworkLast != nil)
+              Row(k: "Cowork mirrored", v: "\(s.state.totalPushed) turns · " + (s.state.lastPushAt.map { AppDelegate.ago($0) } ?? "not yet"), ok: s.state.lastPushAt != nil)
+              Row(k: "Starts at login", v: s.loginItem ? "yes" : (SMAppService.mainApp.status == .requiresApproval ? "approve in System Settings › Login Items" : "no"), ok: s.loginItem)
+              Row(k: "Claude Desktop", v: s.cowork.claudeInstalled ? "installed" : "not found", ok: s.cowork.claudeInstalled)
+              Row(k: "Memory tools", v: s.cowork.mcpRegistered ? "registered with Claude" : "not registered", ok: s.cowork.mcpRegistered)
+              Row(k: "Hooks plugin", v: s.cowork.pluginExported ? "exported to Downloads" : (s.cowork.pluginStaged ? "ready to export" : "not staged"), ok: s.cowork.pluginExported)
+            }.padding(.top, 6)
+            if s.cowork.pluginExported {
+              Text("Alfred Continuity.plugin is in your Downloads, selected in Finder. In Claude, switch to Cowork, open its Plugins panel and upload that file there — a Cowork session loads only plugins installed from Cowork. Installing one is Claude's own step.")
+                .font(AB.body(14)).foregroundColor(AB.marginalia).lineSpacing(3).padding(.top, 12).frame(maxWidth: 448, alignment: .leading).fixedSize(horizontal: false, vertical: true)
+            }
+          }
+        }
       }
+      .animation(reduceMotion ? nil : .easeOut(duration: 0.7), value: s.reply?.at)
 
       if let e = s.state.lastError, let at = s.state.lastErrorAt, Date().timeIntervalSince(at) < 600 {
-        Text(e).font(AB.mono(10)).foregroundColor(AB.oxblood).padding(.top, 10).lineLimit(2)
+        Text(e).font(AB.mono(10)).foregroundColor(AB.oxblood).padding(.top, 8).lineLimit(2)
       }
-      Spacer()
-      Hairline(brass: true)
+      Hairline(brass: true).padding(.top, 10)
       HStack(spacing: 8) {
         Button("Set up Cowork") { s.setUpCowork() }.buttonStyle(ABButton(primary: true))
         Button("Export") { s.exportPlugin() }.buttonStyle(ABButton())
