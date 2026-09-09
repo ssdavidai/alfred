@@ -108,11 +108,12 @@ struct Tenant {
 
   /// Turn whatever the person typed into the tenant domain.
   /// The Desk: cards awaiting the principal's judgment.
-  func deskPending() async throws -> [DeskItem] {
-    struct Page: Decodable { var records: [DeskItem] }
+  func deskPending() async throws -> (items: [DeskItem], total: Int) {
+    struct Page: Decodable { var records: [DeskItem]; var count: Int? }
     let (code, data) = try await request("api/v1/admin/needs-attention", bearer: apiKey)
     guard code == 200 else { throw TenantError(message: "Desk read failed (HTTP \(code)).") }
-    return try JSONDecoder().decode(Page.self, from: data).records
+    let page = try JSONDecoder().decode(Page.self, from: data)
+    return (page.records, page.count ?? page.records.count)   // the list is capped; the count is the truth
   }
 
   /// Ask Alfred from this Mac. ctrl-api journals both turns and puts his memory in front of him.
@@ -138,6 +139,22 @@ struct Tenant {
     return Brief(slot: latest.slot, date: latest.date, excerpt: Brief.excerpt(of: body))
   }
 
+  /// Matters in flight, with the narrative state Alfred keeps for each.
+  func matters() async throws -> [Matter] {
+    struct Page: Decodable { var matters: [Matter] }
+    let (code, data) = try await request("api/v1/matters", bearer: apiKey)
+    guard code == 200 else { throw TenantError(message: "Matters read failed (HTTP \(code)).") }
+    return try JSONDecoder().decode(Page.self, from: data).matters
+  }
+  /// Hours returned today, after every cost (the attention statement for the day).
+  func returnedToday() async throws -> Double? {
+    struct Day: Decodable { var nar_hours: Double? }
+    let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"
+    let (code, data) = try await request("api/v1/attention/statement", bearer: apiKey, query: ["date": f.string(from: Date())])
+    guard code == 200 else { return nil }
+    return try JSONDecoder().decode(Day.self, from: data).nar_hours
+  }
+
   static func domain(from raw: String) -> String? {
     var s = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     if !s.contains("://") { s = "https://" + s }
@@ -150,7 +167,15 @@ struct Tenant {
 
 struct DeskItem: Decodable, Identifiable {
   var id: String; var status: String?; var created: String?; var action_what: String?; var matter_ref: String?
-  var title: String { (action_what ?? "").replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespaces) }
+  var display_headline: String?; var display_body: String?; var body_preview: String?; var target_path: String?; var target_kind: String?; var decay_score: Double?
+  /// The readable line: the card's headline, else what it asks, else its preview, else what it points at.
+  var title: String {
+    for c in [display_headline, action_what, body_preview, target_path] {
+      if let c, !c.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return c.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespaces) }
+    }
+    return id
+  }
+  var body: String { (display_body ?? body_preview ?? "").replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespaces) }
 }
 
 struct Brief {
@@ -163,5 +188,17 @@ struct Brief {
       .first { !$0.isEmpty && !$0.hasPrefix("#") && !$0.hasPrefix("-") && !$0.hasPrefix("|") } ?? ""
     let flat = para.replacingOccurrences(of: "**", with: "").replacingOccurrences(of: "\n", with: " ")
     return flat.count > 260 ? String(flat.prefix(257)).trimmingCharacters(in: .whitespaces) + "…" : flat
+  }
+}
+
+struct Matter: Decodable, Identifiable {
+  var id: String; var name: String?; var summary: String?; var state: String?; var current_state: String?
+  var title: String { (name ?? id).trimmingCharacters(in: .whitespaces) }
+  /// One line for the Glance: the matter and its living state, if any.
+  var glanceTitle: String {
+    let st = (current_state ?? summary ?? "").replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespaces)
+    guard !st.isEmpty else { return title }
+    let first = st.components(separatedBy: ". ").first ?? st
+    return "\(title) — \(first.count > 70 ? String(first.prefix(69)) + "…" : first)"
   }
 }
