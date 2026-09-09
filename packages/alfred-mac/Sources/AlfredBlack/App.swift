@@ -286,6 +286,16 @@ final class AppState: ObservableObject {
   func open(_ sc: Screen) { screen = sc }
   /// Priority when the popover opens: an unread brief of the day, else the Glance.
   func popoverOpened() { screen = (brief.map { $0.isToday && state.briefReadSlug != $0.slug_date } ?? false) ? .brief : .glance }
+  @Published var wordIndex = 0
+  @Published var deciding = false
+  /// The principal's word, then the next matter — or the Glance when none remain.
+  func decide(_ intent: String) async {
+    guard !deciding, let t = tenant, wordIndex < desk.count else { return }
+    let card = desk[wordIndex]; deciding = true; defer { deciding = false }
+    do { try await t.decide(card: card, intent: intent); desk.remove(at: wordIndex); deskTotal = max(0, deskTotal - 1) } catch { record(error) }
+    if wordIndex >= desk.count { wordIndex = max(0, desk.count - 1) }
+    if desk.isEmpty { screen = .glance }
+  }
   func popoverClosed() { if screen == .brief, let b = brief { state.briefReadSlug = b.slug_date }; screen = .glance }
   @Published var reply: (text: String, at: Date)? = nil
   @Published var asking = false
