@@ -145,7 +145,7 @@ export function bindPrincipalChannel(
  * channels (Telegram, Slack) can carry strangers and stay unbound until a
  * deliberate bind.
  */
-const AUTO_BIND_TO_OWNER = new Set(["cowork"]);
+const AUTO_BIND_TO_OWNER = new Set(["cowork", "mac"]);
 
 function ownerPrincipalId(db: DatabaseSync): string | null {
   const row = db
@@ -246,6 +246,7 @@ export function appendJournal(
 export function isPrivateChat(channel: string, chatId: string): boolean {
   switch (channel) {
     case "cowork":
+    case "mac":
     case "omi":
     case "voice":
       return true;

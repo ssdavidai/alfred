@@ -32,6 +32,7 @@ import {
   type Status,
 } from "../../db/alfredJournal.js";
 import { reconcileCronOutbounds } from "../../db/hermesCronJournal.js";
+import { askAlfred } from "../askAlfred.js";
 
 const VALID_DIRECTIONS: ReadonlySet<Direction> = new Set([
   "outbound",
@@ -205,6 +206,21 @@ export function registerAlfredJournalRoutes(): void {
     const db = getStateDb();
     const r = reconcileCronOutbounds(db, undefined, profile);
     sendJson(res, 200, { ok: true, ...r });
+  });
+
+  // POST /api/v1/alfred/ask — a surface asks Alfred; both turns journaled,
+  // memory in front of the model, reply returned. {message, chat_id, channel?="mac"}
+  addRoute("POST", "/api/v1/alfred/ask", async ({ res, body }) => {
+    const b = (body ?? {}) as Record<string, unknown>;
+    const message = asString(b.message, "message");
+    const chatId = asString(b.chat_id, "chat_id");
+    const channel = typeof b.channel === "string" && b.channel ? b.channel : "mac";
+    if (!/^[a-z][a-z0-9_-]{1,31}$/.test(channel)) throw new ValidationError("channel must be a short lowercase slug");
+    try {
+      sendJson(res, 200, await askAlfred(getStateDb(), { message, channel, chat_id: chatId, memory: b.memory !== false }));
+    } catch (err) {
+      sendJson(res, 502, { error: "ALFRED_UNAVAILABLE", detail: err instanceof Error ? err.message : String(err) });
+    }
   });
 
   // POST /api/v1/alfred-journal/principal/bind — idempotent (channel, chat_id) → principal_id.
