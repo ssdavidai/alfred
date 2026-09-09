@@ -238,6 +238,15 @@ final class AppState: ObservableObject {
   func dismissAsk() { if asking { cancelAsk() }; askReply = nil; askPanel?.orderOut(nil) }
 
 
+  /// Open the Ask with a question already written — "what would you do about …?"
+
+
+  func askAbout(_ card: DeskItem) { askDraft = "What would you do about this: \(card.title)"; if askPanel?.isVisible != true { toggleAsk() } }
+
+
+  func nextCard(_ step: Int) { guard !desk.isEmpty else { return }; wordIndex = max(0, min(desk.count - 1, wordIndex + step)) }
+
+
   func toggleAsk() {
 
 
@@ -298,6 +307,7 @@ final class AppState: ObservableObject {
   @Published var notice: (text: String, at: Date, undo: (() -> Void)?)? = nil
   @Published var lastRefreshAt: Date? = nil
   @Published var askStartedAt: Date? = nil
+  @Published var askDraft: String = ""
   private var askTask: Task<String?, Never>? = nil
   func say(_ text: String, undo: (() -> Void)? = nil) {
     notice = (text, Date(), undo)

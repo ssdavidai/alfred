@@ -254,6 +254,11 @@ struct DeskItem: Decodable, Identifiable {
     return id
   }
   var body: String { (display_body ?? body_preview ?? "").replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespaces) }
+  /// What Alfred would do if so ordered — the card's own action, when it names one distinct from the headline.
+  var proposedAction: String? {
+    guard let a = action_what?.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespaces), !a.isEmpty, a != display_headline else { return nil }
+    return a.count > 90 ? String(a.prefix(89)) + "…" : a
+  }
 }
 
 struct Brief {

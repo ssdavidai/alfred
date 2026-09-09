@@ -33,11 +33,11 @@ struct Meta: View {
 
 /// A keycap hint: mono 9px in a 1px hairline chip.
 struct Keycap: View {
-  let text: String
+  let text: String; var color: Color = T.dim
   var body: some View {
-    Text(text).font(T.mono(9, weight: .bold)).tracking(0.9).foregroundColor(T.dim)
+    Text(text).font(T.mono(9, weight: .bold)).tracking(0.9).foregroundColor(color).fixedSize()
       .padding(.horizontal, 6).padding(.vertical, 2)
-      .overlay(RoundedRectangle(cornerRadius: 4).stroke(T.hair2, lineWidth: 1))
+      .overlay(RoundedRectangle(cornerRadius: 4).stroke(color.opacity(0.45), lineWidth: 1))
   }
 }
 
@@ -99,7 +99,7 @@ struct PopRow: View {
 struct PopButton: ButtonStyle {
   var primary = false
   func makeBody(configuration: Configuration) -> some View {
-    configuration.label.font(T.mono(9, weight: .heavy)).tracking(1.8).textCase(.uppercase)
+    configuration.label.font(T.mono(9, weight: .heavy)).tracking(1.8).textCase(.uppercase).fixedSize()
       .padding(.horizontal, 16).padding(.vertical, 9)
       .foregroundColor(primary ? T.bg : T.ink)
       .background(RoundedRectangle(cornerRadius: T.rButton).fill(primary ? T.brass : Color.clear))
