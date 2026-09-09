@@ -120,7 +120,8 @@ struct MattersView: View {
   }
   private func meta(_ m: Matter) -> String {
     if blocked(m) { return "Blocked on you" }
-    switch m.state ?? "" { case "done": return "Done"; case "waiting": return "Waiting"; case "dormant": return "Dormant"; default: return "In flight" }
+    if !m.when.isEmpty { return m.when }
+    switch m.state ?? "" { case "done": return "Done"; case "dormant": return "Dormant"; default: return "In flight" }
   }
   private var inFlight: [Matter] { s.matters.filter { ($0.state ?? "active") != "done" } }
   private var overdue: Int {
@@ -129,7 +130,7 @@ struct MattersView: View {
   }
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
-      ScreenHeader(name: "Matters", status: "\(inFlight.count) in flight · L\(s.trust) trust · " + (overdue == 0 ? "nothing overdue" : "\(overdue) past due"), brass: overdue > 0)
+      ScreenHeader(name: "Matters", status: "\(inFlight.count) in flight · L\(s.trust) trust" + (inFlight.filter(blocked).count > 0 ? " · \(inFlight.filter(blocked).count) blocked on you" : ""), brass: inFlight.contains(where: blocked))
       if inFlight.isEmpty {
         Say(text: "Nothing in flight, \(T.honorific). «The desk is clear.»").padding(.horizontal, 18).padding(.vertical, 18)
       }
@@ -140,10 +141,12 @@ struct MattersView: View {
             Circle().fill(b ? T.brass : Color.clear).overlay(Circle().stroke(b ? Color.clear : T.dim, lineWidth: 1)).frame(width: 6, height: 6).alignmentGuide(.firstTextBaseline) { d in d[VerticalAlignment.center] + 4 }
             VStack(alignment: .leading, spacing: 3) {
               Text(m.title).font(T.body(14)).foregroundColor(T.ink).lineLimit(1)
-              if !m.subline.isEmpty { Text(m.subline).font(T.body(11.5, italic: true)).foregroundColor(T.dim).lineLimit(2) }
+              if let n = m.nextAction { Text("Next: \(n)").font(T.body(11.5, italic: true)).foregroundColor(T.ink.opacity(0.85)).lineLimit(2) }
+              else if !m.subline.isEmpty { Text(m.subline).font(T.body(11.5, italic: true)).foregroundColor(T.dim).lineLimit(2) }
             }.frame(maxWidth: .infinity, alignment: .leading)
             Meta(text: meta(m), color: b ? T.brass : T.dim, size: 8.5, tracking: 1.4)
-          }.padding(.horizontal, 18).padding(.vertical, 12)
+          }.padding(.horizontal, 18).padding(.vertical, 12).contentShape(Rectangle())
+          .onTapGesture { if let d = s.pairing?.domain, let u = URL(string: "https://\(d)/matters/\(m.id)") { NSWorkspace.shared.open(u) } }.pointer()
           Rectangle().fill(T.hair).frame(height: 1)
         }
       }
@@ -200,8 +203,9 @@ struct LedgerView: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
       ScreenHeader(name: "Activity", status: s.lastRefreshAt.map { "updated \(AppDelegate.ago($0)) · every line traceable" } ?? "reading…")
-      if s.ledger.isEmpty { Say(text: "Nothing recorded yet today, \(T.honorific).").padding(.horizontal, 18).padding(.vertical, 18) }
-      ForEach(Array(s.ledger.sorted { (($0.mode ?? "live") == "live" ? 0 : 1) < (($1.mode ?? "live") == "live" ? 0 : 1) }.prefix(6))) { l in
+      let lines = s.ledger.filter { $0.meaningful }
+      if lines.isEmpty { Say(text: "Nothing that touched your things today, \(T.honorific). «The machinery ran quietly.»").padding(.horizontal, 18).padding(.vertical, 18) }
+      ForEach(Array(lines.prefix(6))) { l in
         let live = (l.mode ?? "live") == "live"
         HStack(alignment: .firstTextBaseline, spacing: 12) {
           Meta(text: l.time, color: T.dim, size: 8.5, tracking: 1.2).frame(width: 40, alignment: .leading)
@@ -210,7 +214,8 @@ struct LedgerView: View {
         }.padding(.horizontal, 18).padding(.vertical, 11)
         Rectangle().fill(T.hair).frame(height: 1)
       }
-      Button(action: openAudit) { Meta(text: "Open the full log →", color: T.brass, tracking: 1.4) }.buttonStyle(.plain).pointer().padding(.horizontal, 18).padding(.vertical, 12)
+      HStack { Meta(text: "\(s.ledger.count - lines.count) machine lines hidden", size: 8.5, tracking: 1.2); Spacer()
+        Button(action: openAudit) { Meta(text: "Open the full log →", color: T.brass, tracking: 1.4) }.buttonStyle(.plain).pointer() }.padding(.horizontal, 18).padding(.vertical, 12)
     }
   }
 }
@@ -227,12 +232,15 @@ struct VaultView: View {
       ScreenHeader(name: "Vault", status: "private by design")
       ForEach(Self.shelves, id: \.0) { name, types in
         let n = types.reduce(0) { $0 + (s.vault[$1] ?? 0) }
-        HStack { Text(name).font(T.body(14)).foregroundColor(T.ink); Spacer(); Meta(text: n == 0 ? "—" : String(n), size: 9, tracking: 1.4) }
-          .padding(.horizontal, 18).padding(.vertical, 12)
+        HStack { Text(name).font(T.body(14)).foregroundColor(T.ink); Spacer(); Meta(text: n == 0 ? "—" : String(n), size: 9, tracking: 1.4); Meta(text: "→", color: T.brass, size: 9) }
+          .padding(.horizontal, 18).padding(.vertical, 12).contentShape(Rectangle())
+          .onTapGesture { if let d = s.pairing?.domain, let u = URL(string: "https://\(d)/vault?type=\(types[0])") { NSWorkspace.shared.open(u) } }.pointer()
+          .accessibilityLabel("\(name), \(n) records")
         Rectangle().fill(T.hair).frame(height: 1)
       }
       HStack { Text("Credentials").font(T.body(14)).foregroundColor(T.ink); Spacer(); Meta(text: "Sealed", color: T.brass, size: 9, tracking: 1.4) }
         .padding(.horizontal, 18).padding(.vertical, 12)
+        .help("Kept in the password vault on your tenant. Alfred can use them; he never shows or counts them here.")
       Rectangle().fill(T.hair).frame(height: 1)
       Text("Nothing leaves this machine without your word, \(T.honorific).").font(T.say(13.5)).foregroundColor(T.dim).padding(.horizontal, 18).padding(.vertical, 14)
     }

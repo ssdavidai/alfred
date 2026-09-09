@@ -305,7 +305,16 @@ struct Brief {
 }
 
 struct Matter: Decodable, Identifiable {
-  var id: String; var name: String?; var summary: String?; var state: String?; var current_state: String?; var path: String?; var next: String?
+  var id: String; var name: String?; var summary: String?; var state: String?; var current_state: String?; var path: String?; var next: String?; var last: String?; var as_of: String?
+  /// The list gives `last` as "Wed Jul 29" and `next` as the next action in words.
+  var when: String {
+    guard let l = last, !l.isEmpty else { return "" }
+    var parts = l.split(separator: " ").map(String.init)
+    if let f = parts.first, f.count == 3, ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"].contains(f) { parts.removeFirst() }   // weekday
+    if parts.count > 2, parts.last?.count == 4 { parts.removeLast() }                                                    // year
+    return "changed " + parts.prefix(2).joined(separator: " ")
+  }
+  var nextAction: String? { guard let n = next?.trimmingCharacters(in: .whitespaces), !n.isEmpty else { return nil }; return n }
   /// The living state, first sentence only, for the subline.
   var subline: String {
     let st = (current_state ?? summary ?? "").replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespaces)
@@ -324,6 +333,13 @@ struct Matter: Decodable, Identifiable {
 
 struct LedgerLine: Decodable, Identifiable {
   var id: String; var ts: String?; var action_type: String?; var actor: String?; var summary: String?; var mode: String?; var target_path: String?
+  /// A machine heartbeat (a workflow starting or finishing, a shadow check) is not something a person needs to read.
+  var meaningful: Bool {
+    let t = (summary ?? "").lowercased()
+    if (mode ?? "live") != "live" { return false }
+    if target_path == nil && (t.hasSuffix(" completed") || t.hasSuffix(" started") || t.contains("workflow")) { return false }
+    return true
+  }
   var time: String {
     guard let ts, let d = ISO8601DateFormatter().date(from: ts) ?? { let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]; return f.date(from: ts) }() else { return "" }
     let f = DateFormatter(); f.dateFormat = Calendar.current.isDateInToday(d) ? "HH:mm" : "d MMM"; return f.string(from: d)
