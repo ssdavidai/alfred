@@ -17,6 +17,7 @@ struct RunState: Codable {
   var briefReadSlug: String? = nil
   var pendingTrust: Int? = nil
   var trustEffectiveAt: Date? = nil
+  var deskSeenAt: Date? = nil
   var lastRenderAt: Date?
   var lastRenderEntries: Int = 0
   var lastPushAt: Date?
