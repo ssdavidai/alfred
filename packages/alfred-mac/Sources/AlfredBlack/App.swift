@@ -331,6 +331,7 @@ final class AppState: ObservableObject {
   @Published var brief: Brief? = nil
   private var lastBrief = Date.distantPast
   private var lastDesk = Date.distantPast
+  private var lastDeskSeen: Date? = nil
   var needsWord: Bool { !desk.isEmpty }
 
   /// On every launch while paired: the app may have been moved (dist → /Applications),
@@ -380,7 +381,12 @@ final class AppState: ObservableObject {
     }
     if force || now.timeIntervalSince(lastDesk) >= 60 {
       lastDesk = now
-      if let page = try? await t.deskPending() { desk = page.items.filter { ($0.status ?? "pending") == "pending" }.sorted { ($0.created ?? "") > ($1.created ?? "") }; deskTotal = page.total }   // newest first
+      if let page = try? await t.deskPending() {
+        let before = deskTotal
+        desk = page.items.filter { ($0.status ?? "pending") == "pending" }.sorted { ($0.created ?? "") > ($1.created ?? "") }; deskTotal = page.total   // newest first
+        if before > 0 || lastDeskSeen != nil, page.total > before, let newest = desk.first { Notify.yourWord(newest.title) }
+        lastDeskSeen = now
+      }
       if let ms = try? await t.matters() { matters = ms.filter { ($0.state ?? "active") != "archived" } }
     }
     if force || now.timeIntervalSince(lastPush) >= 60 {
@@ -507,6 +513,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
       m.addItem(withTitle: p, action: nil, keyEquivalent: "")
     }
     m.addItem(.separator())
+    for (title, sel) in [("The Glance", #selector(showGlance)), ("The Brief", #selector(showBrief)), ("Matters", #selector(showMatters)), ("Your Word", #selector(showYourWord)), ("The Ledger", #selector(showLedger)), ("The Vault", #selector(showVault)), ("The Arrangement", #selector(showArrangement))] {
+      m.addItem(withTitle: title, action: sel, keyEquivalent: "").target = self
+    }
+    m.addItem(.separator())
     m.addItem(withTitle: "Ask Alfred…", action: #selector(askAlfred), keyEquivalent: "").target = self
     m.addItem(withTitle: "The Statement…", action: #selector(showStatement), keyEquivalent: "").target = self
     m.addItem(withTitle: "Open Alfred Black…", action: #selector(openWindow), keyEquivalent: "o").target = self
@@ -541,6 +551,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
   }
 
+  func showScreen(_ sc: Screen) {
+
+    guard let button = statusItem.button else { return }
+
+    state.screen = sc
+
+    if !popover.isShown { popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY); popover.contentViewController?.view.window?.makeKey() }
+
+  }
+
+  @objc func showGlance() { showScreen(.glance) }
+
+  @objc func showBrief() { showScreen(.brief) }
+
+  @objc func showMatters() { showScreen(.matters) }
+
+  @objc func showYourWord() { showScreen(.yourWord) }
+
+  @objc func showLedger() { showScreen(.ledger) }
+
+  @objc func showVault() { showScreen(.vault) }
+
+  @objc func showArrangement() { showScreen(.arrangement) }
+
   @objc func askAlfred() { state.toggleAsk() }
 
   @objc func showStatement() { state.showStatement() }
@@ -565,11 +599,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
   func showWindow() {
     if window == nil {
-      let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 640),
+      let unpaired = state.pairing == nil   // 11 · The Placement is 460 × 560, dark
+      let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: unpaired ? 460 : 520, height: unpaired ? 560 : 640),
                        styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
       w.title = "Alfred Black"
       w.titlebarAppearsTransparent = true
-      w.backgroundColor = NSColor(AB.paper)
+      w.backgroundColor = unpaired ? AB.hex(0x1C1A17) : NSColor(AB.paper); if unpaired { w.appearance = NSAppearance(named: .darkAqua) }
       w.isReleasedWhenClosed = false
       w.contentView = NSHostingView(rootView: RootView().environmentObject(state))
       w.center()
