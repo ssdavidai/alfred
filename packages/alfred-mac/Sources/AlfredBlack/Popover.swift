@@ -14,6 +14,8 @@ struct PopoverView: View {
       case .brief: BriefView()
       case .matters: MattersView()
       case .yourWord: YourWordView()
+      case .ledger: LedgerView()
+      case .vault: VaultView()
       default: GlanceView()
       }
     }
@@ -159,6 +161,56 @@ struct YourWordView: View {
       } else {
         Say(text: "Nothing needs your word, \(T.honorific). «The desk is quiet.»").padding(.horizontal, 18).padding(.vertical, 18)
       }
+    }
+  }
+}
+
+/// 08 · The Ledger — history, append-only. No edit or delete affordance anywhere.
+struct LedgerView: View {
+  @EnvironmentObject var s: AppState
+  private func openAudit() { if let d = s.pairing?.domain, let u = URL(string: "https://\(d)/decisions") { NSWorkspace.shared.open(u) } }
+  var body: some View {
+    VStack(alignment: .leading, spacing: 0) {
+      HStack { Meta(text: "The Ledger · today", color: T.brass); Spacer(); Button(action: openAudit) { Meta(text: "Open ⌘F") }.buttonStyle(.plain) }
+        .padding(.horizontal, 18).padding(.top, 15).padding(.bottom, 13)
+      Rectangle().fill(T.hair).frame(height: 1)
+      if s.ledger.isEmpty { Say(text: "Nothing recorded yet today, \(T.honorific).").padding(.horizontal, 18).padding(.vertical, 18) }
+      ForEach(Array(s.ledger.sorted { (($0.mode ?? "live") == "live" ? 0 : 1) < (($1.mode ?? "live") == "live" ? 0 : 1) }.prefix(6))) { l in
+        let live = (l.mode ?? "live") == "live"
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+          Meta(text: l.time, color: T.dim, size: 8.5, tracking: 1.2).frame(width: 40, alignment: .leading)
+          Text(l.title).font(T.body(13.5)).foregroundColor(live ? T.ink : T.dim).lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
+          Meta(text: live ? (l.actor ?? "Alfred") : "Shadow", color: live ? T.brass : T.dim, size: 8.5, tracking: 1.4)
+        }.padding(.horizontal, 18).padding(.vertical, 11)
+        Rectangle().fill(T.hair).frame(height: 1)
+      }
+      Meta(text: "Every line traceable to its session", tracking: 1.8).padding(.horizontal, 18).padding(.vertical, 11)
+    }
+  }
+}
+
+/// 09 · The Vault — what Alfred holds. Credentials are sealed; never a count.
+struct VaultView: View {
+  @EnvironmentObject var s: AppState
+  private static let shelves: [(String, [String])] = [
+    ("Matters & commitments", ["matter", "commitment"]), ("Tasks & chores", ["task", "chore"]), ("People, orgs & places", ["person", "org", "place"]),
+    ("Notes & daybook", ["note", "daybook"]), ("Decisions & briefs", ["decision", "briefing"]), ("Instincts", ["instinct"]),
+  ]
+  var body: some View {
+    VStack(alignment: .leading, spacing: 0) {
+      HStack { Meta(text: "The Vault", color: T.brass); Spacer(); Meta(text: "Private by design") }
+        .padding(.horizontal, 18).padding(.top, 15).padding(.bottom, 13)
+      Rectangle().fill(T.hair).frame(height: 1)
+      ForEach(Self.shelves, id: \.0) { name, types in
+        let n = types.reduce(0) { $0 + (s.vault[$1] ?? 0) }
+        HStack { Text(name).font(T.body(14)).foregroundColor(T.ink); Spacer(); Meta(text: n == 0 ? "—" : String(n), size: 9, tracking: 1.4) }
+          .padding(.horizontal, 18).padding(.vertical, 12)
+        Rectangle().fill(T.hair).frame(height: 1)
+      }
+      HStack { Text("Credentials").font(T.body(14)).foregroundColor(T.ink); Spacer(); Meta(text: "Sealed", color: T.brass, size: 9, tracking: 1.4) }
+        .padding(.horizontal, 18).padding(.vertical, 12)
+      Rectangle().fill(T.hair).frame(height: 1)
+      Text("Nothing leaves this machine without your word, \(T.honorific).").font(T.say(13.5)).foregroundColor(T.dim).padding(.horizontal, 18).padding(.vertical, 14)
     }
   }
 }

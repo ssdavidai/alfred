@@ -176,6 +176,24 @@ struct Tenant {
     }
   }
 
+  /// The audit ledger — append-only, every line traceable to its session.
+  func activity(limit: Int = 30) async throws -> [LedgerLine] {
+    struct Page: Decodable { var items: [LedgerLine] }
+    let (code, data) = try await request("api/v1/admin/activity", bearer: apiKey, query: ["limit": String(limit)])
+    guard code == 200 else { throw TenantError(message: "Ledger read failed (HTTP \(code)).") }
+    return try JSONDecoder().decode(Page.self, from: data).items
+  }
+  /// What the vault holds, counted by record type from the index.
+  func vaultCounts() async throws -> [String: Int] {
+    let (code, data) = try await request("api/v1/vault/index", bearer: apiKey)
+    struct Entry: Decodable { var type: String?; var slug: String? }
+    struct Index: Decodable { var titles: [Entry] }
+    guard code == 200, let idx = try? JSONDecoder().decode(Index.self, from: data) else { return [:] }
+    var out: [String: Int] = [:]
+    for e in idx.titles { let t = e.type ?? String(e.slug?.split(separator: "/").first ?? ""); if !t.isEmpty { out[t, default: 0] += 1 } }
+    return out
+  }
+
   static func domain(from raw: String) -> String? {
     var s = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     if !s.contains("://") { s = "https://" + s }
@@ -257,5 +275,27 @@ struct Matter: Decodable, Identifiable {
     guard !st.isEmpty else { return title }
     let first = st.components(separatedBy: ". ").first ?? st
     return "\(title) — \(first.count > 70 ? String(first.prefix(69)) + "…" : first)"
+  }
+}
+
+struct LedgerLine: Decodable, Identifiable {
+  var id: String; var ts: String?; var action_type: String?; var actor: String?; var summary: String?; var mode: String?; var target_path: String?
+  var time: String {
+    guard let ts, let d = ISO8601DateFormatter().date(from: ts) ?? { let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]; return f.date(from: ts) }() else { return "" }
+    let f = DateFormatter(); f.dateFormat = Calendar.current.isDateInToday(d) ? "HH:mm" : "d MMM"; return f.string(from: d)
+  }
+  /// The line in plain words: slugs become titles, workflows become their names.
+  var title: String {
+    var t = (summary ?? action_type ?? id).replacingOccurrences(of: "\n", with: " ")
+    for prefix in ["steward-action: ", "signal-action: ", "desk-action: "] { if t.hasPrefix(prefix) { t = String(t.dropFirst(prefix.count)) } }
+    if let r = t.range(of: " (conf=") { t = String(t[..<r.lowerBound]) }
+    if let r = t.range(of: #"^(\w+) on (task|matter|note|chore|instinct)/(.+?)\.md$"#, options: .regularExpression) {
+      let parts = String(t[r]).components(separatedBy: " on "); let verb = parts[0].replacingOccurrences(of: "_", with: " ")
+      var name = parts[1].components(separatedBy: "/").last ?? parts[1]; name = name.replacingOccurrences(of: ".md", with: "")
+      name = name.replacingOccurrences(of: #"^[0-9a-f]{8}-"#, with: "", options: .regularExpression).replacingOccurrences(of: "-", with: " ")
+      t = "\(verb.prefix(1).uppercased() + verb.dropFirst()) — \(name)"
+    }
+    t = t.replacingOccurrences(of: #"([a-z])([A-Z])"#, with: "$1 $2", options: .regularExpression).replacingOccurrences(of: " Workflow", with: "")
+    return t.trimmingCharacters(in: .whitespaces)
   }
 }
