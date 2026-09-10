@@ -16,6 +16,7 @@ import {
   connectRedirect,
   isActiveStatus,
   isProviderAvailable,
+  onboardingGates,
   parseConnectedMarker,
   providerOptions,
   toolkitForProvider,
@@ -81,4 +82,44 @@ test("active status is case-insensitive and null-safe", () => {
   assert.equal(isActiveStatus("INITIATED"), false);
   assert.equal(isActiveStatus(null), false);
   assert.equal(isActiveStatus(undefined), false);
+});
+
+// The startOnboarding gate decision — the regression for the bug where the
+// Gmail connection gate ran for an Outlook onboarding (issue #758 follow-up).
+test("Outlook onboarding does NOT require a Gmail connection", () => {
+  const g = onboardingGates("outlook", "composio");
+  assert.equal(g.requireGmailConnection, false); // the bug: this was true
+  assert.equal(g.requireOutlookConnection, true);
+  assert.equal(g.outlookNeedsComposio, false);
+  assert.equal(g.misconfigured, false);
+});
+
+test("Gmail onboarding requires the Gmail connection, not Outlook", () => {
+  const g = onboardingGates("gmail", "composio");
+  assert.equal(g.requireGmailConnection, true);
+  assert.equal(g.requireOutlookConnection, false);
+  assert.equal(g.outlookNeedsComposio, false);
+});
+
+test("Outlook without Composio is refused, not run as Gmail", () => {
+  const g = onboardingGates("outlook", "google");
+  assert.equal(g.outlookNeedsComposio, true);
+  assert.equal(g.requireGmailConnection, false); // never gate Gmail for Outlook
+  assert.equal(g.requireOutlookConnection, false);
+});
+
+test("no auth path configured is provider-neutral misconfigured", () => {
+  for (const p of ["gmail", "outlook"] as const) {
+    const g = onboardingGates(p, "none");
+    assert.equal(g.misconfigured, true);
+    assert.equal(g.requireGmailConnection, false);
+    assert.equal(g.requireOutlookConnection, false);
+  }
+});
+
+test("Gmail in google mode gates nothing here (legacy OAuthCredential path)", () => {
+  const g = onboardingGates("gmail", "google");
+  assert.equal(g.requireGmailConnection, false); // google mode uses the token check, not this gate
+  assert.equal(g.misconfigured, false);
+  assert.equal(g.outlookNeedsComposio, false);
 });
