@@ -856,6 +856,16 @@ the repo when they change (those aren't in any image).
 Sequential ritual at `/awaken → … → /first-brief → /desk`. Behind the
 scenes:
 
+0. **Provider chooser** (#758) — *Start Onboarding* opens a Gmail /
+   Outlook·Microsoft 365 chooser (`DeskOnboardingGate.tsx` +
+   `onboardingProviderCore.ts`) before any authorization. Gmail keeps the
+   google/composio flow; Outlook runs the Composio `outlook` connect (managed
+   read-only consent: `offline_access,User.Read,Mail.Read`) and reads the
+   mailbox through `OUTLOOK_OUTLOOK_LIST_MESSAGES`. The choice rides an
+   explicit `email_provider` axis (separate from `gmail_mode`) from the browser
+   through ctrl to `OnboardingInput`; everything downstream of the collectors
+   is provider-blind. Absent `email_provider` = gmail. Frozen contracts: C-758
+   in `docs/FIX-CONTRACTS.md`; design in `docs/specs/758-outlook-onboarding.md`.
 1. **Gmail OAuth + Composio account creation** (steps `/composing` /
    `/preparing`) — backfilled via `alfred-learn` activities.
 2. **Stream pull** — `composio_pull` activity pulls ~100 days of email

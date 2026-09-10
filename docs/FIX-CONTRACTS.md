@@ -398,6 +398,56 @@ One-line registrations; the cited files are the frozen source of truth:
 
 ---
 
+## C-758 — Gmail-or-Outlook onboarding (email provider axis)
+
+Frozen for #758. The email provider is a second axis alongside `gmail_mode`
+(the Gmail transport). Full design + blast radius in
+`docs/specs/758-outlook-onboarding.md`.
+
+- **C-758-1** — provider vocabulary. `email_provider ∈ {"gmail","outlook"}`.
+  Absent means `gmail` at every layer (web default, ctrl default, learn
+  `OnboardingInput` default), so all historical inputs and in-flight workflows
+  keep the Gmail path. Any other explicit value is rejected — web 400, ctrl
+  `ValidationError`, learn non-retryable `ApplicationError`. `gmail_mode` keeps
+  its meaning and is never overloaded. *(III → I → II)*
+- **C-758-2** — workflow-start body (`packages/ctrl/src/api/routes/workflows.ts`,
+  `POST /api/v1/workflows/onboarding/start`) carries `email_provider` and
+  `connection_id`; the corrections/brief-resume route reads them back off
+  `onboard.json`. *(III → I → II)*
+- **C-758-3** — `OnboardingInput` (`packages/learn/src/workflows/onboarding_pipeline.py`)
+  gains `email_provider="gmail"` + `connection_id=""` (additive, replay-safe).
+  `persist_onboarding_provider` writes both to `onboard.json`; its call is gated
+  with `workflow.patched("758-onboarding-provider")`. *(II internal)*
+- **C-758-4/5/7** — the Outlook stream + collection contract
+  (`packages/learn/src/activities/email_providers.py`, `pull.py`): action slug
+  **`OUTLOOK_OUTLOOK_LIST_MESSAGES`** (the doubled-prefix slug that exists on the
+  Composio project; the docs' `OUTLOOK_LIST_MESSAGES` 404s), Inbox + Sent Items
+  folders, `skip`/`top` pagination (no continuation token), page at
+  `data.response_data.value[]`, ISO-`Z` date filters, `SYNC_CONFIGS` append-mode
+  entry with `{backfill_iso_z}`/`{last_pull_iso_z}`. *(II internal; I mirrors the
+  tables)*
+- **C-758-6/10** — normalisation + provenance. Outlook messages map to the SAME
+  profiler shape `{from,to,subject,date,snippet,domain}` and the flat shape the
+  existing `composio` parser reads (no parser change). Ingest events carry
+  `stream_type:"outlook"` + `metadata.provider:"outlook"`; four source-bucket
+  choke points (`signals`/`signal_observations`/`noise`/`noise_patterns`)
+  collapse Outlook onto the shared email bucket. *(II internal)*
+- **C-758-8** — server-side verification. `startOnboarding`
+  (`packages/web/src/dashboard/operations.ts`) and the ctrl connect path re-verify
+  the chosen connection is ACTIVE for the provider's toolkit and belongs to the
+  tenant, resolving the connection id from the tenant's own integration list —
+  never a client-supplied flag or id. *(III + I)*
+- **C-758-8b** — read-only consent. ctrl's connect route creates a Composio-managed
+  Outlook auth config with `MANAGED_AUTH_SCOPES.outlook =
+  "offline_access,User.Read,Mail.Read"`. Verified live 2026-09-10: the Microsoft
+  authorize URL then carries exactly those three scopes. *(I)*
+- **C-758-9** — identity. `GET /api/v1/integrations/:id/identity` (with
+  `/google-identity` kept as an alias): metadata scan for both providers, Gmail's
+  `GMAIL_GET_PROFILE` fallback unchanged, Outlook falls back to
+  `OUTLOOK_OUTLOOK_GET_PROFILE` (read-only, `User.Read`). *(I → III guard)*
+
+---
+
 ## Open items (2026-07-15 verification)
 
 - **TODO(C15):** the `SAAS_INTERNAL_URL` → `/api/internal/twilio/*` leg
