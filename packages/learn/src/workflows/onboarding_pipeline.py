@@ -28,6 +28,7 @@ with workflow.unsafe.imports_passed_through():
     from src.activities.onboarding import (
         init_onboard_json,
         persist_onboarding_mode,
+        persist_onboarding_provider,
         record_stage_degrade,
         update_onboard_stage,
         update_onboard_progress,
@@ -43,7 +44,9 @@ with workflow.unsafe.imports_passed_through():
     from src.activities.pull import (
         backfill_gmail_as_events,
         composio_backfill_gmail_as_events,
+        composio_backfill_outlook_as_events,
         composio_fetch_email_metadata,
+        composio_fetch_email_metadata_outlook,
     )
     from src.activities.batch_processor import process_stream_batch
     from src.activities.profiler import run_behavioral_profiler
@@ -161,6 +164,15 @@ class OnboardingInput:
     # the field deserialize with resume_stage="" and take the unchanged
     # legacy path.
     resume_stage: str = ""
+    # Email provider — the second axis alongside gmail_mode (#758).
+    #   "gmail"   — the Gmail collectors (google or composio, per gmail_mode).
+    #   "outlook" — the Composio Outlook collectors (managed Microsoft OAuth).
+    # A new field with a default is replay-safe: historical payloads without it
+    # deserialize as "gmail" and take the unchanged Gmail path.
+    email_provider: str = "gmail"
+    # The Composio connected_account id the principal chose. The collectors pin
+    # it so, with both mailboxes connected, only the selected one is read.
+    connection_id: str = ""
 
 
 def _state_count(state: dict[str, Any], kind: str) -> int:
@@ -326,6 +338,18 @@ class OnboardingPipelineWorkflow:
         # carries the same OnboardingInput) always takes the same path.
         use_composio_gmail = input.gmail_mode == "composio"
 
+        # Email provider (#758) — the second axis. Reject an unsupported
+        # explicit value loudly (a caller bug) rather than silently treating it
+        # as gmail. An empty/absent value is gmail (every pre-#758 payload).
+        if input.email_provider and input.email_provider not in ("gmail", "outlook"):
+            raise ApplicationError(
+                f"OnboardingInput.email_provider={input.email_provider!r} is not "
+                f"supported (expected 'gmail' or 'outlook').",
+                type="InvalidEmailProvider",
+                non_retryable=True,
+            )
+        use_outlook = input.email_provider == "outlook"
+
         # Persist the Gmail-mode contract into onboard.json so the
         # brief-stage resume path (ctrl-api /onboarding/corrections, #69)
         # can rebuild this same OnboardingInput and stay on the same path.
@@ -340,6 +364,19 @@ class OnboardingPipelineWorkflow:
             ],
             start_to_close_timeout=timedelta(seconds=10),
         )
+
+        # Persist the provider + chosen connection (#758) so the brief-stage
+        # resume rebuilds the same OnboardingInput. Gated with workflow.patched
+        # because adding a new activity CALL to an existing @workflow.run is a
+        # non-additive change — an in-flight run started before this deploy has
+        # no such event in its history, so replay must skip it (patched()
+        # returns False for those histories). See packages/learn/CLAUDE.md.
+        if workflow.patched("758-onboarding-provider"):
+            await workflow.execute_activity(
+                persist_onboarding_provider,
+                args=[onboard_path, input.email_provider, input.connection_id],
+                start_to_close_timeout=timedelta(seconds=10),
+            )
 
         # If already done, skip everything
         if current_stage == "done":
@@ -371,7 +408,9 @@ class OnboardingPipelineWorkflow:
             # reaches `done`. Downstream stages will see an empty
             # ``emails`` list and bail out cleanly.
             email_metadata_activity = (
-                composio_fetch_email_metadata
+                composio_fetch_email_metadata_outlook
+                if use_outlook
+                else composio_fetch_email_metadata
                 if use_composio_gmail
                 else fetch_email_metadata
             )
@@ -734,7 +773,9 @@ class OnboardingPipelineWorkflow:
             # GMAIL_FETCH_EMAILS paginated loop → composio parser → ingest;
             # Google path uses the legacy direct-Gmail full-message fetch.
             backfill_activity = (
-                composio_backfill_gmail_as_events
+                composio_backfill_outlook_as_events
+                if use_outlook
+                else composio_backfill_gmail_as_events
                 if use_composio_gmail
                 else backfill_gmail_as_events
             )
