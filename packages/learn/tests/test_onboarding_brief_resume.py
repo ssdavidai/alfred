@@ -149,6 +149,12 @@ def _make_stubs(
     ) -> None:
         return None
 
+    @activity.defn(name="persist_onboarding_provider")
+    async def stub_persist_provider(
+        onboard_path: str, email_provider: str, connection_id: str,
+    ) -> None:
+        return None
+
     @activity.defn(name="assign_initial_chores")
     async def stub_chores(onboard_path: str, user_id: str) -> dict[str, Any]:
         state["ran"].append("assign_initial_chores")
@@ -158,6 +164,7 @@ def _make_stubs(
         stub_init,
         stub_stage,
         stub_persist,
+        stub_persist_provider,
         stub_chores,
         _rec("fetch_email_metadata"),
         _rec("composio_fetch_email_metadata"),
