@@ -60,6 +60,12 @@ struct AlfredBlackMain {
       do { let u = try Cowork.exportPlugin(); print("exported: \(u.path)"); exit(0) }
       catch { print("error: \((error as? TenantError)?.message ?? "\(error)")"); exit(1) }
     }
+    if let i = CommandLine.arguments.firstIndex(of: "--transcribe"), CommandLine.arguments.count > i + 1 {   // the dictation engine on a file
+      let u = URL(fileURLWithPath: CommandLine.arguments[i + 1]); let t0 = Date()
+      guard Dictation.available else { print("no model in this build (\(Dictation.modelName))"); exit(2) }
+      guard let out = Dictation.transcribe(file: u) else { print("transcription failed"); exit(1) }
+      print(String(format: "transcribed in %.2fs", Date().timeIntervalSince(t0))); print(out); exit(0)
+    }
     if let i = CommandLine.arguments.firstIndex(of: "--presence"), CommandLine.arguments.count > i + 1 {
       let dir = URL(fileURLWithPath: CommandLine.arguments[i + 1]); try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
       for (name, need, dark) in [("silent-dark", false, true), ("attending-dark", true, true), ("attending-light", true, false)] {
