@@ -13,6 +13,15 @@ from temporalio import activity
 from src.config import load_config
 from src.integrations.composio_client import execute_action
 from src.parsers import get_parser
+from src.activities.email_providers import (
+    OUTLOOK_LIST_ACTION,
+    OUTLOOK_ONBOARDING_FOLDERS,
+    OUTLOOK_PAGE_SIZE,
+    outlook_list_args,
+    outlook_messages_from_response,
+    outlook_msg_to_email,
+    outlook_msg_to_flat,
+)
 
 logger = logging.getLogger("alfred-learn")
 
@@ -1112,6 +1121,287 @@ async def composio_backfill_gmail_as_events(
     return ingested
 
 
+# ---------------------------------------------------------------------------
+# Outlook / Microsoft 365 onboarding collectors (issue #758)
+#
+# The Gmail collectors above are unchanged. These mirror their contract for
+# Outlook: same 100-day window, same 5000-message cap, same per-page retry +
+# quota-aware backoff, same connection pinning, same normalised onboard.json
+# shape — but over Composio's OUTLOOK_OUTLOOK_LIST_MESSAGES action, which pages
+# per folder by skip/top (no continuation token) and returns Graph messages at
+# ``data.response_data.value``. The provider-specific arg building, response
+# extraction and message mapping live in ``email_providers.py``.
+# ---------------------------------------------------------------------------
+
+
+async def _composio_outlook_pages(
+    folder: str,
+    received_ge_iso: str,
+    max_messages: int,
+    page_size: int = OUTLOOK_PAGE_SIZE,
+    connected_account_id: str | None = None,
+):
+    """Yield pages of OUTLOOK_OUTLOOK_LIST_MESSAGES messages for one folder.
+
+    A skip/top loop: Graph's list action has no continuation token, so each
+    call advances ``skip`` by the page it returned and the loop ends on a short
+    page (fewer than ``page_size``) or once ``max_messages`` is reached.
+
+    Retry mirrors ``_composio_gmail_pages``: per page, up to
+    ``_PAGE_MAX_RETRIES`` attempts with quota-aware backoff, heartbeating
+    through the sleep so Temporal's heartbeat timeout does not fire while we
+    wait out a throttling window. On terminal failure raise ``RuntimeError`` so
+    the activity-level RetryPolicy takes a fresh swing.
+    """
+    import asyncio
+
+    skip = 0
+    fetched = 0
+    while True:
+        args = outlook_list_args(
+            folder,
+            received_ge_iso=received_ge_iso,
+            skip=skip,
+            top=page_size,
+        )
+
+        messages: list[dict[str, Any]] = []
+        last_err: str | None = None
+        for attempt in range(1, _PAGE_MAX_RETRIES + 1):
+            raw_response = await composio_pull(
+                OUTLOOK_LIST_ACTION,
+                args,
+                connected_account_id=connected_account_id,
+            )
+            messages, last_err = outlook_messages_from_response(raw_response)
+            if last_err is None:
+                break
+            logger.warning(
+                "composio OUTLOOK_LIST_MESSAGES page attempt %d/%d failed (folder=%s): %s",
+                attempt, _PAGE_MAX_RETRIES, folder, last_err,
+            )
+            try:
+                activity.heartbeat(
+                    f"outlook page retry {attempt} ({folder}): {last_err[:80]}"
+                )
+            except Exception:
+                pass
+            if attempt < _PAGE_MAX_RETRIES:
+                err_lower = (last_err or "").lower()
+                if any(tok in err_lower for tok in _QUOTA_HINT_TOKENS):
+                    delay = 35 + (attempt * 5)
+                else:
+                    delay = min(1.5 ** attempt, 30)
+                delay = min(delay, 90)
+                slept = 0.0
+                while slept < delay:
+                    step = min(10.0, delay - slept)
+                    await asyncio.sleep(step)
+                    slept += step
+                    try:
+                        activity.heartbeat(
+                            f"outlook backoff: waited {slept:.0f}/{delay:.0f}s "
+                            f"after attempt {attempt} ({folder})"
+                        )
+                    except Exception:
+                        pass
+
+        if last_err is not None:
+            raise RuntimeError(
+                "composio OUTLOOK_OUTLOOK_LIST_MESSAGES failed after "
+                f"{_PAGE_MAX_RETRIES} page-level retries (folder={folder}): {last_err}"
+            )
+
+        if not messages:
+            break
+        yield messages
+        fetched += len(messages)
+        skip += len(messages)
+        try:
+            activity.heartbeat(f"outlook: fetched {fetched} messages ({folder})")
+        except Exception:
+            pass
+        # A short page means the folder is exhausted for this window.
+        if len(messages) < page_size or fetched >= max_messages:
+            break
+
+
+@activity.defn
+async def composio_fetch_email_metadata_outlook(user_id: str) -> dict[str, Any]:
+    """Outlook variant of ``composio_fetch_email_metadata`` (onboarding Stage 1).
+
+    Backfills the last 100 days of the Inbox and Sent Items over Composio's
+    managed Microsoft OAuth (read-only, no Microsoft token held here) and writes
+    the corpus to onboard.json in the SAME shape the Gmail path produces, so the
+    profiler and every Opus stage are provider-blind.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from src.integrations.composio_client import resolve_active_connected_account_id
+
+    from_date = (datetime.now(timezone.utc) - timedelta(days=100)).strftime(
+        "%Y-%m-%dT00:00:00Z"
+    )
+
+    conn_id = resolve_active_connected_account_id("outlook")
+    if conn_id:
+        logger.info(
+            "composio_fetch_email_metadata_outlook: pinned outlook connection %s",
+            conn_id,
+        )
+    else:
+        logger.warning(
+            "composio_fetch_email_metadata_outlook: no active outlook connection — "
+            "falling back to auto-routing"
+        )
+
+    emails: list[dict[str, Any]] = []
+    for folder in OUTLOOK_ONBOARDING_FOLDERS:
+        if len(emails) >= 5000:
+            break
+        async for page in _composio_outlook_pages(
+            folder, from_date, max_messages=5000, connected_account_id=conn_id
+        ):
+            for msg in page:
+                emails.append(outlook_msg_to_email(msg))
+                if len(emails) >= 5000:
+                    break
+            if len(emails) >= 5000:
+                break
+
+    from src.activities._email_sampling import sample_emails_per_day
+    emails = sample_emails_per_day(emails)
+
+    by_domain: dict[str, int] = {}
+    for e in emails:
+        by_domain[e["domain"]] = by_domain.get(e["domain"], 0) + 1
+
+    logger.info(
+        "composio_fetch_email_metadata_outlook: fetched %d emails from %d domains",
+        len(emails), len(by_domain),
+    )
+
+    import json
+
+    onboard_path = os.environ.get("ONBOARD_PATH", "/alfred-data/onboard.json")
+    try:
+        with open(onboard_path, encoding="utf-8") as f:
+            onboard = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        onboard = {}
+    if not isinstance(onboard.get("progress"), dict):
+        onboard["progress"] = {"current_day": 0, "total_days": 0, "facts_count": 0, "patterns_count": 0}
+    onboard["emails"] = emails
+    onboard["top_domains"] = sorted(by_domain.items(), key=lambda x: -x[1])[:30]
+    onboard["progress"]["current_day"] = len(emails)
+    onboard["progress"]["total_days"] = len(emails)
+    onboard["progress"]["messages_read"] = len(emails)
+    os.makedirs(os.path.dirname(onboard_path), exist_ok=True)
+    with open(onboard_path, "w", encoding="utf-8") as f:
+        json.dump(onboard, f, indent=2)
+
+    try:
+        from src.activities.inbox_narration import generate_inbox_narration
+
+        narration = await generate_inbox_narration(emails)
+        if narration:
+            onboard["narration"] = narration
+            with open(onboard_path, "w", encoding="utf-8") as f:
+                json.dump(onboard, f, indent=2)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("composio_fetch_email_metadata_outlook: narration skipped: %s", e)
+
+    return {"count": len(emails), "domains": len(by_domain)}
+
+
+@activity.defn
+async def composio_backfill_outlook_as_events(
+    stream_id: str,
+    user_id: str,
+    days: int = 100,
+    max_messages: int = 5000,
+) -> int:
+    """Outlook variant of ``composio_backfill_gmail_as_events`` (background).
+
+    Same paginated OUTLOOK_OUTLOOK_LIST_MESSAGES loop as the metadata activity,
+    but feeds each Graph message — flattened to the shape the ``composio``
+    parser reads — through that parser into ctrl ``/streams/ingest`` so the
+    event processor and curator handle it normally. Events carry
+    ``stream_type: "outlook"`` and ``metadata.provider: "outlook"`` so the
+    mailbox provenance survives; downstream scoring maps that onto the shared
+    email bucket.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from src.integrations.composio_client import resolve_active_connected_account_id
+
+    config = load_config()
+    parser = get_parser("composio")
+
+    from_date = (datetime.now(timezone.utc) - timedelta(days=days)).strftime(
+        "%Y-%m-%dT00:00:00Z"
+    )
+
+    conn_id = resolve_active_connected_account_id("outlook")
+    if conn_id:
+        logger.info(
+            "composio_backfill_outlook_as_events: pinned outlook connection %s",
+            conn_id,
+        )
+
+    ingested = 0
+    seen = 0
+    async with _ctrl_client(config) as ctrl:
+        for folder in OUTLOOK_ONBOARDING_FOLDERS:
+            if seen >= max_messages:
+                break
+            async for page in _composio_outlook_pages(
+                folder, from_date, max_messages=max_messages, connected_account_id=conn_id
+            ):
+                for msg in page:
+                    seen += 1
+                    try:
+                        for event in parser(outlook_msg_to_flat(msg)):
+                            ingest_resp = await ctrl.post(
+                                "/api/v1/streams/ingest",
+                                json={
+                                    "stream_id": stream_id,
+                                    "stream_type": "outlook",
+                                    "source_ref": event.source_ref,
+                                    "received_at": event.received_at,
+                                    "raw": event.raw,
+                                    "summary": event.summary,
+                                    "metadata": {
+                                        **event.metadata,
+                                        "event_type": event.event_type,
+                                        "parser": "composio",
+                                        "provider": "outlook",
+                                        "folder": folder,
+                                        "backfill": True,
+                                    },
+                                },
+                            )
+                            if ingest_resp.status_code in (200, 201):
+                                status = ingest_resp.json().get("status", "")
+                                if status != "duplicate":
+                                    ingested += 1
+                    except Exception as exc:
+                        logger.warning("composio_backfill_outlook: failed msg: %s", exc)
+                        continue
+                try:
+                    activity.heartbeat(f"outlook backfill: ingested {ingested}/{seen}")
+                except Exception:
+                    pass
+                if seen >= max_messages:
+                    break
+
+    logger.info(
+        "composio_backfill_outlook_as_events: ingested %d events from %d messages",
+        ingested, seen,
+    )
+    return ingested
+
+
 @activity.defn
 async def composio_pull(
     action_slug: str,
@@ -1233,6 +1523,7 @@ _ACTION_DEFAULTS: dict[str, dict[str, Any]] = {
     "GOOGLECALENDAR_LIST_CALENDARS": {},
     "GMAIL_FETCH_EMAILS": {"userId": "me"},
     "GMAIL_LIST_LABELS": {"userId": "me"},
+    "OUTLOOK_OUTLOOK_LIST_MESSAGES": {"user_id": "me", "folder": "Inbox"},
 }
 
 
@@ -1273,6 +1564,30 @@ SYNC_CONFIGS: dict[str, dict[str, Any]] = {
         "incremental_args": {
             "query": "after:{last_pull_ts} -in:drafts -in:spam -in:trash -in:chats",
             "max_results": 30,
+        },
+        "cursor_response_field": "",
+        "backfill_past_days": 30,
+    },
+    "OUTLOOK_OUTLOOK_LIST_MESSAGES": {
+        # Ongoing Outlook sync (issue #758). Append mode, exactly like Gmail:
+        # a backfill uses the inclusive received filter, an incremental pull the
+        # exclusive one so the cursor row is not re-fetched. Graph wants an ISO
+        # timestamp with a `Z` suffix (not the `+00:00` offset {last_pull_iso}
+        # renders), hence the `_z` placeholders. StreamEvent's (streamId,
+        # sourceRef) unique index dedupes across overlapping windows.
+        # A later phase can move this to OUTLOOK_GET_MAIL_DELTA (which returns
+        # an @odata.deltaLink) under the "sync" pull mode; append needs no new
+        # cursor code and mirrors Gmail, so it is the v1.
+        "pull_mode": "append",
+        "backfill_args": {
+            "received_date_time_ge": "{backfill_iso_z}",
+            "top": 250,
+            "orderby": ["receivedDateTime desc"],
+        },
+        "incremental_args": {
+            "received_date_time_gt": "{last_pull_iso_z}",
+            "top": 250,
+            "orderby": ["receivedDateTime desc"],
         },
         "cursor_response_field": "",
         "backfill_past_days": 30,
@@ -1379,15 +1694,22 @@ def _resolve_placeholders(
         except (ValueError, TypeError):
             pass
 
+    def _iso_z(dt: datetime) -> str:
+        # Microsoft Graph's OData filter wants `2026-09-10T08:00:00Z`, not the
+        # `+00:00` offset ``isoformat()`` renders for an aware datetime.
+        return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
     replacements = {
         "{cursor_value}": cursor_value,
         "{last_pull_date}": lp_dt.strftime("%Y/%m/%d"),
         "{last_pull_iso}": lp_dt.isoformat(),
+        "{last_pull_iso_z}": _iso_z(lp_dt),
         "{last_pull_ts}": str(int(lp_dt.timestamp())),
         "{backfill_start}": backfill_start.isoformat(),
         "{backfill_end}": backfill_end.isoformat(),
         "{backfill_date}": backfill_start.strftime("%Y/%m/%d"),
         "{backfill_iso}": backfill_start.isoformat(),
+        "{backfill_iso_z}": _iso_z(backfill_start),
         "{backfill_ts}": str(int(backfill_start.timestamp())),
     }
 
