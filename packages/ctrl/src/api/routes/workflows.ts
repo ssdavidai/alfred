@@ -141,13 +141,31 @@ export function registerWorkflowRoutes(): void {
     }
 
     const gmailMode = b.gmail_mode === "composio" ? "composio" : "google";
+
+    // #758: the email provider is a second axis alongside gmail_mode. Absent
+    // means gmail (every legacy caller); any other explicit value is rejected
+    // rather than silently treated as gmail.
+    const emailProvider = b.email_provider === undefined ? "gmail" : b.email_provider;
+    if (emailProvider !== "gmail" && emailProvider !== "outlook") {
+      throw new ValidationError(
+        `email_provider must be "gmail" or "outlook" (got ${JSON.stringify(emailProvider)})`,
+      );
+    }
+
     const onboardingInput: Record<string, unknown> = {
       user_id: b.user_id,
       stream_id: b.stream_id ?? "",
       gmail_mode: gmailMode,
+      email_provider: emailProvider,
     };
     if (gmailMode === "composio" && typeof b.composio_action === "string") {
       onboardingInput.composio_action = b.composio_action;
+    }
+    // The connection the principal chose (Composio connected_account id). The
+    // collectors pin it so, with both mailboxes connected, only the selected
+    // one is read.
+    if (typeof b.connection_id === "string" && b.connection_id) {
+      onboardingInput.connection_id = b.connection_id;
     }
 
     const workflowId = `onboarding-${b.user_id}-${Date.now()}`;
@@ -264,12 +282,20 @@ export function registerWorkflowRoutes(): void {
       const streamId = data.stream_id ?? "";
       const briefGmailMode =
         data.gmail_mode === "composio" ? "composio" : "google";
+      // #758: carry the provider + chosen connection forward off onboard.json
+      // (the learn pipeline persists them at first start) so the brief-stage
+      // resume stays on the same mailbox. Default to gmail for pre-#758 state.
+      const briefProvider = data.email_provider === "outlook" ? "outlook" : "gmail";
       if (userId) {
         const workflowId = `onboarding-${userId}-brief-${Date.now()}`;
         const briefInput: Record<string, unknown> = {
           user_id: userId,
           stream_id: streamId,
           gmail_mode: briefGmailMode,
+          email_provider: briefProvider,
+          ...(typeof data.connection_id === "string" && data.connection_id
+            ? { connection_id: data.connection_id }
+            : {}),
           // Carry the resume stage EXPLICITLY (#74). The brief stage runs
           // as a fresh OnboardingPipelineWorkflow; without this the
           // workflow re-derived its resume point from onboard.json and
