@@ -41,6 +41,7 @@ import {
   checkGmailConnection,
   checkEmailProviderConnection,
 } from "../integrations/operations";
+import { onboardingGates } from "./onboardingProviderCore";
 import { pickTailnetHostnameForDashboard } from "./tailscaleCardCore";
 
 // ============================================================
@@ -1887,16 +1888,30 @@ export const startOnboarding: StartOnboarding<
   // ─────────────────────────────────────────────────────────────────────
   const gmailMode = resolveOnboardingGmailMode();
 
-  if (gmailMode === "none") {
+  // #758 follow-up: each gate is conditioned on the SELECTED provider, decided
+  // by one tested pure function. This is the fix for the bug where the Gmail
+  // connection gate ran whenever the deployment was in composio mode — even for
+  // an Outlook onboarding — rejecting an Outlook-only principal with "No Gmail
+  // connection found." The gates never bleed across providers.
+  const gates = onboardingGates(provider, gmailMode);
+
+  if (gates.misconfigured) {
     // No auth path is configured — fail fast rather than starting a
     // pipeline that can never fetch email and will stall.
     throw new HttpError(
       412,
-      "Gmail onboarding is not configured on this deployment — set COMPOSIO_API_KEY (recommended) or GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET.",
+      "Email onboarding is not configured on this deployment — set COMPOSIO_API_KEY (recommended) or GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET.",
     );
   }
 
-  if (gmailMode === "composio") {
+  if (gates.outlookNeedsComposio) {
+    throw new HttpError(
+      412,
+      "Outlook onboarding requires Composio (COMPOSIO_API_KEY) — there is no direct Microsoft OAuth path.",
+    );
+  }
+
+  if (gates.requireGmailConnection) {
     // Gate on the Composio Gmail connection — re-run the same check the
     // getGmailConnectionStatus query uses (shared helper), server-side, so
     // a client that calls startOnboarding without a real ACTIVE
@@ -1920,18 +1935,12 @@ export const startOnboarding: StartOnboarding<
     }
   }
 
-  // #758: Outlook onboarding. It needs Composio (no direct-Microsoft path) and
-  // an ACTIVE outlook connection on this tenant. We re-verify server-side and
-  // resolve the connection id from the tenant's own integration list — never
-  // trusting a client-supplied connected flag or arbitrary id (C-758-8).
+  // #758: Outlook onboarding gates on an ACTIVE outlook connection and resolves
+  // its id from the tenant's own integration list — never trusting a
+  // client-supplied connected flag or arbitrary id (C-758-8). Independent of
+  // the Gmail gate above, which does not run for an Outlook onboarding.
   let outlookConnectionId: string | null = null;
-  if (provider === "outlook") {
-    if (gmailMode !== "composio") {
-      throw new HttpError(
-        412,
-        "Outlook onboarding requires Composio (COMPOSIO_API_KEY) — there is no direct Microsoft OAuth path.",
-      );
-    }
+  if (gates.requireOutlookConnection) {
     let outlookConn: { connected: boolean; status: string | null; connectionId: string | null };
     try {
       outlookConn = await checkEmailProviderConnection(instance, "outlook");

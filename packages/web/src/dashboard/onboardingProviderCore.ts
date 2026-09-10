@@ -135,3 +135,39 @@ export function connectErrorCopy(kind: ConnectErrorKind, provider: EmailProvider
 export function isActiveStatus(status: string | null | undefined): boolean {
   return String(status ?? "").toUpperCase() === "ACTIVE";
 }
+
+/**
+ * Which server-side gates `startOnboarding` must apply, decided purely from the
+ * selected provider and the resolved transport mode.
+ *
+ * The bug this exists to prevent (#758 follow-up): the Gmail connection gate
+ * must NOT run when Outlook is selected — otherwise an Outlook-only principal
+ * with no Gmail connection is rejected with "No Gmail connection found." Each
+ * gate is conditioned on the SELECTED provider, so the checks never bleed
+ * across providers. `startOnboarding` consumes this so the decision has one
+ * tested source of truth.
+ *
+ * Check order in the action: misconfigured → outlookNeedsComposio →
+ * requireGmailConnection → requireOutlookConnection.
+ */
+export interface OnboardingGates {
+  /** No auth path configured at all — fail fast, provider-neutral. */
+  misconfigured: boolean;
+  /** Gate on an ACTIVE Gmail connection (composio-Gmail path only). */
+  requireGmailConnection: boolean;
+  /** Gate on an ACTIVE Outlook connection + resolve its id. */
+  requireOutlookConnection: boolean;
+  /** Outlook selected without Composio — refuse (no direct Microsoft path). */
+  outlookNeedsComposio: boolean;
+}
+
+export function onboardingGates(provider: EmailProvider, mode: OnboardingMode): OnboardingGates {
+  const composio = mode === "composio";
+  return {
+    misconfigured: mode === "none",
+    requireGmailConnection: provider === "gmail" && composio,
+    requireOutlookConnection: provider === "outlook" && composio,
+    // google (or any non-composio, non-none) mode can't run Outlook.
+    outlookNeedsComposio: provider === "outlook" && !composio && mode !== "none",
+  };
+}
