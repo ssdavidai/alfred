@@ -293,6 +293,14 @@ struct ArrangementView: View {
       }.padding(.horizontal, 18).padding(.vertical, 14)
       Rectangle().fill(T.hair).frame(height: 1)
       HStack {
+        Meta(text: "Dictation on ⌘⇧A", tracking: 1.8); Spacer()
+        ForEach([true, false], id: \.self) { on in
+          Button(action: { s.setDictation(on) }) { Keycap(text: on ? "ON" : "OFF", color: s.state.dictation == on ? T.brass : T.dim) }.buttonStyle(.plain).pointer()
+        }
+      }.padding(.horizontal, 18).padding(.top, 12).padding(.bottom, 4)
+      Text(Dictation.available ? "Transcribed on this Mac by a bundled model; nothing is sent anywhere." : "This build carries no dictation model.").font(T.body(11.5, italic: true)).foregroundColor(T.dim).padding(.horizontal, 18).padding(.bottom, 12)
+      Rectangle().fill(T.hair).frame(height: 1)
+      HStack {
         if let p = s.state.pendingTrust {
           Meta(text: "L\(p) takes effect at midnight", tracking: 1.8)
           Button(action: { s.cancelTrustChange() }) { Keycap(text: "CANCEL") }.buttonStyle(.plain).pointer()

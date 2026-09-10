@@ -19,6 +19,7 @@ struct RunState: Codable {
   var trustEffectiveAt: Date? = nil
   var deskSeenAt: Date? = nil
   var arrangementDraft: [String]? = nil   // an unsaved sentence survives the popover closing
+  var dictation: Bool = true               // ⌘⇧A listens
   var lastRenderAt: Date?
   var lastRenderEntries: Int = 0
   var lastPushAt: Date?

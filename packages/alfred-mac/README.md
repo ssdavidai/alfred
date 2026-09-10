@@ -15,7 +15,7 @@ Silence when nothing needs the principal; one brass dot when something does.
 | **02 · Brief** | The tenant's latest brief: its intro as Alfred's line, its first three bullets as rows, *Read the full brief* below. Closing it marks it read. |
 | **03 · Matters** | Work in flight, at most five: the title, *Next: …* in the matter's own words as the subline, *changed <date>* as the meta — *Blocked on you* in brass when a Desk card points at it. A click opens the matter on the tenant; the header counts what is blocked on the principal. |
 | **04 · Decisions** | One Desk card at a time, the border brassed: the headline as Alfred's line, the body, then what *So ordered* will do (*If so ordered — …*, from the card's own action); when the card proposes nothing, *So ordered* is disabled and *Ask Alfred what he'd do* opens the Ask with the question written. Hold ESC · Myself ⌘⏎ · So ordered ⏎ (`POST /api/v1/decisions`); ↑↓ between cards; every decision confirms in a notice with UNDO for eight seconds. Only this screen may notify, and a click on the notification lands here. |
-| **05/06 · The Ask** | ⌘⇧A anywhere: the screen dims, a translucent 700 pt bar floats on any Space, one field, no modes. ⏎ asks Alfred what he would do (not yet acting); ⏎ again is *So ordered*, ⇧⏎ *send without read*, ESC never mind. Both turns journaled (`POST /api/v1/alfred/ask`), so every surface remembers. |
+| **05/06 · The Ask** | ⌘⇧A anywhere: the screen dims, a translucent 700 pt bar floats on any Space, one field, no modes — and it listens: speak, and the words settle into the field as you go; a pause ends the take, ⏎ asks (or ends the take and asks). Transcription is whisper.cpp with a bundled 57 MB model, on this Mac's GPU, in 99 languages; nothing is sent anywhere. The mark toggles listening; Settings switches it off. ⏎ asks Alfred what he would do (not yet acting); ⏎ again is *So ordered*, ⇧⏎ *send without read*, ESC never mind. Both turns journaled (`POST /api/v1/alfred/ask`), so every surface remembers. |
 | **07 · The Statement** | ⌘⇧S, the only real window: a month's hours returned in 54 pt brass and the three bars — displaced, your time (hatched), net — from the attention statement; ← → turn the months; every bar defines itself on hover. ⌘E opens the print statement. |
 | **08 · Activity** | The audit ledger in plain words, only the lines that touched the principal's things; workflow heartbeats and shadow checks are hidden and counted, the full log one click away. Append-only; no edit or delete affordance. |
 | **09 · Vault** | What Alfred holds, counted by record type onto six shelves, each opening the vault at that type; Credentials sealed, never a count. |
@@ -79,7 +79,8 @@ cd packages/alfred-mac
 scripts/build-app.sh 2026.09.09
 ```
 
-Produces `dist/Alfred Black.app` and `dist/AlfredBlack-2026.09.09.dmg`.
+Produces `dist/Alfred Black.app` and `dist/AlfredBlack-2026.09.09.dmg` (about 62 MB — the dictation model is most of it).
+The first build downloads whisper.cpp's prebuilt framework (a SwiftPM binary target, pinned by checksum) and the model (`ggml-base-q5_1.bin`, verified against a pinned digest, cached under `~/Library/Caches/alfred-mac`, never committed).
 
 ### Command-line modes (for verification and scripting)
 
@@ -92,6 +93,7 @@ Produces `dist/Alfred Black.app` and `dist/AlfredBlack-2026.09.09.dmg`.
 "dist/Alfred Black.app/Contents/MacOS/AlfredBlack" --ask "what is on my plate today?"    # ask Alfred from a shell
 "dist/Alfred Black.app/Contents/MacOS/AlfredBlack" --screen <glance|brief|matters|yourword|ledger|vault|arrangement|ask|statement> /path/dir [--reply "…"]   # one screen to PNG, live data
 "dist/Alfred Black.app/Contents/MacOS/AlfredBlack" --presence /path/dir   # the mark, with and without the dot
+"dist/Alfred Black.app/Contents/MacOS/AlfredBlack" --transcribe /path/clip.wav   # the dictation engine on any audio file
 ```
 
 ## Signing and distribution
@@ -105,7 +107,8 @@ MCP server that Claude Desktop spawns the question is never shown: the process
 just blocks. So while the app is ad-hoc signed the key lives in a 0600 file in
 its support folder, and the Keychain is only read with user interaction
 disabled (to migrate a key an earlier build stored there). A Developer ID
-signature is what makes a Keychain-backed store viable.
+signature is what makes a Keychain-backed store viable. The same applies to the
+microphone: macOS asks once per code identity, so every rebuild asks again.
 
 Proper distribution needs a Developer ID certificate and notarization;
 `build-app.sh` is the place to add them (`codesign --sign "Developer ID

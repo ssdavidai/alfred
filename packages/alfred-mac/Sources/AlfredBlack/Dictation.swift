@@ -32,8 +32,11 @@ final class Dictation: ObservableObject {
   private static func context() -> OpaquePointer? {
     if let c = ctx { return c }
     guard let u = modelURL else { return nil }
+    whisper_log_set({ _, _, _ in }, nil)                       // its narration is not for the principal
     var p = whisper_context_default_params(); p.use_gpu = true
-    ctx = whisper_init_from_file_with_params(u.path, p); return ctx
+    ctx = whisper_init_from_file_with_params(u.path, p)
+    atexit { Dictation.queue.sync { if let c = Dictation.ctx { whisper_free(c); Dictation.ctx = nil } } }   // before ggml's static destructors
+    return ctx
   }
 
   func start() {
@@ -47,20 +50,34 @@ final class Dictation: ObservableObject {
       }
     }
   }
+  private static let target = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false)!
+  private var usingEngine = false
   private func begin() {
     let input = engine.inputNode; let native = input.outputFormat(forBus: 0)
-    guard native.sampleRate > 0,
-          let target = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false),
-          let conv = AVAudioConverter(from: native, to: target) else { problem = "No microphone."; return }
-    input.installTap(onBus: 0, bufferSize: 4096, format: native) { [weak self] buf, _ in self?.ingest(buf, conv, target) }
+    guard native.sampleRate > 0, let conv = AVAudioConverter(from: native, to: Self.target) else { problem = "No microphone."; return }
+    input.installTap(onBus: 0, bufferSize: 4096, format: native) { [weak self] buf, _ in self?.ingest(buf, conv) }
     do { engine.prepare(); try engine.start() } catch { problem = "The microphone could not start: \(error.localizedDescription)"; return }
+    usingEngine = true; arm()
+  }
+  private func arm() {
     listening = true; Self.warm()
     ticker = Timer.scheduledTimer(withTimeInterval: 0.9, repeats: true) { [weak self] _ in self?.tick() }
   }
+  /// A file plays the microphone's part, in real time, through the same path (for `--listen --file`).
+  func rehearse(file: URL) {
+    guard !listening, Self.available, let f = try? AVAudioFile(forReading: file), let conv = AVAudioConverter(from: f.processingFormat, to: Self.target) else { problem = "Cannot read \(file.lastPathComponent)"; return }
+    text = ""; finished = false; problem = nil; lastVoiceAt = nil; startedAt = Date(); lock.lock(); samples = []; lock.unlock(); arm()
+    Thread.detachNewThread { [weak self] in
+      let chunk: AVAudioFrameCount = 4096
+      while let self, self.listening, let buf = AVAudioPCMBuffer(pcmFormat: f.processingFormat, frameCapacity: chunk), (try? f.read(into: buf, frameCount: chunk)) != nil, buf.frameLength > 0 {
+        self.ingest(buf, conv); Thread.sleep(forTimeInterval: Double(buf.frameLength) / f.processingFormat.sampleRate)
+      }
+    }
+  }
   /// On the audio thread: resample to 16 kHz mono, keep the samples, measure the level.
-  private func ingest(_ buf: AVAudioPCMBuffer, _ conv: AVAudioConverter, _ target: AVAudioFormat) {
+  private func ingest(_ buf: AVAudioPCMBuffer, _ conv: AVAudioConverter) {
     let frames = AVAudioFrameCount(Double(buf.frameLength) * 16000 / buf.format.sampleRate) + 16
-    guard let out = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: frames) else { return }
+    guard let out = AVAudioPCMBuffer(pcmFormat: Self.target, frameCapacity: frames) else { return }
     var fed = false
     conv.convert(to: out, error: nil) { _, status in
       if fed { status.pointee = .noDataNow; return nil }
@@ -84,7 +101,8 @@ final class Dictation: ObservableObject {
   func stop() {
     guard listening else { return }
     ticker?.invalidate(); ticker = nil
-    engine.inputNode.removeTap(onBus: 0); engine.stop(); listening = false; level = 0
+    if usingEngine { engine.inputNode.removeTap(onBus: 0); engine.stop(); usingEngine = false }
+    listening = false; level = 0
     if lastVoiceAt != nil { transcribe(final: true) } else { finished = true }
   }
   func cancel() { pass?.cancel(); pass = nil; if listening { stop() }; text = ""; finished = false }
