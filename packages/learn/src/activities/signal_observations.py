@@ -60,6 +60,9 @@ def _normalise_source_type(raw: str) -> str:
     s = (raw or "").lower().strip()
     if s.startswith("composio-gmail") or s == "gmail":
         return "gmail"
+    # Outlook (#758) shares the email bucket — same priors, same noise gate.
+    if s.startswith("composio-outlook") or s == "outlook":
+        return "gmail"
     if s.startswith("composio-googlecalendar") or s in ("gcal", "googlecalendar"):
         return "gcal"
     if s.startswith("composio-slack") or s == "slack":
@@ -100,6 +103,8 @@ def _authoritative_source_type(event_fm: dict[str, Any], signal_source_type: str
     """
     source_ref = str(event_fm.get("source_ref") or "").strip().lower()
     if source_ref.startswith("gmail:"):
+        return "gmail"
+    if source_ref.startswith("outlook:"):
         return "gmail"
     if source_ref.startswith("gcal:") or source_ref.startswith("googlecalendar:"):
         return "gcal"

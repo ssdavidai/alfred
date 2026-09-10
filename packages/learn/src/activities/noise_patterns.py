@@ -125,7 +125,8 @@ def derive_signature(
     # on subject_keywords.
     if (
         source_type.startswith("composio-gmail")
-        or source_type in ("gmail", "email")
+        or source_type.startswith("composio-outlook")
+        or source_type in ("gmail", "email", "outlook")
     ):
         source_type = "gmail"
     elif source_type.startswith("composio-googlecalendar") or source_type == "gcal":
