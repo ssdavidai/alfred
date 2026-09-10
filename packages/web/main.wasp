@@ -1713,6 +1713,12 @@ query getGmailConnectionStatus {
   entities: [ComposioConnection]
 }
 
+// #758 — provider-aware connection status for the onboarding chooser (Gmail or Outlook).
+query getEmailProviderStatus {
+  fn: import { getEmailProviderStatus } from "@src/integrations/operations",
+  entities: [ComposioConnection]
+}
+
 query getIntegrationCapabilities {
   fn: import { getIntegrationCapabilities } from "@src/integrations/operations",
   entities: []

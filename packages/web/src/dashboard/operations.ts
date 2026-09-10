@@ -37,7 +37,10 @@ import {
   resolveOnboardingGmailMode,
   type OnboardingGmailMode,
 } from "../server/onboardingGmailMode";
-import { checkGmailConnection } from "../integrations/operations";
+import {
+  checkGmailConnection,
+  checkEmailProviderConnection,
+} from "../integrations/operations";
 import { pickTailnetHostnameForDashboard } from "./tailscaleCardCore";
 
 // ============================================================
@@ -1854,12 +1857,17 @@ export const getFirstBrief: GetFirstBrief<void, any> = async (
 };
 
 export const startOnboarding: StartOnboarding<
-  { streamId?: string },
+  { streamId?: string; provider?: "gmail" | "outlook"; connectionId?: string },
   any
 > = async (_args, context) => {
   if (!context.user) throw new HttpError(401);
   const instance = await getUserInstance(context);
   const userId = context.user.id;
+
+  // #758: the email provider is a second axis. Absent → gmail (every legacy
+  // caller). Outlook has no direct-OAuth path, so it requires composio mode.
+  const provider: "gmail" | "outlook" =
+    _args?.provider === "outlook" ? "outlook" : "gmail";
 
   // ─────────────────────────────────────────────────────────────────────
   // Composio-managed Gmail onboarding (#69, P2). Resolve the Gmail mode
@@ -1912,6 +1920,44 @@ export const startOnboarding: StartOnboarding<
     }
   }
 
+  // #758: Outlook onboarding. It needs Composio (no direct-Microsoft path) and
+  // an ACTIVE outlook connection on this tenant. We re-verify server-side and
+  // resolve the connection id from the tenant's own integration list — never
+  // trusting a client-supplied connected flag or arbitrary id (C-758-8).
+  let outlookConnectionId: string | null = null;
+  if (provider === "outlook") {
+    if (gmailMode !== "composio") {
+      throw new HttpError(
+        412,
+        "Outlook onboarding requires Composio (COMPOSIO_API_KEY) — there is no direct Microsoft OAuth path.",
+      );
+    }
+    let outlookConn: { connected: boolean; status: string | null; connectionId: string | null };
+    try {
+      outlookConn = await checkEmailProviderConnection(instance, "outlook");
+    } catch (e: any) {
+      throw new HttpError(
+        502,
+        `Could not verify the Outlook connection with the tenant: ${e?.message ?? String(e)}`,
+      );
+    }
+    if (!outlookConn.connected || !outlookConn.connectionId) {
+      throw new HttpError(
+        412,
+        outlookConn.status
+          ? `The Outlook connection is not active (status: ${outlookConn.status}). Finish connecting Outlook before starting onboarding.`
+          : "No Outlook connection found. Connect Outlook before starting onboarding.",
+      );
+    }
+    outlookConnectionId = outlookConn.connectionId;
+  }
+
+  // Per-provider stream identity. The SaaS Stream `source` is unique per user,
+  // so a Gmail stream and an Outlook stream can coexist; the chooser decides
+  // which one onboarding reads.
+  const streamSource = provider === "outlook" ? "outlook" : "gmail";
+  const streamDisplayName = provider === "outlook" ? "Outlook" : "Gmail";
+
   // Track per-step outcomes so the dashboard can see which sub-steps
   // failed even if startOnboarding returns successfully overall (the
   // function intentionally returns "started" once the SaaS-side stream
@@ -1927,7 +1973,7 @@ export const startOnboarding: StartOnboarding<
 
   // Step 1: SaaS-DB Stream row (lazy-create on first call, idempotent).
   let gmailStream = await context.entities.Stream.findFirst({
-    where: { userId, source: "gmail" },
+    where: { userId, source: streamSource },
   });
 
   // The SaaS-DB Stream `config` blob — mode-specific. For `google` it is
@@ -1937,7 +1983,21 @@ export const startOnboarding: StartOnboarding<
   // intent — Composio holds the token, so there is no oauth2 auth block.
   // This blob is mirrored to the tenant by the Step 3 PATCH below.
   const streamConfig =
-    gmailMode === "composio"
+    provider === "outlook"
+      ? {
+          transport: "composio",
+          parser: "composio",
+          // #758: the onboarding stream row carries the Outlook list action,
+          // pinned to the chosen connection so only the selected mailbox is
+          // read. The learn collectors loop Inbox + Sent Items themselves.
+          composio: {
+            action: "OUTLOOK_OUTLOOK_LIST_MESSAGES",
+            toolkit: "outlook",
+            connection_id: outlookConnectionId,
+            args: { user_id: "me", folder: "Inbox", top: 250 },
+          },
+        }
+      : gmailMode === "composio"
       ? {
           transport: "composio",
           parser: "composio",
@@ -1987,9 +2047,9 @@ export const startOnboarding: StartOnboarding<
     gmailStream = await context.entities.Stream.create({
       data: {
         userId,
-        name: "Gmail",
+        name: streamDisplayName,
         type: "scheduled",
-        source: "gmail",
+        source: streamSource,
         config: streamConfig,
         webhookToken: crypto.randomBytes(24).toString("hex"),
       },
@@ -2021,9 +2081,9 @@ export const startOnboarding: StartOnboarding<
       path: "/api/v1/streams",
       body: {
         id: gmailStream.id,
-        name: "Gmail",
+        name: streamDisplayName,
         type: "scheduled",
-        source: "gmail",
+        source: streamSource,
         config: gmailStream.config,
         enabled: true,
       },
@@ -2049,7 +2109,19 @@ export const startOnboarding: StartOnboarding<
   //              stream-row contract P3's learn pipeline reads to drive
   //              the Composio fetch path.
   const streamPatchBody: Record<string, unknown> =
-    gmailMode === "composio"
+    provider === "outlook"
+      ? {
+          type: "composio",
+          parser: "composio",
+          // #758 — the Outlook onboarding stream row contract the learn
+          // pipeline reads. Pinned to the chosen connection.
+          composio_action: "OUTLOOK_OUTLOOK_LIST_MESSAGES",
+          composio_toolkit: "outlook",
+          composio_connection_id: outlookConnectionId,
+          composio_args: { user_id: "me", folder: "Inbox", top: 250 },
+          schedule_interval_seconds: 300,
+        }
+      : gmailMode === "composio"
       ? {
           type: "composio",
           parser: "composio",
@@ -2151,7 +2223,12 @@ export const startOnboarding: StartOnboarding<
         user_id: userId,
         stream_id: gmailStream.id,
         gmail_mode: gmailMode,
-        ...(gmailMode === "composio"
+        // #758 — provider axis + the pinned connection for Outlook.
+        email_provider: provider,
+        ...(provider === "outlook" && outlookConnectionId
+          ? { connection_id: outlookConnectionId }
+          : {}),
+        ...(provider !== "outlook" && gmailMode === "composio"
           ? { composio_action: "GMAIL_FETCH_EMAILS" }
           : {}),
       },
