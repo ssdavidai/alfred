@@ -454,6 +454,11 @@ const RECOMMENDED_STREAMS: Record<string, {
   // openclaw runtime's ~15 KB tool-result cap doesn't truncate after one
   // message. See platform issue: openclaw runtime tool-result truncation.
   gmail:          { action: "GMAIL_FETCH_EMAILS",         name: "Gmail Emails",     interval: 300, args: { userId: "me", format: "metadata", maxResults: 50 } },
+  // Outlook / Microsoft 365 (#758). Read-only mail listing; one folder per
+  // call, so the recommended stream polls the Inbox (Sent Items is added by
+  // onboarding's own stream). Slug is the doubled-prefix one that exists on
+  // the project — the public docs' OUTLOOK_LIST_MESSAGES 404s.
+  outlook:        { action: "OUTLOOK_OUTLOOK_LIST_MESSAGES", name: "Outlook Mail",  interval: 300, args: { user_id: "me", folder: "Inbox", top: 50 } },
   // slack omitted: SLACK_FETCH_CONVERSATION_HISTORY requires a channel ID (per-tenant config)
   // GITHUB_LIST_NOTIFICATIONS was renamed by Composio in early 2026 to
   // GITHUB_LIST_NOTIFICATIONS_FOR_THE_AUTHENTICATED_USER. Same behavior;
@@ -470,6 +475,7 @@ const RECOMMENDED_STREAMS: Record<string, {
 const SYNC_MODE: Record<string, "snapshot" | "append" | "sync"> = {
   googlecalendar: "sync",
   gmail: "append",
+  outlook: "append",
   slack: "append",
   github: "append",
   notion: "snapshot",
@@ -487,6 +493,18 @@ const DEFAULT_ARGS: Record<string, Record<string, unknown>> = {
   GMAIL_LIST_THREADS: { userId: "me", format: "metadata", maxResults: 50 },
   GMAIL_SEND_EMAIL: { userId: "me" },
   GMAIL_LIST_LABELS: { userId: "me" },
+  // Outlook mail listing (#758) — read-only, one folder per call.
+  OUTLOOK_OUTLOOK_LIST_MESSAGES: { user_id: "me", folder: "Inbox", top: 50 },
+};
+
+// Managed-auth OAuth scopes to request when ctrl creates a Composio-managed
+// auth config for a toolkit on first connect (#758). Without this, a managed
+// config is created with Composio's full default scope set — for Outlook that
+// includes Mail.ReadWrite / Mail.Send / Calendars / Contacts. We ask for
+// read-only mail only. Verified live 2026-09-10: the Microsoft consent screen
+// then requests exactly `offline_access User.Read Mail.Read`.
+const MANAGED_AUTH_SCOPES: Record<string, string> = {
+  outlook: "offline_access,User.Read,Mail.Read",
 };
 
 // ---------------------------------------------------------------------------
@@ -1879,16 +1897,30 @@ export function registerIntegrationRoutes(): void {
 
       // If no auth_config exists, create one with Composio-managed OAuth
       if (!authConfigId) {
+        // #758: restrict the managed OAuth scopes for toolkits that would
+        // otherwise be created with a broad default set. Composio honours
+        // `credentials.scopes` on a managed config (verified live), so the
+        // consent screen asks for exactly what we list.
+        const managedScopes = MANAGED_AUTH_SCOPES[String(b.toolkit_slug).toLowerCase()];
+        const createConfigBody = managedScopes
+          ? {
+              toolkit: { slug: b.toolkit_slug },
+              auth_config: {
+                type: "use_composio_managed_auth",
+                credentials: { scopes: managedScopes },
+              },
+            }
+          : {
+              toolkit: { slug: b.toolkit_slug },
+              use_composio_auth: true,
+            };
         const createResp = await fetch(`${COMPOSIO_API_V3}/auth_configs`, {
           method: "POST",
           headers: {
             "x-api-key": apiKey,
             "Content-Type": "application/json",
           },
-          body: JSON.stringify({
-            toolkit: { slug: b.toolkit_slug },
-            use_composio_auth: true,
-          }),
+          body: JSON.stringify(createConfigBody),
         });
 
         if (!createResp.ok) {
@@ -3430,10 +3462,9 @@ export function registerIntegrationRoutes(): void {
   //           404 if the connection doesn't belong to this tenant,
   //           422 if identity couldn't be determined from Composio.
   // =========================================================================
-  addRoute("GET", "/api/v1/integrations/:id/google-identity", async ({ res, params }) => {
+  const resolveConnectionIdentity = async (res: any, connId: string): Promise<void> => {
     const apiKey = getComposioApiKey();
     const userId = getComposioUserId();
-    const connId = params.id;
 
     const conn = await assertConnectionOwnedByTenant(res, connId, userId, apiKey);
     if (!conn) return;
@@ -3469,12 +3500,15 @@ export function registerIntegrationRoutes(): void {
       return;
     }
 
-    // Live probe — run GMAIL_GET_PROFILE if the toolkit is Gmail, otherwise
-    // fail with 422 so SaaS knows it can't verify (and can make its own policy
-    // call — skip guard vs. fail closed — per Google-family toolkit).
+    // Live probe — Gmail runs GMAIL_GET_PROFILE, Outlook runs
+    // OUTLOOK_OUTLOOK_GET_PROFILE (#758, read-only under User.Read). Any other
+    // toolkit fails with 422 so the caller can make its own policy call
+    // (skip-guard vs. fail-closed).
     const toolkit = (conn as any).toolkit?.slug ?? "";
     const toolkitL = String(toolkit).toLowerCase().replace(/[-_\s]/g, "");
-    if (toolkitL !== "gmail" && toolkitL !== "googlemail") {
+    const isGmail = toolkitL === "gmail" || toolkitL === "googlemail";
+    const isOutlook = toolkitL === "outlook";
+    if (!isGmail && !isOutlook) {
       sendJson(res, 422, {
         error: "identity_unavailable",
         reason:
@@ -3482,6 +3516,36 @@ export function registerIntegrationRoutes(): void {
           "don't have a live-probe action for this toolkit.",
         toolkit,
       });
+      return;
+    }
+
+    if (isOutlook) {
+      try {
+        const parsed = await executeComposioAction({
+          apiKey,
+          userId,
+          actionSlug: "OUTLOOK_OUTLOOK_GET_PROFILE",
+          arguments: { user_id: "me" },
+          connectedAccountId: connId,
+        });
+        // The profile lands under data.response_data (Composio wrapper).
+        const outer = (parsed && typeof parsed === "object" ? (parsed as any).data ?? parsed : {}) as any;
+        const prof = (outer && typeof outer === "object" ? outer.response_data ?? outer : {}) as any;
+        const email = prof?.mail || prof?.userPrincipalName || null;
+        if (typeof email === "string" && email.includes("@")) {
+          sendJson(res, 200, { email, verified: true, source: "outlook_get_profile" });
+          return;
+        }
+        sendJson(res, 422, {
+          error: "identity_unavailable",
+          reason: "OUTLOOK_OUTLOOK_GET_PROFILE returned no email",
+        });
+      } catch (err: any) {
+        sendJson(res, 422, {
+          error: "identity_unavailable",
+          reason: `OUTLOOK_OUTLOOK_GET_PROFILE failed: ${String(err?.message ?? err).slice(0, 200)}`,
+        });
+      }
       return;
     }
 
@@ -3510,6 +3574,13 @@ export function registerIntegrationRoutes(): void {
         reason: `GMAIL_GET_PROFILE failed: ${String(err?.message ?? err).slice(0, 200)}`,
       });
     }
+  };
+  addRoute("GET", "/api/v1/integrations/:id/google-identity", async ({ res, params }) => {
+    await resolveConnectionIdentity(res, params.id);
+  });
+  // #758: provider-neutral alias — Gmail or Outlook identity.
+  addRoute("GET", "/api/v1/integrations/:id/identity", async ({ res, params }) => {
+    await resolveConnectionIdentity(res, params.id);
   });
 
   // =========================================================================
