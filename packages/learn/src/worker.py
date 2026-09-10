@@ -259,6 +259,7 @@ from src.activities.reflect import validate_proposals
 from src.activities.onboarding import (
     init_onboard_json,
     persist_onboarding_mode,
+    persist_onboarding_provider,
     record_stage_degrade,
     update_onboard_stage,
     update_onboard_progress,
@@ -962,6 +963,7 @@ ALL_ACTIVITIES = [
     # Onboarding v2
     init_onboard_json,
     persist_onboarding_mode,
+    persist_onboarding_provider,
     record_stage_degrade,
     update_onboard_stage,
     update_onboard_progress,

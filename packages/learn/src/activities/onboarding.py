@@ -223,6 +223,34 @@ async def persist_onboarding_mode(
 
 
 # ---------------------------------------------------------------------------
+# Activity: persist_onboarding_provider
+# ---------------------------------------------------------------------------
+
+@activity.defn
+async def persist_onboarding_provider(
+    onboard_path: str,
+    email_provider: str,
+    connection_id: str,
+) -> None:
+    """Persist the email provider + chosen connection into onboard.json (#758).
+
+    The brief-stage resume path (ctrl-api ``POST /api/v1/onboarding/
+    corrections``) reads ``email_provider`` / ``connection_id`` back off
+    ``onboard.json`` to rebuild the workflow input, so the resumed brief run
+    stays on the same mailbox. Idempotent — a resume re-writes the same values.
+    An unrecognised provider is normalised to ``gmail`` (the safe default), the
+    same defensive posture ``persist_onboarding_mode`` takes for gmail_mode.
+    """
+    data = _read_onboard(onboard_path)
+    data["email_provider"] = (
+        email_provider if email_provider in ("gmail", "outlook") else "gmail"
+    )
+    if connection_id:
+        data["connection_id"] = connection_id
+    _write_onboard(onboard_path, data)
+
+
+# ---------------------------------------------------------------------------
 # Activity: update_onboard_stage
 # ---------------------------------------------------------------------------
 

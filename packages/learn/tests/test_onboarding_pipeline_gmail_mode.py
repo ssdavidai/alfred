@@ -142,6 +142,12 @@ def _make_stubs(init_stage: str) -> tuple[list, dict[str, Any]]:
         state["persisted_mode"] = gmail_mode
         return None
 
+    @activity.defn(name="persist_onboarding_provider")
+    async def stub_persist_provider(
+        onboard_path: str, email_provider: str, connection_id: str,
+    ) -> None:
+        return None
+
     @activity.defn(name="update_onboard_stage")
     async def stub_stage(onboard_path: str, stage: str) -> None:
         return None
@@ -226,7 +232,7 @@ def _make_stubs(init_stage: str) -> tuple[list, dict[str, Any]]:
         return {}
 
     return [
-        stub_init, stub_persist_mode, stub_stage, stub_fetch,
+        stub_init, stub_persist_mode, stub_persist_provider, stub_stage, stub_fetch,
         stub_composio_fetch, stub_backfill, stub_composio_backfill,
         stub_profiler, stub_facts, stub_patterns, stub_personalize,
         stub_brief, stub_matter, stub_instinct, stub_errand,

@@ -56,6 +56,12 @@ def _make_stubs(email_result: dict[str, Any]) -> list:
         # Real signature returns None — a dict here fails payload decode.
         return None
 
+    @activity.defn(name="persist_onboarding_provider")
+    async def stub_persist_provider(
+        onboard_path: str, email_provider: str, connection_id: str,
+    ) -> None:
+        return None
+
     @activity.defn(name="assign_initial_chores")
     async def stub_chores(onboard_path: str, user_id: str) -> dict[str, Any]:
         return {"generated": 0}
@@ -65,7 +71,7 @@ def _make_stubs(email_result: dict[str, Any]) -> list:
         return email_result
 
     return [
-        stub_init, stub_stage, stub_persist, stub_chores, stub_email,
+        stub_init, stub_stage, stub_persist, stub_persist_provider, stub_chores, stub_email,
         _rec("write_brief_and_opportunities_opus"),
         _rec("generate_matter_pack_opus"),
         _rec("generate_instinct_pack_opus"),
