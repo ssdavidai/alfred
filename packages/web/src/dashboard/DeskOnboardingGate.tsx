@@ -62,6 +62,7 @@ import {
   getOnboardingGmailMode,
   getGoogleRefreshTokenStatus,
   getGmailConnectionStatus,
+  getEmailProviderStatus,
   initiateConnect,
   finalizeComposioConnections,
   startOnboarding,
@@ -69,12 +70,19 @@ import {
 import { Frame } from "../client/components/ab/Frame";
 import { Seal } from "../client/components/ab/Seal";
 import { PageOverture } from "../client/components/ab/PageOverture";
+import {
+  type EmailProvider,
+  providerOptions,
+  connectErrorCopy,
+  connectRedirect,
+  parseConnectedMarker,
+  readStoredProvider,
+  writeStoredProvider,
+  toolkitForProvider,
+} from "./onboardingProviderCore";
 
 const GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
 
-// The Composio toolkit slug for Gmail. Confirmed against ctrl-api's
-// RECOMMENDED_STREAMS / GMAIL_FETCH_EMAILS action mapping.
-const GMAIL_TOOLKIT_SLUG = "gmail";
 
 // URL marker carried back from the Gmail-connect round-trip so the gate
 // knows the principal just connected Gmail and the auto-trigger should
@@ -176,6 +184,27 @@ export default function DeskOnboardingGate({
 
   const startOnboardingFn = useAction(startOnboarding);
 
+  // #758 — which mailbox the principal chose. Restored from the URL marker
+  // (a Composio round-trip carries it back) or per-viewer storage, so a reload
+  // mid-flow keeps the selection. null = the chooser is still showing.
+  const [selectedProvider, setSelectedProvider] = useState<EmailProvider | null>(() => {
+    try {
+      const fromUrl = parseConnectedMarker(window.location.search).provider;
+      return fromUrl ?? readStoredProvider();
+    } catch {
+      return null;
+    }
+  });
+
+  // Outlook connection status — only polled once Outlook is the chosen provider
+  // (Composio mode only; Outlook has no direct path). Gives us the ACTIVE
+  // connection id to pin the mailbox.
+  const { data: outlookConnection, refetch: refetchOutlookConnection } = useQuery(
+    getEmailProviderStatus,
+    { provider: "outlook" },
+    { retry: false, refetchInterval: 5_000, enabled: selectedProvider === "outlook" },
+  );
+
   // The marker may already be on the URL (the `google`-mode OAuth
   // round-trip carries it back). In `composio` mode the popup-poll sets
   // it via state instead — so the marker is stateful, not URL-only.
@@ -220,6 +249,14 @@ export default function DeskOnboardingGate({
         ? Boolean(tokenStatus?.hasCredential)
         : false;
 
+  // #758 — the chosen provider's connected state + (for Outlook) the ACTIVE
+  // connection id to pin. Gmail keeps its existing detection; Outlook reads the
+  // dedicated status query.
+  const providerConnected =
+    selectedProvider === "outlook" ? Boolean(outlookConnection?.connected) : gmailConnected;
+  const providerConnectionId =
+    selectedProvider === "outlook" ? outlookConnection?.connectionId ?? null : null;
+
   // True while the connected-detection query for the active mode is
   // still loading — used to decide whether to show the "finishing" hold.
   const connectedStatusLoading =
@@ -258,8 +295,8 @@ export default function DeskOnboardingGate({
 
     // Not connected yet — the OAuth callback / Composio connection may
     // still be settling. Hold; the queries refetch and this effect
-    // re-runs once `gmailConnected` flips true.
-    if (!gmailConnected) return;
+    // re-runs once `providerConnected` flips true.
+    if (!providerConnected) return;
 
     onboardingTriggered.current = true;
     setTriggering(true);
@@ -272,7 +309,12 @@ export default function DeskOnboardingGate({
       /* ignore */
     }
 
-    startOnboardingFn({})
+    // #758 — carry the chosen provider (and, for Outlook, the pinned
+    // connection) into startOnboarding. The server re-verifies both.
+    startOnboardingFn({
+      provider: selectedProvider ?? "gmail",
+      ...(providerConnectionId ? { connectionId: providerConnectionId } : {}),
+    })
       .then(() => {
         navigate("/awaken");
       })
@@ -290,7 +332,9 @@ export default function DeskOnboardingGate({
     progressLoading,
     modeLoading,
     isNotStarted,
-    gmailConnected,
+    providerConnected,
+    providerConnectionId,
+    selectedProvider,
     startOnboardingFn,
     navigate,
   ]);
@@ -333,9 +377,11 @@ export default function DeskOnboardingGate({
   // ConnectionsPage's post-connect sweep) and set the `connected` marker
   // so the mode-agnostic auto-trigger above fires startOnboarding.
   // ---------------------------------------------------------------------
-  async function startComposioOnboarding() {
+  async function startComposioOnboarding(provider: EmailProvider) {
     if (!user?.id) return;
     if (composioPollActive.current) return; // popup already open
+    const refetchConn =
+      provider === "outlook" ? refetchOutlookConnection : refetchGmailConnection;
     composioPollActive.current = true;
     setConnecting(true);
     setConnectError(null);
@@ -344,17 +390,15 @@ export default function DeskOnboardingGate({
       // popup after consent — matches ConnectionsPage's startOAuth. The
       // popup-close poll is authoritative; the redirect is a courtesy.
       const result: any = await initiateConnect({
-        toolkit_slug: GMAIL_TOOLKIT_SLUG,
-        redirect_url: `${window.location.origin}/desk?onboarding=${CONNECTED_MARKER}`,
+        toolkit_slug: toolkitForProvider(provider),
+        redirect_url: connectRedirect(window.location.origin, provider),
       });
       // ctrl-api returns `connect_url` (not `redirect_url`).
       const connectUrl: string | undefined = result?.connect_url;
       if (!connectUrl) {
         composioPollActive.current = false;
         setConnecting(false);
-        setConnectError(
-          "Alfred could not start the Gmail connection. Please try again.",
-        );
+        setConnectError(connectErrorCopy("generic", provider));
         return;
       }
 
@@ -363,15 +407,13 @@ export default function DeskOnboardingGate({
       // between Composio and Google blow away postMessage.
       const popup = window.open(
         connectUrl,
-        "composio-gmail-connect",
+        provider === "outlook" ? "composio-outlook-connect" : "composio-gmail-connect",
         "width=600,height=700,left=200,top=100",
       );
       if (!popup) {
         composioPollActive.current = false;
         setConnecting(false);
-        setConnectError(
-          "Alfred could not open the Gmail consent window. Please allow popups and try again.",
-        );
+        setConnectError(connectErrorCopy("popup_blocked", provider));
         return;
       }
 
@@ -387,7 +429,7 @@ export default function DeskOnboardingGate({
         let landed = false;
         for (let attempt = 0; attempt < 6; attempt++) {
           try {
-            const refreshed = await refetchGmailConnection();
+            const refreshed = await refetchConn();
             if (refreshed?.data?.connected) {
               landed = true;
               break;
@@ -417,9 +459,7 @@ export default function DeskOnboardingGate({
           // cancelled, or Composio is slow. The background
           // getGmailConnectionStatus poll will catch a late ACTIVE flip;
           // until then, re-show the CTA.
-          setConnectError(
-            "The Gmail connection didn't complete. Please try again.",
-          );
+          setConnectError(connectErrorCopy("cancelled", provider));
         }
         composioPollActive.current = false;
         setConnecting(false);
@@ -435,20 +475,20 @@ export default function DeskOnboardingGate({
       console.error("[DeskOnboardingGate] composio connect failed", e);
       composioPollActive.current = false;
       setConnecting(false);
-      setConnectError(
-        "Alfred could not start the Gmail connection. Please try again.",
-      );
+      setConnectError(connectErrorCopy("generic", provider));
     }
   }
 
   // The CTA dispatches on mode. `none` is handled in the render branch
   // (the button is disabled) so this is never called for it.
   function startOnboardingRitual() {
-    if (mode === "composio") {
-      void startComposioOnboarding();
+    const provider = selectedProvider ?? "gmail";
+    // Outlook is composio-only. Gmail: composio if available, else the legacy
+    // direct-Google redirect.
+    if (provider === "outlook" || mode === "composio") {
+      void startComposioOnboarding(provider);
       return;
     }
-    // Default + `google` mode: the legacy direct-Google redirect.
     startGoogleOnboarding();
   }
 
@@ -475,12 +515,13 @@ export default function DeskOnboardingGate({
     return <GateShell title="A moment, sir." body="Taking you to your setup." />;
   }
 
-  // Marker present + Gmail connected + trigger in flight (or about to be)
+  // Marker present + mailbox connected + trigger in flight (or about to be)
   // — show a connecting state rather than the CTA.
-  if (hasMarker && (triggering || (!triggerError && gmailConnected))) {
+  const providerName = selectedProvider === "outlook" ? "Outlook" : "Gmail";
+  if (hasMarker && (triggering || (!triggerError && providerConnected))) {
     return (
       <GateShell
-        title="Connecting Gmail."
+        title={`Connecting ${providerName}.`}
         body="Alfred is opening his ledger — this takes a moment."
       />
     );
@@ -491,13 +532,13 @@ export default function DeskOnboardingGate({
   if (
     hasMarker &&
     !connectedStatusLoading &&
-    !gmailConnected &&
+    !providerConnected &&
     !triggerError
   ) {
     return (
       <GateShell
         title="Finishing the connection."
-        body="One moment while Gmail is linked to your account."
+        body={`One moment while ${providerName} is linked to your account.`}
       />
     );
   }
@@ -507,8 +548,8 @@ export default function DeskOnboardingGate({
   if (connecting && !triggerError) {
     return (
       <GateShell
-        title="Connecting Gmail."
-        body="Finish the Google consent in the window Alfred opened."
+        title={`Connecting ${providerName}.`}
+        body={`Finish the ${selectedProvider === "outlook" ? "Microsoft" : "Google"} consent in the window Alfred opened.`}
       />
     );
   }
@@ -553,8 +594,8 @@ export default function DeskOnboardingGate({
             >
               Alfred learns the shape of your life from your last hundred
               days of email — the people, the projects, the patterns — then
-              composes your first Brief. Connect Gmail to begin. Read-only,
-              and nothing leaves your own machine.
+              composes your first Brief. Choose where your mail lives to
+              begin. Read-only, and nothing leaves your own machine.
             </p>
 
             {misconfigured && (
@@ -578,27 +619,70 @@ export default function DeskOnboardingGate({
               </p>
             )}
 
-            <div className="mt-9 flex items-baseline gap-6">
-              <button
-                type="button"
-                onClick={startOnboardingRitual}
-                disabled={!user?.id || misconfigured}
-                className="btn-brass"
-                style={{ fontSize: "1rem" }}
-              >
-                Start onboarding →
-              </button>
-              <span
-                className="font-mono text-[10px] uppercase tracking-[0.22em]"
-                style={{ color: "var(--marginalia)" }}
-              >
-                {misconfigured
-                  ? "Gmail connection unavailable"
-                  : mode === "composio"
-                    ? "Connect Gmail · managed by Composio"
-                    : "Connect Gmail · gmail.readonly"}
-              </span>
-            </div>
+            {/* #758 — provider chooser, then the connect CTA for the pick. */}
+            {!misconfigured && selectedProvider === null && (
+              <div className="mt-9 flex flex-col gap-3">
+                {providerOptions(mode).map((opt) => (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    onClick={() => {
+                      if (!opt.available) return;
+                      writeStoredProvider(opt.id);
+                      setSelectedProvider(opt.id);
+                    }}
+                    disabled={!user?.id || !opt.available}
+                    className="border border-rule px-6 py-4 text-left transition-colors hover:border-[color:var(--brass)] disabled:opacity-50 disabled:hover:border-rule"
+                    style={{ background: "transparent" }}
+                  >
+                    <div className="font-display text-[20px] leading-tight">{opt.label}</div>
+                    <div
+                      className="font-mono text-[10px] uppercase tracking-[0.18em] mt-1"
+                      style={{ color: "var(--marginalia)" }}
+                    >
+                      {opt.available ? opt.hint : opt.reason}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {!misconfigured && selectedProvider !== null && (
+              <div className="mt-9 flex items-baseline gap-6">
+                <button
+                  type="button"
+                  onClick={startOnboardingRitual}
+                  disabled={!user?.id}
+                  className="btn-brass"
+                  style={{ fontSize: "1rem" }}
+                >
+                  Connect {selectedProvider === "outlook" ? "Outlook" : "Gmail"} →
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    writeStoredProvider(null);
+                    setSelectedProvider(null);
+                    setConnectError(null);
+                  }}
+                  className="font-mono text-[10px] uppercase tracking-[0.22em] underline"
+                  style={{ color: "var(--marginalia)" }}
+                >
+                  Choose a different mailbox
+                </button>
+              </div>
+            )}
+
+            {misconfigured && (
+              <div className="mt-9">
+                <span
+                  className="font-mono text-[10px] uppercase tracking-[0.22em]"
+                  style={{ color: "var(--marginalia)" }}
+                >
+                  Mailbox connection unavailable
+                </span>
+              </div>
+            )}
           </article>
         </div>
       </section>
