@@ -21,6 +21,7 @@ import type {
   GetToolkitRequiredFields,
   GetConnectedIntegrations,
   GetGmailConnectionStatus,
+  GetEmailProviderStatus,
   GetIntegrationCapabilities,
   GetOpenclawReadiness,
   GetIntegrationScope,
@@ -320,27 +321,50 @@ export type GmailConnectionStatus = { connected: boolean; status: string | null 
  * the same check itself. Takes a resolved tenant `instance` so it is
  * callable from any server operation, not just a query with a `context`.
  */
+/** Provider-generalised connection status — adds the ACTIVE connection id so a
+ *  caller can pin exactly the mailbox the principal chose (#758). */
+export type EmailProviderConnectionStatus = {
+  connected: boolean;
+  status: string | null;
+  connectionId: string | null;
+};
+
+/**
+ * Core "is this email provider's toolkit connected?" check for gmail or
+ * outlook (#758). Reads the tenant's authoritative GET /api/v1/integrations
+ * list and reports whether an ACTIVE connection exists for the toolkit, plus
+ * that connection's id. Both the client-facing query and startOnboarding's
+ * server-side gate call this — the gate must never trust a client-supplied
+ * flag; it re-runs the same check.
+ */
+export async function checkEmailProviderConnection(
+  instance: Instance,
+  provider: "gmail" | "outlook",
+): Promise<EmailProviderConnectionStatus> {
+  const data = await proxyToTenant(instance, { path: "/api/v1/integrations" });
+  const list: any[] = Array.isArray(data?.integrations) ? data.integrations : [];
+  const toolkit = provider === "outlook" ? "outlook" : "gmail";
+  const conn = list.find(
+    (c) => String(c?.toolkit ?? "").toLowerCase() === toolkit,
+  );
+  if (!conn) {
+    return { connected: false, status: null, connectionId: null };
+  }
+  const status = String(conn.status ?? "").toUpperCase();
+  return {
+    connected: status === "ACTIVE",
+    status: status || null,
+    connectionId: conn.id ?? conn.connection_id ?? conn.connectionId ?? null,
+  };
+}
+
+// Backward-compatible Gmail helper — the existing callers (getGmailConnectionStatus
+// query, startOnboarding's Gmail gate) keep the narrower shape.
 export async function checkGmailConnection(
   instance: Instance,
 ): Promise<GmailConnectionStatus> {
-  const data = await proxyToTenant(instance, {
-    path: "/api/v1/integrations",
-  });
-  const list: any[] = Array.isArray(data?.integrations)
-    ? data.integrations
-    : [];
-
-  // The Gmail toolkit slug in Composio is `gmail` (confirmed against
-  // ctrl-api's RECOMMENDED_STREAMS + GMAIL_FETCH_EMAILS action mapping).
-  const gmail = list.find(
-    (c) => String(c?.toolkit ?? "").toLowerCase() === "gmail",
-  );
-  if (!gmail) {
-    return { connected: false, status: null };
-  }
-
-  const status = String(gmail.status ?? "").toUpperCase();
-  return { connected: status === "ACTIVE", status: status || null };
+  const { connected, status } = await checkEmailProviderConnection(instance, "gmail");
+  return { connected, status };
 }
 
 export const getGmailConnectionStatus: GetGmailConnectionStatus<
@@ -350,6 +374,18 @@ export const getGmailConnectionStatus: GetGmailConnectionStatus<
   requireUser(context);
   const instance = await getUserInstance(context);
   return checkGmailConnection(instance);
+};
+
+/** Provider-aware connection status — used by the chooser to know when the
+ *  selected mailbox has landed ACTIVE and to pin its connection id (#758). */
+export const getEmailProviderStatus: GetEmailProviderStatus<
+  { provider: "gmail" | "outlook" },
+  EmailProviderConnectionStatus
+> = async (args, context) => {
+  requireUser(context);
+  const provider = args?.provider === "outlook" ? "outlook" : "gmail";
+  const instance = await getUserInstance(context);
+  return checkEmailProviderConnection(instance, provider);
 };
 
 // =============================================================================
