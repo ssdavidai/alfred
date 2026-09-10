@@ -117,7 +117,7 @@ def extract_log_line(event: dict[str, Any]) -> str:
     if not isinstance(raw, dict):
         raw = {}
 
-    if stream_type in ("gmail", "email"):
+    if stream_type in ("gmail", "email", "outlook"):
         return _log_line_email(raw)
     elif stream_type == "omi":
         return _log_line_omi(raw)
