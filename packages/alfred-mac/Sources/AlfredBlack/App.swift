@@ -60,6 +60,17 @@ struct AlfredBlackMain {
       do { let u = try Cowork.exportPlugin(); print("exported: \(u.path)"); exit(0) }
       catch { print("error: \((error as? TenantError)?.message ?? "\(error)")"); exit(1) }
     }
+    if let i = CommandLine.arguments.firstIndex(of: "--listen"), CommandLine.arguments.count > i + 1 {   // live microphone for N seconds
+      let secs = Double(CommandLine.arguments[i + 1]) ?? 10; let d = Dictation(); var shown = ""; var peak: Float = 0
+      if let f = CommandLine.arguments.firstIndex(of: "--file"), CommandLine.arguments.count > f + 1 { d.rehearse(file: URL(fileURLWithPath: CommandLine.arguments[f + 1])) } else { d.start() }
+      let end = Date().addingTimeInterval(secs)
+      while Date() < end, d.problem == nil, !(d.finished && !d.listening) {
+        RunLoop.main.run(until: Date().addingTimeInterval(0.25))
+        peak = max(peak, d.level); if d.text != shown { shown = d.text; print("partial: \(shown)") }
+      }
+      if d.listening { d.stop(); while !d.finished { RunLoop.main.run(until: Date().addingTimeInterval(0.1)) } }
+      print(d.problem ?? "final: \(d.text)"); print(String(format: "peak level %.2f", peak)); exit(d.problem == nil ? 0 : 1)
+    }
     if let i = CommandLine.arguments.firstIndex(of: "--transcribe"), CommandLine.arguments.count > i + 1 {   // the dictation engine on a file
       let u = URL(fileURLWithPath: CommandLine.arguments[i + 1]); let t0 = Date()
       guard Dictation.available else { print("no model in this build (\(Dictation.modelName))"); exit(2) }
@@ -99,7 +110,8 @@ struct AlfredBlackMain {
         let name = CommandLine.arguments[i + 1]
         st.screen = ["brief": Screen.brief, "matters": .matters, "yourword": .yourWord, "ledger": .ledger, "vault": .vault, "arrangement": .arrangement][name] ?? .glance
         if let r = CommandLine.arguments.firstIndex(of: "--reply"), CommandLine.arguments.count > r + 1 { st.askReply = CommandLine.arguments[r + 1] }
-        let host: NSHostingView<AnyView> = name == "ask" ? NSHostingView(rootView: AnyView(AskView().environmentObject(st))) : name == "statement" ? NSHostingView(rootView: AnyView(StatementView().environmentObject(st))) : NSHostingView(rootView: AnyView(PopoverView().environmentObject(st)))
+        if name == "ask", CommandLine.arguments.contains("--listening") { st.dictation.listening = true; st.dictation.level = 0.6; st.dictation.text = "Move the painter\'s quote to next week and tell the client we need two more days on the" }
+        let host: NSHostingView<AnyView> = name == "ask" ? NSHostingView(rootView: AnyView(AskView().environmentObject(st).environmentObject(st.dictation))) : name == "statement" ? NSHostingView(rootView: AnyView(StatementView().environmentObject(st))) : NSHostingView(rootView: AnyView(PopoverView().environmentObject(st)))
         let w: CGFloat = name == "ask" ? 700 : name == "statement" ? 520 : T.popoverWidth
         host.frame = NSRect(x: 0, y: 0, width: w, height: host.fittingSize.height); host.layoutSubtreeIfNeeded()
         if let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) { host.cacheDisplay(in: host.bounds, to: rep); try? rep.representation(using: .png, properties: [:])?.write(to: dir.appendingPathComponent("screen-\(CommandLine.arguments[i + 1]).png")) }
@@ -257,7 +269,8 @@ final class AppState: ObservableObject {
   func cancelAsk() { askTask?.cancel(); askTask = nil; asking = false; askStartedAt = nil }
 
 
-  func dismissAsk() { if asking { cancelAsk() }; askReply = nil; askPanel?.orderOut(nil) }
+  func dismissAsk() { dictation.cancel(); if asking { cancelAsk() }; askReply = nil; askPanel?.orderOut(nil) }
+  func setDictation(_ on: Bool) { state.dictation = on; Store.saveState(state); if !on { dictation.cancel() } }
 
 
   /// Open the Ask with a question already written — "what would you do about …?"
@@ -275,7 +288,7 @@ final class AppState: ObservableObject {
     if askPanel == nil { askPanel = AskPanel(state: self) }
 
 
-    if askPanel?.isVisible == true { dismissAsk() } else { askReply = nil; askPanel?.present() }
+    if askPanel?.isVisible == true { dismissAsk() } else { askReply = nil; askPanel?.present(); if state.dictation && Dictation.available && askDraft.isEmpty { dictation.start() } }
 
 
   }
@@ -379,6 +392,7 @@ final class AppState: ObservableObject {
   @Published var asking = false
   @Published var askReply: String? = nil
   var askPanel: AskPanel? = nil
+  let dictation = Dictation()
   @Published var brief: Brief? = nil
   private var lastBrief = Date.distantPast
   private var lastDesk = Date.distantPast
@@ -485,6 +499,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, UNU
     let host = NSHostingController(rootView: PopoverView().environmentObject(state)); host.sizingOptions = .preferredContentSize; popover.contentViewController = host; popover.delegate = self
     state.selfHeal()
     HotKey.onPress = { [weak self] in self?.state.toggleAsk() }; HotKey.onStatement = { [weak self] in self?.state.showStatement() }; HotKey.register()
+    if state.state.dictation && Dictation.available { Dictation.warm() }   // the first load compiles shaders; not on his time
     if state.pairing == nil || !Self.launchedAsLoginItem() { showWindow() }
     timer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
       guard let self else { return }

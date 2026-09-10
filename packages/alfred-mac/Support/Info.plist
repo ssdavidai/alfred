@@ -15,6 +15,7 @@
   <key>NSHighResolutionCapable</key> <true/>
   <key>NSHumanReadableCopyright</key><string>Alfred Black. Service is the standard.</string>
   <key>ATSApplicationFontsPath</key> <string>Fonts</string>
+  <key>NSMicrophoneUsageDescription</key><string>Alfred listens only while the Ask bar is open. Speech is transcribed on this Mac and never leaves it.</string>
   <key>NSAppTransportSecurity</key>
   <dict><key>NSAllowsArbitraryLoads</key><false/></dict>
 </dict>

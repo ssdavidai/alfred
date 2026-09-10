@@ -24,7 +24,7 @@ final class AskPanel: NSPanel {
     isFloatingPanel = true; level = .floating; collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
     backgroundColor = .clear; isOpaque = false; hasShadow = true; isMovableByWindowBackground = true
     appearance = NSAppearance(named: .darkAqua); hidesOnDeactivate = false; isReleasedWhenClosed = false
-    contentViewController = NSHostingController(rootView: AskView().environmentObject(state))
+    contentViewController = NSHostingController(rootView: AskView().environmentObject(state).environmentObject(state.dictation))
     backdrop.onClick = { [weak state] in state?.dismissAsk() }
   }
   override var canBecomeKey: Bool { true }
@@ -51,23 +51,30 @@ struct Vibrancy: NSViewRepresentable {
 
 struct AskView: View {
   @EnvironmentObject var s: AppState
+  @EnvironmentObject var d: Dictation
   @State private var text = ""
+  @State private var sendWhenFinal = false
   @FocusState private var focused: Bool
   private var reduceMotion: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
   var body: some View {
     VStack(spacing: 0) {
       HStack(spacing: 16) {
-        if let m = Brand.image("logo-brass.svg") {
-          Image(nsImage: m).resizable().aspectRatio(contentMode: .fit).frame(height: 26)
-            .shadow(color: T.brass.opacity(0.55), radius: 10)   // the mark glows, faintly
+        if let m = Brand.image("logo-brass.svg") {   // the mark glows faintly; while listening it breathes with your voice
+          Button(action: { d.listening ? d.stop() : d.start() }) {
+            Image(nsImage: m).resizable().aspectRatio(contentMode: .fit).frame(height: 26)
+              .shadow(color: T.brass.opacity(d.listening ? 0.6 + Double(d.level) * 0.4 : 0.55), radius: d.listening ? 10 + CGFloat(d.level) * 16 : 10)
+          }.buttonStyle(.plain).pointer().disabled(!Dictation.available).help(d.listening ? "Stop listening" : "Dictate")
         }
         TextField("What can I take off your desk, \(T.honorific)?", text: $text).textFieldStyle(.plain)
           .font(T.say(21)).foregroundColor(T.ink).focused($focused).disabled(s.asking)
           .onSubmit { submit(withoutRead: NSEvent.modifierFlags.contains(.shift)) }
-        if s.asking { Waiting() } else { Keycap(text: "ESC") }
+        if s.asking { Waiting() } else if d.listening { Listening() } else { Keycap(text: "ESC") }
       }.padding(.horizontal, 24).padding(.vertical, 22)
       if s.askReply == nil && !s.asking {
-        Meta(text: "⏎ to ask · Alfred proposes before he acts", size: 8.5, tracking: 1.2).padding(.horizontal, 24).padding(.bottom, 14)
+        Meta(text: d.listening ? "Speak · a pause ends the take · ⏎ asks · esc never mind" : d.finished && !text.isEmpty ? "⏎ to ask · click the mark to dictate again" : "⏎ to ask · Alfred proposes before he acts", size: 8.5, tracking: 1.2).padding(.horizontal, 24).padding(.bottom, 14)
+      }
+      if let e = d.problem {
+        Text(e).font(T.body(12.5)).foregroundColor(Color(nsColor: AB.hex(0xD9776C))).padding(.horizontal, 24).padding(.bottom, 14)
       }
       if let r = s.askReply {
         Rectangle().fill(T.hair).frame(height: 1).padding(.horizontal, 24)
@@ -82,15 +89,29 @@ struct AskView: View {
     .frame(width: 700)
     .background(ZStack { Vibrancy(); RoundedRectangle(cornerRadius: 18).fill(T.bg.opacity(0.72)) })
     .overlay(RoundedRectangle(cornerRadius: 18).stroke(T.hair2, lineWidth: 1))
-    .onAppear { focused = true; if !s.askDraft.isEmpty { text = s.askDraft; s.askDraft = "" } }
+    .onAppear { focused = true; if !s.askDraft.isEmpty { text = s.askDraft; s.askDraft = "" } else if d.listening || d.finished { text = d.text } }
     .onChange(of: s.askDraft) { d in if !d.isEmpty { text = d; s.askDraft = ""; focused = true } }
+    .onChange(of: d.text) { t in if d.listening || d.finished { text = t } }
+    .onChange(of: d.finished) { f in guard f else { return }; focused = true; if sendWhenFinal { sendWhenFinal = false; submit(withoutRead: false) } }
     .onExitCommand { s.dismissAsk() }
     .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: s.askReply)
   }
   private func submit(withoutRead: Bool) {
     if s.askReply != nil { s.soOrdered(withoutRead: withoutRead); return }   // ⏎ on the answer executes
+    if d.listening { sendWhenFinal = true; d.stop(); return }                  // ⏎ mid-take: finish, then ask
     let q = text; text = ""; guard !q.trimmingCharacters(in: .whitespaces).isEmpty else { return }
     Task { await s.propose(q) }
+  }
+}
+
+/// A brass point that swells with the voice, and the word for what is happening.
+struct Listening: View {
+  @EnvironmentObject var d: Dictation
+  var body: some View {
+    HStack(spacing: 10) {
+      Circle().fill(T.brass).frame(width: 7, height: 7).scaleEffect(1 + CGFloat(d.level) * 1.6).animation(.easeOut(duration: 0.12), value: d.level)
+      Meta(text: "Listening", color: T.brass, size: 8.5, tracking: 1.6)
+    }.fixedSize().accessibilityLabel("Listening")
   }
 }
 
