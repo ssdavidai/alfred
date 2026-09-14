@@ -215,6 +215,11 @@ INTERVAL_SCHEDULES = [
         "interval": timedelta(hours=1),
     },
     {
+        "id": "al-omi-chat-tasks",
+        "workflow": "OmiSyncWorkflow",
+        "interval": timedelta(minutes=1),
+    },
+    {
         "id": "al-omi-processor",
         "workflow": "OmiAudioProcessorWorkflow",
         "interval": timedelta(minutes=10),

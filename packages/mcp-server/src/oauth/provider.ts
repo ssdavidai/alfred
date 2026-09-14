@@ -12,6 +12,7 @@
 // and redirects back to Claude with the code + state.
 
 import * as crypto from "node:crypto";
+import { omiResourceFallback } from "../omiOAuth.js";
 import type { Response } from "express";
 import type {
   OAuthServerProvider,
@@ -118,6 +119,7 @@ export class SqliteOAuthProvider implements OAuthServerProvider {
     // identify the protected resource the token will be used against. In
     // our deployment, resource encodes the app:
     //   https://<tenant>.alfred.black/<app>/mcp
+    params = { ...params, resource: omiResourceFallback(params.resource, params.redirectUri, this.cfg.publicUrl) };
     const appId = extractAppFromResource(params.resource, this.cfg.publicUrl);
     if (!appId) {
       res.status(400).type("text/plain").send(

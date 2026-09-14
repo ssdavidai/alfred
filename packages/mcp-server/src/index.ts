@@ -259,7 +259,15 @@ async function main() {
       }
       // Anything else (no header, malformed, mismatched secret) → defer to
       // the standard OAuth verifier.
-      return realAuth(req, res, next);
+      return realAuth(req, res, (error?: unknown) => {
+        if (error) return next(error);
+        const auth = (req as Request & { auth?: { extra?: Partial<MCPProps> } }).auth;
+        if (auth?.extra?.appId !== appId) {
+          res.status(403).json({ error: "Token is bound to a different MCP resource" });
+          return;
+        }
+        return next();
+      });
     };
   };
 
