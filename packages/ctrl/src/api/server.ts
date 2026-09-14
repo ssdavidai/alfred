@@ -1,4 +1,5 @@
 import http from "node:http";
+import { registerOmiPilotRoutes } from "./routes/omiPilot.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { authenticate } from "./auth.js";
 import { handleError, sendJson, ValidationError } from "./errors.js";
@@ -196,6 +197,7 @@ export function createApiServer(): http.Server {
   // probe against the satellite IP the operator pastes in.
   registerVoiceEsphomeRoutes();
   registerOmiChannelRoutes();
+  registerOmiPilotRoutes();
   registerPaperclipChannelRoutes();
   registerPaperclipEvidenceRoutes();
   // /api/v1/channels/recall/* + /api/v1/webhooks/recall — Recall.ai

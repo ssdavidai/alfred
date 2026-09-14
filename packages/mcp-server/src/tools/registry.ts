@@ -3,6 +3,7 @@
 // enumerate or call Plane tools — and vice versa.
 
 import type { ToolDef } from "./types.js";
+import { ALL_OMI_TOOLS } from "./omi.js";
 import { ALL_TOOLS as ALL_SURE_TOOLS } from "./sure.js";
 import { ALL_ALFRED_TOOLS } from "./alfred.js";
 import { ALL_VAULTWARDEN_TOOLS } from "./vaultwarden.js";
@@ -37,6 +38,7 @@ import { ALL_PAPERCLIP_TOOLS } from "./paperclip.js";
 // `alfred-paperclip-bootstrap` drives these (confirm-first flow). Contract:
 // docs/PAPERCLIP-BOOTSTRAP-CONTRACT.md C2.
 export type AppId =
+  | "omi"
   | "sure"
   | "alfred"
   | "vaultwarden"
@@ -47,6 +49,7 @@ export type AppId =
   | "paperclip-admin";
 
 export const SUPPORTED_APPS: ReadonlySet<AppId> = new Set([
+  "omi",
   "sure",
   "alfred",
   "vaultwarden",
@@ -62,6 +65,7 @@ export function isAppId(value: string): value is AppId {
 }
 
 const REGISTRY: Record<AppId, ToolDef[]> = {
+  omi: ALL_OMI_TOOLS,
   sure: ALL_SURE_TOOLS,
   alfred: ALL_ALFRED_TOOLS,
   vaultwarden: ALL_VAULTWARDEN_TOOLS,

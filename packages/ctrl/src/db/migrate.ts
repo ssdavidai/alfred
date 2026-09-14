@@ -35,6 +35,7 @@ import m0018 from "./migrations/0018_channel_identity.sql";
 import m0019 from "./migrations/0019_journal_solicited.sql";
 import m0020 from "./migrations/0020_nar_entry.sql";
 import m0021 from "./migrations/0021_codex_desktop.sql";
+import m0022 from "./migrations/0022_omi_pilot.sql";
 
 interface Migration {
   version: number;
@@ -65,6 +66,7 @@ const MIGRATIONS: Migration[] = [
   { version: 19, name: "journal_solicited",   sql: m0019 },
   { version: 20, name: "nar_entry",           sql: m0020 },
   { version: 21, name: "codex_desktop",       sql: m0021 },
+  { version: 22, name: "omi_pilot", sql: m0022 },
 ];
 
 /**

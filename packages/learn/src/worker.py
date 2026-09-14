@@ -21,6 +21,8 @@ from src.workflows.flywheel_telemetry import FlywheelTelemetryWorkflow
 from src.workflows.stream_puller import StreamPullerWorkflow, StreamSweepWorkflow
 from src.workflows.onboarding_pipeline import OnboardingPipelineWorkflow
 from src.workflows.omi_processor import OmiAudioProcessorWorkflow
+from src.workflows.omi_sync import OmiSyncWorkflow
+from src.activities.omi_sync import reconcile_omi_chat_tasks
 from src.workflows.nightly_maintenance import NightlyMaintenanceWorkflow
 from src.workflows.chore_promotion import ChorePromotionReflectionWorkflow
 from src.workflows.hourly_enrichment import HourlyEnrichmentWorkflow
@@ -807,6 +809,7 @@ _STATIC_WORKFLOWS = [
     StreamSweepWorkflow,
     OnboardingPipelineWorkflow,
     OmiAudioProcessorWorkflow,
+    OmiSyncWorkflow,
     NightlyMaintenanceWorkflow,
     ChorePromotionReflectionWorkflow,
     HourlyEnrichmentWorkflow,
@@ -1009,6 +1012,7 @@ ALL_ACTIVITIES = [
     transcribe_audio_group,
     ingest_omi_transcription,
     # Validators
+    reconcile_omi_chat_tasks,
     validate_classification,
     # Chore template helpers + actions + assignment + matching + generation
     assign_initial_chores,
